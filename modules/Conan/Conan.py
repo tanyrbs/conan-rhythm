@@ -21,6 +21,13 @@ from modules.Conan.flow.flow import FlowMel
 from modules.commons.conv import ConvBlocks
 from modules.commons.conv import TextConvEncoder, ConvBlocks, CausalConvBlocks, CausalFM
 from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
+from modules.Conan.rhythm.bridge import (
+    attach_rhythm_outputs,
+    build_content_nonpadding,
+    run_rhythm_frontend,
+)
+from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
+from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from modules.commons.transformer import SinusoidalPositionalEmbedding
 
 Flow_DECODERS = {
@@ -69,6 +76,16 @@ class Conan(FastSpeech):
             num_layers=5,
         )
 
+        self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
+        if self.rhythm_enable_v2:
+            self.rhythm_unit_frontend = RhythmUnitFrontend(
+                silent_token=hparams.get("silent_token", 57),
+                separator_aware=bool(hparams.get("rhythm_separator_aware", True)),
+                tail_open_units=int(hparams.get("rhythm_tail_open_units", 1)),
+            )
+            self.rhythm_module = build_streaming_rhythm_module_from_hparams(hparams)
+            self.rhythm_pause_state = nn.Parameter(torch.zeros(hidden_size))
+
         if hparams["style"]:
             self.padding_idx = 0
             self.prosody_extractor = LocalStyleAdaptor(
@@ -112,6 +129,11 @@ class Conan(FastSpeech):
                 kernel_size=hparams["predictor_kernel"],
             )
 
+    def _unit_speech_state_fn(self, unit_ids):
+        unit_embed = self.content_embedding(unit_ids)
+        unit_embed = self.content_proj(unit_embed.transpose(1, 2)).transpose(1, 2)
+        return unit_embed
+
     def forward(
         self,
         content,
@@ -125,15 +147,22 @@ class Conan(FastSpeech):
         **kwargs,
     ):  # add **kwargs
         ret = {}  # initialize result dictionary
+        content_lengths = kwargs.get("content_lengths")
+        rhythm_state = kwargs.get("rhythm_state")
+        rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
+        rhythm_apply_override = kwargs.get("rhythm_apply_override")
         # if hparams['hop_size']==320:
         ret["content"] = content  # store input content
+        ret["content_base"] = content
         # elif hparams['hop_size']==160:
         #     ret['content'] = content.repeat_interleave(2, dim=-1)
         # assert False,f'content:{content.size()}'
         # --- assume tgt_nonpadding (target non-padding region) based on content's padding token (e.g. -1) ---
         # this is usually used for mask loss or output. shape might be [B, T_tok, 1]
         # print(f'content:{content.size()},f0:{f0.size()},target:{target.size()}')
-        tgt_nonpadding = (content != -1).float()[:, :, None]
+        tgt_nonpadding = build_content_nonpadding(
+            content, content_lengths=content_lengths
+        )[:, :, None]
         # note: if decoder needs frame-level mask, this might need adjustment, or handle length-expanded mask inside decoder
 
         # compute content embedding
@@ -157,6 +186,30 @@ class Conan(FastSpeech):
             ret["style_embed"] = style_embed = self.encode_spk_embed(
                 ref.transpose(1, 2)
             ).transpose(1, 2)
+
+        if self.rhythm_enable_v2 and ref is not None:
+            rhythm_bundle = run_rhythm_frontend(
+                rhythm_enable_v2=self.rhythm_enable_v2,
+                rhythm_unit_frontend=self.rhythm_unit_frontend,
+                rhythm_module=self.rhythm_module,
+                content=content,
+                ref=ref,
+                infer=infer,
+                content_lengths=content_lengths,
+                rhythm_state=rhythm_state,
+                rhythm_ref_conditioning=rhythm_ref_conditioning,
+            )
+            content_embed, tgt_nonpadding = attach_rhythm_outputs(
+                ret=ret,
+                rhythm_bundle=rhythm_bundle,
+                content_embed=content_embed,
+                tgt_nonpadding=tgt_nonpadding,
+                hparams=self.hparams,
+                infer=infer,
+                rhythm_apply_override=rhythm_apply_override,
+                speech_state_fn=self._unit_speech_state_fn,
+                pause_state=self.rhythm_pause_state,
+            )
 
         # pitch input = content embedding + style embedding
         pitch_inp = content_embed + style_embed

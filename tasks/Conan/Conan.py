@@ -11,6 +11,8 @@ import math
 from modules.tts.iclspeech.multi_window_disc import Discriminator
 import torch.nn as nn
 import random
+from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 
 
 class ConanEmbTask(AuxDecoderMIDITask):
@@ -59,7 +61,7 @@ class ConanTask(AuxDecoderMIDITask):
             tech[random_tech < drop_p] = 2
         return tech
             
-    def run_model(self, sample, infer=False, test=False):
+    def run_model(self, sample, infer=False, test=False, **kwargs):
         # txt_tokens = sample["txt_tokens"]
         # mel2ph = sample["mel2ph"]
         # spk_id = sample["spk_ids"]
@@ -72,13 +74,26 @@ class ConanTask(AuxDecoderMIDITask):
         # notes, note_durs, note_types = sample["notes"], sample["note_durs"], sample["note_types"]
 
         target = sample["mels"]
-        print(target.shape)
-        if self.global_step >= hparams["random_speaker_steps"]:
-            ref=sample['ref_mels']
-        else:
-            ref=target
         if test:
             self.global_step = 200000
+        use_reference = (
+            test
+            or self.global_step >= hparams["random_speaker_steps"]
+            or bool(hparams.get("rhythm_force_reference_conditioning", False))
+        )
+        if use_reference:
+            ref = sample['ref_mels']
+        else:
+            ref = target
+        rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
+        if rhythm_ref_conditioning is None:
+            ref_stats = sample.get("ref_rhythm_stats")
+            ref_trace = sample.get("ref_rhythm_trace")
+            if ref_stats is not None and ref_trace is not None:
+                rhythm_ref_conditioning = {
+                    "ref_rhythm_stats": ref_stats,
+                    "ref_rhythm_trace": ref_trace,
+                }
         # assert False, f'content: {content.shape}, target: {target.shape},spk_embed: {spk_embed.shape}'
         # if not infer:
         #     tech_drop = {
@@ -100,7 +115,12 @@ class ConanTask(AuxDecoderMIDITask):
         # pharyngeal, vibrato, glissando = sample['pharyngeal'], sample['vibrato'], sample['glissando']
         output = self.model(content,spk_embed=spk_embed, target=target,ref=ref,
                             f0=f0, uv=uv,
-                            infer=infer, global_steps=self.global_step)
+                            infer=infer, global_steps=self.global_step,
+                            content_lengths=sample.get("mel_lengths"),
+                            ref_lengths=sample.get("ref_mel_lengths"),
+                            rhythm_apply_override=bool(test),
+                            rhythm_state=kwargs.get("rhythm_state"),
+                            rhythm_ref_conditioning=rhythm_ref_conditioning)
         
         losses = {}
         
@@ -108,6 +128,7 @@ class ConanTask(AuxDecoderMIDITask):
             self.add_mel_loss(output['mel_out'], target, losses)
             # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
             self.add_pitch_loss(output, sample, losses)
+            self.add_rhythm_loss(output, sample, losses)
             if hparams['style']:
                 if self.global_step > hparams['forcing'] and self.global_step < hparams['random_speaker_steps']:
                     losses['gloss'] = output['gloss']
@@ -138,6 +159,55 @@ class ConanTask(AuxDecoderMIDITask):
             losses["fdiff"] = output["fdiff"]
             losses['uv'] = (F.binary_cross_entropy_with_logits(
                 output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding.sum() * hparams['lambda_uv']
+
+    def _build_rhythm_loss_targets(self, output, sample):
+        if "rhythm_execution" not in output or output["rhythm_execution"] is None:
+            return None
+        explicit_keys = [
+            "rhythm_speech_exec_tgt",
+            "rhythm_pause_exec_tgt",
+            "rhythm_speech_budget_tgt",
+            "rhythm_pause_budget_tgt",
+        ]
+        if all(key in sample for key in explicit_keys):
+            guidance_speech = sample.get("rhythm_guidance_speech_tgt")
+            guidance_pause = sample.get("rhythm_guidance_pause_tgt")
+            return RhythmLossTargets(
+                speech_exec_tgt=sample["rhythm_speech_exec_tgt"],
+                pause_exec_tgt=sample["rhythm_pause_exec_tgt"],
+                speech_budget_tgt=sample["rhythm_speech_budget_tgt"],
+                pause_budget_tgt=sample["rhythm_pause_budget_tgt"],
+                unit_mask=output["rhythm_unit_batch"].unit_mask,
+                guidance_speech_tgt=guidance_speech,
+                guidance_pause_tgt=guidance_pause,
+            )
+        if not hparams.get("rhythm_train_identity_fallback", False):
+            return None
+        unit_batch = output.get("rhythm_unit_batch")
+        if unit_batch is None:
+            return None
+        unit_mask = unit_batch.unit_mask.float()
+        speech_exec_tgt = unit_batch.dur_anchor_src.float() * unit_mask
+        pause_exec_tgt = torch.zeros_like(speech_exec_tgt)
+        speech_budget_tgt = speech_exec_tgt.sum(dim=1, keepdim=True)
+        pause_budget_tgt = torch.zeros_like(speech_budget_tgt)
+        return RhythmLossTargets(
+            speech_exec_tgt=speech_exec_tgt,
+            pause_exec_tgt=pause_exec_tgt,
+            speech_budget_tgt=speech_budget_tgt,
+            pause_budget_tgt=pause_budget_tgt,
+            unit_mask=unit_mask,
+        )
+
+    def add_rhythm_loss(self, output, sample, losses):
+        targets = self._build_rhythm_loss_targets(output, sample)
+        if targets is None:
+            return
+        rhythm_losses = build_rhythm_loss_dict(output["rhythm_execution"], targets)
+        losses["rhythm_exec_speech"] = rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
+        losses["rhythm_exec_pause"] = rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
+        losses["rhythm_budget"] = rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
+        losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
 
             
     def _training_step(self, sample, batch_idx, optimizer_idx):
@@ -212,45 +282,19 @@ class ConanTask(AuxDecoderMIDITask):
         return outputs
     
     def test_step(self, sample, batch_idx):
-        """
-        Streaming inference:
-        1. Incrementally input content by 80 ms (=4 tokens) granularity
-        2. Extract newly generated mel segments from each inference round
-        3. Concatenate to get complete mel, then pass through vocoder as a whole
-        """
-        # === Preparation ===
-        sample['ref_mels'] = sample['mels']  # Keep consistent with original implementation
-        tokens_per_chunk = 4                   # 80 ms / 20 ms
-        content_full = sample['content']         # [B, T_c]
-        B, T_c = content_full.shape
-        total_chunks = (T_c + tokens_per_chunk - 1) // tokens_per_chunk
-
-        mel_chunks = []                          # Save mel segments
-        prev_mel_len = 0                         # Previous complete mel length
-
-        # # === streaming inference ===
-        # for chunk_idx in range(total_chunks):
-        #     end_idx = min((chunk_idx + 1) * tokens_per_chunk, T_c)
-
-        #     # Copy sample; only truncate content
-        #     sample_chunk = {k: v for k, v in sample.items()}
-        #     sample_chunk['content'] = content_full[:, :end_idx]
-
-        #     # Inference
-        #     _, outputs = self.run_model(sample_chunk, infer=True, test=True)
-        #     mel_out = outputs['mel_out'][0]      # [T_mel, 80]
-
-        #     # Extract newly added part from this round
-        #     mel_new = mel_out[prev_mel_len:]
-        #     mel_chunks.append(mel_new)
-        #     prev_mel_len = mel_out.shape[0]
-
-        # # === Concatenate and save results ===
-        # mel_pred = torch.cat(mel_chunks, dim=0)          # [T_total, 80]
-        
-        outputs=self.run_model(sample, infer=True, test=True)[1]
-        mel_pred = outputs['mel_out'][0]  # [T_total, 80
-        # mel_pred=self.run_model(sample, infer=True, test=True)[1]['mel_out'][0] # [T_total, 80]
+        if "ref_mels" not in sample or sample["ref_mels"] is None:
+            sample["ref_mels"] = sample["mels"]
+        if hparams.get("rhythm_test_chunkwise", True):
+            stream_result = run_chunkwise_streaming_inference(
+                self,
+                sample,
+                tokens_per_chunk=int(hparams.get("rhythm_test_tokens_per_chunk", 4)),
+            )
+            outputs = stream_result.final_output
+            mel_pred = stream_result.mel_pred
+        else:
+            outputs = self.run_model(sample, infer=True, test=True)[1]
+            mel_pred = outputs['mel_out'][0]
         item_name = sample['item_name'][0]
         base_fn = f'{item_name.replace(" ", "_")}[P]'
 

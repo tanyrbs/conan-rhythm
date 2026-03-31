@@ -133,6 +133,35 @@ class RhythmUnitFrontend:
             sep_hint=sep_hint,
         )
 
+    def from_content_tensor(
+        self,
+        content: torch.Tensor,
+        *,
+        content_lengths: torch.Tensor | None = None,
+        mark_last_open: bool = True,
+    ) -> RhythmUnitBatch:
+        if content.dim() != 2:
+            raise ValueError(f"content must be rank-2 [B,T], got {tuple(content.shape)}")
+        batch_tokens = []
+        batch_size, total_steps = content.shape
+        if content_lengths is None:
+            content_lengths = torch.full(
+                (batch_size,),
+                int(total_steps),
+                dtype=torch.long,
+                device=content.device,
+            )
+        for batch_idx in range(batch_size):
+            valid_len = int(content_lengths[batch_idx].item())
+            valid_len = max(0, min(valid_len, int(total_steps)))
+            tokens = content[batch_idx, :valid_len].detach().cpu().tolist()
+            batch_tokens.append(tokens)
+        return self.from_token_lists(
+            batch_tokens,
+            mark_last_open=mark_last_open,
+            device=content.device,
+        )
+
     def from_precomputed(
         self,
         *,

@@ -6,6 +6,29 @@
 
 This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise Online Network for Zero-Shot Adaptive Voice Conversion**".
 
+> **Current repository note (2026-03-31)**  
+> This local branch now also contains an in-progress **Rhythm V2 clean mainline** under:
+>
+> - `docs/rhythm_module_vision.md`
+> - `docs/rhythm_migration_plan.md`
+> - `modules/Conan/rhythm/`
+> - `tasks/Conan/rhythm/`
+> - `egs/conan_emformer_rhythm_v2.yaml`
+>
+> The new rhythm path follows:
+>
+> - small public contract
+> - explicit reference rhythm stats/trace
+> - window budget + unit redistribution
+> - single projector execution authority
+>
+> Recent repository changes:
+>
+> - `data_gen/conan_binarizer.py` can now cache minimal rhythm fields when `binarization_args.with_rhythm_cache: true`
+> - `tasks/Conan/dataset.py` now builds reference-guided heuristic rhythm targets at runtime
+> - `tasks/Conan/Conan.py::test_step` is back to chunkwise streaming evaluation
+> - `scripts/smoke_test_rhythm_v2.py` covers the new Rhythm V2 path
+
 <p align="center">
   <a href="https://arxiv.org/abs/2507.14534"><b>📄 Read the Paper (arXiv)</b></a> &nbsp;|&nbsp;
   <a href="https://aaronz345.github.io/ConanDemo/"><b>🎧 Demo Page</b></a>

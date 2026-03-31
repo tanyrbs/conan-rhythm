@@ -28,6 +28,10 @@ def _ensure_btf(ref_mel: torch.Tensor) -> torch.Tensor:
         ref_mel = ref_mel.unsqueeze(0)
     if ref_mel.dim() != 3:
         raise ValueError(f"ref_mel must be rank-3, got shape={tuple(ref_mel.shape)}")
+    if ref_mel.size(-1) == 80:
+        return ref_mel
+    if ref_mel.size(1) == 80:
+        return ref_mel.transpose(1, 2)
     if ref_mel.size(1) <= ref_mel.size(2):
         return ref_mel.transpose(1, 2)
     return ref_mel

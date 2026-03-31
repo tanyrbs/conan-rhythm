@@ -90,6 +90,11 @@ class StreamingVoiceConversion:
         prev_len = 0
         pos = 0
         state = None  # Emformer state for streaming
+        rhythm_state = None
+        rhythm_ref_conditioning = None
+        if getattr(self.model, "rhythm_enable_v2", False):
+            with torch.no_grad():
+                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(ref_mel.unsqueeze(0))
         
 
         while pos < total_frames:
@@ -138,7 +143,12 @@ class StreamingVoiceConversion:
                     uv=None,
                     infer=True,
                     global_steps=200000,
+                    content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
+                    rhythm_state=rhythm_state,
+                    rhythm_ref_conditioning=rhythm_ref_conditioning,
                 )
+                rhythm_state = out.get("rhythm_state_next", rhythm_state)
+                rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 mel_out = out["mel_out"][0]
             mel_new = mel_out[prev_len:]
             mel_chunks.append(mel_new)
@@ -147,10 +157,13 @@ class StreamingVoiceConversion:
             # collect mel from start to current pos
             mel_chunks_forvocoder = torch.cat(mel_chunks, dim=0)
             wav_chunk_vocoder = self.vocoder.spec2wav(mel_chunks_forvocoder.cpu().numpy())
-            # only keep the wav generated for the current chunk
+            # only keep the wav generated for the newly added mel segment
+            # note: cannot slice by source `pos`, because rhythm rendering may
+            # expand/compress time relative to source progress.
             hop = self.hparams["hop_size"]
-            start_sample = max(0, (pos - emit) * hop)
-            end_sample = min(len(wav_chunk_vocoder), pos * hop)
+            new_mel_frames = int(mel_new.shape[0])
+            end_sample = len(wav_chunk_vocoder)
+            start_sample = max(0, end_sample - new_mel_frames * hop)
             if end_sample > start_sample:
                 wav_chunk = wav_chunk_vocoder[start_sample:end_sample]
                 wav_chunks.append(wav_chunk)

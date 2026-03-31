@@ -134,6 +134,7 @@ class BaseSpeechDataset(BaseDataset):
             'mel': spec,
             'mel_nonpadding': spec.abs().sum(-1) > 0,
             'ref_mel': ref_spec,
+            'ref_item_id': ref_local,
         }
 
         # Optional speaker embedding
@@ -198,7 +199,6 @@ class FastSpeechDataset(BaseSpeechDataset):
         else:
             T = sample['mel'].shape[0]
         sample['mel'] = sample['mel'][:T]
-        sample['ref_mel'] = sample['ref_mel'][:T]
 
         if hparams.get('use_pitch_embed', False):
             if 'f0' in item:

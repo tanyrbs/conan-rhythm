@@ -15,6 +15,7 @@ from utils.audio.align import get_mel2ph, mel2token_to_dur
 from utils.text.text_encoder import build_token_encoder
 import json
 from utils.audio.pitch.utils import f0_to_coarse
+from modules.Conan.rhythm.supervision import build_item_rhythm_bundle
 np.seterr(divide='ignore', invalid='ignore')
 
 
@@ -376,6 +377,18 @@ class ConanBinarizer(VCBinarizer):
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
         item['hubert'] = content = content[:min_length]
         item['len'] = min_length
+        if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+            item.update(
+                build_item_rhythm_bundle(
+                    content_tokens=item['hubert'],
+                    mel=item['mel'],
+                    silent_token=hparams.get('silent_token', 57),
+                    separator_aware=bool(hparams.get('rhythm_separator_aware', True)),
+                    tail_open_units=int(hparams.get('rhythm_tail_open_units', 1)),
+                    trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
+                    include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
+                )
+            )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
         # except:
         #     # parselmouth
@@ -443,6 +456,18 @@ class EmformerBinarizer(VCBinarizer):
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
         item['hubert'] = content = content[:min_length]
         item['len'] = min_length
+        if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+            item.update(
+                build_item_rhythm_bundle(
+                    content_tokens=item['hubert'],
+                    mel=item['mel'],
+                    silent_token=hparams.get('silent_token', 57),
+                    separator_aware=bool(hparams.get('rhythm_separator_aware', True)),
+                    tail_open_units=int(hparams.get('rhythm_tail_open_units', 1)),
+                    trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
+                    include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
+                )
+            )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
         # except:
         #     # parselmouth
@@ -485,4 +510,3 @@ class EmformerBinarizer(VCBinarizer):
             startTime = startTime + ph_durs[i_ph]
 
         item['mel2ph'] = mel2ph
-

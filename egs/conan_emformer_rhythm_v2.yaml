@@ -1,5 +1,8 @@
 base_config: egs/conan_emformer.yaml
 
+binarization_args:
+  with_rhythm_cache: true
+
 # Rhythm V2 clean mainline
 rhythm_enable_v2: true
 rhythm_runtime_mode: v2_clean
@@ -16,8 +19,27 @@ rhythm_max_unit_logratio: 0.6
 rhythm_pause_share_max: 0.45
 rhythm_separator_aware: true
 rhythm_tail_open_units: 1
+rhythm_apply_mode: infer
+rhythm_force_reference_conditioning: true
+rhythm_train_identity_fallback: false
+rhythm_binarize_self_targets: true
+rhythm_dataset_build_guidance_from_ref: true
+rhythm_guidance_rate_scale_min: 0.60
+rhythm_guidance_rate_scale_max: 1.80
+rhythm_guidance_local_rate_strength: 0.35
+rhythm_guidance_segment_bias_strength: 0.25
+rhythm_guidance_pause_strength: 1.00
+rhythm_guidance_boundary_strength: 1.25
+rhythm_guidance_pause_budget_ratio_cap: 0.75
+rhythm_test_chunkwise: true
+rhythm_test_tokens_per_chunk: 4
 
 rhythm_projector_min_speech_frames: 1
 rhythm_projector_max_speech_expand: 3.0
 rhythm_projector_tail_hold_units: 2
 rhythm_projector_boundary_commit_threshold: 0.45
+
+lambda_rhythm_exec_speech: 1.0
+lambda_rhythm_exec_pause: 1.0
+lambda_rhythm_budget: 0.25
+lambda_rhythm_guidance: 0.0
