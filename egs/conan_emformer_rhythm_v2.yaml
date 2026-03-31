@@ -1,0 +1,23 @@
+base_config: egs/conan_emformer.yaml
+
+# Rhythm V2 clean mainline
+rhythm_enable_v2: true
+rhythm_runtime_mode: v2_clean
+rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
+rhythm_public_outputs: [speech_budget_win, pause_budget_win, dur_logratio_unit, pause_weight_unit]
+rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_guidance]
+
+rhythm_stats_dim: 6
+rhythm_trace_dim: 5
+rhythm_trace_bins: 24
+rhythm_hidden_size: 256
+rhythm_max_total_logratio: 0.8
+rhythm_max_unit_logratio: 0.6
+rhythm_pause_share_max: 0.45
+rhythm_separator_aware: true
+rhythm_tail_open_units: 1
+
+rhythm_projector_min_speech_frames: 1
+rhythm_projector_max_speech_expand: 3.0
+rhythm_projector_tail_hold_units: 2
+rhythm_projector_boundary_commit_threshold: 0.45
