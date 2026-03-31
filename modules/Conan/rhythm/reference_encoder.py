@@ -83,7 +83,13 @@ def _resample_by_progress(feature_track: torch.Tensor, progress: torch.Tensor, t
     return trace
 
 
-def sample_progress_trace(trace: torch.Tensor, phase_ptr: torch.Tensor, window_size: int) -> torch.Tensor:
+def sample_progress_trace(
+    trace: torch.Tensor,
+    phase_ptr: torch.Tensor,
+    window_size: int,
+    *,
+    horizon: float = 0.35,
+) -> torch.Tensor:
     if trace.dim() != 3:
         raise ValueError(f"trace must be [B, bins, dim], got {tuple(trace.shape)}")
     batch_size, trace_bins, trace_dim = trace.shape
@@ -93,8 +99,8 @@ def sample_progress_trace(trace: torch.Tensor, phase_ptr: torch.Tensor, window_s
         raise ValueError(
             f"phase_ptr must be [B] or [B,1], got {tuple(phase_ptr.shape)} for batch_size={batch_size}"
         )
-    span = max(window_size - 1, 0) / max(trace_bins - 1, 1)
-    offsets = torch.linspace(0.0, span, window_size, device=trace.device) if window_size > 0 else trace.new_zeros((0,))
+    horizon = float(max(0.01, min(1.0, horizon)))
+    offsets = torch.linspace(0.0, horizon, window_size, device=trace.device) if window_size > 0 else trace.new_zeros((0,))
     positions = (phase_ptr[:, None] + offsets[None, :]).clamp(0.0, 1.0)
     scaled = positions * max(trace_bins - 1, 1)
     left = torch.floor(scaled).long().clamp(0, max(trace_bins - 1, 0))
@@ -112,25 +118,36 @@ class ReferenceRhythmEncoder(nn.Module):
         self,
         *,
         trace_bins: int = 24,
-        pause_quantile: float = 0.18,
         smooth_kernel: int = 5,
+        trace_horizon: float = 0.35,
+        pause_energy_threshold_std: float = -0.5,
+        pause_delta_quantile: float = 0.35,
+        voiced_energy_threshold_std: float = -0.1,
+        boundary_quantile: float = 0.75,
     ) -> None:
         super().__init__()
         self.trace_bins = max(4, int(trace_bins))
-        self.pause_quantile = float(max(0.01, min(0.49, pause_quantile)))
         self.smooth_kernel = max(1, int(smooth_kernel))
+        self.trace_horizon = float(max(0.01, min(1.0, trace_horizon)))
+        self.pause_energy_threshold_std = float(pause_energy_threshold_std)
+        self.pause_delta_quantile = float(max(0.01, min(0.95, pause_delta_quantile)))
+        self.voiced_energy_threshold_std = float(voiced_energy_threshold_std)
+        self.boundary_quantile = float(max(0.50, min(0.99, boundary_quantile)))
         self.trace_dim = len(REF_RHYTHM_TRACE_KEYS)
         self.stats_dim = len(REF_RHYTHM_STATS_KEYS)
 
     def forward(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         ref_mel = _ensure_btf(ref_mel).float()
         energy = ref_mel.mean(dim=-1)
+        energy_mean = energy.mean(dim=1, keepdim=True)
+        energy_std = energy.std(dim=1, keepdim=True).clamp_min(1e-6)
+        energy_z = (energy - energy_mean) / energy_std
         delta = torch.zeros_like(energy)
         delta[:, 1:] = (energy[:, 1:] - energy[:, :-1]).abs()
-        threshold = torch.quantile(energy, self.pause_quantile, dim=1, keepdim=True)
-        pause_mask = energy <= threshold
+        delta_threshold = torch.quantile(delta, self.pause_delta_quantile, dim=1, keepdim=True)
+        pause_mask = (energy_z <= self.pause_energy_threshold_std) & (delta <= delta_threshold)
         speech_mask = ~pause_mask
-        voiced = (energy - energy.mean(dim=1, keepdim=True)).gt(0).float()
+        voiced = energy_z.gt(self.voiced_energy_threshold_std).float()
 
         kernel = min(self.smooth_kernel, max(1, energy.size(1)))
         padding = kernel // 2
@@ -157,11 +174,18 @@ class ReferenceRhythmEncoder(nn.Module):
         uniform = torch.linspace(0.0, 1.0, energy.size(1), device=energy.device)[None, :]
         segment_duration_bias = progress - uniform
 
+        boundary_events = boundary_strength >= torch.quantile(
+            boundary_strength,
+            self.boundary_quantile,
+            dim=1,
+            keepdim=True,
+        )
+
         feature_track = torch.stack(
             [
                 pause_mask.float(),
                 local_rate,
-                boundary_strength,
+                boundary_events.float(),
                 segment_duration_bias,
                 voiced,
             ],
@@ -174,7 +198,7 @@ class ReferenceRhythmEncoder(nn.Module):
                 _masked_run_mean(pause_mask.long()),
                 _masked_run_mean(speech_mask.long()),
                 (local_rate[:, -1] - local_rate[:, 0]),
-                boundary_strength.mean(dim=1),
+                boundary_events.float().mean(dim=1),
                 voiced.mean(dim=1),
             ],
             dim=-1,
@@ -189,5 +213,12 @@ class ReferenceRhythmEncoder(nn.Module):
         ref_rhythm_trace: torch.Tensor,
         phase_ptr: torch.Tensor,
         window_size: int,
+        *,
+        horizon: float | None = None,
     ) -> torch.Tensor:
-        return sample_progress_trace(ref_rhythm_trace, phase_ptr, window_size)
+        return sample_progress_trace(
+            ref_rhythm_trace,
+            phase_ptr,
+            window_size,
+            horizon=self.trace_horizon if horizon is None else horizon,
+        )

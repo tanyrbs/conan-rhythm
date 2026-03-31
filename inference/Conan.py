@@ -11,6 +11,7 @@ from utils.commons.ckpt_utils import load_ckpt, load_ckpt_emformer
 from utils.audio import librosa_wav2spec
 from utils.audio.io import save_wav
 from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
+from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
 
 from modules.Conan.Conan import Conan
 # Emformer feature extractor
@@ -87,7 +88,7 @@ class StreamingVoiceConversion:
         content_code_buffer = []  # list of [emit,] tensors
         mel_chunks = []
         wav_chunks = []
-        prev_len = 0
+        prev_committed_len = 0
         pos = 0
         state = None  # Emformer state for streaming
         rhythm_state = None
@@ -150,23 +151,25 @@ class StreamingVoiceConversion:
                 rhythm_state = out.get("rhythm_state_next", rhythm_state)
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 mel_out = out["mel_out"][0]
-            mel_new = mel_out[prev_len:]
-            mel_chunks.append(mel_new)
-            prev_len = mel_out.shape[0]
+            mel_new, prev_committed_len = extract_incremental_committed_mel(
+                out,
+                prev_committed_len=prev_committed_len,
+                batch_index=0,
+            )
+            if mel_new.numel() > 0:
+                mel_chunks.append(mel_new)
             pos += emit
-            # collect mel from start to current pos
-            mel_chunks_forvocoder = torch.cat(mel_chunks, dim=0)
-            wav_chunk_vocoder = self.vocoder.spec2wav(mel_chunks_forvocoder.cpu().numpy())
-            # only keep the wav generated for the newly added mel segment
-            # note: cannot slice by source `pos`, because rhythm rendering may
-            # expand/compress time relative to source progress.
-            hop = self.hparams["hop_size"]
-            new_mel_frames = int(mel_new.shape[0])
-            end_sample = len(wav_chunk_vocoder)
-            start_sample = max(0, end_sample - new_mel_frames * hop)
-            if end_sample > start_sample:
-                wav_chunk = wav_chunk_vocoder[start_sample:end_sample]
-                wav_chunks.append(wav_chunk)
+            if mel_new.numel() > 0:
+                wav_chunk = self.vocoder.spec2wav(mel_new.cpu().numpy())
+                if len(wav_chunk) > 0:
+                    wav_chunks.append(wav_chunk)
+        if prev_committed_len < int(mel_out.shape[0]):
+            mel_tail = mel_out[prev_committed_len:]
+            if mel_tail.numel() > 0:
+                mel_chunks.append(mel_tail)
+                wav_tail = self.vocoder.spec2wav(mel_tail.cpu().numpy())
+                if len(wav_tail) > 0:
+                    wav_chunks.append(wav_tail)
         mel_pred = torch.cat(mel_chunks, dim=0)
         if len(wav_chunks) > 0:
             wav_pred = np.concatenate(wav_chunks, axis=0)

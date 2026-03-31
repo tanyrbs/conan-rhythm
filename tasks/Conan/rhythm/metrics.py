@@ -81,6 +81,18 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
+        if "rhythm_teacher_speech_exec_tgt" in sample:
+            metrics["rhythm_metric_distill_speech_l1"] = _masked_l1(
+                execution.speech_duration_exec,
+                sample["rhythm_teacher_speech_exec_tgt"],
+                unit_mask,
+            )
+        if "rhythm_teacher_pause_exec_tgt" in sample:
+            metrics["rhythm_metric_distill_pause_l1"] = _masked_l1(
+                execution.pause_after_exec,
+                sample["rhythm_teacher_pause_exec_tgt"],
+                unit_mask,
+            )
     return metrics
 
 
@@ -99,9 +111,21 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
     commit_values = [float(hist[0]) if len(hist) > 0 else 0.0 for hist in commit_history]
     commit_deltas = [commit_values[0]]
     commit_deltas.extend(max(0.0, commit_values[idx] - commit_values[idx - 1]) for idx in range(1, len(commit_values)))
+    committed_lengths = list(getattr(stream_result, "committed_mel_lengths", []))
+    committed_deltas = []
+    if len(committed_lengths) > 0:
+        committed_deltas.append(float(committed_lengths[0]))
+        committed_deltas.extend(
+            max(0.0, float(committed_lengths[idx] - committed_lengths[idx - 1]))
+            for idx in range(1, len(committed_lengths))
+        )
+    prefix_exec_deltas = list(getattr(stream_result, "prefix_exec_deltas", []))
     return {
         "stream_num_chunks": float(len(mel_lengths)),
         "stream_final_mel_len": float(mel_lengths[-1]),
         "stream_mean_chunk_mel_delta": float(sum(mel_deltas) / max(len(mel_deltas), 1)),
         "stream_mean_commit_delta": float(sum(commit_deltas) / max(len(commit_deltas), 1)),
+        "stream_final_committed_mel_len": float(committed_lengths[-1]) if len(committed_lengths) > 0 else 0.0,
+        "stream_mean_committed_mel_delta": float(sum(committed_deltas) / max(len(committed_deltas), 1)) if len(committed_deltas) > 0 else 0.0,
+        "stream_max_prefix_exec_delta": float(max(prefix_exec_deltas)) if len(prefix_exec_deltas) > 0 else 0.0,
     }

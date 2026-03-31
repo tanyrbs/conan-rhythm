@@ -14,6 +14,8 @@ class ProjectorConfig:
     max_speech_expand: float = 3.0
     tail_hold_units: int = 2
     boundary_commit_threshold: float = 0.45
+    pause_topk_ratio: float = 0.35
+    pause_min_boundary_weight: float = 0.10
 
 
 class StreamingRhythmProjector(nn.Module):
@@ -44,12 +46,35 @@ class StreamingRhythmProjector(nn.Module):
         dur_logratio_unit: torch.Tensor,
         unit_mask: torch.Tensor,
         speech_budget_win: torch.Tensor,
+        state: StreamingRhythmState,
     ) -> torch.Tensor:
         base = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * torch.exp(dur_logratio_unit.float())
         max_speech = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * self.config.max_speech_expand
         min_speech = torch.full_like(base, float(self.config.min_speech_frames))
-        speech = torch.maximum(torch.minimum(base, max_speech), min_speech) * unit_mask
-        speech = self._renormalize_to_budget(speech, unit_mask, speech_budget_win)
+        candidate = torch.maximum(torch.minimum(base, max_speech), min_speech) * unit_mask
+        speech = candidate.new_zeros(candidate.shape)
+        previous = state.previous_speech_exec
+        for batch_idx in range(candidate.size(0)):
+            mask_row = unit_mask[batch_idx]
+            budget_row = speech_budget_win[batch_idx : batch_idx + 1]
+            frontier = int(state.commit_frontier[batch_idx].item())
+            if previous is not None and batch_idx < previous.size(0) and frontier > 0:
+                valid_frontier = min(frontier, int(previous.size(1)), int(candidate.size(1)))
+                prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
+                speech[batch_idx, :valid_frontier] = prefix
+            else:
+                valid_frontier = 0
+            tail_mask = mask_row.clone()
+            if valid_frontier > 0:
+                tail_mask[:valid_frontier] = 0.0
+            remaining_budget = budget_row.squeeze(0) - speech[batch_idx].sum()
+            if tail_mask.sum() > 0 and float(remaining_budget.item()) > 0:
+                tail_values = self._renormalize_to_budget(
+                    candidate[batch_idx : batch_idx + 1],
+                    tail_mask.unsqueeze(0),
+                    remaining_budget.view(1, 1),
+                )[0]
+                speech[batch_idx] = speech[batch_idx] + tail_values * tail_mask
         return speech * unit_mask
 
     def _project_pause(
@@ -59,13 +84,48 @@ class StreamingRhythmProjector(nn.Module):
         boundary_latent: torch.Tensor,
         unit_mask: torch.Tensor,
         pause_budget_win: torch.Tensor,
+        state: StreamingRhythmState,
     ) -> torch.Tensor:
         scores = pause_weight_unit.float().clamp_min(0.0)
-        scores = scores * (0.5 + boundary_latent.float()) * unit_mask
-        score_total = scores.sum(dim=1, keepdim=True)
-        fallback = unit_mask / unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        weights = torch.where(score_total > 0, scores / score_total.clamp_min(1e-6), fallback)
-        return weights * pause_budget_win
+        boundary_weight = (self.config.pause_min_boundary_weight + boundary_latent.float()).clamp_min(0.0)
+        scores = scores * boundary_weight * unit_mask
+        sparse_scores = scores.new_zeros(scores.shape)
+        topk_ratio = float(max(0.0, min(1.0, self.config.pause_topk_ratio)))
+        for batch_idx in range(scores.size(0)):
+            visible = int(unit_mask[batch_idx].sum().item())
+            if visible <= 0:
+                continue
+            topk = max(1, int(round(visible * topk_ratio)))
+            row_scores = scores[batch_idx, :visible]
+            keep_k = min(topk, visible)
+            values, indices = torch.topk(row_scores, k=keep_k, dim=0)
+            sparse_scores[batch_idx, indices] = values
+
+        pause = sparse_scores.new_zeros(sparse_scores.shape)
+        previous = state.previous_pause_exec
+        for batch_idx in range(sparse_scores.size(0)):
+            mask_row = unit_mask[batch_idx]
+            budget_row = pause_budget_win[batch_idx]
+            frontier = int(state.commit_frontier[batch_idx].item())
+            if previous is not None and batch_idx < previous.size(0) and frontier > 0:
+                valid_frontier = min(frontier, int(previous.size(1)), int(sparse_scores.size(1)))
+                prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
+                pause[batch_idx, :valid_frontier] = prefix
+            else:
+                valid_frontier = 0
+            tail_mask = mask_row.clone()
+            if valid_frontier > 0:
+                tail_mask[:valid_frontier] = 0.0
+            remaining_budget = budget_row - pause[batch_idx].sum()
+            tail_scores = sparse_scores[batch_idx] * tail_mask
+            score_total = tail_scores.sum()
+            if tail_mask.sum() > 0 and float(remaining_budget.item()) > 0:
+                if float(score_total.item()) > 0:
+                    pause[batch_idx] = pause[batch_idx] + tail_scores * (remaining_budget / score_total.clamp_min(1e-6))
+                else:
+                    fallback = tail_mask / tail_mask.sum().clamp_min(1.0)
+                    pause[batch_idx] = pause[batch_idx] + fallback * remaining_budget
+        return pause * unit_mask
 
     def _compute_commit_frontier(
         self,
@@ -152,12 +212,14 @@ class StreamingRhythmProjector(nn.Module):
             dur_logratio_unit=dur_logratio_unit,
             unit_mask=unit_mask,
             speech_budget_win=speech_budget_win,
+            state=state,
         )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
             boundary_latent=boundary_latent,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
+            state=state,
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
         commit_frontier = self._compute_commit_frontier(

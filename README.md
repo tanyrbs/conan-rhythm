@@ -12,6 +12,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `docs/rhythm_module_vision.md`
 > - `docs/rhythm_migration_plan.md`
 > - `docs/rhythm_local_adaptation.md`
+> - `docs/rhythm_training_stages.md`
 > - `modules/Conan/rhythm/`
 > - `tasks/Conan/rhythm/`
 > - `egs/conan_emformer_rhythm_v2.yaml`
@@ -27,7 +28,11 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - `data_gen/conan_binarizer.py` can now cache minimal rhythm fields when `binarization_args.with_rhythm_cache: true`
 > - `tasks/Conan/dataset.py` now builds reference-guided heuristic rhythm targets at runtime
+> - teacher/distill target fields are now reserved in the dataset/loss path
 > - `tasks/Conan/Conan.py::test_step` is back to chunkwise streaming evaluation
+> - chunkwise evaluation now uses committed-prefix mel increments
+> - projector now freezes committed prefix and applies sparser pause allocation
+> - reference trace sampling now uses a fixed progress horizon instead of long-prefix saturation
 > - `scripts/smoke_test_rhythm_v2.py` covers the new Rhythm V2 path
 
 <p align="center">

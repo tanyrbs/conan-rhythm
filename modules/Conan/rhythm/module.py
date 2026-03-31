@@ -18,6 +18,7 @@ class StreamingRhythmModule(nn.Module):
         trace_bins: int = 24,
         stats_dim: int = 6,
         trace_dim: int = 5,
+        trace_horizon: float = 0.35,
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
@@ -25,7 +26,10 @@ class StreamingRhythmModule(nn.Module):
     ) -> None:
         super().__init__()
         self.unit_embedding = nn.Embedding(num_units, hidden_size)
-        self.reference_encoder = ReferenceRhythmEncoder(trace_bins=trace_bins)
+        self.reference_encoder = ReferenceRhythmEncoder(
+            trace_bins=trace_bins,
+            trace_horizon=trace_horizon,
+        )
         self.budget_controller = WindowBudgetController(
             hidden_size=hidden_size,
             stats_dim=stats_dim,

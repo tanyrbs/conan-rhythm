@@ -172,6 +172,29 @@ def build_reference_guided_targets(
     }
 
 
+def build_reference_teacher_targets(
+    *,
+    dur_anchor_src,
+    ref_rhythm_stats,
+    ref_rhythm_trace,
+    unit_mask=None,
+    **kwargs,
+) -> dict[str, np.ndarray]:
+    targets = build_reference_guided_targets(
+        dur_anchor_src=dur_anchor_src,
+        ref_rhythm_stats=ref_rhythm_stats,
+        ref_rhythm_trace=ref_rhythm_trace,
+        unit_mask=unit_mask,
+        **kwargs,
+    )
+    return {
+        "rhythm_teacher_speech_exec_tgt": targets["rhythm_speech_exec_tgt"],
+        "rhythm_teacher_pause_exec_tgt": targets["rhythm_pause_exec_tgt"],
+        "rhythm_teacher_speech_budget_tgt": targets["rhythm_speech_budget_tgt"],
+        "rhythm_teacher_pause_budget_tgt": targets["rhythm_pause_budget_tgt"],
+    }
+
+
 def build_item_rhythm_bundle(
     *,
     content_tokens,
@@ -181,6 +204,7 @@ def build_item_rhythm_bundle(
     tail_open_units: int = 1,
     trace_bins: int = 24,
     include_self_targets: bool = True,
+    include_teacher_targets: bool = False,
 ) -> dict[str, np.ndarray]:
     source = build_source_rhythm_cache(
         content_tokens,
@@ -190,9 +214,19 @@ def build_item_rhythm_bundle(
     )
     conditioning = build_reference_rhythm_conditioning(mel, trace_bins=trace_bins)
     bundle = {**source, **conditioning}
-    if include_self_targets:
+    guided = None
+    if include_self_targets or include_teacher_targets:
+        guided = build_reference_guided_targets(
+            dur_anchor_src=source["dur_anchor_src"],
+            unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
+            ref_rhythm_stats=conditioning["ref_rhythm_stats"],
+            ref_rhythm_trace=conditioning["ref_rhythm_trace"],
+        )
+    if include_self_targets and guided is not None:
+        bundle.update(guided)
+    if include_teacher_targets:
         bundle.update(
-            build_reference_guided_targets(
+            build_reference_teacher_targets(
                 dur_anchor_src=source["dur_anchor_src"],
                 unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
                 ref_rhythm_stats=conditioning["ref_rhythm_stats"],

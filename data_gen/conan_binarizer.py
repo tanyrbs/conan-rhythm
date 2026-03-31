@@ -387,6 +387,7 @@ class ConanBinarizer(VCBinarizer):
                     tail_open_units=int(hparams.get('rhythm_tail_open_units', 1)),
                     trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
                     include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
+                    include_teacher_targets=bool(hparams.get('rhythm_binarize_teacher_targets', False)),
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
@@ -466,6 +467,7 @@ class EmformerBinarizer(VCBinarizer):
                     tail_open_units=int(hparams.get('rhythm_tail_open_units', 1)),
                     trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
                     include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
+                    include_teacher_targets=bool(hparams.get('rhythm_binarize_teacher_targets', False)),
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')

@@ -173,6 +173,10 @@ class ConanTask(AuxDecoderMIDITask):
         if all(key in sample for key in explicit_keys):
             guidance_speech = sample.get("rhythm_guidance_speech_tgt")
             guidance_pause = sample.get("rhythm_guidance_pause_tgt")
+            distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
+            distill_pause = sample.get("rhythm_teacher_pause_exec_tgt")
+            distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt")
+            distill_pause_budget = sample.get("rhythm_teacher_pause_budget_tgt")
             return RhythmLossTargets(
                 speech_exec_tgt=sample["rhythm_speech_exec_tgt"],
                 pause_exec_tgt=sample["rhythm_pause_exec_tgt"],
@@ -181,6 +185,10 @@ class ConanTask(AuxDecoderMIDITask):
                 unit_mask=output["rhythm_unit_batch"].unit_mask,
                 guidance_speech_tgt=guidance_speech,
                 guidance_pause_tgt=guidance_pause,
+                distill_speech_tgt=distill_speech,
+                distill_pause_tgt=distill_pause,
+                distill_speech_budget_tgt=distill_speech_budget,
+                distill_pause_budget_tgt=distill_pause_budget,
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
             return None
@@ -209,6 +217,7 @@ class ConanTask(AuxDecoderMIDITask):
         losses["rhythm_exec_pause"] = rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
         losses["rhythm_budget"] = rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
+        losses["rhythm_distill"] = rhythm_losses["rhythm_distill"] * hparams.get("lambda_rhythm_distill", 0.0)
 
             
     def _training_step(self, sample, batch_idx, optimizer_idx):

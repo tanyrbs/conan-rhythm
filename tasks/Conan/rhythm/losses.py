@@ -16,6 +16,10 @@ class RhythmLossTargets:
     unit_mask: torch.Tensor
     guidance_speech_tgt: Optional[torch.Tensor] = None
     guidance_pause_tgt: Optional[torch.Tensor] = None
+    distill_speech_tgt: Optional[torch.Tensor] = None
+    distill_pause_tgt: Optional[torch.Tensor] = None
+    distill_speech_budget_tgt: Optional[torch.Tensor] = None
+    distill_pause_budget_tgt: Optional[torch.Tensor] = None
 
 
 def _masked_huber(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
@@ -46,10 +50,34 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         )
     else:
         l_guidance = execution.speech_duration_exec.new_tensor(0.0)
+    if (
+        targets.distill_speech_tgt is not None
+        and targets.distill_pause_tgt is not None
+        and targets.distill_speech_budget_tgt is not None
+        and targets.distill_pause_budget_tgt is not None
+    ):
+        l_distill = _masked_huber(
+            execution.speech_duration_exec,
+            targets.distill_speech_tgt.float(),
+            unit_mask,
+        ) + _masked_huber(
+            execution.pause_after_exec,
+            targets.distill_pause_tgt.float(),
+            unit_mask,
+        ) + F.l1_loss(
+            execution.planner.speech_budget_win,
+            targets.distill_speech_budget_tgt.float(),
+        ) + F.l1_loss(
+            execution.planner.pause_budget_win,
+            targets.distill_pause_budget_tgt.float(),
+        )
+    else:
+        l_distill = execution.speech_duration_exec.new_tensor(0.0)
     return {
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_budget': l_budget,
         'rhythm_guidance': l_guidance,
-        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_guidance,
+        'rhythm_distill': l_distill,
+        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_guidance + l_distill,
     }

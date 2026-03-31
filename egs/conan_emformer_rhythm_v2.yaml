@@ -8,11 +8,12 @@ rhythm_enable_v2: true
 rhythm_runtime_mode: v2_clean
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_budget_win, pause_budget_win, dur_logratio_unit, pause_weight_unit]
-rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_guidance]
+rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_guidance]  # stage2: add teacher-driven distill via rhythm_teacher_* + lambda_rhythm_distill
 
 rhythm_stats_dim: 6
 rhythm_trace_dim: 5
 rhythm_trace_bins: 24
+rhythm_trace_horizon: 0.35
 rhythm_hidden_size: 256
 rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
@@ -23,7 +24,9 @@ rhythm_apply_mode: infer
 rhythm_force_reference_conditioning: true
 rhythm_train_identity_fallback: false
 rhythm_binarize_self_targets: true
+rhythm_binarize_teacher_targets: false
 rhythm_dataset_build_guidance_from_ref: true
+rhythm_dataset_build_teacher_from_ref: false
 rhythm_guidance_rate_scale_min: 0.60
 rhythm_guidance_rate_scale_max: 1.80
 rhythm_guidance_local_rate_strength: 0.35
@@ -38,8 +41,11 @@ rhythm_projector_min_speech_frames: 1
 rhythm_projector_max_speech_expand: 3.0
 rhythm_projector_tail_hold_units: 2
 rhythm_projector_boundary_commit_threshold: 0.45
+rhythm_projector_pause_topk_ratio: 0.35
+rhythm_projector_pause_min_boundary_weight: 0.10
 
 lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.25
 lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.0
