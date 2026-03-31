@@ -270,15 +270,12 @@ class ConanTask(AuxDecoderMIDITask):
 
     def validation_step(self, sample, batch_idx):
         outputs = {}
-        outputs['losses'] = {"flow": 0}
-        outputs['rhythm_metrics'] = {}
+        outputs['losses'], model_out = self.run_model(sample, infer=True)
+        outputs['rhythm_metrics'] = tensors_to_scalars(build_rhythm_metric_dict(model_out, sample))
         outputs['total_loss'] = sum(outputs['losses'].values())
         outputs['nsamples'] = sample['nsamples']
         outputs = tensors_to_scalars(outputs)
         if batch_idx < hparams['num_valid_plots']:
-            outputs['losses'], model_out = self.run_model(sample, infer=True)
-            outputs['total_loss'] = sum(outputs['losses'].values())
-            outputs['rhythm_metrics'] = tensors_to_scalars(build_rhythm_metric_dict(model_out, sample))
             sr = hparams["audio_sample_rate"]
             gt_f0 = denorm_f0(sample['f0'], sample["uv"])
             wav_gt = self.vocoder.spec2wav(sample["mels"][0].cpu().numpy(), f0=gt_f0[0].cpu().numpy())
