@@ -12,6 +12,7 @@ from modules.tts.iclspeech.multi_window_disc import Discriminator
 import torch.nn as nn
 import random
 from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 
 
@@ -261,12 +262,14 @@ class ConanTask(AuxDecoderMIDITask):
     def validation_step(self, sample, batch_idx):
         outputs = {}
         outputs['losses'] = {"flow": 0}
+        outputs['rhythm_metrics'] = {}
         outputs['total_loss'] = sum(outputs['losses'].values())
         outputs['nsamples'] = sample['nsamples']
         outputs = tensors_to_scalars(outputs)
         if batch_idx < hparams['num_valid_plots']:
             outputs['losses'], model_out = self.run_model(sample, infer=True)
             outputs['total_loss'] = sum(outputs['losses'].values())
+            outputs['rhythm_metrics'] = tensors_to_scalars(build_rhythm_metric_dict(model_out, sample))
             sr = hparams["audio_sample_rate"]
             gt_f0 = denorm_f0(sample['f0'], sample["uv"])
             wav_gt = self.vocoder.spec2wav(sample["mels"][0].cpu().numpy(), f0=gt_f0[0].cpu().numpy())
@@ -292,9 +295,11 @@ class ConanTask(AuxDecoderMIDITask):
             )
             outputs = stream_result.final_output
             mel_pred = stream_result.mel_pred
+            stream_metrics = build_streaming_chunk_metrics(stream_result)
         else:
             outputs = self.run_model(sample, infer=True, test=True)[1]
             mel_pred = outputs['mel_out'][0]
+            stream_metrics = {}
         item_name = sample['item_name'][0]
         base_fn = f'{item_name.replace(" ", "_")}[P]'
 
@@ -325,7 +330,10 @@ class ConanTask(AuxDecoderMIDITask):
                 None]
         )
 
-        return {}  # Keep interface consistent with original test_step
+        result = {}
+        result.update(tensors_to_scalars(build_rhythm_metric_dict(outputs, sample)))
+        result.update(stream_metrics)
+        return result
 
 
     def build_optimizer(self, model):

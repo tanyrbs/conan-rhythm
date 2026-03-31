@@ -11,6 +11,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - `docs/rhythm_module_vision.md`
 > - `docs/rhythm_migration_plan.md`
+> - `docs/rhythm_local_adaptation.md`
 > - `modules/Conan/rhythm/`
 > - `tasks/Conan/rhythm/`
 > - `egs/conan_emformer_rhythm_v2.yaml`
