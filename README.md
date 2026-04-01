@@ -38,15 +38,18 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - projector already freezes committed prefix and uses sparser pause allocation
 > - trace sampling uses a fixed progress horizon
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`
+> - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
 > - dataset / loss path already reserves guidance and distillation fields
 > - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
 > - a cumulative `rhythm_plan` loss is now available for prefix drift control
+> - a dual-mode teacher/student skeleton is now wired: streaming execution + offline full-horizon execution + algorithmic teacher targets
 > - `scripts/smoke_test_rhythm_v2.py` now covers descriptor + stateful scheduler reuse
 >
 > Still missing before claiming a full strong-rhythm training closure:
 >
-> - offline teacher of sufficient quality
+> - higher-quality offline teacher beyond the current algorithmic / dual-mode bootstrap
 > - fully retimed decoder training to remove train/infer mismatch
+> - richer reference slow-memory / selector path beyond the current stats + trace cache
 > - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
 >
 > Current staging note:
@@ -80,6 +83,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - projector-centric timing supervision
 > - cached-only reproducibility
+> - dual-mode teacher/student schedule distillation
 > - retimed train/infer closure
 > - stronger streaming regression
 

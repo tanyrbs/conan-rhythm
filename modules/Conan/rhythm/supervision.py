@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .reference_encoder import ReferenceRhythmEncoder, sample_progress_trace
+from .teacher import AlgorithmicTeacherConfig, build_algorithmic_teacher_targets
 from .unit_frontend import RhythmUnitFrontend
 
 RHYTHM_CACHE_VERSION = 3
@@ -80,7 +81,9 @@ def build_source_rhythm_cache(
         "content_units": batch.content_units[0].cpu().numpy().astype(np.int64),
         "dur_anchor_src": batch.dur_anchor_src[0].cpu().numpy().astype(np.int64),
         "open_run_mask": batch.open_run_mask[0].cpu().numpy().astype(np.int64),
+        "sealed_mask": batch.sealed_mask[0].cpu().numpy().astype(np.int64),
         "sep_hint": batch.sep_hint[0].cpu().numpy().astype(np.int64),
+        "boundary_confidence": batch.boundary_confidence[0].cpu().numpy().astype(np.float32),
     }
 
 
@@ -408,6 +411,7 @@ def build_reference_teacher_targets(
     ref_rhythm_stats,
     ref_rhythm_trace,
     unit_mask=None,
+    source_boundary_cue=None,
     rate_scale_min: float = 0.55,
     rate_scale_max: float = 1.95,
     local_rate_strength: float = 0.45,
@@ -427,74 +431,33 @@ def build_reference_teacher_targets(
         unit_mask = dur_anchor_src.gt(0).float()
     else:
         unit_mask = torch.tensor(np.asarray(unit_mask), dtype=torch.float32)
-
-    unit_count = int(unit_mask.sum().item())
-    if unit_count <= 0:
-        zero_units = dur_anchor_src.new_zeros(dur_anchor_src.shape)
-        zero_budget = dur_anchor_src.new_zeros((1,))
-        return {
-            "rhythm_teacher_speech_exec_tgt": zero_units.cpu().numpy().astype(np.float32),
-            "rhythm_teacher_pause_exec_tgt": zero_units.cpu().numpy().astype(np.float32),
-            "rhythm_teacher_speech_budget_tgt": zero_budget.cpu().numpy().astype(np.float32),
-            "rhythm_teacher_pause_budget_tgt": zero_budget.cpu().numpy().astype(np.float32),
-        }
-
-    trace_context = sample_progress_trace(
-        ref_rhythm_trace.unsqueeze(0),
-        phase_ptr=torch.zeros(1, dtype=torch.float32),
-        window_size=int(dur_anchor_src.size(0)),
-        visible_sizes=torch.tensor([unit_count], dtype=torch.long),
-    )[0]
-    trace_context = trace_context * unit_mask.unsqueeze(-1)
-
-    src_total = (dur_anchor_src * unit_mask).sum().clamp_min(1.0)
-    src_mean = src_total / unit_mask.sum().clamp_min(1.0)
-    ref_mean_speech = ref_rhythm_stats[2].clamp_min(1.0)
-    rate_scale = (ref_mean_speech / src_mean.clamp_min(1.0)).clamp(rate_scale_min, rate_scale_max)
-    speech_budget = src_total * rate_scale
-
-    pause_ratio = ref_rhythm_stats[0].clamp(0.0, 0.49)
-    boundary_ratio = ref_rhythm_stats[4].clamp(0.0, 1.0)
-    mean_pause = ref_rhythm_stats[1].clamp_min(0.0)
-    pause_from_ratio = speech_budget * pause_ratio / (1.0 - pause_ratio).clamp_min(0.20)
-    pause_from_events = unit_mask.sum().clamp_min(1.0) * boundary_ratio * mean_pause
-    pause_budget = 0.35 * pause_from_ratio + 0.65 * pause_from_events
-    pause_budget = pause_budget.clamp(min=0.0, max=speech_budget * pause_budget_ratio_cap)
-
-    local_rate = _masked_standardize(trace_context[:, 1], unit_mask)
-    segment_bias = _masked_standardize(trace_context[:, 3], unit_mask)
-    speech_scores = torch.exp(
-        torch.log1p(dur_anchor_src.clamp_min(0.0))
-        + local_rate_strength * local_rate
-        + segment_bias_strength * segment_bias
-    ) * unit_mask
-    speech_scores = _smooth_1d(speech_scores, speech_smooth_kernel) * unit_mask
-    speech_scores = _masked_normalize(speech_scores, unit_mask)
-    speech_exec = speech_scores * speech_budget
-
-    pause_seed = pause_strength * _masked_standardize(trace_context[:, 0], unit_mask)
-    pause_seed = pause_seed + boundary_strength * _masked_standardize(trace_context[:, 2], unit_mask)
-    pause_scores = torch.exp(pause_seed) * unit_mask
-    pause_scores = _sparsify_scores(
-        pause_scores,
-        unit_mask,
-        topk_ratio=max(float(pause_topk_ratio), float(boundary_ratio.item())),
-    )
-    pause_scores = _masked_normalize(pause_scores, unit_mask)
-    pause_exec = pause_scores * pause_budget
-    teacher_confidence = _estimate_surface_confidence(
-        trace_context=trace_context,
+    if source_boundary_cue is not None:
+        source_boundary_cue = torch.tensor(np.asarray(source_boundary_cue), dtype=torch.float32)
+    teacher = build_algorithmic_teacher_targets(
+        dur_anchor_src=dur_anchor_src,
         ref_rhythm_stats=ref_rhythm_stats,
+        ref_rhythm_trace=ref_rhythm_trace,
         unit_mask=unit_mask,
-        smoother_bonus=0.05,
+        source_boundary_cue=source_boundary_cue,
+        config=AlgorithmicTeacherConfig(
+            rate_scale_min=rate_scale_min,
+            rate_scale_max=rate_scale_max,
+            local_rate_strength=local_rate_strength,
+            segment_bias_strength=segment_bias_strength,
+            pause_strength=pause_strength,
+            boundary_strength=boundary_strength,
+            pause_budget_ratio_cap=pause_budget_ratio_cap,
+            speech_smooth_kernel=speech_smooth_kernel,
+            pause_topk_ratio=pause_topk_ratio,
+        ),
     )
 
     return {
-        "rhythm_teacher_speech_exec_tgt": speech_exec.cpu().numpy().astype(np.float32),
-        "rhythm_teacher_pause_exec_tgt": pause_exec.cpu().numpy().astype(np.float32),
-        "rhythm_teacher_speech_budget_tgt": speech_budget.view(1).cpu().numpy().astype(np.float32),
-        "rhythm_teacher_pause_budget_tgt": pause_budget.view(1).cpu().numpy().astype(np.float32),
-        "rhythm_teacher_confidence": np.asarray([teacher_confidence], dtype=np.float32),
+        "rhythm_teacher_speech_exec_tgt": teacher.speech_exec_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_pause_exec_tgt": teacher.pause_exec_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_speech_budget_tgt": teacher.speech_budget_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_pause_budget_tgt": teacher.pause_budget_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_confidence": teacher.confidence[0].cpu().numpy().astype(np.float32),
     }
 
 
@@ -543,6 +506,7 @@ def build_item_rhythm_bundle(
             build_reference_teacher_targets(
                 dur_anchor_src=source["dur_anchor_src"],
                 unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
+                source_boundary_cue=source.get("boundary_confidence"),
                 ref_rhythm_stats=conditioning["ref_rhythm_stats"],
                 ref_rhythm_trace=conditioning["ref_rhythm_trace"],
                 **teacher_kwargs,

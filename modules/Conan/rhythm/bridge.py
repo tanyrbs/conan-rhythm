@@ -51,6 +51,8 @@ def run_rhythm_frontend(
     content_lengths: torch.Tensor | None = None,
     rhythm_state=None,
     rhythm_ref_conditioning=None,
+    enable_dual_mode_teacher: bool = False,
+    enable_algorithmic_teacher: bool = False,
 ):
     if not rhythm_enable_v2 or ref is None:
         return None
@@ -62,20 +64,55 @@ def run_rhythm_frontend(
     )
     if rhythm_ref_conditioning is None:
         rhythm_ref_conditioning = rhythm_module.encode_reference(ref)
-    execution = rhythm_module(
-        content_units=unit_batch.content_units,
-        dur_anchor_src=unit_batch.dur_anchor_src,
-        unit_mask=unit_batch.unit_mask,
-        open_run_mask=unit_batch.open_run_mask,
-        sep_hint=unit_batch.sep_hint,
-        ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
-        ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
-        state=rhythm_state,
-    )
+    if enable_dual_mode_teacher and not infer:
+        dual_outputs = rhythm_module.forward_dual(
+            content_units=unit_batch.content_units,
+            dur_anchor_src=unit_batch.dur_anchor_src,
+            unit_mask=unit_batch.unit_mask,
+            open_run_mask=unit_batch.open_run_mask,
+            sealed_mask=unit_batch.sealed_mask,
+            sep_hint=unit_batch.sep_hint,
+            boundary_confidence=unit_batch.boundary_confidence,
+            ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
+            ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+            state=rhythm_state,
+        )
+        execution = dual_outputs["streaming_execution"]
+        offline_execution = dual_outputs["offline_execution"]
+        algorithmic_teacher = dual_outputs["algorithmic_teacher"]
+    else:
+        execution = rhythm_module(
+            content_units=unit_batch.content_units,
+            dur_anchor_src=unit_batch.dur_anchor_src,
+            unit_mask=unit_batch.unit_mask,
+            open_run_mask=unit_batch.open_run_mask,
+            sealed_mask=unit_batch.sealed_mask,
+            sep_hint=unit_batch.sep_hint,
+            boundary_confidence=unit_batch.boundary_confidence,
+            ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
+            ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+            state=rhythm_state,
+        )
+        offline_execution = None
+        algorithmic_teacher = None
+        if enable_algorithmic_teacher and not infer:
+            algorithmic_teacher = rhythm_module.compute_algorithmic_teacher(
+                content_units=unit_batch.content_units,
+                dur_anchor_src=unit_batch.dur_anchor_src,
+                unit_mask=unit_batch.unit_mask,
+                open_run_mask=unit_batch.open_run_mask,
+                sealed_mask=unit_batch.sealed_mask,
+                sep_hint=unit_batch.sep_hint,
+                boundary_confidence=unit_batch.boundary_confidence,
+                ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
+                ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+            )
     return {
         "unit_batch": unit_batch,
         "execution": execution,
         "ref_conditioning": rhythm_ref_conditioning,
+        "offline_execution": offline_execution,
+        "algorithmic_teacher": algorithmic_teacher,
     }
 
 
@@ -109,9 +146,20 @@ def attach_rhythm_outputs(
     ret["boundary_latent"] = execution.planner.boundary_latent
     ret["source_boundary_cue"] = execution.planner.source_boundary_cue
     ret["speech_duration_exec"] = execution.speech_duration_exec
+    ret["blank_duration_exec"] = execution.blank_duration_exec
     ret["pause_after_exec"] = execution.pause_after_exec
     ret["effective_duration_exec"] = execution.effective_duration_exec
     ret["commit_frontier"] = execution.commit_frontier
+    ret["slot_duration_exec"] = execution.slot_duration_exec
+    ret["slot_mask"] = execution.slot_mask
+    ret["slot_is_blank"] = execution.slot_is_blank
+    ret["slot_unit_index"] = execution.slot_unit_index
+    ret["sealed_mask"] = unit_batch.sealed_mask
+    ret["boundary_confidence"] = unit_batch.boundary_confidence
+    if rhythm_bundle.get("offline_execution") is not None:
+        ret["rhythm_offline_execution"] = rhythm_bundle["offline_execution"]
+    if rhythm_bundle.get("algorithmic_teacher") is not None:
+        ret["rhythm_algorithmic_teacher"] = rhythm_bundle["algorithmic_teacher"]
 
     apply_rhythm_render = resolve_rhythm_apply_mode(
         hparams,
@@ -125,9 +173,10 @@ def attach_rhythm_outputs(
         raise ValueError("speech_state_fn and pause_state are required when rhythm render is enabled.")
     rendered = render_rhythm_sequence(
         content_units=unit_batch.content_units,
-        speech_duration_exec=execution.speech_duration_exec,
-        pause_after_exec=execution.pause_after_exec,
-        unit_mask=unit_batch.unit_mask,
+        slot_duration_exec=execution.slot_duration_exec,
+        slot_mask=execution.slot_mask,
+        slot_is_blank=execution.slot_is_blank,
+        slot_unit_index=execution.slot_unit_index,
         silent_token=hparams.get("silent_token", 57),
         speech_state_fn=speech_state_fn,
         pause_state=pause_state,

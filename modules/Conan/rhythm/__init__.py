@@ -9,6 +9,7 @@ from .contracts import (
     RhythmExecution,
     RhythmPlannerOutputs,
     RhythmPublicInputs,
+    RhythmTeacherTargets,
     StreamingRhythmState,
 )
 from .controller import UnitRedistributionHead, WindowBudgetController
@@ -38,6 +39,19 @@ from .supervision import (
     build_reference_teacher_targets,
     build_source_rhythm_cache,
 )
+from .teacher import (
+    AlgorithmicRhythmTeacher,
+    AlgorithmicTeacherConfig,
+    build_algorithmic_teacher_targets,
+)
+from .unitizer import (
+    CompressedUnitSequence,
+    StreamingRunLengthUnitizer,
+    StreamingUnitizerState,
+    build_compressed_sequence,
+    compress_token_sequence,
+    estimate_boundary_confidence,
+)
 from .unit_frontend import RhythmUnitBatch, RhythmUnitFrontend
 
 __all__ = [
@@ -64,16 +78,26 @@ __all__ = [
     'build_retimed_mel_target',
     'build_reference_teacher_targets',
     'build_source_rhythm_cache',
+    'build_algorithmic_teacher_targets',
     'resolve_content_lengths',
     'resolve_rhythm_apply_mode',
     'render_rhythm_sequence',
+    'AlgorithmicRhythmTeacher',
+    'AlgorithmicTeacherConfig',
+    'CompressedUnitSequence',
     'RhythmExecution',
     'RhythmPlannerOutputs',
     'RhythmPublicInputs',
+    'RhythmTeacherTargets',
     'RhythmUnitBatch',
     'RhythmUnitFrontend',
     'run_rhythm_frontend',
+    'StreamingRunLengthUnitizer',
     'StreamingRhythmModule',
     'StreamingRhythmState',
+    'StreamingUnitizerState',
     'build_source_boundary_cue',
+    'build_compressed_sequence',
+    'compress_token_sequence',
+    'estimate_boundary_confidence',
 ]

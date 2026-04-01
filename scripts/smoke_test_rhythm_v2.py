@@ -15,6 +15,7 @@ from modules.Conan.rhythm.supervision import (
     build_retimed_mel_target,
 )
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
+from modules.Conan.rhythm.unitizer import StreamingRunLengthUnitizer
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
@@ -46,6 +47,32 @@ if __name__ == '__main__':
     ref_conditioning = model.encode_reference(ref_mel)
     print('ref descriptor keys:', sorted(ref_conditioning.keys()))
     assert 'global_rate' in ref_conditioning and 'boundary_trace' in ref_conditioning
+    assert batch.sealed_mask.shape == batch.open_run_mask.shape
+    assert batch.boundary_confidence.shape == batch.open_run_mask.shape
+
+    dual = model.forward_dual(
+        content_units=batch.content_units,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        open_run_mask=batch.open_run_mask,
+        sealed_mask=batch.sealed_mask,
+        sep_hint=batch.sep_hint,
+        boundary_confidence=batch.boundary_confidence,
+        ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
+        ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
+        state=model.init_state(batch_size=2, device=torch.device('cpu')),
+    )
+    offline_exec = dual["offline_execution"]
+    algo_teacher = dual["algorithmic_teacher"]
+    assert offline_exec.commit_frontier.tolist() == batch.unit_mask.sum(dim=1).long().tolist()
+    assert algo_teacher.allocation_tgt.shape == batch.unit_mask.shape
+
+    stream_unitizer = StreamingRunLengthUnitizer(silent_token=57, separator_aware=True)
+    unitizer_state = stream_unitizer.init_state(batch_size=1)
+    _, unitizer_state = stream_unitizer.step_token_lists([[1, 1, 2, 57]], unitizer_state)
+    unitized_step2, unitizer_state = stream_unitizer.step_token_lists([[2, 2, 3, 3]], unitizer_state)
+    assert len(unitizer_state.raw_tokens[0]) == 8
+    assert unitized_step2[0].units == [1, 2, 2, 3]
 
     state = model.init_state(batch_size=2, device=torch.device('cpu'))
     out1 = model(
@@ -98,6 +125,8 @@ if __name__ == '__main__':
     metrics = build_rhythm_metric_dict(
         {
             "rhythm_execution": out1,
+            "rhythm_offline_execution": offline_exec,
+            "rhythm_algorithmic_teacher": algo_teacher,
             "rhythm_unit_batch": batch,
             "rhythm_state_next": out1.next_state,
             "rhythm_apply_render": 1.0,
@@ -116,6 +145,8 @@ if __name__ == '__main__':
     print('commit_frontier step2:', out2.commit_frontier.tolist())
     print('phase_ptr step2:', out2.next_state.phase_ptr.tolist())
     print('source_boundary_cue max:', float(out1.planner.source_boundary_cue.max().item()))
+    print('offline total corr metric:', float(metrics['rhythm_metric_offline_online_total_corr']))
+    print('algorithmic teacher alloc kl:', float(metrics['rhythm_metric_algorithmic_teacher_alloc_kl']))
     print('retimed mel len:', int(retimed['rhythm_retimed_mel_len'][0]))
     print('retimed frame weight mean:', float(retimed['rhythm_retimed_frame_weight'].mean()))
     print('guidance keys:', sorted(guidance.keys()))
@@ -134,3 +165,4 @@ if __name__ == '__main__':
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr']) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1']) < 1e-6
+    assert float(metrics['rhythm_metric_offline_online_total_corr']) >= 0.0

@@ -18,6 +18,8 @@ def build_source_boundary_cue(
     unit_mask: torch.Tensor,
     sep_hint: torch.Tensor | None = None,
     open_run_mask: torch.Tensor | None = None,
+    sealed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build a cheap, prefix-safe boundary cue.
 
@@ -43,7 +45,11 @@ def build_source_boundary_cue(
 
     if sep_hint is not None:
         cue = cue + 0.55 * sep_hint.float()
+    if boundary_confidence is not None:
+        cue = cue + 0.35 * boundary_confidence.float()
     if open_run_mask is not None:
         cue = cue * (1.0 - 0.25 * open_run_mask.float())
+    if sealed_mask is not None:
+        cue = cue * (0.80 + 0.20 * sealed_mask.float())
 
     return cue.clamp(0.0, 1.0) * unit_mask

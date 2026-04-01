@@ -42,8 +42,24 @@ class RhythmPlannerOutputs:
 @dataclass
 class RhythmExecution:
     speech_duration_exec: torch.Tensor
+    blank_duration_exec: torch.Tensor
     pause_after_exec: torch.Tensor
     effective_duration_exec: torch.Tensor
     commit_frontier: torch.Tensor
+    slot_duration_exec: torch.Tensor
+    slot_mask: torch.Tensor
+    slot_is_blank: torch.Tensor
+    slot_unit_index: torch.Tensor
     planner: RhythmPlannerOutputs
     next_state: StreamingRhythmState
+
+
+@dataclass
+class RhythmTeacherTargets:
+    speech_exec_tgt: torch.Tensor
+    pause_exec_tgt: torch.Tensor
+    speech_budget_tgt: torch.Tensor
+    pause_budget_tgt: torch.Tensor
+    allocation_tgt: torch.Tensor
+    confidence: torch.Tensor
+    trace_context: torch.Tensor

@@ -17,5 +17,6 @@ rhythm_require_retimed_cache: true
 rhythm_require_cached_teacher: true
 
 # Turn on the teacher/distill path only for this staged experiment.
+rhythm_enable_dual_mode_teacher: true
 lambda_rhythm_guidance: 0.10
 lambda_rhythm_distill: 0.25

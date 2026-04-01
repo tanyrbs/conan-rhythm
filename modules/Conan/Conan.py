@@ -199,6 +199,8 @@ class Conan(FastSpeech):
                 content_lengths=content_lengths,
                 rhythm_state=rhythm_state,
                 rhythm_ref_conditioning=rhythm_ref_conditioning,
+                enable_dual_mode_teacher=bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)),
+                enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
             )
             content_embed, tgt_nonpadding = attach_rhythm_outputs(
                 ret=ret,

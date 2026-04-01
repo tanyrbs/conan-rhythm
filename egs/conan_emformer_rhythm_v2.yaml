@@ -35,6 +35,8 @@ rhythm_binarize_self_targets: true
 rhythm_binarize_teacher_targets: false
 rhythm_binarize_retimed_mel_targets: true
 rhythm_binarize_retimed_mel_source: guidance
+rhythm_enable_algorithmic_teacher: false
+rhythm_enable_dual_mode_teacher: false
 rhythm_use_retimed_target_if_available: true
 rhythm_resample_retimed_target_to_output: true
 rhythm_retimed_target_start_steps: 0
@@ -65,6 +67,8 @@ rhythm_teacher_boundary_strength: 1.50
 rhythm_teacher_pause_budget_ratio_cap: 0.80
 rhythm_teacher_speech_smooth_kernel: 3
 rhythm_teacher_pause_topk_ratio: 0.30
+rhythm_teacher_phrase_final_bonus: 0.20
+rhythm_teacher_confidence_bonus: 0.05
 rhythm_test_chunkwise: true
 rhythm_test_tokens_per_chunk: 4
 

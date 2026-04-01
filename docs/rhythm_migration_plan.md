@@ -14,6 +14,7 @@ The project has already moved away from the old “rhythm mixed into style / dec
 
 Current migrated blocks:
 
+- `modules/Conan/rhythm/unitizer.py`
 - `modules/Conan/rhythm/unit_frontend.py`
 - `modules/Conan/rhythm/reference_descriptor.py`
 - `modules/Conan/rhythm/reference_encoder.py`
@@ -40,6 +41,8 @@ Current repository stage:
 - cached rhythm supervision
 - cached-only cache-contract validation
 - stateful scheduler / projector path
+- stateful run-length unitizer helper
+- dual-mode schedule teacher skeleton
 - retimed mel target generation
 - chunkwise streaming evaluation
 
@@ -47,6 +50,7 @@ Current repository stage:
 
 - retimed decoder training
 - offline teacher surface distillation
+- shared-contract dual-mode KD rollout in real training
 - stronger rhythm-specific regression tests
 
 ### Not final yet

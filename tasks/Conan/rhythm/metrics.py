@@ -48,11 +48,21 @@ def _masked_event_f1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, 
     return precision.mean(), recall.mean(), f1.mean()
 
 
+def _masked_kl(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.float()
+    pred = (pred.float() * mask).clamp_min(1e-6)
+    tgt = (tgt.float() * mask).clamp_min(1e-6)
+    pred = pred / pred.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    tgt = tgt / tgt.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    return (tgt * (torch.log(tgt) - torch.log(pred))).sum(dim=1).mean()
+
+
 def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
     execution = output.get("rhythm_execution")
     if execution is None:
         return {}
     planner = execution.planner
+    blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)
     unit_batch = output.get("rhythm_unit_batch")
     if unit_batch is not None:
         unit_mask = unit_batch.unit_mask.float()
@@ -65,7 +75,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         visible_units = speech.new_full((speech.size(0),), float(speech.size(1)))
 
     speech_total = execution.speech_duration_exec.float().sum(dim=1)
-    pause_total = execution.pause_after_exec.float().sum(dim=1)
+    pause_total = blank_exec.float().sum(dim=1)
     total_exec = (speech_total + pause_total).clamp_min(1e-6)
     commit_ratio = execution.commit_frontier.float() / visible_units
 
@@ -76,15 +86,31 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_pause_total_mean": _safe_mean(pause_total),
         "rhythm_metric_pause_share_mean": _safe_mean(pause_total / total_exec),
         "rhythm_metric_pause_event_ratio_mean": _safe_mean((execution.pause_after_exec.float() > 0.5).float().sum(dim=1) / visible_units),
+        "rhythm_metric_blank_slot_ratio_mean": _safe_mean((blank_exec.float() > 0.5).float().sum(dim=1) / visible_units),
         "rhythm_metric_expand_ratio_mean": _safe_mean(speech_total / anchor_total.clamp_min(1.0)),
         "rhythm_metric_commit_ratio_mean": _safe_mean(commit_ratio),
         "rhythm_metric_budget_violation_mean": _safe_mean(
             ((speech_total + pause_total) - (planner.speech_budget_win.squeeze(-1) + planner.pause_budget_win.squeeze(-1))).abs()
         ),
     }
+    metrics["rhythm_metric_pause_trace_corr"] = _masked_corr(
+        blank_exec.float(),
+        planner.trace_context[:, :, 0].float(),
+        unit_mask,
+    )
+    metrics["rhythm_metric_boundary_trace_corr"] = _masked_corr(
+        blank_exec.float(),
+        planner.trace_context[:, :, 2].float(),
+        unit_mask,
+    )
     source_boundary_cue = output.get("source_boundary_cue")
     if source_boundary_cue is not None:
         metrics["rhythm_metric_source_boundary_mean"] = _safe_mean(source_boundary_cue.float())
+        metrics["rhythm_metric_source_boundary_pause_corr"] = _masked_corr(
+            blank_exec.float(),
+            source_boundary_cue.float(),
+            unit_mask,
+        )
 
     state_next = output.get("rhythm_state_next")
     if state_next is not None:
@@ -94,6 +120,41 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 "rhythm_metric_backlog_mean": _safe_mean(state_next.backlog),
                 "rhythm_metric_clock_delta_mean": _safe_mean(state_next.clock_delta),
             }
+        )
+    offline_execution = output.get("rhythm_offline_execution")
+    if offline_execution is not None:
+        metrics["rhythm_metric_offline_online_speech_l1"] = _masked_l1(
+            execution.speech_duration_exec,
+            offline_execution.speech_duration_exec,
+            unit_mask,
+        )
+        metrics["rhythm_metric_offline_online_pause_l1"] = _masked_l1(
+            blank_exec,
+            getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            unit_mask,
+        )
+        metrics["rhythm_metric_offline_online_total_corr"] = _masked_corr(
+            execution.speech_duration_exec + blank_exec,
+            offline_execution.speech_duration_exec + getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            unit_mask,
+        )
+        metrics["rhythm_metric_offline_online_alloc_kl"] = _masked_kl(
+            execution.speech_duration_exec + blank_exec,
+            offline_execution.speech_duration_exec + getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            unit_mask,
+        )
+    algorithmic_teacher = output.get("rhythm_algorithmic_teacher")
+    if algorithmic_teacher is not None:
+        metrics["rhythm_metric_algorithmic_teacher_confidence"] = _safe_mean(algorithmic_teacher.confidence.float())
+        metrics["rhythm_metric_algorithmic_teacher_pause_l1"] = _masked_l1(
+            blank_exec,
+            algorithmic_teacher.pause_exec_tgt,
+            unit_mask,
+        )
+        metrics["rhythm_metric_algorithmic_teacher_alloc_kl"] = _masked_kl(
+            execution.speech_duration_exec + blank_exec,
+            algorithmic_teacher.allocation_tgt,
+            unit_mask,
         )
     metrics["rhythm_metric_acoustic_target_is_retimed"] = execution.speech_duration_exec.new_tensor(
         1.0 if bool(output.get("acoustic_target_is_retimed", False)) else 0.0
@@ -122,12 +183,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             )
         if "rhythm_pause_exec_tgt" in sample:
             metrics["rhythm_metric_exec_pause_l1"] = _masked_l1(
-                execution.pause_after_exec,
+                blank_exec,
                 sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
             pause_p, pause_r, pause_f1 = _masked_event_f1(
-                execution.pause_after_exec,
+                blank_exec,
                 sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
@@ -136,11 +197,11 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             metrics["rhythm_metric_pause_event_f1"] = pause_f1
         if "rhythm_speech_exec_tgt" in sample and "rhythm_pause_exec_tgt" in sample:
             metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
-                execution.speech_duration_exec + execution.pause_after_exec,
+                execution.speech_duration_exec + blank_exec,
                 sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
-            pred_prefix = torch.cumsum((execution.speech_duration_exec + execution.pause_after_exec) * unit_mask, dim=1)
+            pred_prefix = torch.cumsum((execution.speech_duration_exec + blank_exec) * unit_mask, dim=1)
             tgt_prefix = torch.cumsum((sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"]).float() * unit_mask, dim=1)
             metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
         if "rhythm_teacher_speech_exec_tgt" in sample:
@@ -151,12 +212,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             )
         if "rhythm_teacher_pause_exec_tgt" in sample:
             metrics["rhythm_metric_distill_pause_l1"] = _masked_l1(
-                execution.pause_after_exec,
+                blank_exec,
                 sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )
             pause_p, pause_r, pause_f1 = _masked_event_f1(
-                execution.pause_after_exec,
+                blank_exec,
                 sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )
@@ -165,7 +226,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             metrics["rhythm_metric_distill_pause_event_f1"] = pause_f1
         if "rhythm_teacher_speech_exec_tgt" in sample and "rhythm_teacher_pause_exec_tgt" in sample:
             metrics["rhythm_metric_distill_total_corr"] = _masked_corr(
-                execution.speech_duration_exec + execution.pause_after_exec,
+                execution.speech_duration_exec + blank_exec,
                 sample["rhythm_teacher_speech_exec_tgt"] + sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )

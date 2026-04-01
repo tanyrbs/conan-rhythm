@@ -217,6 +217,9 @@ class ConanDataset(FastSpeechDataset):
 
     def _validate_source_cache_shapes(self, cache, *, item_name: str):
         lengths = {key: int(np.asarray(cache[key]).reshape(-1).shape[0]) for key in self._RHYTHM_SOURCE_CACHE_KEYS}
+        for key in ("sealed_mask", "boundary_confidence"):
+            if key in cache:
+                lengths[key] = int(np.asarray(cache[key]).reshape(-1).shape[0])
         if len(set(lengths.values())) != 1:
             raise RuntimeError(
                 f"Rhythm source cache shape mismatch in {item_name}: {lengths}. Re-binarize the dataset."
@@ -441,6 +444,7 @@ class ConanDataset(FastSpeechDataset):
         teacher_kwargs = dict(
             dur_anchor_src=source_cache["dur_anchor_src"],
             unit_mask=unit_mask,
+            source_boundary_cue=source_cache.get("boundary_confidence"),
             ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
             ref_rhythm_trace=ref_conditioning["ref_rhythm_trace"],
             rate_scale_min=float(self.hparams.get("rhythm_teacher_rate_scale_min", 0.55)),
@@ -542,7 +546,9 @@ class ConanDataset(FastSpeechDataset):
             "content_units",
             "dur_anchor_src",
             "open_run_mask",
+            "sealed_mask",
             "sep_hint",
+            "boundary_confidence",
             "ref_rhythm_stats",
             "ref_rhythm_trace",
             "rhythm_cache_version",
@@ -595,6 +601,8 @@ class ConanDataset(FastSpeechDataset):
             if key == "ref_rhythm_trace":
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif "stats" in key or "budget" in key:
+                sample[key] = torch.tensor(value, dtype=torch.float32)
+            elif key in {"sealed_mask", "boundary_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
@@ -657,7 +665,9 @@ class ConanDataset(FastSpeechDataset):
             "content_units": ("long", 0),
             "dur_anchor_src": ("long", 0),
             "open_run_mask": ("long", 0),
+            "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
+            "boundary_confidence": ("float", 0.0),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
             "rhythm_cache_version": ("long", 0),

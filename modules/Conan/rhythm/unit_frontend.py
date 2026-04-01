@@ -5,6 +5,12 @@ from typing import Iterable, Sequence
 
 import torch
 
+from .unitizer import (
+    StreamingRunLengthUnitizer,
+    StreamingUnitizerState,
+    build_compressed_sequence,
+)
+
 
 @dataclass
 class RhythmUnitBatch:
@@ -12,40 +18,9 @@ class RhythmUnitBatch:
     dur_anchor_src: torch.Tensor
     unit_mask: torch.Tensor
     open_run_mask: torch.Tensor
+    sealed_mask: torch.Tensor
     sep_hint: torch.Tensor
-
-
-def _compress_token_sequence(
-    token_sequence: Sequence[int],
-    *,
-    silent_token: int | None = None,
-    separator_aware: bool = False,
-) -> tuple[list[int], list[int], list[int]]:
-    units: list[int] = []
-    durations: list[int] = []
-    sep_hint: list[int] = []
-    prev_token: int | None = None
-    saw_separator = False
-    for token in token_sequence:
-        token = int(token)
-        if token < 0:
-            continue
-        if silent_token is not None and token == int(silent_token):
-            if separator_aware and len(units) > 0:
-                saw_separator = True
-            continue
-        start_new = len(units) == 0 or token != prev_token or (separator_aware and saw_separator)
-        if start_new:
-            if saw_separator and separator_aware and len(sep_hint) > 0:
-                sep_hint[-1] = 1
-            units.append(token)
-            durations.append(1)
-            sep_hint.append(0)
-        else:
-            durations[-1] += 1
-        prev_token = token
-        saw_separator = False
-    return units, durations, sep_hint
+    boundary_confidence: torch.Tensor
 
 
 class RhythmUnitFrontend:
@@ -71,6 +46,11 @@ class RhythmUnitFrontend:
         self.silent_token = silent_token
         self.separator_aware = bool(separator_aware)
         self.tail_open_units = max(1, int(tail_open_units))
+        self.unitizer = StreamingRunLengthUnitizer(
+            silent_token=silent_token,
+            separator_aware=separator_aware,
+            tail_open_units=tail_open_units,
+        )
 
     @staticmethod
     def _pad(seqs: list[torch.Tensor], pad_value: int = 0, *, dtype=torch.long) -> torch.Tensor:
@@ -91,38 +71,48 @@ class RhythmUnitFrontend:
         unit_list = []
         dur_list = []
         open_list = []
+        sealed_list = []
         sep_list = []
+        boundary_list = []
         mask_list = []
         for token_sequence in batch_tokens:
-            units, durations, sep_hint = _compress_token_sequence(
+            compressed = build_compressed_sequence(
                 token_sequence,
                 silent_token=self.silent_token,
                 separator_aware=self.separator_aware,
+                tail_open_units=self.tail_open_units,
+                mark_last_open=mark_last_open,
             )
-            unit_tensor = torch.tensor(units, dtype=torch.long)
-            dur_tensor = torch.tensor(durations, dtype=torch.long)
-            open_tensor = torch.zeros_like(unit_tensor)
-            if mark_last_open and unit_tensor.numel() > 0:
-                open_tensor[max(0, unit_tensor.numel() - self.tail_open_units):] = 1
-            sep_tensor = torch.tensor(sep_hint, dtype=torch.long)
+            unit_tensor = torch.tensor(compressed.units, dtype=torch.long)
+            dur_tensor = torch.tensor(compressed.durations, dtype=torch.long)
+            open_tensor = torch.tensor(compressed.open_run_mask, dtype=torch.long)
+            sealed_tensor = torch.tensor(compressed.sealed_mask, dtype=torch.long)
+            sep_tensor = torch.tensor(compressed.sep_hint, dtype=torch.long)
+            boundary_tensor = torch.tensor(compressed.boundary_confidence, dtype=torch.float32)
             mask_tensor = torch.ones_like(unit_tensor, dtype=torch.float32)
             unit_list.append(unit_tensor)
             dur_list.append(dur_tensor)
             open_list.append(open_tensor)
+            sealed_list.append(sealed_tensor)
             sep_list.append(sep_tensor)
+            boundary_list.append(boundary_tensor)
             mask_list.append(mask_tensor)
 
         content_units = self._pad(unit_list, pad_value=0, dtype=torch.long)
         dur_anchor_src = self._pad(dur_list, pad_value=0, dtype=torch.long)
         open_run_mask = self._pad(open_list, pad_value=0, dtype=torch.long)
+        sealed_mask = self._pad(sealed_list, pad_value=0, dtype=torch.long)
         sep_hint = self._pad(sep_list, pad_value=0, dtype=torch.long)
+        boundary_confidence = self._pad(boundary_list, pad_value=0, dtype=torch.float32)
         unit_mask = self._pad([m.long() for m in mask_list], pad_value=0, dtype=torch.long).float()
 
         if device is not None:
             content_units = content_units.to(device)
             dur_anchor_src = dur_anchor_src.to(device)
             open_run_mask = open_run_mask.to(device)
+            sealed_mask = sealed_mask.to(device)
             sep_hint = sep_hint.to(device)
+            boundary_confidence = boundary_confidence.to(device)
             unit_mask = unit_mask.to(device)
 
         return RhythmUnitBatch(
@@ -130,7 +120,9 @@ class RhythmUnitFrontend:
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask.float(),
             sep_hint=sep_hint,
+            boundary_confidence=boundary_confidence,
         )
 
     def from_content_tensor(
@@ -181,10 +173,58 @@ class RhythmUnitFrontend:
             open_run_mask = torch.zeros_like(content_units)
         if sep_hint is None:
             sep_hint = torch.zeros_like(content_units)
+        sealed_mask = (1 - open_run_mask.long()).clamp_min(0).float() * unit_mask.float()
+        boundary_confidence = sep_hint.float() * unit_mask.float()
         return RhythmUnitBatch(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             open_run_mask=open_run_mask.long(),
+            sealed_mask=sealed_mask,
             sep_hint=sep_hint.long(),
+            boundary_confidence=boundary_confidence,
         )
+
+    def init_stream_state(self, batch_size: int) -> StreamingUnitizerState:
+        return self.unitizer.init_state(batch_size)
+
+    def step_token_lists(
+        self,
+        batch_tokens: Iterable[Sequence[int]],
+        state: StreamingUnitizerState,
+        *,
+        mark_last_open: bool = True,
+        device: torch.device | None = None,
+    ) -> tuple[RhythmUnitBatch, StreamingUnitizerState]:
+        compressed_list, next_state = self.unitizer.step_token_lists(
+            batch_tokens,
+            state,
+            mark_last_open=mark_last_open,
+        )
+        unit_list = [torch.tensor(item.units, dtype=torch.long) for item in compressed_list]
+        dur_list = [torch.tensor(item.durations, dtype=torch.long) for item in compressed_list]
+        open_list = [torch.tensor(item.open_run_mask, dtype=torch.long) for item in compressed_list]
+        sealed_list = [torch.tensor(item.sealed_mask, dtype=torch.long) for item in compressed_list]
+        sep_list = [torch.tensor(item.sep_hint, dtype=torch.long) for item in compressed_list]
+        boundary_list = [torch.tensor(item.boundary_confidence, dtype=torch.float32) for item in compressed_list]
+        mask_list = [torch.ones_like(unit_tensor, dtype=torch.float32) for unit_tensor in unit_list]
+        batch = RhythmUnitBatch(
+            content_units=self._pad(unit_list, pad_value=0, dtype=torch.long),
+            dur_anchor_src=self._pad(dur_list, pad_value=0, dtype=torch.long),
+            unit_mask=self._pad([m.long() for m in mask_list], pad_value=0, dtype=torch.long).float(),
+            open_run_mask=self._pad(open_list, pad_value=0, dtype=torch.long),
+            sealed_mask=self._pad(sealed_list, pad_value=0, dtype=torch.long).float(),
+            sep_hint=self._pad(sep_list, pad_value=0, dtype=torch.long),
+            boundary_confidence=self._pad(boundary_list, pad_value=0, dtype=torch.float32),
+        )
+        if device is not None:
+            batch = RhythmUnitBatch(
+                content_units=batch.content_units.to(device),
+                dur_anchor_src=batch.dur_anchor_src.to(device),
+                unit_mask=batch.unit_mask.to(device),
+                open_run_mask=batch.open_run_mask.to(device),
+                sealed_mask=batch.sealed_mask.to(device),
+                sep_hint=batch.sep_hint.to(device),
+                boundary_confidence=batch.boundary_confidence.to(device),
+            )
+        return batch, next_state

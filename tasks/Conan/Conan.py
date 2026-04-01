@@ -377,6 +377,8 @@ class ConanTask(AuxDecoderMIDITask):
     def _build_rhythm_loss_targets(self, output, sample):
         if "rhythm_execution" not in output or output["rhythm_execution"] is None:
             return None
+        runtime_teacher = output.get("rhythm_offline_execution")
+        algorithmic_teacher = output.get("rhythm_algorithmic_teacher")
         explicit_keys = [
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
@@ -390,6 +392,23 @@ class ConanTask(AuxDecoderMIDITask):
             distill_pause = sample.get("rhythm_teacher_pause_exec_tgt")
             distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt")
             distill_pause_budget = sample.get("rhythm_teacher_pause_budget_tgt")
+            distill_allocation = None
+            distill_confidence = sample.get("rhythm_teacher_confidence")
+            if distill_speech is None and runtime_teacher is not None:
+                distill_speech = runtime_teacher.speech_duration_exec.detach()
+                distill_pause = runtime_teacher.pause_after_exec.detach()
+                distill_speech_budget = runtime_teacher.planner.speech_budget_win.detach()
+                distill_pause_budget = runtime_teacher.planner.pause_budget_win.detach()
+                distill_confidence = torch.ones_like(distill_speech_budget)
+            if distill_speech is None and algorithmic_teacher is not None:
+                distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
+                distill_pause = algorithmic_teacher.pause_exec_tgt.detach()
+                distill_speech_budget = algorithmic_teacher.speech_budget_tgt.detach()
+                distill_pause_budget = algorithmic_teacher.pause_budget_tgt.detach()
+                distill_allocation = algorithmic_teacher.allocation_tgt.detach()
+                distill_confidence = algorithmic_teacher.confidence.detach()
+            elif distill_speech is not None and distill_pause is not None:
+                distill_allocation = (distill_speech.float() + distill_pause.float())
             return RhythmLossTargets(
                 speech_exec_tgt=sample["rhythm_speech_exec_tgt"],
                 pause_exec_tgt=sample["rhythm_pause_exec_tgt"],
@@ -406,7 +425,8 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_pause_tgt=distill_pause,
                 distill_speech_budget_tgt=distill_speech_budget,
                 distill_pause_budget_tgt=distill_pause_budget,
-                distill_confidence=sample.get("rhythm_teacher_confidence"),
+                distill_allocation_tgt=distill_allocation,
+                distill_confidence=distill_confidence,
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
             return None

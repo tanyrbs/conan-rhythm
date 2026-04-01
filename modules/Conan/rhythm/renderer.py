@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 import torch
+
+
+@dataclass
+class BlankSlotSchedule:
+    slot_duration_exec: torch.Tensor
+    slot_mask: torch.Tensor
+    slot_is_blank: torch.Tensor
+    slot_unit_index: torch.Tensor
 
 
 def _pad_sequences(
@@ -24,12 +33,43 @@ def _pad_sequences(
     return out
 
 
+def build_interleaved_blank_slot_schedule(
+    *,
+    speech_duration_exec: torch.Tensor,
+    blank_duration_exec: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> BlankSlotSchedule:
+    speech_duration_exec = speech_duration_exec.float()
+    blank_duration_exec = blank_duration_exec.float()
+    unit_mask = unit_mask.float()
+    batch_size, num_units = speech_duration_exec.shape
+    slot_count = num_units * 2
+    slot_duration = speech_duration_exec.new_zeros((batch_size, slot_count))
+    slot_mask = speech_duration_exec.new_zeros((batch_size, slot_count))
+    slot_is_blank = torch.zeros((batch_size, slot_count), dtype=torch.long, device=speech_duration_exec.device)
+    slot_unit_index = torch.zeros((batch_size, slot_count), dtype=torch.long, device=speech_duration_exec.device)
+    slot_duration[:, 0::2] = speech_duration_exec
+    slot_duration[:, 1::2] = blank_duration_exec
+    slot_mask[:, 0::2] = unit_mask
+    slot_mask[:, 1::2] = unit_mask
+    slot_is_blank[:, 1::2] = 1
+    slot_unit_index[:, 0::2] = torch.arange(num_units, device=speech_duration_exec.device)[None, :]
+    slot_unit_index[:, 1::2] = torch.arange(num_units, device=speech_duration_exec.device)[None, :]
+    return BlankSlotSchedule(
+        slot_duration_exec=slot_duration,
+        slot_mask=slot_mask,
+        slot_is_blank=slot_is_blank,
+        slot_unit_index=slot_unit_index,
+    )
+
+
 def render_rhythm_sequence(
     *,
     content_units: torch.Tensor,
-    speech_duration_exec: torch.Tensor,
-    pause_after_exec: torch.Tensor,
-    unit_mask: torch.Tensor,
+    slot_duration_exec: torch.Tensor,
+    slot_mask: torch.Tensor,
+    slot_is_blank: torch.Tensor,
+    slot_unit_index: torch.Tensor,
     silent_token: int,
     speech_state_fn: Callable[[torch.Tensor], torch.Tensor],
     pause_state: torch.Tensor,
@@ -42,9 +82,10 @@ def render_rhythm_sequence(
     - pause token id is the configured silent token
     """
 
-    speech_duration_exec = torch.round(speech_duration_exec.float()).long().clamp_min(0)
-    pause_after_exec = torch.round(pause_after_exec.float()).long().clamp_min(0)
-    unit_mask = unit_mask.float()
+    slot_duration_exec = torch.round(slot_duration_exec.float()).long().clamp_min(0)
+    slot_mask = slot_mask.float()
+    slot_is_blank = slot_is_blank.long()
+    slot_unit_index = slot_unit_index.long()
     device = content_units.device
     batch_size = int(content_units.size(0))
     hidden_size = int(pause_state.numel())
@@ -56,19 +97,22 @@ def render_rhythm_sequence(
     for batch_idx in range(batch_size):
         states = []
         tokens = []
-        num_units = int(unit_mask[batch_idx].sum().item())
-        for unit_idx in range(num_units):
+        num_slots = int(slot_mask[batch_idx].sum().item())
+        for slot_idx in range(num_slots):
+            duration = int(slot_duration_exec[batch_idx, slot_idx].item())
+            if duration <= 0:
+                continue
+            unit_idx = int(slot_unit_index[batch_idx, slot_idx].item())
+            is_blank = int(slot_is_blank[batch_idx, slot_idx].item()) > 0
             unit_id = int(content_units[batch_idx, unit_idx].item())
-            speech_len = int(speech_duration_exec[batch_idx, unit_idx].item())
-            pause_len = int(pause_after_exec[batch_idx, unit_idx].item())
-            if speech_len > 0:
-                speech_state = unit_states[batch_idx, unit_idx].unsqueeze(0).expand(speech_len, -1)
-                states.append(speech_state)
-                tokens.append(torch.full((speech_len,), unit_id, dtype=torch.long, device=device))
-            if pause_len > 0:
-                pause_state_seq = pause_state.view(1, hidden_size).expand(pause_len, -1).to(device=device)
+            if is_blank:
+                pause_state_seq = pause_state.view(1, hidden_size).expand(duration, -1).to(device=device)
                 states.append(pause_state_seq)
-                tokens.append(torch.full((pause_len,), int(silent_token), dtype=torch.long, device=device))
+                tokens.append(torch.full((duration,), int(silent_token), dtype=torch.long, device=device))
+            else:
+                speech_state = unit_states[batch_idx, unit_idx].unsqueeze(0).expand(duration, -1)
+                states.append(speech_state)
+                tokens.append(torch.full((duration,), unit_id, dtype=torch.long, device=device))
         if len(states) <= 0:
             states = [pause_state.view(1, hidden_size).to(device=device)]
             tokens = [torch.full((1,), int(silent_token), dtype=torch.long, device=device)]

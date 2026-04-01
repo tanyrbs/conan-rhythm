@@ -18,6 +18,8 @@ Current state:
 - mostly completed
 - `scripts/smoke_test_rhythm_v2.py` now covers descriptor export and stateful scheduler reuse
 - scheduler now also consumes a cheap internal source-boundary cue
+- unit frontend now exports `sealed_mask + boundary_confidence`
+- a stateful run-length unitizer helper is now available for incremental debugging
 
 ---
 
@@ -69,7 +71,11 @@ Reserved fields already exist:
 Important terminology note:
 
 - the repository currently has a stronger **offline teacher surface**
-- it does **not** yet have a true full-context offline teacher model
+- it now also has a **dual-mode schedule teacher skeleton**
+  - streaming branch = stateful projector path
+  - offline branch = full-horizon / no-prefix-reuse projector pass
+  - algorithmic teacher = explicit schedule bootstrap
+- it still does **not** yet have a true learned non-causal offline teacher model
 - docs and experiments should keep that distinction explicit
 
 ---

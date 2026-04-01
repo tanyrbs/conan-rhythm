@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .contracts import RhythmExecution, RhythmPlannerOutputs, StreamingRhythmState
+from .renderer import build_interleaved_blank_slot_schedule
 
 
 @dataclass
@@ -47,6 +48,7 @@ class StreamingRhythmProjector(nn.Module):
         unit_mask: torch.Tensor,
         speech_budget_win: torch.Tensor,
         state: StreamingRhythmState,
+        reuse_prefix: bool,
     ) -> torch.Tensor:
         base = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * torch.exp(dur_logratio_unit.float())
         max_speech = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * self.config.max_speech_expand
@@ -58,7 +60,7 @@ class StreamingRhythmProjector(nn.Module):
             mask_row = unit_mask[batch_idx]
             budget_row = speech_budget_win[batch_idx : batch_idx + 1]
             frontier = int(state.commit_frontier[batch_idx].item())
-            if previous is not None and batch_idx < previous.size(0) and frontier > 0:
+            if reuse_prefix and previous is not None and batch_idx < previous.size(0) and frontier > 0:
                 valid_frontier = min(frontier, int(previous.size(1)), int(candidate.size(1)))
                 prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
                 speech[batch_idx, :valid_frontier] = prefix
@@ -85,6 +87,7 @@ class StreamingRhythmProjector(nn.Module):
         unit_mask: torch.Tensor,
         pause_budget_win: torch.Tensor,
         state: StreamingRhythmState,
+        reuse_prefix: bool,
     ) -> torch.Tensor:
         scores = pause_weight_unit.float().clamp_min(0.0)
         boundary_weight = (self.config.pause_min_boundary_weight + boundary_latent.float()).clamp_min(0.0)
@@ -107,7 +110,7 @@ class StreamingRhythmProjector(nn.Module):
             mask_row = unit_mask[batch_idx]
             budget_row = pause_budget_win[batch_idx]
             frontier = int(state.commit_frontier[batch_idx].item())
-            if previous is not None and batch_idx < previous.size(0) and frontier > 0:
+            if reuse_prefix and previous is not None and batch_idx < previous.size(0) and frontier > 0:
                 valid_frontier = min(frontier, int(previous.size(1)), int(sparse_scores.size(1)))
                 prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
                 pause[batch_idx, :valid_frontier] = prefix
@@ -134,9 +137,12 @@ class StreamingRhythmProjector(nn.Module):
         unit_mask: torch.Tensor,
         open_run_mask: torch.Tensor | None,
         boundary_latent: torch.Tensor | None,
+        force_full_commit: bool,
     ) -> torch.Tensor:
         batch_size, _ = unit_mask.shape
         active_len = unit_mask.long().sum(dim=1)
+        if force_full_commit:
+            return active_len.long()
         if open_run_mask is None:
             open_run_mask = torch.zeros_like(unit_mask, dtype=torch.long)
         commit = state.commit_frontier.clone()
@@ -205,6 +211,8 @@ class StreamingRhythmProjector(nn.Module):
         state: StreamingRhythmState,
         open_run_mask: torch.Tensor | None = None,
         planner: RhythmPlannerOutputs,
+        reuse_prefix: bool = True,
+        force_full_commit: bool = False,
     ) -> RhythmExecution:
         unit_mask = unit_mask.float()
         speech_duration_exec = self._project_speech(
@@ -213,6 +221,7 @@ class StreamingRhythmProjector(nn.Module):
             unit_mask=unit_mask,
             speech_budget_win=speech_budget_win,
             state=state,
+            reuse_prefix=reuse_prefix,
         )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
@@ -220,13 +229,20 @@ class StreamingRhythmProjector(nn.Module):
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
             state=state,
+            reuse_prefix=reuse_prefix,
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
+        slot_schedule = build_interleaved_blank_slot_schedule(
+            speech_duration_exec=speech_duration_exec,
+            blank_duration_exec=pause_after_exec,
+            unit_mask=unit_mask,
+        )
         commit_frontier = self._compute_commit_frontier(
             state=state,
             unit_mask=unit_mask,
             open_run_mask=open_run_mask,
             boundary_latent=boundary_latent,
+            force_full_commit=force_full_commit,
         )
         next_state = self._advance_state(
             state=state,
@@ -238,9 +254,14 @@ class StreamingRhythmProjector(nn.Module):
         )
         return RhythmExecution(
             speech_duration_exec=speech_duration_exec,
+            blank_duration_exec=pause_after_exec,
             pause_after_exec=pause_after_exec,
             effective_duration_exec=effective_duration_exec,
             commit_frontier=commit_frontier,
+            slot_duration_exec=slot_schedule.slot_duration_exec,
+            slot_mask=slot_schedule.slot_mask,
+            slot_is_blank=slot_schedule.slot_is_blank,
+            slot_unit_index=slot_schedule.slot_unit_index,
             planner=planner,
             next_state=next_state,
         )
