@@ -21,7 +21,7 @@ def _masked_l1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> tor
 
 def _masked_corr(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
-    denom = mask.sum().clamp_min(1.0)
+    denom = mask.sum(dim=1).clamp_min(1.0)
     pred_mean = (pred.float() * mask).sum(dim=1) / denom
     tgt_mean = (tgt.float() * mask).sum(dim=1) / denom
     pred_center = (pred.float() - pred_mean[:, None]) * mask
@@ -30,6 +30,8 @@ def _masked_corr(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> t
     pred_var = (pred_center ** 2).sum(dim=1).clamp_min(1e-6)
     tgt_var = (tgt_center ** 2).sum(dim=1).clamp_min(1e-6)
     corr = cov / (pred_var.sqrt() * tgt_var.sqrt())
+    valid = mask.sum(dim=1) > 1
+    corr = torch.where(valid, corr, torch.zeros_like(corr))
     return corr.mean()
 
 
@@ -76,6 +78,9 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_pause_event_ratio_mean": _safe_mean((execution.pause_after_exec.float() > 0.5).float().sum(dim=1) / visible_units),
         "rhythm_metric_expand_ratio_mean": _safe_mean(speech_total / anchor_total.clamp_min(1.0)),
         "rhythm_metric_commit_ratio_mean": _safe_mean(commit_ratio),
+        "rhythm_metric_budget_violation_mean": _safe_mean(
+            ((speech_total + pause_total) - (planner.speech_budget_win.squeeze(-1) + planner.pause_budget_win.squeeze(-1))).abs()
+        ),
     }
     source_boundary_cue = output.get("source_boundary_cue")
     if source_boundary_cue is not None:
@@ -135,6 +140,9 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
+            pred_prefix = torch.cumsum((execution.speech_duration_exec + execution.pause_after_exec) * unit_mask, dim=1)
+            tgt_prefix = torch.cumsum((sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"]).float() * unit_mask, dim=1)
+            metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
         if "rhythm_teacher_speech_exec_tgt" in sample:
             metrics["rhythm_metric_distill_speech_l1"] = _masked_l1(
                 execution.speech_duration_exec,
@@ -161,6 +169,22 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_teacher_speech_exec_tgt"] + sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )
+        if "rhythm_target_confidence" in sample:
+            metrics["rhythm_metric_target_confidence_mean"] = _safe_mean(sample["rhythm_target_confidence"].float())
+        if "rhythm_guidance_confidence" in sample:
+            metrics["rhythm_metric_guidance_confidence_mean"] = _safe_mean(sample["rhythm_guidance_confidence"].float())
+        if "rhythm_teacher_confidence" in sample:
+            metrics["rhythm_metric_teacher_confidence_mean"] = _safe_mean(sample["rhythm_teacher_confidence"].float())
+        if "rhythm_retimed_target_confidence" in sample:
+            metrics["rhythm_metric_retimed_confidence_mean"] = _safe_mean(sample["rhythm_retimed_target_confidence"].float())
+        if "rhythm_retimed_target_source_id" in sample:
+            metrics["rhythm_metric_retimed_source_id_mean"] = _safe_mean(sample["rhythm_retimed_target_source_id"].float())
+        if "rhythm_cache_version" in sample:
+            metrics["rhythm_metric_cache_version_mean"] = _safe_mean(sample["rhythm_cache_version"].float())
+        if "rhythm_trace_bins" in sample:
+            metrics["rhythm_metric_trace_bins_mean"] = _safe_mean(sample["rhythm_trace_bins"].float())
+        if "rhythm_trace_horizon" in sample:
+            metrics["rhythm_metric_trace_horizon_mean"] = _safe_mean(sample["rhythm_trace_horizon"].float())
     return metrics
 
 
@@ -198,6 +222,7 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         "stream_mean_commit_delta": float(sum(commit_deltas) / max(len(commit_deltas), 1)),
         "stream_final_committed_mel_len": float(committed_lengths[-1]) if len(committed_lengths) > 0 else 0.0,
         "stream_mean_committed_mel_delta": float(sum(committed_deltas) / max(len(committed_deltas), 1)) if len(committed_deltas) > 0 else 0.0,
+        "stream_mean_prefix_exec_delta": float(sum(prefix_exec_deltas) / max(len(prefix_exec_deltas), 1)) if len(prefix_exec_deltas) > 0 else 0.0,
         "stream_max_prefix_exec_delta": float(max(prefix_exec_deltas)) if len(prefix_exec_deltas) > 0 else 0.0,
         "stream_commit_monotonic_violations": float(commit_monotonic_violations),
     }

@@ -1,0 +1,11 @@
+base_config: egs/conan_emformer_rhythm_v2.yaml
+
+# Formal warm-start config:
+# keep the conservative decoder path, but require offline cached rhythm targets.
+rhythm_dataset_target_mode: cached_only
+rhythm_cached_reference_policy: self
+
+# Keep teacher surfaces cached as well so phase-2 can be enabled without rebinarizing again.
+rhythm_binarize_teacher_targets: true
+rhythm_dataset_build_teacher_from_ref: false
+rhythm_require_cached_teacher: false

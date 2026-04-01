@@ -16,6 +16,7 @@ rhythm_stats_dim: 6
 rhythm_trace_dim: 5
 rhythm_trace_bins: 24
 rhythm_trace_horizon: 0.35
+rhythm_cache_version: 3
 rhythm_hidden_size: 256
 rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
@@ -39,7 +40,13 @@ rhythm_resample_retimed_target_to_output: true
 rhythm_retimed_target_start_steps: 0
 rhythm_retimed_pause_frame_weight: 0.20
 rhythm_retimed_stretch_weight_min: 0.35
+# Transitional setting:
+# use cached targets first, but still allow runtime fallback while refreshing caches.
+# Formal experiments should switch to egs/conan_emformer_rhythm_v2_cached_only.yaml.
 rhythm_dataset_target_mode: prefer_cache
+# Cached rhythm targets in the current repo are self-conditioned surfaces.
+# Keep rhythm conditioning self-consistent unless a pairwise offline cache is introduced later.
+rhythm_cached_reference_policy: self
 rhythm_dataset_build_guidance_from_ref: true
 rhythm_dataset_build_teacher_from_ref: false
 rhythm_guidance_rate_scale_min: 0.60
@@ -72,5 +79,10 @@ lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.25
 lambda_rhythm_plan: 1.0
+rhythm_plan_local_weight: 0.5
+rhythm_plan_cum_weight: 1.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
+rhythm_require_retimed_cache: false
+rhythm_require_cached_teacher: false
+rhythm_retimed_confidence_floor: 0.05

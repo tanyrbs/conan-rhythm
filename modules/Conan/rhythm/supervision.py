@@ -9,6 +9,15 @@ import torch.nn.functional as F
 from .reference_encoder import ReferenceRhythmEncoder, sample_progress_trace
 from .unit_frontend import RhythmUnitFrontend
 
+RHYTHM_CACHE_VERSION = 3
+RHYTHM_UNIT_HOP_MS = 20
+RHYTHM_TRACE_HOP_MS = 80
+RHYTHM_REFERENCE_MODE_STATIC_REF_FULL = 0
+RHYTHM_GUIDANCE_SURFACE_NAME = "ref_guidance_v2"
+RHYTHM_TEACHER_SURFACE_NAME = "offline_teacher_surface_v1"
+RHYTHM_RETIMED_SOURCE_GUIDANCE = 0
+RHYTHM_RETIMED_SOURCE_TEACHER = 1
+
 
 def _as_token_list(content_tokens) -> list[int]:
     if isinstance(content_tokens, str):
@@ -43,9 +52,12 @@ def _cached_frontend(
     )
 
 
-@lru_cache(maxsize=8)
-def _cached_reference_encoder(trace_bins: int) -> ReferenceRhythmEncoder:
-    return ReferenceRhythmEncoder(trace_bins=trace_bins)
+@lru_cache(maxsize=16)
+def _cached_reference_encoder(trace_bins: int, trace_horizon: float) -> ReferenceRhythmEncoder:
+    return ReferenceRhythmEncoder(
+        trace_bins=trace_bins,
+        trace_horizon=trace_horizon,
+    )
 
 
 def build_source_rhythm_cache(
@@ -76,8 +88,12 @@ def build_reference_rhythm_conditioning(
     ref_mel,
     *,
     trace_bins: int = 24,
+    trace_horizon: float = 0.35,
 ) -> dict[str, np.ndarray]:
-    encoder = _cached_reference_encoder(trace_bins=trace_bins)
+    encoder = _cached_reference_encoder(
+        trace_bins=trace_bins,
+        trace_horizon=float(trace_horizon),
+    )
     conditioning = encoder(_as_mel_tensor(ref_mel))
     return {
         "ref_rhythm_stats": conditioning["ref_rhythm_stats"][0].cpu().numpy().astype(np.float32),
@@ -91,6 +107,68 @@ def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mean = (x * mask).sum() / total
     var = (((x - mean) ** 2) * mask).sum() / total
     return ((x - mean) / var.clamp_min(1e-6).sqrt()) * mask
+
+
+def _estimate_surface_confidence(
+    *,
+    trace_context: torch.Tensor,
+    ref_rhythm_stats: torch.Tensor,
+    unit_mask: torch.Tensor,
+    smoother_bonus: float = 0.0,
+) -> float:
+    unit_mask = unit_mask.float()
+    visible = float(unit_mask.sum().item())
+    if visible <= 0:
+        return 0.0
+    unit_support = min(1.0, visible / 6.0)
+    local_rate_dyn = float(trace_context[:, 1].float().std().item()) if trace_context.size(0) > 1 else 0.0
+    boundary_support = float(ref_rhythm_stats[4].clamp(0.0, 1.0).item())
+    pause_support = float((ref_rhythm_stats[0].clamp(0.0, 0.49) / 0.49).item())
+    trace_boundary_dyn = float(trace_context[:, 2].float().mean().clamp(0.0, 1.0).item())
+    dynamics = float(np.tanh(local_rate_dyn + trace_boundary_dyn))
+    confidence = 0.20 + 0.80 * (
+        0.35 * unit_support
+        + 0.35 * dynamics
+        + 0.15 * boundary_support
+        + 0.15 * pause_support
+    )
+    confidence = min(1.0, max(0.05, confidence + float(smoother_bonus)))
+    return float(confidence)
+
+
+def _build_cache_metadata(
+    *,
+    trace_bins: int,
+    trace_horizon: float,
+    target_confidence: float,
+    guidance_confidence: float,
+    retimed_target_source: str | None = None,
+    retimed_target_confidence: float | None = None,
+    teacher_confidence: float | None = None,
+) -> dict[str, np.ndarray]:
+    meta = {
+        "rhythm_cache_version": np.asarray([RHYTHM_CACHE_VERSION], dtype=np.int64),
+        "rhythm_unit_hop_ms": np.asarray([RHYTHM_UNIT_HOP_MS], dtype=np.int64),
+        "rhythm_trace_hop_ms": np.asarray([RHYTHM_TRACE_HOP_MS], dtype=np.int64),
+        "rhythm_trace_bins": np.asarray([int(trace_bins)], dtype=np.int64),
+        "rhythm_trace_horizon": np.asarray([float(trace_horizon)], dtype=np.float32),
+        "rhythm_reference_mode_id": np.asarray([RHYTHM_REFERENCE_MODE_STATIC_REF_FULL], dtype=np.int64),
+        "rhythm_target_confidence": np.asarray([float(target_confidence)], dtype=np.float32),
+        "rhythm_guidance_confidence": np.asarray([float(guidance_confidence)], dtype=np.float32),
+        "rhythm_guidance_surface_name": np.asarray([RHYTHM_GUIDANCE_SURFACE_NAME], dtype=np.str_),
+    }
+    if teacher_confidence is not None:
+        meta["rhythm_teacher_confidence"] = np.asarray([float(teacher_confidence)], dtype=np.float32)
+        meta["rhythm_teacher_surface_name"] = np.asarray([RHYTHM_TEACHER_SURFACE_NAME], dtype=np.str_)
+    if retimed_target_source is not None:
+        target_source = str(retimed_target_source).strip().lower()
+        source_id = RHYTHM_RETIMED_SOURCE_TEACHER if target_source == "teacher" else RHYTHM_RETIMED_SOURCE_GUIDANCE
+        source_name = RHYTHM_TEACHER_SURFACE_NAME if source_id == RHYTHM_RETIMED_SOURCE_TEACHER else RHYTHM_GUIDANCE_SURFACE_NAME
+        meta["rhythm_retimed_target_source_id"] = np.asarray([source_id], dtype=np.int64)
+        meta["rhythm_retimed_target_surface_name"] = np.asarray([source_name], dtype=np.str_)
+        if retimed_target_confidence is not None:
+            meta["rhythm_retimed_target_confidence"] = np.asarray([float(retimed_target_confidence)], dtype=np.float32)
+    return meta
 
 
 def _masked_normalize(scores: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -305,6 +383,12 @@ def build_reference_guided_targets(
     pause_scores = torch.exp(pause_seed) * unit_mask
     pause_scores = pause_scores / pause_scores.sum().clamp_min(1e-6)
     pause_exec = pause_scores * pause_budget
+    guidance_confidence = _estimate_surface_confidence(
+        trace_context=trace_context,
+        ref_rhythm_stats=ref_rhythm_stats,
+        unit_mask=unit_mask,
+        smoother_bonus=0.0,
+    )
 
     return {
         "rhythm_speech_exec_tgt": speech_exec.cpu().numpy().astype(np.float32),
@@ -313,6 +397,8 @@ def build_reference_guided_targets(
         "rhythm_pause_budget_tgt": pause_budget.view(1).cpu().numpy().astype(np.float32),
         "rhythm_guidance_speech_tgt": speech_exec.cpu().numpy().astype(np.float32),
         "rhythm_guidance_pause_tgt": pause_exec.cpu().numpy().astype(np.float32),
+        "rhythm_target_confidence": np.asarray([guidance_confidence], dtype=np.float32),
+        "rhythm_guidance_confidence": np.asarray([guidance_confidence], dtype=np.float32),
     }
 
 
@@ -396,12 +482,19 @@ def build_reference_teacher_targets(
     )
     pause_scores = _masked_normalize(pause_scores, unit_mask)
     pause_exec = pause_scores * pause_budget
+    teacher_confidence = _estimate_surface_confidence(
+        trace_context=trace_context,
+        ref_rhythm_stats=ref_rhythm_stats,
+        unit_mask=unit_mask,
+        smoother_bonus=0.05,
+    )
 
     return {
         "rhythm_teacher_speech_exec_tgt": speech_exec.cpu().numpy().astype(np.float32),
         "rhythm_teacher_pause_exec_tgt": pause_exec.cpu().numpy().astype(np.float32),
         "rhythm_teacher_speech_budget_tgt": speech_budget.view(1).cpu().numpy().astype(np.float32),
         "rhythm_teacher_pause_budget_tgt": pause_budget.view(1).cpu().numpy().astype(np.float32),
+        "rhythm_teacher_confidence": np.asarray([teacher_confidence], dtype=np.float32),
     }
 
 
@@ -413,6 +506,7 @@ def build_item_rhythm_bundle(
     separator_aware: bool = True,
     tail_open_units: int = 1,
     trace_bins: int = 24,
+    trace_horizon: float = 0.35,
     include_self_targets: bool = True,
     include_teacher_targets: bool = False,
     include_retimed_mel_target: bool = False,
@@ -427,7 +521,11 @@ def build_item_rhythm_bundle(
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
     )
-    conditioning = build_reference_rhythm_conditioning(mel, trace_bins=trace_bins)
+    conditioning = build_reference_rhythm_conditioning(
+        mel,
+        trace_bins=trace_bins,
+        trace_horizon=trace_horizon,
+    )
     bundle = {**source, **conditioning}
     guided = None
     if include_self_targets or include_teacher_targets:
@@ -450,14 +548,20 @@ def build_item_rhythm_bundle(
                 **teacher_kwargs,
             )
         )
+    retimed_target_confidence = None
+    retimed_target_source = None
     if include_retimed_mel_target:
         target_source = str(retimed_mel_target_source or "guidance").strip().lower()
         if target_source == "teacher" and "rhythm_teacher_speech_exec_tgt" in bundle:
             speech_key = "rhythm_teacher_speech_exec_tgt"
             pause_key = "rhythm_teacher_pause_exec_tgt"
+            retimed_target_source = "teacher"
+            retimed_target_confidence = bundle.get("rhythm_teacher_confidence")
         else:
             speech_key = "rhythm_speech_exec_tgt"
             pause_key = "rhythm_pause_exec_tgt"
+            retimed_target_source = "guidance"
+            retimed_target_confidence = bundle.get("rhythm_guidance_confidence", bundle.get("rhythm_target_confidence"))
         if speech_key in bundle and pause_key in bundle:
             bundle.update(
                 build_retimed_mel_target(
@@ -470,4 +574,22 @@ def build_item_rhythm_bundle(
                     stretch_weight_min=retimed_stretch_weight_min,
                 )
             )
+    target_confidence = float(np.asarray(bundle.get("rhythm_target_confidence", [1.0])).reshape(-1)[0])
+    guidance_confidence = float(np.asarray(bundle.get("rhythm_guidance_confidence", [target_confidence])).reshape(-1)[0])
+    teacher_confidence = bundle.get("rhythm_teacher_confidence")
+    if retimed_target_confidence is not None:
+        retimed_target_confidence = float(np.asarray(retimed_target_confidence).reshape(-1)[0])
+    if teacher_confidence is not None:
+        teacher_confidence = float(np.asarray(teacher_confidence).reshape(-1)[0])
+    bundle.update(
+        _build_cache_metadata(
+            trace_bins=trace_bins,
+            trace_horizon=trace_horizon,
+            target_confidence=target_confidence,
+            guidance_confidence=guidance_confidence,
+            retimed_target_source=retimed_target_source,
+            retimed_target_confidence=retimed_target_confidence,
+            teacher_confidence=teacher_confidence,
+        )
+    )
     return bundle

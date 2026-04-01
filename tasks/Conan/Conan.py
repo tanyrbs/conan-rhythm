@@ -95,7 +95,20 @@ class ConanTask(AuxDecoderMIDITask):
             return False
         return enabled
 
-    def _resolve_acoustic_target(self, sample, *, apply_rhythm_render: bool):
+    @staticmethod
+    def _resolve_rhythm_target_mode() -> str:
+        mode = str(hparams.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
+        aliases = {
+            "auto": "prefer_cache",
+            "offline": "cached_only",
+            "offline_only": "cached_only",
+            "never": "cached_only",
+            "runtime": "runtime_only",
+            "always": "runtime_only",
+        }
+        return aliases.get(mode, mode)
+
+    def _resolve_acoustic_target(self, sample, *, apply_rhythm_render: bool, infer: bool, test: bool):
         target = sample["mels"]
         is_retimed = False
         start_step = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
@@ -108,12 +121,27 @@ class ConanTask(AuxDecoderMIDITask):
             if retimed is not None:
                 target = retimed
                 is_retimed = True
+            else:
+                require_retimed = bool(hparams.get("rhythm_require_retimed_cache", False))
+                if require_retimed or (not test and self._resolve_rhythm_target_mode() == "cached_only"):
+                    stage = "test" if test else ("valid" if infer else "train")
+                    raise RuntimeError(
+                        "Rhythm retimed target is required for the active render path "
+                        f"({stage}) but rhythm_retimed_mel_tgt is missing. Re-binarize the dataset."
+                    )
         return target, is_retimed
 
     def _resolve_acoustic_weight(self, sample, *, acoustic_target_is_retimed: bool):
         if not acoustic_target_is_retimed:
             return None
-        return sample.get("rhythm_retimed_frame_weight")
+        frame_weight = sample.get("rhythm_retimed_frame_weight")
+        confidence = sample.get("rhythm_retimed_target_confidence")
+        if confidence is None:
+            return frame_weight
+        confidence = confidence.float().clamp_min(float(hparams.get("rhythm_retimed_confidence_floor", 0.05)))
+        if frame_weight is None:
+            return confidence
+        return frame_weight.float() * confidence
 
     @staticmethod
     def _resample_sequence_length(x: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -252,6 +280,8 @@ class ConanTask(AuxDecoderMIDITask):
         acoustic_target, acoustic_target_is_retimed = self._resolve_acoustic_target(
             sample,
             apply_rhythm_render=bool(apply_rhythm_render),
+            infer=infer,
+            test=test,
         )
         acoustic_weight = self._resolve_acoustic_weight(
             sample,
@@ -366,12 +396,17 @@ class ConanTask(AuxDecoderMIDITask):
                 speech_budget_tgt=sample["rhythm_speech_budget_tgt"],
                 pause_budget_tgt=sample["rhythm_pause_budget_tgt"],
                 unit_mask=output["rhythm_unit_batch"].unit_mask,
+                plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
+                plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+                sample_confidence=sample.get("rhythm_target_confidence"),
                 guidance_speech_tgt=guidance_speech,
                 guidance_pause_tgt=guidance_pause,
+                guidance_confidence=sample.get("rhythm_guidance_confidence"),
                 distill_speech_tgt=distill_speech,
                 distill_pause_tgt=distill_pause,
                 distill_speech_budget_tgt=distill_speech_budget,
                 distill_pause_budget_tgt=distill_pause_budget,
+                distill_confidence=sample.get("rhythm_teacher_confidence"),
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
             return None
@@ -389,6 +424,9 @@ class ConanTask(AuxDecoderMIDITask):
             speech_budget_tgt=speech_budget_tgt,
             pause_budget_tgt=pause_budget_tgt,
             unit_mask=unit_mask,
+            plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
+            plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            sample_confidence=torch.ones((unit_mask.size(0), 1), device=unit_mask.device),
         )
 
     def add_rhythm_loss(self, output, sample, losses):

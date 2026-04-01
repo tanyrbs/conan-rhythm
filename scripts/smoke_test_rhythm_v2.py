@@ -9,11 +9,13 @@ if str(root) not in sys.path:
 
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
 from modules.Conan.rhythm.supervision import (
+    build_item_rhythm_bundle,
     build_reference_guided_targets,
     build_reference_teacher_targets,
     build_retimed_mel_target,
 )
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
+from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
 if __name__ == '__main__':
@@ -84,6 +86,30 @@ if __name__ == '__main__':
         pause_exec_tgt=guidance["rhythm_pause_exec_tgt"],
         unit_mask=batch.unit_mask[0].cpu().numpy(),
     )
+    cached_bundle = build_item_rhythm_bundle(
+        content_tokens=[1, 1, 1, 2, 2, 57, 3, 3],
+        mel=np.random.randn(16, 80).astype(np.float32),
+        trace_horizon=0.40,
+        include_self_targets=True,
+        include_teacher_targets=True,
+        include_retimed_mel_target=True,
+        retimed_mel_target_source="teacher",
+    )
+    metrics = build_rhythm_metric_dict(
+        {
+            "rhythm_execution": out1,
+            "rhythm_unit_batch": batch,
+            "rhythm_state_next": out1.next_state,
+            "rhythm_apply_render": 1.0,
+            "acoustic_target_is_retimed": False,
+        },
+        {
+            "rhythm_speech_exec_tgt": out1.speech_duration_exec.detach(),
+            "rhythm_pause_exec_tgt": out1.pause_after_exec.detach(),
+            "rhythm_speech_budget_tgt": out1.planner.speech_budget_win.detach(),
+            "rhythm_pause_budget_tgt": out1.planner.pause_budget_win.detach(),
+        },
+    )
     print('speech_exec shape:', tuple(out1.speech_duration_exec.shape))
     print('pause_exec shape:', tuple(out1.pause_after_exec.shape))
     print('commit_frontier step1:', out1.commit_frontier.tolist())
@@ -96,4 +122,15 @@ if __name__ == '__main__':
     print('teacher keys:', sorted(teacher.keys()))
     teacher_gap = float(np.abs(teacher['rhythm_teacher_pause_exec_tgt'] - guidance['rhythm_pause_exec_tgt']).sum())
     print('teacher/guidance pause gap:', teacher_gap)
+    print('cache version:', int(cached_bundle['rhythm_cache_version'][0]))
+    print('trace bins:', int(cached_bundle['rhythm_trace_bins'][0]))
+    print('trace horizon:', float(cached_bundle['rhythm_trace_horizon'][0]))
+    print('target confidence:', float(cached_bundle['rhythm_target_confidence'][0]))
+    print('teacher confidence:', float(cached_bundle['rhythm_teacher_confidence'][0]))
+    print('retimed source id:', int(cached_bundle['rhythm_retimed_target_source_id'][0]))
+    print('retimed confidence:', float(cached_bundle['rhythm_retimed_target_confidence'][0]))
+    print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr']))
+    print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1']))
     assert teacher_gap >= 0.0
+    assert float(metrics['rhythm_metric_exec_total_corr']) > 0.99
+    assert float(metrics['rhythm_metric_prefix_drift_l1']) < 1e-6

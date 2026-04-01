@@ -26,7 +26,10 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `modules/Conan/rhythm/module.py`
 > - `tasks/Conan/rhythm/`
 > - `docs/rhythm_module_vision.md`
+> - `docs/rhythm_local_adaptation.md`
+> - `docs/rhythm_migration_plan.md`
 > - `docs/rhythm_training_stages.md`
+> - `docs/rhythm_supervision_policy.md`
 >
 > Current status:
 >
@@ -58,6 +61,27 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >   - `rhythm_train_render_start_steps`
 >   - `rhythm_valid_render_start_steps`
 >   - `rhythm_retimed_target_start_steps`
+>
+> Practical supervision policy:
+>
+> - runtime heuristic targets are now a debug / fallback path, not the desired formal training path
+> - `egs/conan_emformer_rhythm_v2.yaml` stays transitional with `rhythm_dataset_target_mode: prefer_cache`
+> - `egs/conan_emformer_rhythm_v2_cached_only.yaml` is the stricter warm-start config
+> - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config
+> - cached-only experiments now validate a stricter rhythm cache contract (`rhythm_cache_version: 3`)
+> - current cached targets are self-conditioned surfaces, so cache-based rhythm conditioning defaults to `rhythm_cached_reference_policy: self`
+>
+> Current streaming mode note:
+>
+> - the current repository still uses static full-reference rhythm conditioning (`static_ref_full`)
+> - progressive streaming reference updates are future work, not the current default path
+>
+> Current task focus:
+>
+> - projector-centric timing supervision
+> - cached-only reproducibility
+> - retimed train/infer closure
+> - stronger streaming regression
 
 <p align="center">
   <a href="https://arxiv.org/abs/2507.14534"><b>📄 Read the Paper (arXiv)</b></a> &nbsp;|&nbsp;
@@ -108,8 +132,8 @@ be generated, ensuring smooth transitions at chunk boundaries.
 
 1. **Clone the repository**:
 ```bash
-git clone https://github.com/User-tian/Conan.git
-cd Conan
+git clone https://github.com/tanyrbs/conan-rhythm.git
+cd conan-rhythm
 ```
 
 2. **Create a virtual environment**:
@@ -125,16 +149,33 @@ pip install -r requirements.txt
 ## 📊 Data Preparation
 
 ### Dataset Structure
-You only need to prepare the metadata.json file in the `data/processed/` directory.
-```
+For the current Conan / Rhythm V2 path, `metadata.json` alone is **not** enough.
+
+At minimum, prepare:
+
+- `metadata_vctk_librittsr_gt.json` for the current VC binarizer path
+- `spker_set.json`
+- raw wav paths referenced by metadata
+- HuBERT token sequences in metadata entries
+- RMVPE F0 files for main-model training
+
+If rhythm cache generation is enabled, the binarizer can additionally cache:
+
+- source unit cache: `content_units`, `dur_anchor_src`, `open_run_mask`, `sep_hint`
+- reference rhythm cache: `ref_rhythm_stats`, `ref_rhythm_trace`
+- cached guidance / teacher targets
+- cached retimed mel targets
+
+Example:
+```text
 data/
-└── processed/
-    ├── metadata.json
-    └── spker_set.json
+`-- processed/
+    |-- metadata_vctk_librittsr_gt.json
+    `-- spker_set.json
 ```
 ### Metadata Format
 There is an example "example_metadata.json" file in the `data/processed/vc/` directory.
-The `metadata.json` file should contain entries like:
+The metadata file should contain entries like:
 ```json
 [
   {
@@ -172,6 +213,8 @@ File structure: (an example below)
 python data_gen/tts/runs/binarize.py --config egs/conan.yaml
 ```
 (You can use this config for all 3-stage training binarization)
+
+For formal Rhythm V2 experiments, binarization should be re-run with rhythm cache enabled so training can use offline cached targets instead of runtime heuristics.
 ### Configuration
 Update the configuration files in `egs/` directory to match your dataset:
 - `egs/conan_emformer.yaml`: Main training configuration
@@ -209,6 +252,32 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
     --config egs/hifi_16k320_shuffle.yaml \
     --exp_name hifigan_training \
+    --reset
+```
+
+### Rhythm V2 warm-start / retimed training
+
+Transitional warm-start:
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
+    --config egs/conan_emformer_rhythm_v2.yaml \
+    --exp_name conan_rhythm_v2 \
+    --reset
+```
+
+Strict cached-only warm-start:
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
+    --config egs/conan_emformer_rhythm_v2_cached_only.yaml \
+    --exp_name conan_rhythm_v2_cached \
+    --reset
+```
+
+Strict cached-only retimed-train experiment:
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
+    --config egs/conan_emformer_rhythm_v2_retimed_train.yaml \
+    --exp_name conan_rhythm_v2_retimed \
     --reset
 ```
 

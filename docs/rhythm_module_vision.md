@@ -1,5 +1,12 @@
 # Rhythm Module Vision (2026-04-01)
 
+See also:
+
+- `docs/rhythm_local_adaptation.md`
+- `docs/rhythm_migration_plan.md`
+- `docs/rhythm_training_stages.md`
+- `docs/rhythm_supervision_policy.md`
+
 ## 1. Goal
 
 This branch is now converging to a smaller and harder rhythm mainline for **strong rhythm transfer under streaming constraints**.
@@ -54,6 +61,13 @@ It is built cheaply from source-side separator evidence and source duration shap
 
 `L_guidance` is the current warm-start surface.
 `L_distill` is reserved for latency-matched teacher distillation, not naive full-context imitation.
+
+Current objective priority in practice:
+
+- core: `L_recon + L_plan`
+- warm-start: add `L_guidance` when cached guidance targets exist
+- phase-2: add `L_distill` only when a stronger offline teacher surface exists
+- within `L_plan`, cumulative prefix drift should carry more weight than local shape error
 
 ---
 
@@ -129,6 +143,14 @@ The public contract is intentionally small, but the runtime system still needs i
 
 These are **runtime hidden states**, not public contract pollution.
 
+The scheduler should be understood as a **stateful timing module**, not just a small set of heads.
+The most important internal semantics are:
+
+- prefix debt / backlog
+- trace cursor / phase pointer
+- emitted total frames
+- pending pause realization
+
 ---
 
 ## 7. What is already in place
@@ -146,6 +168,13 @@ Already connected:
 - teacher/distill field reservation
 - chunkwise streaming evaluation
 - committed-prefix mel increment extraction
+- strict cached-only cache-contract validation for formal experiments
+
+What the project should explicitly avoid:
+
+- putting strong rhythm control back into the large style path
+- treating decoder crop logic as a second hidden scheduler
+- relying on runtime heuristic labels as the main formal supervision path
 
 ---
 
@@ -172,6 +201,10 @@ The biggest remaining gaps are:
    - runtime heuristic targets are no longer the ideal mainline
    - cached/offline supervision should become the maintained path
 
+6. **Reference mode split**
+   - current path is still `static_ref_full`
+   - `progressive_ref_stream` should be documented as future work, not implied by the current default
+
 ---
 
 ## 9. Current recommendation
@@ -183,3 +216,19 @@ In short:
 - keep Conan's streaming ears and mouth
 - reduce rhythm to an explicit descriptor + stateful scheduler + single projector
 - push teacher/distill and retimed decoder training as the next serious milestones
+- prefer `cached_only` for formal experiments once the cache has been regenerated
+- treat runtime heuristic generation as a debug path, not a maintained public training contract
+
+Current task focus:
+
+- harden cache contracts
+- train on projector outputs, not style-side rhythm proxies
+- reduce train/infer mismatch
+- improve streaming regression
+
+Future expansion:
+
+- stronger offline teacher
+- dual-mode offline/online projector distillation
+- richer rhythm-specific evaluation
+- progressive streaming reference support
