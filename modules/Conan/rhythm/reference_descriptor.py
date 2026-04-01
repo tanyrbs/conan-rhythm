@@ -3,7 +3,11 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .reference_encoder import ReferenceRhythmEncoder
+from .reference_encoder import (
+    REF_RHYTHM_STATS_KEYS,
+    REF_RHYTHM_TRACE_KEYS,
+    ReferenceRhythmEncoder,
+)
 from .reference_selector import ReferenceSelector
 
 
@@ -36,11 +40,44 @@ class RefRhythmDescriptor(nn.Module):
         )
 
     @staticmethod
+    def _validate_cached_contract(ref_rhythm_stats: torch.Tensor, ref_rhythm_trace: torch.Tensor) -> None:
+        if ref_rhythm_stats.dim() != 2:
+            raise ValueError(
+                f"ref_rhythm_stats must be [B, {len(REF_RHYTHM_STATS_KEYS)}], got {tuple(ref_rhythm_stats.shape)}"
+            )
+        if ref_rhythm_trace.dim() != 3:
+            raise ValueError(
+                f"ref_rhythm_trace must be [B, bins, {len(REF_RHYTHM_TRACE_KEYS)}], got {tuple(ref_rhythm_trace.shape)}"
+            )
+        if ref_rhythm_stats.size(-1) != len(REF_RHYTHM_STATS_KEYS):
+            raise ValueError(
+                f"ref_rhythm_stats dim mismatch: found={ref_rhythm_stats.size(-1)}, "
+                f"expected={len(REF_RHYTHM_STATS_KEYS)}"
+            )
+        if ref_rhythm_trace.size(-1) != len(REF_RHYTHM_TRACE_KEYS):
+            raise ValueError(
+                f"ref_rhythm_trace dim mismatch: found={ref_rhythm_trace.size(-1)}, "
+                f"expected={len(REF_RHYTHM_TRACE_KEYS)}"
+            )
+
+    @staticmethod
+    def _phase_to_trace_start(phase_ptr: torch.Tensor, horizon: float) -> torch.Tensor:
+        if phase_ptr.dim() == 2 and phase_ptr.size(-1) == 1:
+            phase_ptr = phase_ptr.squeeze(-1)
+        horizon = float(max(0.01, min(1.0, horizon)))
+        max_start = max(0.0, 1.0 - horizon)
+        phase_ptr = phase_ptr.float().clamp(0.0, 1.0)
+        if max_start <= 0.0:
+            return torch.zeros_like(phase_ptr)
+        return torch.minimum(phase_ptr, phase_ptr.new_full(phase_ptr.shape, max_start))
+
+    @staticmethod
     def from_stats_trace(
         ref_rhythm_stats: torch.Tensor,
         ref_rhythm_trace: torch.Tensor,
         selector: ReferenceSelector | None = None,
     ) -> dict[str, torch.Tensor]:
+        RefRhythmDescriptor._validate_cached_contract(ref_rhythm_stats, ref_rhythm_trace)
         global_rate = torch.reciprocal(ref_rhythm_stats[:, 2:3].clamp_min(1.0))
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
@@ -97,10 +134,11 @@ class RefRhythmDescriptor(nn.Module):
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
             ref_conditioning["ref_rhythm_trace"],
-            phase_ptr=phase_ptr,
+            phase_ptr=self._phase_to_trace_start(phase_ptr, effective_horizon),
             window_size=window_size,
-            horizon=horizon,
+            horizon=effective_horizon,
             visible_sizes=visible_sizes,
         )

@@ -59,7 +59,7 @@ Mainline timing losses:
 1. `L_exec_speech`
 2. `L_exec_pause`
 3. `L_budget`
-4. `L_carry`
+4. `L_cumplan`
 
 Staged / optional:
 
@@ -70,13 +70,13 @@ Interpretation:
 
 - `L_exec_*` is the main supervision surface because projector execution is the actual timing authority
 - `L_budget` is a light streaming guardrail, not the main target
-- `L_carry` supervises cumulative prefix debt / backlog directly
+- `L_cumplan` supervises cumulative prefix debt / backlog directly
 - `L_distill` is reserved for latency-matched teacher distillation, not naive full-context imitation
 - `L_base` is the outer acoustic closure once retimed decoder training is enabled
 
 Current objective priority in practice:
 
-- schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_carry`
+- schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_cumplan`
 - phase-2 KD: add `L_distill`, preferably on executed speech/pause plus optional prefix carry
 - retimed acoustic stage: add light `L_base`
 - `L_plan` and `L_guidance` remain available only as internal ablations/debug paths
@@ -169,6 +169,14 @@ The most important internal semantics are:
 - trace cursor / phase pointer
 - emitted total frames
 - pending pause realization
+
+At the dataset / training-batch level, keep the exported rhythm fields layered:
+
+- runtime-minimal contract
+- debug sidecars
+- cache/audit metadata
+
+This prevents the sample schema from drifting back into a single undifferentiated sidecar blob.
 
 ---
 

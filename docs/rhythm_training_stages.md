@@ -12,6 +12,7 @@ Goal:
 - verify descriptor -> scheduler -> projector wiring
 - verify state carry-over and committed-prefix behavior
 - verify dataset fields and loss hooks are alive
+- verify cache/config readiness before long runs
 
 Current state:
 
@@ -22,6 +23,10 @@ Current state:
 - a stateful run-length unitizer helper is now available for incremental debugging
 - explicit blank-slot graph is now public in projector / renderer / loss
 - renderer also exports `rhythm_blank_mask`, `rhythm_render_slot_index`, `rhythm_render_unit_index`
+- `scripts/preflight_rhythm_v2.py` can now fail fast on cache/config mismatches before training starts
+- preflight now also checks cached-only contract metadata, teacher/retimed surface identity, and whether `ConanDataset` filtering empties a split
+- optional `--model_dry_run` also checks dataset collation + one no-grad ConanTask forward before a long run
+- the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 
 ---
 
@@ -59,7 +64,7 @@ Current recommendation:
   - `L_exec_speech`
   - `L_exec_pause`
   - light `L_budget`
-  - light `L_carry`
+  - light `L_cumplan`
 
 ---
 
@@ -98,6 +103,7 @@ Important terminology note:
   - offline branch = full-horizon / no-prefix-reuse projector pass
   - algorithmic teacher = explicit schedule bootstrap
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the formal stage-2 config
+- formal stage-2 intentionally still inherits the stage-1 schedule-only scaffold (`rhythm_schedule_only_stage: true`, `rhythm_optimize_module_only: true`)
 - it still does **not** yet have a true learned non-causal offline teacher model
 - docs and experiments should keep that distinction explicit
 
@@ -131,21 +137,23 @@ Current bridge step already in repo:
 - task code now resolves `rhythm_apply_mode` and retimed acoustic targets from the same flag, so train/test render and target selection no longer drift apart
 - cached-only retimed training now fails fast if retimed cache is required but missing or mismatched
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
+- until dedicated retimed pitch targets exist, stage-3 disables source-aligned pitch supervision automatically to avoid shape-mismatch and train/infer drift
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
 - rhythm cache contract is now versioned at `rhythm_cache_version: 4`
 - config now also exposes staged rollout knobs:
-  - `rhythm_train_render_start_steps`
-  - `rhythm_valid_render_start_steps`
-  - `rhythm_retimed_target_start_steps`
+- `rhythm_train_render_start_steps`
+- `rhythm_valid_render_start_steps`
+- `rhythm_retimed_target_start_steps`
 - a staged experiment config is now provided at `egs/conan_emformer_rhythm_v2_retimed_train.yaml`
+- that stage now explicitly inherits `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` and is the first formal joint stage that turns `rhythm_schedule_only_stage: false`
 - a stricter cached-only warm-start config is now provided at `egs/conan_emformer_rhythm_v2_cached_only.yaml`
 
 Recommended future config direction after retimed targets exist:
 
 - enable train-time retimed rendering explicitly
 - keep `L_base` as the outer acoustic objective
-- keep the main timing path on executed speech/pause + light budget/carry
+- keep the main timing path on executed speech/pause + light budget / cumulative-plan guardrail
 - keep KD focused on executed speech/pause plus optional prefix carry
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 

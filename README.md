@@ -68,7 +68,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - train-time retimed rendering should only be enabled after retimed acoustic targets are prepared
 > - the binarizer can now cache a first-pass `rhythm_retimed_mel_tgt` built from cached rhythm targets
 > - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but disable the heavier local style/prosody adaptor path entirely
-> - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as executed speech/pause supervision + light budget/carry guardrails + light `L_base`
+> - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as executed speech/pause supervision + light budget + cumulative-plan guardrail + light `L_base`
+> - when train/valid switch to the retimed canvas, source-aligned pitch supervision is automatically disabled unless retimed pitch targets are introduced later
 > - staged rollout knobs now exist for future train-time retimed experiments:
 >   - `rhythm_train_render_start_steps`
 >   - `rhythm_valid_render_start_steps`
@@ -195,6 +196,12 @@ If rhythm cache generation is enabled, the binarizer can additionally cache:
 - cached guidance / teacher targets, including teacher allocation / prefix carry surfaces
 - cached retimed mel targets
 
+Keep the cache / batch schema layered:
+
+- runtime-minimal contract: `content_units`, `dur_anchor_src`, `ref_rhythm_stats`, `ref_rhythm_trace`
+- debug sidecars: source phrase cues, offline prefix views, selector spans, streaming prefix stats
+- cache/audit bundle: cache version, hop/trace contract, confidence, retimed source metadata
+
 Example:
 ```text
 data/
@@ -296,6 +303,26 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
 ```
 
 ### Rhythm V2 warm-start / retimed training
+
+Before starting any formal Rhythm V2 run, do a cache/config preflight:
+```bash
+python scripts/preflight_rhythm_v2.py \
+    --config egs/conan_emformer_rhythm_v2_schedule_only.yaml \
+    --binary_data_dir data/binary/your_dataset \
+    --model_dry_run
+```
+
+Formal expectation:
+
+- `train` and `valid` must both pass raw cache inspection **and** survive `ConanDataset` filtering
+- repeat preflight with the exact config for each stage
+- the bundled smoke cache is only for structural sanity checks; if its `valid` split is intentionally filtered empty, use `--splits train` for smoke-only checks, but do not treat that as formal training readiness
+
+Recommended formal path:
+
+1. `schedule_only`
+2. `dual_mode_kd`
+3. `retimed_train`
 
 Transitional warm-start:
 ```bash

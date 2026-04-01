@@ -14,6 +14,8 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_topk_ratio=float(hparams.get('rhythm_projector_pause_topk_ratio', 0.35)),
         pause_min_boundary_weight=float(hparams.get('rhythm_projector_pause_min_boundary_weight', 0.10)),
         pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
+        pause_train_soft=bool(hparams.get('rhythm_projector_pause_train_soft', True)),
+        pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
     )
 
 

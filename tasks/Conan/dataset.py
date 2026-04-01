@@ -80,6 +80,58 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_retimed_target_source_id",
         "rhythm_retimed_target_confidence",
     )
+    # Keep the batch schema layered even if the current training sample still
+    # carries all keys in one dict:
+    #   1) runtime-minimal contract: the maintained timing path
+    #   2) debug sidecars: useful for inspection / streaming audits
+    #   3) cache/audit metadata: used for fail-fast contract checks
+    _RHYTHM_RUNTIME_MINIMAL_KEYS = (
+        "content_units",
+        "dur_anchor_src",
+        "open_run_mask",
+        "sealed_mask",
+        "sep_hint",
+        "boundary_confidence",
+        "ref_rhythm_stats",
+        "ref_rhythm_trace",
+    )
+    _RHYTHM_DEBUG_SIDECAR_KEYS = (
+        "source_boundary_cue",
+        "phrase_group_index",
+        "phrase_group_pos",
+        "phrase_final_mask",
+        "rhythm_offline_content_units",
+        "rhythm_offline_dur_anchor_src",
+        "rhythm_offline_open_run_mask",
+        "rhythm_offline_sealed_mask",
+        "rhythm_offline_sep_hint",
+        "rhythm_offline_boundary_confidence",
+        "rhythm_offline_source_boundary_cue",
+        "rhythm_offline_phrase_group_index",
+        "rhythm_offline_phrase_group_pos",
+        "rhythm_offline_phrase_final_mask",
+        "slow_rhythm_memory",
+        "slow_rhythm_summary",
+        "selector_meta_indices",
+        "selector_meta_scores",
+        "selector_meta_starts",
+        "selector_meta_ends",
+        "rhythm_stream_prefix_ratio",
+        "rhythm_stream_visible_units",
+        "rhythm_stream_full_units",
+    )
+    _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS = _RHYTHM_TARGET_KEYS + (
+        "rhythm_retimed_mel_tgt",
+        "rhythm_retimed_mel_len",
+        "rhythm_retimed_frame_weight",
+    )
+    _RHYTHM_CACHE_AUDIT_KEYS = _RHYTHM_META_KEYS
+    _RHYTHM_OPTIONAL_SAMPLE_KEYS = tuple(dict.fromkeys(
+        _RHYTHM_RUNTIME_MINIMAL_KEYS
+        + _RHYTHM_DEBUG_SIDECAR_KEYS
+        + _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS
+        + _RHYTHM_CACHE_AUDIT_KEYS
+    ))
 
     def _resolve_primary_target_surface(self) -> str:
         surface = str(self.hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
@@ -737,74 +789,7 @@ class ConanDataset(FastSpeechDataset):
             item_name=item_name,
         )
 
-        optional_rhythm_keys = [
-            "content_units",
-            "dur_anchor_src",
-            "open_run_mask",
-            "sealed_mask",
-            "sep_hint",
-            "boundary_confidence",
-            "source_boundary_cue",
-            "phrase_group_index",
-            "phrase_group_pos",
-            "phrase_final_mask",
-            "rhythm_offline_content_units",
-            "rhythm_offline_dur_anchor_src",
-            "rhythm_offline_open_run_mask",
-            "rhythm_offline_sealed_mask",
-            "rhythm_offline_sep_hint",
-            "rhythm_offline_boundary_confidence",
-            "rhythm_offline_source_boundary_cue",
-            "rhythm_offline_phrase_group_index",
-            "rhythm_offline_phrase_group_pos",
-            "rhythm_offline_phrase_final_mask",
-            "ref_rhythm_stats",
-            "ref_rhythm_trace",
-            "slow_rhythm_memory",
-            "slow_rhythm_summary",
-            "selector_meta_indices",
-            "selector_meta_scores",
-            "selector_meta_starts",
-            "selector_meta_ends",
-            "rhythm_cache_version",
-            "rhythm_unit_hop_ms",
-            "rhythm_trace_hop_ms",
-            "rhythm_trace_bins",
-            "rhythm_trace_horizon",
-            "rhythm_slow_topk",
-            "rhythm_selector_cell_size",
-            "rhythm_source_phrase_threshold",
-            "rhythm_reference_mode_id",
-            "rhythm_target_confidence",
-            "rhythm_guidance_confidence",
-            "rhythm_teacher_confidence",
-            "rhythm_retimed_target_source_id",
-            "rhythm_retimed_target_confidence",
-            "rhythm_speech_exec_tgt",
-            "rhythm_pause_exec_tgt",
-            "rhythm_blank_exec_tgt",
-            "rhythm_speech_budget_tgt",
-            "rhythm_pause_budget_tgt",
-            "rhythm_blank_budget_tgt",
-            "rhythm_guidance_speech_tgt",
-            "rhythm_guidance_pause_tgt",
-            "rhythm_guidance_blank_tgt",
-            "rhythm_teacher_speech_exec_tgt",
-            "rhythm_teacher_pause_exec_tgt",
-            "rhythm_teacher_blank_exec_tgt",
-            "rhythm_teacher_speech_budget_tgt",
-            "rhythm_teacher_pause_budget_tgt",
-            "rhythm_teacher_blank_budget_tgt",
-            "rhythm_teacher_allocation_tgt",
-            "rhythm_teacher_prefix_clock_tgt",
-            "rhythm_teacher_prefix_backlog_tgt",
-            "rhythm_retimed_mel_tgt",
-            "rhythm_retimed_mel_len",
-            "rhythm_retimed_frame_weight",
-            "rhythm_stream_prefix_ratio",
-            "rhythm_stream_visible_units",
-            "rhythm_stream_full_units",
-        ]
+        optional_rhythm_keys = self._RHYTHM_OPTIONAL_SAMPLE_KEYS
         rhythm_runtime_fields = {}
         source_cache = self._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):

@@ -127,6 +127,26 @@ Current cache version: `4`
 
 ---
 
+## 4.1 Batch/schema layering
+
+To keep the dataset sidecar from turning back into an unstructured grab-bag, read the sample/cache schema in three layers:
+
+1. `runtime_minimal`
+   - maintained timing contract used by the main rhythm path
+   - `content_units`, `dur_anchor_src`, `ref_rhythm_stats`, `ref_rhythm_trace`
+
+2. `debug_sidecar`
+   - source phrase cues, offline prefix views, selector spans, streaming prefix counters
+   - useful for inspection and regression, but not the maintained public control surface
+
+3. `cache_audit_bundle`
+   - cache version, hop/trace contract, confidence, retimed source metadata
+   - should be validated before long runs and should fail fast in `cached_only`
+
+This repo still materializes these fields into one training sample dict, but the maintained interpretation should stay layered.
+
+---
+
 ## 5. Loss policy
 
 The rhythm path should stay minimal.
@@ -136,18 +156,18 @@ The rhythm path should stay minimal.
 - `L_exec_speech`
 - `L_exec_pause`
 - small-weight `L_budget`
-- small-weight `L_carry`
+- small-weight `L_cumplan`
 
 Interpretation:
 
 - `L_exec_*` supervises executed timing directly
 - `L_budget` keeps the streaming budget honest
-- `L_carry` keeps cumulative prefix debt / backlog honest
+- `L_cumplan` keeps cumulative prefix debt / backlog honest
 
 Current practical weighting in config:
 
 - `lambda_rhythm_budget = 0.10 ~ 0.25`
-- `lambda_rhythm_carry = 0.10 ~ 0.20`
+- `lambda_rhythm_cumplan = 0.10 ~ 0.20` (`lambda_rhythm_carry` remains a backward-compatible alias)
 
 `L_plan` and `L_guidance` may still exist in code for ablations / migration, but they are not the maintained mainline objective.
 

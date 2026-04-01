@@ -18,6 +18,8 @@ class ProjectorConfig:
     pause_topk_ratio: float = 0.35
     pause_min_boundary_weight: float = 0.10
     pause_boundary_bias_weight: float = 0.15
+    pause_train_soft: bool = True
+    pause_soft_temperature: float = 0.12
 
 
 class StreamingRhythmProjector(nn.Module):
@@ -131,6 +133,7 @@ class StreamingRhythmProjector(nn.Module):
         pause_budget_win: torch.Tensor,
         state: StreamingRhythmState,
         reuse_prefix: bool,
+        soft_pause_selection: bool,
     ) -> torch.Tensor:
         scores = pause_weight_unit.float().clamp_min(0.0)
         boundary_bias = self.config.pause_boundary_bias_weight * (
@@ -139,6 +142,7 @@ class StreamingRhythmProjector(nn.Module):
         scores = (scores + boundary_bias) * unit_mask
         sparse_scores = scores.new_zeros(scores.shape)
         topk_ratio = float(max(0.0, min(1.0, self.config.pause_topk_ratio)))
+        temperature = float(max(1e-4, self.config.pause_soft_temperature))
         for batch_idx in range(scores.size(0)):
             visible = int(unit_mask[batch_idx].sum().item())
             if visible <= 0:
@@ -146,8 +150,16 @@ class StreamingRhythmProjector(nn.Module):
             topk = max(1, int(round(visible * topk_ratio)))
             row_scores = scores[batch_idx, :visible]
             keep_k = min(topk, visible)
+            if keep_k >= visible:
+                sparse_scores[batch_idx, :visible] = row_scores
+                continue
             values, indices = torch.topk(row_scores, k=keep_k, dim=0)
-            sparse_scores[batch_idx, indices] = values
+            if soft_pause_selection:
+                threshold = values[-1].detach()
+                gate = torch.sigmoid((row_scores - threshold) / temperature)
+                sparse_scores[batch_idx, :visible] = row_scores * gate
+            else:
+                sparse_scores[batch_idx, indices] = values
 
         pause = sparse_scores.new_zeros(sparse_scores.shape)
         previous = state.previous_pause_exec
@@ -270,6 +282,8 @@ class StreamingRhythmProjector(nn.Module):
             state=state,
             reuse_prefix=reuse_prefix,
         )
+        feasible_speech_budget_delta = (speech_budget_win - planner.speech_budget_win.float()).clamp_min(0.0)
+        feasible_pause_budget_delta = (pause_budget_win - planner.pause_budget_win.float()).clamp_min(0.0)
         execution_planner = RhythmPlannerOutputs(
             speech_budget_win=speech_budget_win,
             pause_budget_win=pause_budget_win,
@@ -282,6 +296,11 @@ class StreamingRhythmProjector(nn.Module):
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
         )
+        execution_planner.feasible_speech_budget_delta = feasible_speech_budget_delta.detach()
+        execution_planner.feasible_pause_budget_delta = feasible_pause_budget_delta.detach()
+        execution_planner.feasible_total_budget_delta = (
+            feasible_speech_budget_delta + feasible_pause_budget_delta
+        ).detach()
         speech_duration_exec = self._project_speech(
             dur_anchor_src=dur_anchor_src,
             dur_logratio_unit=dur_logratio_unit,
@@ -297,6 +316,9 @@ class StreamingRhythmProjector(nn.Module):
             pause_budget_win=pause_budget_win,
             state=state,
             reuse_prefix=reuse_prefix,
+            soft_pause_selection=bool(
+                self.training and torch.is_grad_enabled() and self.config.pause_train_soft and not force_full_commit
+            ),
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
         slot_schedule = build_interleaved_blank_slot_schedule(

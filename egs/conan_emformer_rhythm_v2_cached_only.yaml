@@ -2,6 +2,7 @@ base_config: egs/conan_emformer_rhythm_v2.yaml
 
 # Formal warm-start config:
 # keep the conservative decoder path, but require offline cached rhythm targets.
+# Stage-1/2/3 configs inherit from this stricter cache-contract base.
 rhythm_dataset_target_mode: cached_only
 rhythm_cached_reference_policy: self
 

@@ -283,6 +283,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_budget': l_budget,
         'rhythm_carry': l_carry,
+        'rhythm_cumplan': l_carry,
         'rhythm_plan_local': l_plan_local,
         'rhythm_plan_cum': l_plan_cum,
         'rhythm_plan': l_plan,

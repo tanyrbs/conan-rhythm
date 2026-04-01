@@ -299,6 +299,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             pred_prefix = torch.cumsum((execution.speech_duration_exec + blank_exec) * unit_mask, dim=1)
             tgt_prefix = torch.cumsum((sample["rhythm_speech_exec_tgt"] + sample[pause_target_key]).float() * unit_mask, dim=1)
             metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
+            metrics["rhythm_metric_cumplan_l1"] = metrics["rhythm_metric_prefix_drift_l1"]
         if "rhythm_teacher_speech_exec_tgt" in sample:
             metrics["rhythm_metric_distill_speech_l1"] = _masked_l1(
                 execution.speech_duration_exec,

@@ -3,11 +3,18 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 # Stage-2 schedule distillation:
 # keep cached teacher surfaces as the offline floor,
 # and additionally enable the shared-projector full-context branch.
+# Stage-2 intentionally still stays in schedule-only / module-only mode;
+# stage-3 is where joint retimed acoustic closure begins.
+rhythm_schedule_only_stage: true
+rhythm_optimize_module_only: true
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: offline
 rhythm_enable_dual_mode_teacher: true
 rhythm_enable_algorithmic_teacher: false
-lambda_rhythm_carry: 0.15
+rhythm_require_cached_teacher: true
+rhythm_dataset_build_guidance_from_ref: false
+lambda_rhythm_budget: 0.15
+lambda_rhythm_cumplan: 0.15
 lambda_rhythm_distill: 0.25
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0

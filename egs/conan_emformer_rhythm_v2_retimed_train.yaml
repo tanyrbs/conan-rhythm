@@ -1,4 +1,4 @@
-base_config: egs/conan_emformer_rhythm_v2_cached_only.yaml
+base_config: egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml
 
 # Controlled experiment: train/valid on the retimed canvas after a warmup.
 # Keep this separate from the conservative main config.
@@ -10,15 +10,25 @@ rhythm_retimed_target_start_steps: 20000
 
 # Require offline cached rhythm targets for formal retimed experiments.
 rhythm_dataset_target_mode: cached_only
+rhythm_primary_target_surface: teacher
+rhythm_distill_surface: offline
+rhythm_enable_dual_mode_teacher: true
 rhythm_binarize_teacher_targets: true
-rhythm_dataset_build_teacher_from_ref: true
+rhythm_binarize_retimed_mel_targets: true
+rhythm_dataset_build_teacher_from_ref: false
+rhythm_dataset_build_guidance_from_ref: false
 rhythm_binarize_retimed_mel_source: teacher
+rhythm_use_retimed_target_if_available: true
 rhythm_require_retimed_cache: true
 rhythm_require_cached_teacher: true
 
-# Turn on the teacher/distill path only for this staged experiment.
-rhythm_enable_dual_mode_teacher: true
-lambda_rhythm_carry: 0.10
+# Stage-3 inherits stage-2 dual-mode KD and then opens retimed acoustic closure.
+rhythm_schedule_only_stage: false
+rhythm_optimize_module_only: false
+lambda_rhythm_exec_speech: 0.5
+lambda_rhythm_exec_pause: 0.5
+lambda_rhythm_budget: 0.10
+lambda_rhythm_cumplan: 0.10
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.25
 rhythm_distill_budget_weight: 0.0
