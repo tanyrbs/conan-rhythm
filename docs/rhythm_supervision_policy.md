@@ -24,10 +24,13 @@ Current cached fields:
 
 - `rhythm_speech_exec_tgt`
 - `rhythm_pause_exec_tgt`
+- `rhythm_blank_exec_tgt` (alias of the same executed blank surface)
 - `rhythm_speech_budget_tgt`
 - `rhythm_pause_budget_tgt`
+- `rhythm_blank_budget_tgt` (alias of the same blank-budget surface)
 - `rhythm_guidance_speech_tgt`
 - `rhythm_guidance_pause_tgt`
+- `rhythm_guidance_blank_tgt`
 
 ### Tier B: offline teacher surface
 
@@ -40,8 +43,10 @@ Current cached fields:
 
 - `rhythm_teacher_speech_exec_tgt`
 - `rhythm_teacher_pause_exec_tgt`
+- `rhythm_teacher_blank_exec_tgt`
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
+- `rhythm_teacher_blank_budget_tgt`
 
 Important distinction:
 

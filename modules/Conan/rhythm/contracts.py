@@ -24,6 +24,10 @@ class StreamingRhythmState:
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
 
+    @property
+    def previous_blank_exec(self) -> Optional[torch.Tensor]:
+        return self.previous_pause_exec
+
 
 @dataclass
 class RhythmPlannerOutputs:
@@ -37,6 +41,10 @@ class RhythmPlannerOutputs:
     boundary_latent: torch.Tensor
     trace_context: torch.Tensor
     source_boundary_cue: Optional[torch.Tensor] = None
+
+    @property
+    def blank_budget_win(self) -> torch.Tensor:
+        return self.pause_budget_win
 
 
 @dataclass
@@ -53,6 +61,22 @@ class RhythmExecution:
     planner: RhythmPlannerOutputs
     next_state: StreamingRhythmState
 
+    @property
+    def blank_slot_duration_exec(self) -> torch.Tensor:
+        return self.slot_duration_exec
+
+    @property
+    def blank_slot_mask(self) -> torch.Tensor:
+        return self.slot_mask
+
+    @property
+    def blank_slot_is_blank(self) -> torch.Tensor:
+        return self.slot_is_blank
+
+    @property
+    def blank_slot_unit_index(self) -> torch.Tensor:
+        return self.slot_unit_index
+
 
 @dataclass
 class RhythmTeacherTargets:
@@ -65,3 +89,11 @@ class RhythmTeacherTargets:
     trace_context: torch.Tensor
     prefix_clock_tgt: torch.Tensor
     prefix_backlog_tgt: torch.Tensor
+
+    @property
+    def blank_exec_tgt(self) -> torch.Tensor:
+        return self.pause_exec_tgt
+
+    @property
+    def blank_budget_tgt(self) -> torch.Tensor:
+        return self.pause_budget_tgt

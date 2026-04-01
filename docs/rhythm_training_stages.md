@@ -21,6 +21,7 @@ Current state:
 - unit frontend now exports `sealed_mask + boundary_confidence`
 - a stateful run-length unitizer helper is now available for incremental debugging
 - explicit blank-slot graph is now public in projector / renderer / loss
+- renderer also exports `rhythm_blank_mask`, `rhythm_render_slot_index`, `rhythm_render_unit_index`
 
 ---
 
@@ -35,10 +36,13 @@ Current supervision surface:
 
 - `rhythm_speech_exec_tgt`
 - `rhythm_pause_exec_tgt`
+- `rhythm_blank_exec_tgt` (alias of the same surface)
 - `rhythm_speech_budget_tgt`
 - `rhythm_pause_budget_tgt`
+- `rhythm_blank_budget_tgt` (alias of the same surface)
 - `rhythm_guidance_speech_tgt`
 - `rhythm_guidance_pause_tgt`
+- `rhythm_guidance_blank_tgt`
 - cached source phrase metadata (`source_boundary_cue`, `phrase_group_*`)
 - cached slow-rhythm selector outputs (`slow_rhythm_memory`, `selector_meta_*`)
 
@@ -70,8 +74,10 @@ Reserved fields already exist:
 
 - `rhythm_teacher_speech_exec_tgt`
 - `rhythm_teacher_pause_exec_tgt`
+- `rhythm_teacher_blank_exec_tgt`
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
+- `rhythm_teacher_blank_budget_tgt`
 - `rhythm_teacher_allocation_tgt`
 - `rhythm_teacher_prefix_clock_tgt`
 - `rhythm_teacher_prefix_backlog_tgt`

@@ -49,6 +49,8 @@ rhythm_retimed_stretch_weight_min: 0.35
 # use cached targets first, but still allow runtime fallback while refreshing caches.
 # Formal experiments should switch to egs/conan_emformer_rhythm_v2_cached_only.yaml.
 rhythm_dataset_target_mode: prefer_cache
+rhythm_primary_target_surface: guidance
+rhythm_distill_surface: auto
 # Cached rhythm targets in the current repo are self-conditioned surfaces.
 # Keep rhythm conditioning self-consistent unless a pairwise offline cache is introduced later.
 rhythm_cached_reference_policy: self
@@ -92,6 +94,9 @@ rhythm_plan_local_weight: 0.5
 rhythm_plan_cum_weight: 1.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
+rhythm_distill_budget_weight: 0.5
+rhythm_distill_allocation_weight: 0.5
+rhythm_distill_prefix_weight: 0.25
 rhythm_require_retimed_cache: false
 rhythm_require_cached_teacher: false
 rhythm_schedule_only_stage: false

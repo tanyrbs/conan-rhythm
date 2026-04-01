@@ -133,6 +133,90 @@ class ConanTask(AuxDecoderMIDITask):
         return aliases.get(mode, mode)
 
     @staticmethod
+    def _resolve_rhythm_primary_target_surface() -> str:
+        surface = str(hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
+        aliases = {
+            "cache_teacher": "teacher",
+            "offline": "teacher",
+            "offline_teacher": "teacher",
+            "teacher_surface": "teacher",
+            "guidance_surface": "guidance",
+            "self": "guidance",
+        }
+        resolved = aliases.get(surface, surface)
+        if resolved not in {"guidance", "teacher"}:
+            raise ValueError(f"Unsupported rhythm_primary_target_surface: {surface}")
+        return resolved
+
+    @staticmethod
+    def _resolve_rhythm_distill_surface() -> str:
+        surface = str(hparams.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
+        aliases = {
+            "off": "none",
+            "disable": "none",
+            "disabled": "none",
+            "false": "none",
+            "cache_teacher": "cache",
+            "cached_teacher": "cache",
+            "full_context": "offline",
+            "shared_offline": "offline",
+            "algo": "algorithmic",
+            "teacher": "cache",
+        }
+        resolved = aliases.get(surface, surface)
+        if resolved not in {"auto", "none", "cache", "offline", "algorithmic"}:
+            raise ValueError(f"Unsupported rhythm_distill_surface: {surface}")
+        return resolved
+
+    @staticmethod
+    def _collect_rhythm_source_cache(sample, *, prefix: str = ""):
+        keys = (
+            "content_units",
+            "dur_anchor_src",
+            "open_run_mask",
+            "sealed_mask",
+            "sep_hint",
+            "boundary_confidence",
+        )
+        payload = {}
+        for key in keys:
+            sample_key = f"{prefix}{key}"
+            value = sample.get(sample_key)
+            if value is not None:
+                payload[key] = value
+        return payload or None
+
+    @staticmethod
+    def _slice_rhythm_surface_to_student(
+        *,
+        speech_exec,
+        pause_exec,
+        student_units: int,
+        dur_anchor_src: torch.Tensor,
+        unit_mask: torch.Tensor,
+    ):
+        speech_exec = speech_exec[:, :student_units]
+        pause_exec = pause_exec[:, :student_units]
+        speech_budget = speech_exec.float().sum(dim=1, keepdim=True)
+        pause_budget = pause_exec.float().sum(dim=1, keepdim=True)
+        allocation = (speech_exec.float() + pause_exec.float()) * unit_mask[:, :student_units].float()
+        prefix_clock, prefix_backlog = ConanTask._build_prefix_carry_from_exec(
+            speech_exec,
+            pause_exec,
+            dur_anchor_src[:, :student_units],
+            unit_mask[:, :student_units],
+        )
+        return (
+            speech_exec,
+            pause_exec,
+            speech_budget,
+            pause_budget,
+            allocation,
+            prefix_clock,
+            prefix_backlog,
+        )
+
+    @staticmethod
     def _build_prefix_carry_from_exec(speech_exec, pause_exec, dur_anchor_src, unit_mask):
         unit_mask = unit_mask.float()
         prefix_clock = torch.cumsum(
@@ -367,7 +451,9 @@ class ConanTask(AuxDecoderMIDITask):
                             ref_lengths=sample.get("ref_mel_lengths"),
                             rhythm_apply_override=rhythm_apply_override,
                             rhythm_state=kwargs.get("rhythm_state"),
-                            rhythm_ref_conditioning=rhythm_ref_conditioning)
+                            rhythm_ref_conditioning=rhythm_ref_conditioning,
+                            rhythm_source_cache=self._collect_rhythm_source_cache(sample),
+                            rhythm_offline_source_cache=self._collect_rhythm_source_cache(sample, prefix="rhythm_offline_"))
         
         losses = {}
         output["acoustic_target_mel"] = acoustic_target
@@ -427,25 +513,62 @@ class ConanTask(AuxDecoderMIDITask):
             return None
         runtime_teacher = output.get("rhythm_offline_execution")
         algorithmic_teacher = output.get("rhythm_algorithmic_teacher")
+        primary_surface = self._resolve_rhythm_primary_target_surface()
+        distill_surface = self._resolve_rhythm_distill_surface()
+        pause_exec_key = "rhythm_blank_exec_tgt" if "rhythm_blank_exec_tgt" in sample else "rhythm_pause_exec_tgt"
+        pause_budget_key = "rhythm_blank_budget_tgt" if "rhythm_blank_budget_tgt" in sample else "rhythm_pause_budget_tgt"
+        guidance_pause_key = "rhythm_guidance_blank_tgt" if "rhythm_guidance_blank_tgt" in sample else "rhythm_guidance_pause_tgt"
+        distill_pause_key = (
+            "rhythm_teacher_blank_exec_tgt"
+            if "rhythm_teacher_blank_exec_tgt" in sample
+            else "rhythm_teacher_pause_exec_tgt"
+        )
+        distill_pause_budget_key = (
+            "rhythm_teacher_blank_budget_tgt"
+            if "rhythm_teacher_blank_budget_tgt" in sample
+            else "rhythm_teacher_pause_budget_tgt"
+        )
+        if primary_surface == "teacher":
+            target_speech_key = "rhythm_teacher_speech_exec_tgt"
+            target_pause_key = distill_pause_key
+            target_speech_budget_key = "rhythm_teacher_speech_budget_tgt"
+            target_pause_budget_key = distill_pause_budget_key
+            sample_confidence = sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence"))
+        else:
+            target_speech_key = "rhythm_speech_exec_tgt"
+            target_pause_key = pause_exec_key
+            target_speech_budget_key = "rhythm_speech_budget_tgt"
+            target_pause_budget_key = pause_budget_key
+            sample_confidence = sample.get("rhythm_target_confidence")
         explicit_keys = [
-            "rhythm_speech_exec_tgt",
-            "rhythm_pause_exec_tgt",
-            "rhythm_speech_budget_tgt",
-            "rhythm_pause_budget_tgt",
+            target_speech_key,
+            target_pause_key,
+            target_speech_budget_key,
+            target_pause_budget_key,
         ]
         if all(key in sample for key in explicit_keys):
             unit_batch = output["rhythm_unit_batch"]
             guidance_speech = sample.get("rhythm_guidance_speech_tgt")
-            guidance_pause = sample.get("rhythm_guidance_pause_tgt")
-            distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
-            distill_pause = sample.get("rhythm_teacher_pause_exec_tgt")
-            distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt")
-            distill_pause_budget = sample.get("rhythm_teacher_pause_budget_tgt")
-            distill_allocation = sample.get("rhythm_teacher_allocation_tgt")
-            distill_prefix_clock = sample.get("rhythm_teacher_prefix_clock_tgt")
-            distill_prefix_backlog = sample.get("rhythm_teacher_prefix_backlog_tgt")
-            distill_confidence = sample.get("rhythm_teacher_confidence")
-            if distill_speech is None and runtime_teacher is not None:
+            guidance_pause = sample.get(guidance_pause_key)
+            distill_speech = None
+            distill_pause = None
+            distill_speech_budget = None
+            distill_pause_budget = None
+            distill_allocation = None
+            distill_prefix_clock = None
+            distill_prefix_backlog = None
+            distill_confidence = None
+
+            if distill_surface in {"auto", "cache"}:
+                distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
+                distill_pause = sample.get(distill_pause_key)
+                distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt")
+                distill_pause_budget = sample.get(distill_pause_budget_key)
+                distill_allocation = sample.get("rhythm_teacher_allocation_tgt")
+                distill_prefix_clock = sample.get("rhythm_teacher_prefix_clock_tgt")
+                distill_prefix_backlog = sample.get("rhythm_teacher_prefix_backlog_tgt")
+                distill_confidence = sample.get("rhythm_teacher_confidence")
+            if distill_speech is None and distill_surface in {"auto", "offline"} and runtime_teacher is not None:
                 distill_speech = runtime_teacher.speech_duration_exec.detach()
                 distill_pause = getattr(runtime_teacher, "blank_duration_exec", runtime_teacher.pause_after_exec).detach()
                 distill_speech_budget = runtime_teacher.planner.speech_budget_win.detach()
@@ -456,8 +579,9 @@ class ConanTask(AuxDecoderMIDITask):
                     unit_batch.dur_anchor_src,
                     unit_batch.unit_mask,
                 )
+                distill_allocation = (distill_speech.float() + distill_pause.float())
                 distill_confidence = torch.ones_like(distill_speech_budget)
-            if distill_speech is None and algorithmic_teacher is not None:
+            if distill_speech is None and distill_surface in {"auto", "algorithmic"} and algorithmic_teacher is not None:
                 distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
                 distill_pause = algorithmic_teacher.pause_exec_tgt.detach()
                 distill_speech_budget = algorithmic_teacher.speech_budget_tgt.detach()
@@ -477,15 +601,15 @@ class ConanTask(AuxDecoderMIDITask):
                         unit_batch.unit_mask,
                     )
             return RhythmLossTargets(
-                speech_exec_tgt=sample["rhythm_speech_exec_tgt"],
-                pause_exec_tgt=sample["rhythm_pause_exec_tgt"],
-                speech_budget_tgt=sample["rhythm_speech_budget_tgt"],
-                pause_budget_tgt=sample["rhythm_pause_budget_tgt"],
+                speech_exec_tgt=sample[target_speech_key],
+                pause_exec_tgt=sample[target_pause_key],
+                speech_budget_tgt=sample[target_speech_budget_key],
+                pause_budget_tgt=sample[target_pause_budget_key],
                 unit_mask=unit_batch.unit_mask,
                 dur_anchor_src=unit_batch.dur_anchor_src,
                 plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
                 plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
-                sample_confidence=sample.get("rhythm_target_confidence"),
+                sample_confidence=sample_confidence,
                 guidance_speech_tgt=guidance_speech,
                 guidance_pause_tgt=guidance_pause,
                 guidance_confidence=sample.get("rhythm_guidance_confidence"),
@@ -497,6 +621,9 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_prefix_clock_tgt=distill_prefix_clock,
                 distill_prefix_backlog_tgt=distill_prefix_backlog,
                 distill_confidence=distill_confidence,
+                distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
+                distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
+                distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
             return None
@@ -518,6 +645,9 @@ class ConanTask(AuxDecoderMIDITask):
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
             sample_confidence=torch.ones((unit_mask.size(0), 1), device=unit_mask.device),
+            distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
+            distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
+            distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
         )
 
     def add_rhythm_loss(self, output, sample, losses):

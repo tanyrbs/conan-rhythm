@@ -14,6 +14,17 @@ class BlankSlotSchedule:
     slot_unit_index: torch.Tensor
 
 
+@dataclass
+class RenderedRhythmSequence:
+    frame_states: torch.Tensor
+    frame_tokens: torch.Tensor
+    speech_mask: torch.Tensor
+    blank_mask: torch.Tensor
+    total_mask: torch.Tensor
+    frame_slot_index: torch.Tensor
+    frame_unit_index: torch.Tensor
+
+
 def _pad_sequences(
     sequences: list[torch.Tensor],
     *,
@@ -73,7 +84,7 @@ def render_rhythm_sequence(
     silent_token: int,
     speech_state_fn: Callable[[torch.Tensor], torch.Tensor],
     pause_state: torch.Tensor,
-) -> dict[str, torch.Tensor]:
+) -> RenderedRhythmSequence:
     """Render unit-level rhythm decisions into frame-level decoder inputs.
 
     The renderer is deliberately kept simple:
@@ -93,10 +104,16 @@ def render_rhythm_sequence(
     unit_states = speech_state_fn(content_units.long())
     frame_state_list: list[torch.Tensor] = []
     frame_token_list: list[torch.Tensor] = []
+    frame_blank_list: list[torch.Tensor] = []
+    frame_slot_index_list: list[torch.Tensor] = []
+    frame_unit_index_list: list[torch.Tensor] = []
 
     for batch_idx in range(batch_size):
         states = []
         tokens = []
+        blank_mask = []
+        slot_indices = []
+        unit_indices = []
         num_slots = int(slot_mask[batch_idx].sum().item())
         for slot_idx in range(num_slots):
             duration = int(slot_duration_exec[batch_idx, slot_idx].item())
@@ -109,25 +126,43 @@ def render_rhythm_sequence(
                 pause_state_seq = pause_state.view(1, hidden_size).expand(duration, -1).to(device=device)
                 states.append(pause_state_seq)
                 tokens.append(torch.full((duration,), int(silent_token), dtype=torch.long, device=device))
+                blank_mask.append(torch.ones((duration,), dtype=torch.float32, device=device))
             else:
                 speech_state = unit_states[batch_idx, unit_idx].unsqueeze(0).expand(duration, -1)
                 states.append(speech_state)
                 tokens.append(torch.full((duration,), unit_id, dtype=torch.long, device=device))
+                blank_mask.append(torch.zeros((duration,), dtype=torch.float32, device=device))
+            slot_indices.append(torch.full((duration,), int(slot_idx), dtype=torch.long, device=device))
+            unit_indices.append(torch.full((duration,), int(unit_idx), dtype=torch.long, device=device))
         if len(states) <= 0:
             states = [pause_state.view(1, hidden_size).to(device=device)]
             tokens = [torch.full((1,), int(silent_token), dtype=torch.long, device=device)]
+            blank_mask = [torch.ones((1,), dtype=torch.float32, device=device)]
+            slot_indices = [torch.zeros((1,), dtype=torch.long, device=device)]
+            unit_indices = [torch.zeros((1,), dtype=torch.long, device=device)]
         frame_state_list.append(torch.cat(states, dim=0))
         frame_token_list.append(torch.cat(tokens, dim=0))
+        frame_blank_list.append(torch.cat(blank_mask, dim=0))
+        frame_slot_index_list.append(torch.cat(slot_indices, dim=0))
+        frame_unit_index_list.append(torch.cat(unit_indices, dim=0))
 
     frame_states = _pad_sequences(frame_state_list, pad_value=0.0)
     frame_tokens = _pad_sequences(frame_token_list, pad_value=int(silent_token), dtype=torch.long)
-    frame_mask = frame_tokens.ne(int(silent_token)).float()
-    total_mask = torch.zeros_like(frame_mask)
+    blank_mask = _pad_sequences(frame_blank_list, pad_value=0.0)
+    frame_slot_index = _pad_sequences(frame_slot_index_list, pad_value=-1, dtype=torch.long)
+    frame_unit_index = _pad_sequences(frame_unit_index_list, pad_value=-1, dtype=torch.long)
+    speech_mask = (1.0 - blank_mask).clamp(0.0, 1.0)
+    total_mask = torch.zeros_like(speech_mask)
     for batch_idx, seq in enumerate(frame_token_list):
         total_mask[batch_idx, : seq.size(0)] = 1.0
-    return {
-        "frame_states": frame_states,
-        "frame_tokens": frame_tokens,
-        "frame_mask": frame_mask,
-        "total_mask": total_mask,
-    }
+    blank_mask = blank_mask * total_mask
+    speech_mask = speech_mask * total_mask
+    return RenderedRhythmSequence(
+        frame_states=frame_states,
+        frame_tokens=frame_tokens,
+        speech_mask=speech_mask,
+        blank_mask=blank_mask,
+        total_mask=total_mask,
+        frame_slot_index=frame_slot_index,
+        frame_unit_index=frame_unit_index,
+    )

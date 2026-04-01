@@ -98,6 +98,8 @@ if __name__ == '__main__':
     )
     assert out1.slot_duration_exec.shape[1] == batch.content_units.shape[1] * 2
     assert out1.slot_is_blank[:, 1::2].sum().item() > 0
+    assert torch.equal(out1.blank_slot_duration_exec, out1.slot_duration_exec)
+    assert torch.equal(out1.blank_slot_is_blank, out1.slot_is_blank)
 
     guidance = build_reference_guided_targets(
         dur_anchor_src=batch.dur_anchor_src[0].cpu().numpy(),
@@ -173,6 +175,7 @@ if __name__ == '__main__':
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr']))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1']))
     print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean']))
+    assert "rhythm_blank_exec_tgt" in guidance and "rhythm_teacher_blank_exec_tgt" in teacher
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr']) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1']) < 1e-6

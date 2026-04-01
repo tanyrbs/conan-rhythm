@@ -100,6 +100,10 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else execution.speech_duration_exec,
         unit_mask=unit_mask,
     )
+    prefix_budget = torch.cumsum(
+        (unit_batch.dur_anchor_src if unit_batch is not None else execution.speech_duration_exec).float() * unit_mask,
+        dim=1,
+    ).clamp_min(1.0)
     final_indices = (visible_units.long() - 1).clamp_min(0).unsqueeze(1)
     final_prefix_clock = pred_prefix_clock.gather(1, final_indices).squeeze(1)
 
@@ -121,6 +125,11 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_prefix_backlog_max": pred_prefix_backlog.max(),
         "rhythm_metric_deadline_final_abs_mean": _safe_mean(final_prefix_clock.abs()),
     }
+    render_blank_mask = output.get("rhythm_blank_mask")
+    if render_blank_mask is not None:
+        render_total_mask = output.get("rhythm_total_mask")
+        denom = render_total_mask.float().sum().clamp_min(1.0) if render_total_mask is not None else float(render_blank_mask.numel())
+        metrics["rhythm_metric_render_blank_ratio"] = render_blank_mask.float().sum() / denom
     metrics["rhythm_metric_local_rate_transfer_corr"] = _masked_corr(
         execution.speech_duration_exec.float(),
         planner.trace_context[:, :, 1].float(),
@@ -237,13 +246,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         metrics["rhythm_metric_retimed_weight_mean"] = _safe_mean(acoustic_target_weight.float())
 
     if sample is not None:
+        pause_target_key = "rhythm_blank_exec_tgt" if "rhythm_blank_exec_tgt" in sample else "rhythm_pause_exec_tgt"
+        pause_budget_key = "rhythm_blank_budget_tgt" if "rhythm_blank_budget_tgt" in sample else "rhythm_pause_budget_tgt"
+        teacher_pause_key = (
+            "rhythm_teacher_blank_exec_tgt"
+            if "rhythm_teacher_blank_exec_tgt" in sample
+            else "rhythm_teacher_pause_exec_tgt"
+        )
         if "rhythm_speech_budget_tgt" in sample:
             metrics["rhythm_metric_budget_speech_l1"] = (
                 planner.speech_budget_win.float() - sample["rhythm_speech_budget_tgt"].float()
             ).abs().mean()
-        if "rhythm_pause_budget_tgt" in sample:
+        if pause_budget_key in sample:
             metrics["rhythm_metric_budget_pause_l1"] = (
-                planner.pause_budget_win.float() - sample["rhythm_pause_budget_tgt"].float()
+                planner.pause_budget_win.float() - sample[pause_budget_key].float()
             ).abs().mean()
         if "rhythm_speech_exec_tgt" in sample:
             metrics["rhythm_metric_exec_speech_l1"] = _masked_l1(
@@ -251,28 +267,28 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_speech_exec_tgt"],
                 unit_mask,
             )
-        if "rhythm_pause_exec_tgt" in sample:
+        if pause_target_key in sample:
             metrics["rhythm_metric_exec_pause_l1"] = _masked_l1(
                 blank_exec,
-                sample["rhythm_pause_exec_tgt"],
+                sample[pause_target_key],
                 unit_mask,
             )
             pause_p, pause_r, pause_f1 = _masked_event_f1(
                 blank_exec,
-                sample["rhythm_pause_exec_tgt"],
+                sample[pause_target_key],
                 unit_mask,
             )
             metrics["rhythm_metric_pause_event_precision"] = pause_p
             metrics["rhythm_metric_pause_event_recall"] = pause_r
             metrics["rhythm_metric_pause_event_f1"] = pause_f1
-        if "rhythm_speech_exec_tgt" in sample and "rhythm_pause_exec_tgt" in sample:
+        if "rhythm_speech_exec_tgt" in sample and pause_target_key in sample:
             metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
                 execution.speech_duration_exec + blank_exec,
-                sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"],
+                sample["rhythm_speech_exec_tgt"] + sample[pause_target_key],
                 unit_mask,
             )
             pred_prefix = torch.cumsum((execution.speech_duration_exec + blank_exec) * unit_mask, dim=1)
-            tgt_prefix = torch.cumsum((sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"]).float() * unit_mask, dim=1)
+            tgt_prefix = torch.cumsum((sample["rhythm_speech_exec_tgt"] + sample[pause_target_key]).float() * unit_mask, dim=1)
             metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
         if "rhythm_teacher_speech_exec_tgt" in sample:
             metrics["rhythm_metric_distill_speech_l1"] = _masked_l1(
@@ -280,24 +296,24 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_teacher_speech_exec_tgt"],
                 unit_mask,
             )
-        if "rhythm_teacher_pause_exec_tgt" in sample:
+        if teacher_pause_key in sample:
             metrics["rhythm_metric_distill_pause_l1"] = _masked_l1(
                 blank_exec,
-                sample["rhythm_teacher_pause_exec_tgt"],
+                sample[teacher_pause_key],
                 unit_mask,
             )
             pause_p, pause_r, pause_f1 = _masked_event_f1(
                 blank_exec,
-                sample["rhythm_teacher_pause_exec_tgt"],
+                sample[teacher_pause_key],
                 unit_mask,
             )
             metrics["rhythm_metric_distill_pause_event_precision"] = pause_p
             metrics["rhythm_metric_distill_pause_event_recall"] = pause_r
             metrics["rhythm_metric_distill_pause_event_f1"] = pause_f1
-        if "rhythm_teacher_speech_exec_tgt" in sample and "rhythm_teacher_pause_exec_tgt" in sample:
+        if "rhythm_teacher_speech_exec_tgt" in sample and teacher_pause_key in sample:
             metrics["rhythm_metric_distill_total_corr"] = _masked_corr(
                 execution.speech_duration_exec + blank_exec,
-                sample["rhythm_teacher_speech_exec_tgt"] + sample["rhythm_teacher_pause_exec_tgt"],
+                sample["rhythm_teacher_speech_exec_tgt"] + sample[teacher_pause_key],
                 unit_mask,
             )
         if "rhythm_teacher_allocation_tgt" in sample:
@@ -312,10 +328,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_teacher_prefix_clock_tgt"],
                 unit_mask,
             )
+            metrics["rhythm_metric_distill_prefix_clock_norm_l1"] = _masked_l1(
+                pred_prefix_clock / prefix_budget,
+                sample["rhythm_teacher_prefix_clock_tgt"].float() / prefix_budget,
+                unit_mask,
+            )
         if "rhythm_teacher_prefix_backlog_tgt" in sample:
             metrics["rhythm_metric_distill_prefix_backlog_l1"] = _masked_l1(
                 pred_prefix_backlog,
                 sample["rhythm_teacher_prefix_backlog_tgt"],
+                unit_mask,
+            )
+            metrics["rhythm_metric_distill_prefix_backlog_norm_l1"] = _masked_l1(
+                pred_prefix_backlog / prefix_budget,
+                sample["rhythm_teacher_prefix_backlog_tgt"].float() / prefix_budget,
                 unit_mask,
             )
         if "rhythm_target_confidence" in sample:

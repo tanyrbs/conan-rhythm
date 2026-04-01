@@ -21,6 +21,14 @@ RHYTHM_TEACHER_SURFACE_NAME = "offline_teacher_surface_v1"
 RHYTHM_RETIMED_SOURCE_GUIDANCE = 0
 RHYTHM_RETIMED_SOURCE_TEACHER = 1
 
+_BLANK_ALIAS_KEYS = {
+    "rhythm_pause_exec_tgt": "rhythm_blank_exec_tgt",
+    "rhythm_pause_budget_tgt": "rhythm_blank_budget_tgt",
+    "rhythm_guidance_pause_tgt": "rhythm_guidance_blank_tgt",
+    "rhythm_teacher_pause_exec_tgt": "rhythm_teacher_blank_exec_tgt",
+    "rhythm_teacher_pause_budget_tgt": "rhythm_teacher_blank_budget_tgt",
+}
+
 
 def _as_token_list(content_tokens) -> list[int]:
     if isinstance(content_tokens, str):
@@ -304,6 +312,16 @@ def _sparsify_scores(scores: torch.Tensor, mask: torch.Tensor, *, topk_ratio: fl
     return sparse * mask
 
 
+def with_blank_aliases(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    out = dict(bundle)
+    for pause_key, blank_key in _BLANK_ALIAS_KEYS.items():
+        if pause_key in out and blank_key not in out:
+            out[blank_key] = np.asarray(out[pause_key]).copy()
+        if blank_key in out and pause_key not in out:
+            out[pause_key] = np.asarray(out[blank_key]).copy()
+    return out
+
+
 def _resample_segment(segment: torch.Tensor, target_len: int) -> torch.Tensor:
     if target_len <= 0:
         return segment.new_zeros((0, segment.size(-1)))
@@ -439,14 +457,14 @@ def build_reference_guided_targets(
     if unit_count <= 0:
         zero_units = dur_anchor_src.new_zeros(dur_anchor_src.shape)
         zero_budget = dur_anchor_src.new_zeros((1,))
-        return {
+        return with_blank_aliases({
             "rhythm_speech_exec_tgt": zero_units.cpu().numpy().astype(np.float32),
             "rhythm_pause_exec_tgt": zero_units.cpu().numpy().astype(np.float32),
             "rhythm_speech_budget_tgt": zero_budget.cpu().numpy().astype(np.float32),
             "rhythm_pause_budget_tgt": zero_budget.cpu().numpy().astype(np.float32),
             "rhythm_guidance_speech_tgt": zero_units.cpu().numpy().astype(np.float32),
             "rhythm_guidance_pause_tgt": zero_units.cpu().numpy().astype(np.float32),
-        }
+        })
 
     trace_context = sample_progress_trace(
         ref_rhythm_trace.unsqueeze(0),
@@ -490,7 +508,7 @@ def build_reference_guided_targets(
         smoother_bonus=0.0,
     )
 
-    return {
+    return with_blank_aliases({
         "rhythm_speech_exec_tgt": speech_exec.cpu().numpy().astype(np.float32),
         "rhythm_pause_exec_tgt": pause_exec.cpu().numpy().astype(np.float32),
         "rhythm_speech_budget_tgt": speech_budget.view(1).cpu().numpy().astype(np.float32),
@@ -499,7 +517,7 @@ def build_reference_guided_targets(
         "rhythm_guidance_pause_tgt": pause_exec.cpu().numpy().astype(np.float32),
         "rhythm_target_confidence": np.asarray([guidance_confidence], dtype=np.float32),
         "rhythm_guidance_confidence": np.asarray([guidance_confidence], dtype=np.float32),
-    }
+    })
 
 
 def build_reference_teacher_targets(
@@ -549,7 +567,7 @@ def build_reference_teacher_targets(
         ),
     )
 
-    return {
+    return with_blank_aliases({
         "rhythm_teacher_speech_exec_tgt": teacher.speech_exec_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_pause_exec_tgt": teacher.pause_exec_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_speech_budget_tgt": teacher.speech_budget_tgt[0].cpu().numpy().astype(np.float32),
@@ -558,7 +576,7 @@ def build_reference_teacher_targets(
         "rhythm_teacher_prefix_clock_tgt": teacher.prefix_clock_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_prefix_backlog_tgt": teacher.prefix_backlog_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_confidence": teacher.confidence[0].cpu().numpy().astype(np.float32),
-    }
+    })
 
 
 def build_item_rhythm_bundle(
@@ -607,7 +625,7 @@ def build_item_rhythm_bundle(
             ref_rhythm_trace=conditioning["ref_rhythm_trace"],
         )
     if include_self_targets and guided is not None:
-        bundle.update(guided)
+        bundle.update(with_blank_aliases(guided))
     if include_teacher_targets:
         teacher_kwargs = dict(teacher_kwargs or {})
         bundle.update(
@@ -667,4 +685,4 @@ def build_item_rhythm_bundle(
             teacher_confidence=teacher_confidence,
         )
     )
-    return bundle
+    return with_blank_aliases(bundle)

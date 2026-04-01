@@ -8,10 +8,12 @@ rhythm_optimize_module_only: true
 rhythm_optimize_pause_state: false
 
 # Formal schedule warm-start should already rely on cached offline teacher surfaces.
+rhythm_primary_target_surface: teacher
+rhythm_distill_surface: none
 rhythm_enable_algorithmic_teacher: false
 rhythm_enable_dual_mode_teacher: false
 rhythm_require_cached_teacher: true
-lambda_rhythm_distill: 0.25
+lambda_rhythm_distill: 0.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_plan: 0.0
 lambda_mel_adv: 0.0

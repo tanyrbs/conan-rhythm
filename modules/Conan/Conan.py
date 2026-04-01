@@ -189,6 +189,8 @@ class Conan(FastSpeech):
             ).transpose(1, 2)
 
         if self.rhythm_enable_v2 and ref is not None:
+            rhythm_source_cache = kwargs.get("rhythm_source_cache")
+            rhythm_offline_source_cache = kwargs.get("rhythm_offline_source_cache")
             rhythm_bundle = run_rhythm_frontend(
                 rhythm_enable_v2=self.rhythm_enable_v2,
                 rhythm_unit_frontend=self.rhythm_unit_frontend,
@@ -199,6 +201,8 @@ class Conan(FastSpeech):
                 content_lengths=content_lengths,
                 rhythm_state=rhythm_state,
                 rhythm_ref_conditioning=rhythm_ref_conditioning,
+                rhythm_source_cache=rhythm_source_cache,
+                rhythm_offline_source_cache=rhythm_offline_source_cache,
                 enable_dual_mode_teacher=bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)),
                 enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
             )

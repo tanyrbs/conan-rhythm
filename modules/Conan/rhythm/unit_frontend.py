@@ -161,7 +161,9 @@ class RhythmUnitFrontend:
         dur_anchor_src: torch.Tensor,
         unit_mask: torch.Tensor | None = None,
         open_run_mask: torch.Tensor | None = None,
+        sealed_mask: torch.Tensor | None = None,
         sep_hint: torch.Tensor | None = None,
+        boundary_confidence: torch.Tensor | None = None,
     ) -> RhythmUnitBatch:
         content_units = content_units.long()
         dur_anchor_src = dur_anchor_src.long()
@@ -173,8 +175,14 @@ class RhythmUnitFrontend:
             open_run_mask = torch.zeros_like(content_units)
         if sep_hint is None:
             sep_hint = torch.zeros_like(content_units)
-        sealed_mask = (1 - open_run_mask.long()).clamp_min(0).float() * unit_mask.float()
-        boundary_confidence = sep_hint.float() * unit_mask.float()
+        if sealed_mask is None:
+            sealed_mask = (1 - open_run_mask.long()).clamp_min(0).float() * unit_mask.float()
+        else:
+            sealed_mask = sealed_mask.float() * unit_mask.float()
+        if boundary_confidence is None:
+            boundary_confidence = sep_hint.float() * unit_mask.float()
+        else:
+            boundary_confidence = boundary_confidence.float() * unit_mask.float()
         return RhythmUnitBatch(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,

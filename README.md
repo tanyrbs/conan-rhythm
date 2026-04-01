@@ -40,10 +40,12 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`
 > - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
 > - explicit blank-slot scheduling is now public: projector / renderer / loss all use the same interleaved blank-slot graph
+> - renderer now also exports frame-level blank masks plus slot/unit indices for debugging and retimed training hooks
 > - reference cache now also carries slow-rhythm memory cells, selector spans, and source-side phrase-group metadata
 > - dataset / loss path already reserves guidance and distillation fields
 > - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
 > - cached teacher surfaces now also carry allocation + prefix carry targets
+> - cache/runtime targets now expose `rhythm_blank_*` aliases in addition to legacy `rhythm_pause_*` keys
 > - an optional `rhythm_plan` proxy remains available for ablations, but the mainline now keeps it disabled by default
 > - a dual-mode teacher/student skeleton is now wired: streaming execution + offline full-horizon execution + algorithmic teacher targets
 > - formal schedule-only warm-start now defaults to cached-only + cached teacher surfaces

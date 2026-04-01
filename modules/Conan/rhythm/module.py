@@ -250,6 +250,13 @@ class StreamingRhythmModule(nn.Module):
         sep_hint: torch.Tensor | None = None,
         boundary_confidence: torch.Tensor | None = None,
         state: StreamingRhythmState | None = None,
+        offline_content_units: torch.Tensor | None = None,
+        offline_dur_anchor_src: torch.Tensor | None = None,
+        offline_unit_mask: torch.Tensor | None = None,
+        offline_open_run_mask: torch.Tensor | None = None,
+        offline_sealed_mask: torch.Tensor | None = None,
+        offline_sep_hint: torch.Tensor | None = None,
+        offline_boundary_confidence: torch.Tensor | None = None,
     ) -> dict[str, object]:
         streaming_execution = self.forward(
             content_units=content_units,
@@ -265,35 +272,46 @@ class StreamingRhythmModule(nn.Module):
             boundary_confidence=boundary_confidence,
             state=state,
         )
+        offline_content_units = content_units if offline_content_units is None else offline_content_units
+        offline_dur_anchor_src = dur_anchor_src if offline_dur_anchor_src is None else offline_dur_anchor_src
+        offline_unit_mask = unit_mask if offline_unit_mask is None else offline_unit_mask
+        offline_sep_hint = sep_hint if offline_sep_hint is None else offline_sep_hint
+        offline_boundary_confidence = boundary_confidence if offline_boundary_confidence is None else offline_boundary_confidence
+        if offline_open_run_mask is None:
+            offline_open_run_mask = torch.zeros_like(offline_content_units)
+        if offline_sealed_mask is None:
+            if offline_unit_mask is None:
+                offline_unit_mask = offline_dur_anchor_src.gt(0).float()
+            offline_sealed_mask = torch.ones_like(offline_unit_mask).float()
         offline_execution = self.forward(
-            content_units=content_units,
-            dur_anchor_src=dur_anchor_src,
+            content_units=offline_content_units,
+            dur_anchor_src=offline_dur_anchor_src,
             ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
-            unit_mask=unit_mask,
-            open_run_mask=torch.zeros_like(open_run_mask) if open_run_mask is not None else None,
-            sealed_mask=torch.ones_like(unit_mask).float() if unit_mask is not None else None,
-            sep_hint=sep_hint,
-            boundary_confidence=boundary_confidence,
-            state=self.init_state(batch_size=content_units.size(0), device=content_units.device),
+            unit_mask=offline_unit_mask,
+            open_run_mask=torch.zeros_like(offline_open_run_mask),
+            sealed_mask=torch.ones_like(offline_sealed_mask).float(),
+            sep_hint=offline_sep_hint,
+            boundary_confidence=offline_boundary_confidence,
+            state=self.init_state(batch_size=offline_content_units.size(0), device=offline_content_units.device),
             trace_horizon=1.0,
             projector_reuse_prefix=False,
             projector_force_full_commit=True,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
-            content_units=content_units,
-            dur_anchor_src=dur_anchor_src,
+            content_units=offline_content_units,
+            dur_anchor_src=offline_dur_anchor_src,
             ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
-            unit_mask=unit_mask,
-            open_run_mask=open_run_mask,
-            sealed_mask=sealed_mask,
-            sep_hint=sep_hint,
-            boundary_confidence=boundary_confidence,
+            unit_mask=offline_unit_mask,
+            open_run_mask=torch.zeros_like(offline_open_run_mask),
+            sealed_mask=torch.ones_like(offline_sealed_mask).float(),
+            sep_hint=offline_sep_hint,
+            boundary_confidence=offline_boundary_confidence,
         )
         return {
             "streaming_execution": streaming_execution,

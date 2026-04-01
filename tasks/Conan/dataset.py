@@ -17,6 +17,7 @@ from modules.Conan.rhythm.supervision import (
     build_reference_teacher_targets,
     build_retimed_mel_target,
     build_source_rhythm_cache,
+    with_blank_aliases,
 )
 
 class ConanDataset(FastSpeechDataset):
@@ -45,14 +46,19 @@ class ConanDataset(FastSpeechDataset):
     _RHYTHM_TARGET_KEYS = (
         "rhythm_speech_exec_tgt",
         "rhythm_pause_exec_tgt",
+        "rhythm_blank_exec_tgt",
         "rhythm_speech_budget_tgt",
         "rhythm_pause_budget_tgt",
+        "rhythm_blank_budget_tgt",
         "rhythm_guidance_speech_tgt",
         "rhythm_guidance_pause_tgt",
+        "rhythm_guidance_blank_tgt",
         "rhythm_teacher_speech_exec_tgt",
         "rhythm_teacher_pause_exec_tgt",
+        "rhythm_teacher_blank_exec_tgt",
         "rhythm_teacher_speech_budget_tgt",
         "rhythm_teacher_pause_budget_tgt",
+        "rhythm_teacher_blank_budget_tgt",
         "rhythm_teacher_allocation_tgt",
         "rhythm_teacher_prefix_clock_tgt",
         "rhythm_teacher_prefix_backlog_tgt",
@@ -73,6 +79,40 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_retimed_target_source_id",
         "rhythm_retimed_target_confidence",
     )
+
+    def _resolve_primary_target_surface(self) -> str:
+        surface = str(self.hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
+        aliases = {
+            "cache_teacher": "teacher",
+            "offline": "teacher",
+            "offline_teacher": "teacher",
+            "teacher_surface": "teacher",
+            "guidance_surface": "guidance",
+            "self": "guidance",
+        }
+        resolved = aliases.get(surface, surface)
+        if resolved not in {"guidance", "teacher"}:
+            raise ValueError(f"Unsupported rhythm_primary_target_surface: {surface}")
+        return resolved
+
+    def _resolve_distill_surface(self) -> str:
+        surface = str(self.hparams.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
+        aliases = {
+            "off": "none",
+            "disable": "none",
+            "disabled": "none",
+            "false": "none",
+            "cache_teacher": "cache",
+            "cached_teacher": "cache",
+            "full_context": "offline",
+            "shared_offline": "offline",
+            "algo": "algorithmic",
+            "teacher": "cache",
+        }
+        resolved = aliases.get(surface, surface)
+        if resolved not in {"auto", "none", "cache", "offline", "algorithmic"}:
+            raise ValueError(f"Unsupported rhythm_distill_surface: {surface}")
+        return resolved
 
     def _resolve_rhythm_target_mode(self) -> str:
         mode = str(self.hparams.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
@@ -163,11 +203,9 @@ class ConanDataset(FastSpeechDataset):
             )
 
     def _required_cached_target_keys(self):
+        primary_surface = self._resolve_primary_target_surface()
+        distill_surface = self._resolve_distill_surface()
         keys = [
-            "rhythm_speech_exec_tgt",
-            "rhythm_pause_exec_tgt",
-            "rhythm_speech_budget_tgt",
-            "rhythm_pause_budget_tgt",
             "rhythm_cache_version",
             "rhythm_unit_hop_ms",
             "rhythm_trace_hop_ms",
@@ -177,18 +215,30 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_selector_cell_size",
             "rhythm_source_phrase_threshold",
             "rhythm_reference_mode_id",
-            "rhythm_target_confidence",
-            "rhythm_guidance_confidence",
             "rhythm_guidance_surface_name",
         ]
+        need_guidance = primary_surface == "guidance" or float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0
+        if need_guidance:
+            keys.extend([
+                "rhythm_speech_exec_tgt",
+                "rhythm_pause_exec_tgt",
+                "rhythm_speech_budget_tgt",
+                "rhythm_pause_budget_tgt",
+                "rhythm_target_confidence",
+                "rhythm_guidance_confidence",
+            ])
         if float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0:
             keys.extend([
                 "rhythm_guidance_speech_tgt",
                 "rhythm_guidance_pause_tgt",
             ])
         need_teacher = (
-            float(self.hparams.get("lambda_rhythm_distill", 0.0)) > 0
+            primary_surface == "teacher"
             or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or (
+                float(self.hparams.get("lambda_rhythm_distill", 0.0)) > 0
+                and distill_surface == "cache"
+            )
             or (
                 bool(self.hparams.get("rhythm_use_retimed_target_if_available", False))
                 and str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance")).strip().lower() == "teacher"
@@ -307,10 +357,13 @@ class ConanDataset(FastSpeechDataset):
         unit_keys = [
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
+            "rhythm_blank_exec_tgt",
             "rhythm_guidance_speech_tgt",
             "rhythm_guidance_pause_tgt",
+            "rhythm_guidance_blank_tgt",
             "rhythm_teacher_speech_exec_tgt",
             "rhythm_teacher_pause_exec_tgt",
+            "rhythm_teacher_blank_exec_tgt",
             "rhythm_teacher_allocation_tgt",
             "rhythm_teacher_prefix_clock_tgt",
             "rhythm_teacher_prefix_backlog_tgt",
@@ -371,15 +424,18 @@ class ConanDataset(FastSpeechDataset):
         visible_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
         full_units = int(np.asarray(item["dur_anchor_src"]).reshape(-1).shape[0]) if "dur_anchor_src" in item else visible_units
         if visible_units >= full_units:
-            return dict(cached_targets)
-        adapted = dict(cached_targets)
+            return with_blank_aliases(dict(cached_targets))
+        adapted = with_blank_aliases(dict(cached_targets))
         unit_keys = [
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
+            "rhythm_blank_exec_tgt",
             "rhythm_guidance_speech_tgt",
             "rhythm_guidance_pause_tgt",
+            "rhythm_guidance_blank_tgt",
             "rhythm_teacher_speech_exec_tgt",
             "rhythm_teacher_pause_exec_tgt",
+            "rhythm_teacher_blank_exec_tgt",
             "rhythm_teacher_allocation_tgt",
             "rhythm_teacher_prefix_clock_tgt",
             "rhythm_teacher_prefix_backlog_tgt",
@@ -399,6 +455,7 @@ class ConanDataset(FastSpeechDataset):
             adapted["rhythm_pause_budget_tgt"] = np.asarray(
                 [float(np.asarray(adapted["rhythm_pause_exec_tgt"]).sum())], dtype=np.float32
             )
+            adapted["rhythm_blank_budget_tgt"] = adapted["rhythm_pause_budget_tgt"].copy()
         if "rhythm_teacher_speech_exec_tgt" in adapted:
             adapted["rhythm_teacher_speech_budget_tgt"] = np.asarray(
                 [float(np.asarray(adapted["rhythm_teacher_speech_exec_tgt"]).sum())], dtype=np.float32
@@ -407,6 +464,7 @@ class ConanDataset(FastSpeechDataset):
             adapted["rhythm_teacher_pause_budget_tgt"] = np.asarray(
                 [float(np.asarray(adapted["rhythm_teacher_pause_exec_tgt"]).sum())], dtype=np.float32
             )
+            adapted["rhythm_teacher_blank_budget_tgt"] = adapted["rhythm_teacher_pause_budget_tgt"].copy()
         if "rhythm_retimed_mel_tgt" in adapted:
             source_id = int(np.asarray(adapted.get("rhythm_retimed_target_source_id", [RHYTHM_RETIMED_SOURCE_GUIDANCE])).reshape(-1)[0])
             if source_id == RHYTHM_RETIMED_SOURCE_TEACHER and "rhythm_teacher_speech_exec_tgt" in adapted:
@@ -426,7 +484,7 @@ class ConanDataset(FastSpeechDataset):
                     stretch_weight_min=float(self.hparams.get("rhythm_retimed_stretch_weight_min", 0.35)),
                 )
             )
-        return adapted
+        return with_blank_aliases(adapted)
 
     def _get_source_rhythm_cache(self, item, visible_tokens, *, target_mode: str):
         cache_keys = self._RHYTHM_SOURCE_CACHE_KEYS
@@ -536,9 +594,21 @@ class ConanDataset(FastSpeechDataset):
             pause_topk_ratio=float(self.hparams.get("rhythm_teacher_pause_topk_ratio", 0.30)),
         )
         targets = {}
-        if self.hparams.get("rhythm_dataset_build_guidance_from_ref", True):
+        primary_surface = self._resolve_primary_target_surface()
+        distill_surface = self._resolve_distill_surface()
+        need_guidance = primary_surface == "guidance" or float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0
+        need_teacher = (
+            primary_surface == "teacher"
+            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or (float(self.hparams.get("lambda_rhythm_distill", 0.0)) > 0 and distill_surface == "algorithmic")
+            or (
+                bool(self.hparams.get("rhythm_use_retimed_target_if_available", False))
+                and str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance")).strip().lower() == "teacher"
+            )
+        )
+        if self.hparams.get("rhythm_dataset_build_guidance_from_ref", True) or need_guidance:
             targets.update(build_reference_guided_targets(**shared_kwargs))
-        if self.hparams.get("rhythm_dataset_build_teacher_from_ref", False):
+        if self.hparams.get("rhythm_dataset_build_teacher_from_ref", False) or need_teacher:
             targets.update(build_reference_teacher_targets(**teacher_kwargs))
         return targets
 
@@ -655,14 +725,19 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_retimed_target_confidence",
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
+            "rhythm_blank_exec_tgt",
             "rhythm_speech_budget_tgt",
             "rhythm_pause_budget_tgt",
+            "rhythm_blank_budget_tgt",
             "rhythm_guidance_speech_tgt",
             "rhythm_guidance_pause_tgt",
+            "rhythm_guidance_blank_tgt",
             "rhythm_teacher_speech_exec_tgt",
             "rhythm_teacher_pause_exec_tgt",
+            "rhythm_teacher_blank_exec_tgt",
             "rhythm_teacher_speech_budget_tgt",
             "rhythm_teacher_pause_budget_tgt",
+            "rhythm_teacher_blank_budget_tgt",
             "rhythm_teacher_allocation_tgt",
             "rhythm_teacher_prefix_clock_tgt",
             "rhythm_teacher_prefix_backlog_tgt",
@@ -805,14 +880,19 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_retimed_target_confidence": ("float", 0.0),
             "rhythm_speech_exec_tgt": ("float", 0.0),
             "rhythm_pause_exec_tgt": ("float", 0.0),
+            "rhythm_blank_exec_tgt": ("float", 0.0),
             "rhythm_speech_budget_tgt": ("float", 0.0),
             "rhythm_pause_budget_tgt": ("float", 0.0),
+            "rhythm_blank_budget_tgt": ("float", 0.0),
             "rhythm_guidance_speech_tgt": ("float", 0.0),
             "rhythm_guidance_pause_tgt": ("float", 0.0),
+            "rhythm_guidance_blank_tgt": ("float", 0.0),
             "rhythm_teacher_speech_exec_tgt": ("float", 0.0),
             "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
+            "rhythm_teacher_blank_exec_tgt": ("float", 0.0),
             "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
             "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
+            "rhythm_teacher_blank_budget_tgt": ("float", 0.0),
             "rhythm_teacher_allocation_tgt": ("float", 0.0),
             "rhythm_teacher_prefix_clock_tgt": ("float", 0.0),
             "rhythm_teacher_prefix_backlog_tgt": ("float", 0.0),

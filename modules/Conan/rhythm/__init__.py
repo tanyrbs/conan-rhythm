@@ -21,7 +21,12 @@ from .reference_encoder import (
     ReferenceRhythmEncoder,
 )
 from .reference_selector import ReferenceSelection, ReferenceSelector
-from .renderer import BlankSlotSchedule, build_interleaved_blank_slot_schedule, render_rhythm_sequence
+from .renderer import (
+    BlankSlotSchedule,
+    RenderedRhythmSequence,
+    build_interleaved_blank_slot_schedule,
+    render_rhythm_sequence,
+)
 from .scheduler import MonotonicRhythmScheduler
 from .source_boundary import build_source_boundary_cue
 from .supervision import (
@@ -91,6 +96,7 @@ __all__ = [
     'AlgorithmicRhythmTeacher',
     'AlgorithmicTeacherConfig',
     'BlankSlotSchedule',
+    'RenderedRhythmSequence',
     'CompressedUnitSequence',
     'RhythmExecution',
     'RhythmPlannerOutputs',
