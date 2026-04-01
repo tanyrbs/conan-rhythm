@@ -1,0 +1,29 @@
+base_config: egs/conan_emformer_rhythm_v2.yaml
+
+# Minimal Strong-Rhythm V1:
+# canonical formal base for all maintained training stages.
+# Keep the runtime path narrow and cache-first before any stage-specific override.
+rhythm_dataset_target_mode: cached_only
+rhythm_cached_reference_policy: self
+
+# Formal path should learn against cached teacher timing surfaces, not runtime heuristics.
+rhythm_primary_target_surface: teacher
+rhythm_distill_surface: none
+rhythm_require_cached_teacher: true
+
+# Keep preprocessing/cache generation teacher-ready, but do not rebuild guidance/teacher targets at runtime.
+rhythm_binarize_teacher_targets: true
+rhythm_dataset_build_guidance_from_ref: false
+rhythm_dataset_build_teacher_from_ref: false
+
+# Main maintained timing objective stays minimal.
+lambda_rhythm_exec_speech: 1.0
+lambda_rhythm_exec_pause: 1.0
+lambda_rhythm_budget: 0.15
+lambda_rhythm_cumplan: 0.15
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_plan: 0.0
+lambda_rhythm_distill: 0.0
+rhythm_distill_budget_weight: 0.0
+rhythm_distill_allocation_weight: 0.0
+rhythm_distill_prefix_weight: 0.25

@@ -45,12 +45,23 @@ It is built cheaply from source-side separator evidence and source duration shap
 3. `ref_rhythm_stats`
 4. `ref_rhythm_trace`
 
-### Outputs (4)
+### Planner-facing tensors (internal/public-debug, not the final binding contract)
 
 1. `speech_budget_win`
 2. `pause_budget_win`
 3. `dur_logratio_unit`
 4. `pause_weight_unit`
+
+These four tensors are still useful for debugging and regression,
+but they should now be treated as **planner surfaces**, not as the main
+public execution contract.
+
+### Binding execution contract (projector-owned)
+
+1. `speech_exec`
+2. `blank_exec` / `pause_exec`
+3. `commit_frontier`
+4. `next_state`
 
 ### Losses (mainline + staged)
 
@@ -123,6 +134,12 @@ content/unit states + source anchor + explicit ref rhythm + streaming state
 
 This is more appropriate for a strong-rhythm system than exposing many loosely coupled heads at the public surface.
 
+Important contract note:
+
+- scheduler tensors are useful to inspect and lightly regularize
+- but the **maintained binding contract** should live one step later, at projector execution
+- in other words: the planner may expose budgets and redistribution logits, but the system should report and compare `speech_exec / blank_exec / commit_frontier / next_state` as the real outcome
+
 Important implementation note:
 
 - `source_boundary_cue` is a **soft source-side prior**
@@ -147,6 +164,15 @@ Current implemented properties:
 
 This means the system is no longer treating the planner output as already-executed timing.
 The projector is the place where timing becomes binding.
+
+Recommended maintained output semantics:
+
+- `speech_exec`
+- `blank_exec` / `pause_exec`
+- `commit_frontier`
+- `next_state`
+
+The older scheduler-level tensors should remain available for debug/regression, but they should not be described as the final external timing contract.
 
 ---
 

@@ -64,6 +64,13 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_teacher_prefix_clock_tgt",
         "rhythm_teacher_prefix_backlog_tgt",
     )
+    _RHYTHM_BLANK_COMPAT_TARGET_KEYS = (
+        "rhythm_blank_exec_tgt",
+        "rhythm_blank_budget_tgt",
+        "rhythm_guidance_blank_tgt",
+        "rhythm_teacher_blank_exec_tgt",
+        "rhythm_teacher_blank_budget_tgt",
+    )
     _RHYTHM_META_KEYS = (
         "rhythm_cache_version",
         "rhythm_unit_hop_ms",
@@ -120,7 +127,22 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_stream_visible_units",
         "rhythm_stream_full_units",
     )
-    _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS = _RHYTHM_TARGET_KEYS + (
+    # Public/runtime batch contract prefers pause-* naming. Keep blank-* only as
+    # cache/backward-compat aliases inside cached target validation / adaptation.
+    _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS = (
+        "rhythm_speech_exec_tgt",
+        "rhythm_pause_exec_tgt",
+        "rhythm_speech_budget_tgt",
+        "rhythm_pause_budget_tgt",
+        "rhythm_guidance_speech_tgt",
+        "rhythm_guidance_pause_tgt",
+        "rhythm_teacher_speech_exec_tgt",
+        "rhythm_teacher_pause_exec_tgt",
+        "rhythm_teacher_speech_budget_tgt",
+        "rhythm_teacher_pause_budget_tgt",
+        "rhythm_teacher_allocation_tgt",
+        "rhythm_teacher_prefix_clock_tgt",
+        "rhythm_teacher_prefix_backlog_tgt",
         "rhythm_retimed_mel_tgt",
         "rhythm_retimed_mel_len",
         "rhythm_retimed_frame_weight",
@@ -962,19 +984,14 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_retimed_target_confidence": ("float", 0.0),
             "rhythm_speech_exec_tgt": ("float", 0.0),
             "rhythm_pause_exec_tgt": ("float", 0.0),
-            "rhythm_blank_exec_tgt": ("float", 0.0),
             "rhythm_speech_budget_tgt": ("float", 0.0),
             "rhythm_pause_budget_tgt": ("float", 0.0),
-            "rhythm_blank_budget_tgt": ("float", 0.0),
             "rhythm_guidance_speech_tgt": ("float", 0.0),
             "rhythm_guidance_pause_tgt": ("float", 0.0),
-            "rhythm_guidance_blank_tgt": ("float", 0.0),
             "rhythm_teacher_speech_exec_tgt": ("float", 0.0),
             "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
-            "rhythm_teacher_blank_exec_tgt": ("float", 0.0),
             "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
             "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
-            "rhythm_teacher_blank_budget_tgt": ("float", 0.0),
             "rhythm_teacher_allocation_tgt": ("float", 0.0),
             "rhythm_teacher_prefix_clock_tgt": ("float", 0.0),
             "rhythm_teacher_prefix_backlog_tgt": ("float", 0.0),

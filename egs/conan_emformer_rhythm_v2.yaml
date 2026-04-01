@@ -53,7 +53,7 @@ rhythm_retimed_stretch_weight_min: 0.35
 # Transitional setting:
 # use cached targets first, but still allow runtime fallback while refreshing caches.
 # Formal experiments should move through:
-#   cached_only -> schedule_only -> dual_mode_kd -> retimed_train
+#   minimal_v1 -> schedule_only -> dual_mode_kd -> retimed_train
 rhythm_dataset_target_mode: prefer_cache
 rhythm_primary_target_surface: guidance
 rhythm_distill_surface: auto

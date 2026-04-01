@@ -1,4 +1,4 @@
-base_config: egs/conan_emformer_rhythm_v2_cached_only.yaml
+base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 
 # Stage-1 rhythm bootstrap: train the timing stack first.
 # This keeps supervision close to executed speech/pause + light budget / cumulative-plan,
@@ -7,22 +7,12 @@ rhythm_schedule_only_stage: true
 rhythm_optimize_module_only: true
 rhythm_optimize_pause_state: false
 
-# Formal schedule warm-start should already rely on cached offline teacher surfaces.
 # Stage-1 is the first maintained formal config in the chain.
-rhythm_primary_target_surface: teacher
-rhythm_distill_surface: none
 rhythm_streaming_prefix_train: true
 rhythm_streaming_prefix_min_ratio: 0.45
 rhythm_streaming_prefix_max_ratio: 0.75
 rhythm_enable_algorithmic_teacher: false
 rhythm_enable_dual_mode_teacher: false
-rhythm_require_cached_teacher: true
-rhythm_dataset_build_guidance_from_ref: false
-lambda_rhythm_budget: 0.15
-lambda_rhythm_cumplan: 0.15
-lambda_rhythm_distill: 0.0
-lambda_rhythm_guidance: 0.0
-lambda_rhythm_plan: 0.0
 lambda_mel_adv: 0.0
 
 # Warm-start the projector with a fixed learning rate; long warmup makes the tiny schedule losses move too slowly.

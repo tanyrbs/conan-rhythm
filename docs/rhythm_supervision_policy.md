@@ -23,14 +23,14 @@ Used for:
 Current cached fields:
 
 - `rhythm_speech_exec_tgt`
-- `rhythm_pause_exec_tgt`
-- `rhythm_blank_exec_tgt` (alias of the same executed blank surface)
+- `rhythm_blank_exec_tgt`
+- `rhythm_pause_exec_tgt` (legacy alias of the same executed blank surface)
 - `rhythm_speech_budget_tgt`
-- `rhythm_pause_budget_tgt`
-- `rhythm_blank_budget_tgt` (alias of the same blank-budget surface)
+- `rhythm_blank_budget_tgt`
+- `rhythm_pause_budget_tgt` (legacy alias of the same blank-budget surface)
 - `rhythm_guidance_speech_tgt`
-- `rhythm_guidance_pause_tgt`
 - `rhythm_guidance_blank_tgt`
+- `rhythm_guidance_pause_tgt` (legacy alias)
 
 ### Tier B: offline teacher surface
 
@@ -42,11 +42,11 @@ Used for:
 Current cached fields:
 
 - `rhythm_teacher_speech_exec_tgt`
-- `rhythm_teacher_pause_exec_tgt`
 - `rhythm_teacher_blank_exec_tgt`
+- `rhythm_teacher_pause_exec_tgt` (legacy alias)
 - `rhythm_teacher_speech_budget_tgt`
-- `rhythm_teacher_pause_budget_tgt`
 - `rhythm_teacher_blank_budget_tgt`
+- `rhythm_teacher_pause_budget_tgt` (legacy alias)
 - `rhythm_teacher_prefix_clock_tgt`
 - `rhythm_teacher_prefix_backlog_tgt`
 
@@ -150,6 +150,11 @@ This repo still materializes these fields into one training sample dict, but the
 ## 5. Loss policy
 
 The rhythm path should stay minimal.
+
+Maintained naming preference:
+
+- use **blank** for the executed non-speech slot surface in docs/configs
+- keep **pause** only as a backward-compatible alias in cache/code paths
 
 ### Core timing losses
 

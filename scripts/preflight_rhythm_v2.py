@@ -159,10 +159,81 @@ def _detect_stage(hp: dict, config_path: str) -> str:
     return "transitional"
 
 
+def _detect_profile(hp: dict, config_path: str) -> str:
+    if bool(hp.get("rhythm_minimal_v1_profile", False)) or "minimal_v1" in str(config_path).lower():
+        return "minimal_v1"
+    return "default"
+
+
+def _resolve_cumplan_lambda(hp: dict) -> float:
+    if "lambda_rhythm_cumplan" in hp:
+        return float(hp.get("lambda_rhythm_cumplan", 0.0))
+    return float(hp.get("lambda_rhythm_carry", 0.0))
+
+
+def _validate_profile_contract(
+    hp: dict,
+    *,
+    config_path: str,
+    model_dry_run: bool,
+) -> tuple[str, list[str], list[str]]:
+    profile = _detect_profile(hp, config_path)
+    errors: list[str] = []
+    warnings: list[str] = []
+    if profile != "minimal_v1":
+        return profile, errors, warnings
+
+    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
+    primary = _normalize_surface(str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower())
+    distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
+    if target_mode != "cached_only":
+        errors.append("minimal_v1 profile requires rhythm_dataset_target_mode: cached_only.")
+    if primary != "teacher":
+        errors.append("minimal_v1 profile requires rhythm_primary_target_surface: teacher.")
+    if distill != "none":
+        errors.append("minimal_v1 profile requires rhythm_distill_surface: none.")
+    if not bool(hp.get("rhythm_require_cached_teacher", False)):
+        errors.append("minimal_v1 profile requires rhythm_require_cached_teacher: true.")
+    if not bool(hp.get("rhythm_binarize_teacher_targets", False)):
+        errors.append("minimal_v1 profile requires rhythm_binarize_teacher_targets: true.")
+    if bool(hp.get("rhythm_dataset_build_guidance_from_ref", True)):
+        errors.append("minimal_v1 profile should disable runtime guidance target synthesis.")
+    if bool(hp.get("rhythm_dataset_build_teacher_from_ref", False)):
+        errors.append("minimal_v1 profile should disable runtime teacher target synthesis.")
+    if bool(hp.get("rhythm_enable_dual_mode_teacher", False)):
+        errors.append("minimal_v1 profile should keep rhythm_enable_dual_mode_teacher: false.")
+    if bool(hp.get("rhythm_require_retimed_cache", False)):
+        errors.append("minimal_v1 profile should not require retimed mel cache.")
+    if bool(hp.get("rhythm_apply_train_override", False)) or bool(hp.get("rhythm_apply_valid_override", False)):
+        errors.append("minimal_v1 profile should keep train/valid on source-aligned canvas.")
+
+    if float(hp.get("lambda_rhythm_exec_speech", 0.0)) <= 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_exec_speech > 0.")
+    if float(hp.get("lambda_rhythm_exec_pause", 0.0)) <= 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_exec_pause > 0.")
+    if _resolve_cumplan_lambda(hp) <= 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_cumplan (or lambda_rhythm_carry) > 0.")
+    if float(hp.get("lambda_rhythm_budget", 0.0)) < 0.0:
+        errors.append("minimal_v1 profile does not allow negative lambda_rhythm_budget.")
+    elif float(hp.get("lambda_rhythm_budget", 0.0)) == 0.0:
+        warnings.append("minimal_v1 profile keeps lambda_rhythm_budget at 0; maintained path expects a small positive budget guardrail.")
+    if float(hp.get("lambda_rhythm_guidance", 0.0)) > 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_guidance: 0.")
+    if float(hp.get("lambda_rhythm_plan", 0.0)) > 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_plan: 0.")
+    if float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0:
+        errors.append("minimal_v1 profile requires lambda_rhythm_distill: 0.")
+
+    if not model_dry_run:
+        warnings.append("minimal_v1 train-ready preflight should include --model_dry_run before starting training.")
+    return profile, errors, warnings
+
+
 def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     stage = _detect_stage(hp, config_path)
+    profile = _detect_profile(hp, config_path)
     target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
     primary = _normalize_surface(str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower())
     distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
@@ -243,10 +314,11 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         if not binarize_retimed:
             errors.append("Formal retimed-train stage requires rhythm_binarize_retimed_mel_targets: true.")
     else:
-        warnings.append(
-            "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
-            "(schedule_only -> dual_mode_kd -> retimed_train)."
-        )
+        if profile != "minimal_v1":
+            warnings.append(
+                "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
+                "(schedule_only -> dual_mode_kd -> retimed_train)."
+            )
     return stage, errors, warnings
 
 
@@ -451,6 +523,13 @@ def main():
     hp = set_hparams(config=args.config, exp_name=args.exp_name, hparams_str=hparams_str, global_hparams=True, print_hparams=False)
 
     required_groups, errors, warnings = _expected_fields(hp)
+    profile, profile_errors, profile_warnings = _validate_profile_contract(
+        hp,
+        config_path=args.config,
+        model_dry_run=args.model_dry_run,
+    )
+    errors.extend(profile_errors)
+    warnings.extend(profile_warnings)
     stage, stage_errors, stage_warnings = _validate_stage_contract(hp, config_path=args.config)
     errors.extend(stage_errors)
     warnings.extend(stage_warnings)
@@ -461,6 +540,7 @@ def main():
         errors.append(f"binary_data_dir does not exist: {binary_dir}")
 
     print(f"[preflight] config={args.config}")
+    print(f"[preflight] profile={profile}")
     print(f"[preflight] stage={stage}")
     print(f"[preflight] binary_data_dir={binary_dir}")
     printable_groups = [" | ".join(group) for group in required_groups]

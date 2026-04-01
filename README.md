@@ -16,6 +16,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - use an explicit `RefRhythmDescriptor`
 > - use a single `MonotonicRhythmScheduler`
 > - keep `StreamingRhythmProjector` as the only hard timing authority
+> - treat scheduler tensors as internal planning surfaces, and treat projector execution as the maintained binding contract
 > - inject a cheap internal `source_boundary_cue` instead of restoring boundary hints as public inputs
 >
 > Main files:
@@ -94,6 +95,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > Current task focus:
 >
 > - projector-centric timing supervision
+> - projector-space public contract (`speech_exec`, `blank/pause_exec`, `commit_frontier`, `next_state`)
 > - cached-only reproducibility
 > - dual-mode teacher/student schedule distillation
 > - schedule-only warm-start support (`egs/conan_emformer_rhythm_v2_schedule_only.yaml`)

@@ -79,6 +79,7 @@ Important principle:
 
 - do not distill unattainable full-context behavior directly
 - distill a latency-matched surface that the student can actually realize
+- prefer projector-space targets over planner-surface targets
 
 Reserved fields already exist:
 
@@ -156,6 +157,7 @@ Recommended future config direction after retimed targets exist:
 - keep the main timing path on executed speech/pause + light budget / cumulative-plan guardrail
 - keep KD focused on executed speech/pause plus optional prefix carry
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
+- treat scheduler outputs as debug/regression tensors, and treat projector execution as the real maintained contract
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.
 

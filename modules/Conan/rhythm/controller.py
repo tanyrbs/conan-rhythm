@@ -24,10 +24,27 @@ def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> t
     return probs / denom
 
 
-class ResidualCausalBlock(nn.Module):
-    def __init__(self, hidden_size: int, kernel_size: int = 3, dilation: int = 1):
+class ResidualTemporalBlock(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        kernel_size: int = 3,
+        dilation: int = 1,
+        *,
+        causal: bool = True,
+    ):
         super().__init__()
-        self.conv = CausalConv1d(hidden_size, hidden_size, kernel_size=kernel_size, dilation=dilation)
+        if causal:
+            self.conv = CausalConv1d(hidden_size, hidden_size, kernel_size=kernel_size, dilation=dilation)
+        else:
+            pad = dilation * (kernel_size - 1) // 2
+            self.conv = nn.Conv1d(
+                hidden_size,
+                hidden_size,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                padding=pad,
+            )
         self.norm = nn.LayerNorm(hidden_size)
         self.act = nn.SiLU()
 
@@ -50,6 +67,7 @@ class WindowBudgetController(nn.Module):
         pause_share_max: float = 0.45,
         min_speech_frames: float = 1.0,
         boundary_feature_scale: float = 0.35,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         self.max_total_logratio = float(max_total_logratio)
@@ -67,9 +85,9 @@ class WindowBudgetController(nn.Module):
         self.backlog_proj = nn.Linear(2, hidden_size)
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
-            ResidualCausalBlock(hidden_size, dilation=1),
-            ResidualCausalBlock(hidden_size, dilation=2),
-            ResidualCausalBlock(hidden_size, dilation=4),
+            ResidualTemporalBlock(hidden_size, dilation=1, causal=causal),
+            ResidualTemporalBlock(hidden_size, dilation=2, causal=causal),
+            ResidualTemporalBlock(hidden_size, dilation=4, causal=causal),
         ])
         self.pool_mlp = nn.Sequential(
             nn.Linear(hidden_size + trace_dim + trace_dim + stats_dim + 5, hidden_size),
@@ -173,6 +191,7 @@ class UnitRedistributionHead(nn.Module):
         boundary_source_cue_weight: float = 0.35,
         pause_boundary_latent_weight: float = 0.35,
         pause_source_boundary_weight: float = 0.20,
+        causal: bool = True,
     ) -> None:
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
@@ -185,8 +204,8 @@ class UnitRedistributionHead(nn.Module):
         self.boundary_proj = nn.Linear(1, hidden_size)
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
-            ResidualCausalBlock(hidden_size, dilation=1),
-            ResidualCausalBlock(hidden_size, dilation=2),
+            ResidualTemporalBlock(hidden_size, dilation=1, causal=causal),
+            ResidualTemporalBlock(hidden_size, dilation=2, causal=causal),
         ])
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
