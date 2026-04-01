@@ -57,13 +57,13 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > Still missing before claiming a full strong-rhythm training closure:
 >
 > - higher-quality offline teacher beyond the current algorithmic / dual-mode bootstrap
-> - fully retimed decoder training to remove train/infer mismatch
+> - stronger proof that the new `retimed_train` stage closes train/infer mismatch robustly on real runs
 > - a learned non-causal offline teacher beyond the current algorithmic / shared-projector bootstrap
 > - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
 >
 > Current staging note:
 >
-> - train/valid still keep decoder reconstruction on the source-aligned canvas
+> - the default main config still keeps train/valid decoder reconstruction on the source-aligned canvas
 > - test/inference already uses the retimed rhythm execution path
 > - train-time retimed rendering should only be enabled after retimed acoustic targets are prepared
 > - the binarizer can now cache a first-pass `rhythm_retimed_mel_tgt` built from cached rhythm targets

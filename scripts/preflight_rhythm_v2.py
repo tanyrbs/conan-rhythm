@@ -66,6 +66,7 @@ TEACHER_FIELD_GROUPS = [
     ("rhythm_teacher_blank_exec_tgt", "rhythm_teacher_pause_exec_tgt"),
     ("rhythm_teacher_speech_budget_tgt",),
     ("rhythm_teacher_blank_budget_tgt", "rhythm_teacher_pause_budget_tgt"),
+    ("rhythm_teacher_allocation_tgt",),
     ("rhythm_teacher_prefix_clock_tgt",),
     ("rhythm_teacher_prefix_backlog_tgt",),
     ("rhythm_teacher_confidence",),
