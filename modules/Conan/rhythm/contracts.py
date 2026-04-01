@@ -36,6 +36,7 @@ class RhythmPlannerOutputs:
     anchor_gate: torch.Tensor
     boundary_latent: torch.Tensor
     trace_context: torch.Tensor
+    source_boundary_cue: Optional[torch.Tensor] = None
 
 
 @dataclass

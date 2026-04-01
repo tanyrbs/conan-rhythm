@@ -57,6 +57,7 @@ class WindowBudgetController(nn.Module):
         self.min_speech_frames = float(min_speech_frames)
 
         self.anchor_proj = nn.Linear(1, hidden_size)
+        self.boundary_proj = nn.Linear(1, hidden_size)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
         self.stats_proj = nn.Linear(stats_dim, hidden_size)
         self.phase_proj = nn.Linear(1, hidden_size)
@@ -68,7 +69,7 @@ class WindowBudgetController(nn.Module):
             ResidualCausalBlock(hidden_size, dilation=4),
         ])
         self.pool_mlp = nn.Sequential(
-            nn.Linear(hidden_size + trace_dim + stats_dim + 4, hidden_size),
+            nn.Linear(hidden_size + trace_dim + stats_dim + 5, hidden_size),
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
@@ -85,12 +86,16 @@ class WindowBudgetController(nn.Module):
         unit_mask: torch.Tensor,
         ref_rhythm_stats: torch.Tensor,
         trace_context: torch.Tensor,
+        source_boundary_cue: torch.Tensor | None,
         phase_ptr: torch.Tensor,
         backlog: torch.Tensor,
         clock_delta: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
+        if source_boundary_cue is None:
+            source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
+        boundary_feat = source_boundary_cue.float().unsqueeze(-1)
         phase = phase_ptr.view(-1, 1, 1).expand(-1, unit_states.size(1), -1)
         backlog_pair = torch.stack([backlog.float(), clock_delta.float()], dim=-1)
         backlog_pair = backlog_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
@@ -98,6 +103,7 @@ class WindowBudgetController(nn.Module):
         x = (
             unit_states
             + self.anchor_proj(src_log)
+            + self.boundary_proj(boundary_feat)
             + self.trace_proj(trace_context)
             + self.stats_proj(ref_rhythm_stats).unsqueeze(1)
             + self.phase_proj(phase)
@@ -110,12 +116,14 @@ class WindowBudgetController(nn.Module):
         pooled_units = masked_mean(x, unit_mask, dim=1)
         pooled_trace = masked_mean(trace_context, unit_mask, dim=1)
         pooled_anchor = masked_mean(src_log, unit_mask, dim=1).squeeze(-1)
+        pooled_boundary = masked_mean(boundary_feat, unit_mask, dim=1).squeeze(-1)
         global_input = torch.cat(
             [
                 pooled_units,
                 pooled_trace,
                 ref_rhythm_stats,
                 pooled_anchor.unsqueeze(-1),
+                pooled_boundary.unsqueeze(-1),
                 phase_ptr.unsqueeze(-1).float(),
                 backlog.unsqueeze(-1).float(),
                 clock_delta.unsqueeze(-1).float(),
@@ -157,6 +165,7 @@ class UnitRedistributionHead(nn.Module):
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
+        self.boundary_proj = nn.Linear(1, hidden_size)
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
             ResidualCausalBlock(hidden_size, dilation=1),
@@ -172,9 +181,13 @@ class UnitRedistributionHead(nn.Module):
         hidden: torch.Tensor,
         trace_context: torch.Tensor,
         unit_mask: torch.Tensor,
+        source_boundary_cue: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
-        x = hidden + self.trace_proj(trace_context)
+        if source_boundary_cue is None:
+            source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
+        boundary_feat = source_boundary_cue.float().unsqueeze(-1)
+        x = hidden + self.trace_proj(trace_context) + self.boundary_proj(boundary_feat)
         x = self.in_proj(x)
         for block in self.blocks:
             x = block(x)
@@ -183,8 +196,8 @@ class UnitRedistributionHead(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1)) * unit_mask
-        pause_logits = self.pause_head(x).squeeze(-1) + 0.75 * boundary_latent
+        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1) + source_boundary_cue.float()) * unit_mask
+        pause_logits = self.pause_head(x).squeeze(-1) + 0.75 * boundary_latent + 0.60 * source_boundary_cue.float()
         pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
 
         return {

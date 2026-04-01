@@ -11,6 +11,31 @@ from modules.Conan.rhythm.supervision import (
 )
 
 class ConanDataset(FastSpeechDataset):
+    _RHYTHM_TARGET_KEYS = (
+        "rhythm_speech_exec_tgt",
+        "rhythm_pause_exec_tgt",
+        "rhythm_speech_budget_tgt",
+        "rhythm_pause_budget_tgt",
+        "rhythm_guidance_speech_tgt",
+        "rhythm_guidance_pause_tgt",
+        "rhythm_teacher_speech_exec_tgt",
+        "rhythm_teacher_pause_exec_tgt",
+        "rhythm_teacher_speech_budget_tgt",
+        "rhythm_teacher_pause_budget_tgt",
+    )
+
+    def _resolve_rhythm_target_mode(self) -> str:
+        mode = str(self.hparams.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
+        aliases = {
+            "auto": "prefer_cache",
+            "offline": "cached_only",
+            "offline_only": "cached_only",
+            "never": "cached_only",
+            "runtime": "runtime_only",
+            "always": "runtime_only",
+        }
+        return aliases.get(mode, mode)
+
     def _get_source_rhythm_cache(self, item, visible_tokens):
         cache_keys = ("content_units", "dur_anchor_src", "open_run_mask", "sep_hint")
         full_tokens = np.asarray(item["hubert"])
@@ -60,6 +85,21 @@ class ConanDataset(FastSpeechDataset):
             targets.update(build_reference_teacher_targets(**shared_kwargs))
         return targets
 
+    def _merge_rhythm_targets(self, item, source_cache, ref_conditioning):
+        target_mode = self._resolve_rhythm_target_mode()
+        cached_targets = {key: item[key] for key in self._RHYTHM_TARGET_KEYS if key in item}
+        if target_mode == "cached_only":
+            return cached_targets
+
+        runtime_targets = self._build_runtime_rhythm_targets(source_cache, ref_conditioning)
+        if target_mode == "runtime_only":
+            return runtime_targets
+
+        merged = dict(cached_targets)
+        for key, value in runtime_targets.items():
+            merged.setdefault(key, value)
+        return merged
+
     def __getitem__(self, index):
         hparams=self.hparams
         sample = super(ConanDataset, self).__getitem__(index)
@@ -100,15 +140,15 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_teacher_pause_budget_tgt",
         ]
         rhythm_runtime_fields = {}
-        rhythm_runtime_fields.update(self._get_source_rhythm_cache(item, sample["content"].cpu().numpy()))
-        rhythm_runtime_fields.update(self._get_reference_rhythm_conditioning(ref_item, sample))
+        source_cache = self._get_source_rhythm_cache(item, sample["content"].cpu().numpy())
+        ref_conditioning = self._get_reference_rhythm_conditioning(ref_item, sample)
+        rhythm_runtime_fields.update(source_cache)
+        rhythm_runtime_fields.update(ref_conditioning)
         rhythm_runtime_fields.update(
-            self._build_runtime_rhythm_targets(
-                rhythm_runtime_fields,
-                {
-                    "ref_rhythm_stats": rhythm_runtime_fields["ref_rhythm_stats"],
-                    "ref_rhythm_trace": rhythm_runtime_fields["ref_rhythm_trace"],
-                },
+            self._merge_rhythm_targets(
+                item,
+                source_cache,
+                ref_conditioning,
             )
         )
 

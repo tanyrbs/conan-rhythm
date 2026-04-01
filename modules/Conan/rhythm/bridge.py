@@ -67,6 +67,7 @@ def run_rhythm_frontend(
         dur_anchor_src=unit_batch.dur_anchor_src,
         unit_mask=unit_batch.unit_mask,
         open_run_mask=unit_batch.open_run_mask,
+        sep_hint=unit_batch.sep_hint,
         ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
         ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
         state=rhythm_state,
@@ -106,6 +107,7 @@ def attach_rhythm_outputs(
     ret["dur_logratio_unit"] = execution.planner.dur_logratio_unit
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
     ret["boundary_latent"] = execution.planner.boundary_latent
+    ret["source_boundary_cue"] = execution.planner.source_boundary_cue
     ret["speech_duration_exec"] = execution.speech_duration_exec
     ret["pause_after_exec"] = execution.pause_after_exec
     ret["effective_duration_exec"] = execution.effective_duration_exec

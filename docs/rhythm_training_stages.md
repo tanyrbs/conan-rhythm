@@ -1,86 +1,104 @@
-# Rhythm V2 训练阶段建议
+# Rhythm Training Stages (2026-04-01)
 
-更新时间：2026-03-31
+## Stage 0: Structural smoke / integration
 
-当前仓库已经具备把 Rhythm V2 分阶段训练起来的最小接口。
+Goal:
 
----
+- verify descriptor -> scheduler -> projector wiring
+- verify state carry-over and committed-prefix behavior
+- verify dataset fields and loss hooks are alive
 
-## Stage 0：结构热启动
+Current state:
 
-目标：
-
-- 先把 planner/projector 跑稳
-- 先学会 source anchor 上的基本 timing
-
-推荐配置：
-
-- `rhythm_dataset_build_guidance_from_ref: true`
-- `rhythm_dataset_build_teacher_from_ref: false`
-- `lambda_rhythm_guidance > 0`
-- `lambda_rhythm_distill = 0`
+- mostly completed
+- `scripts/smoke_test_rhythm_v2.py` now covers descriptor export and stateful scheduler reuse
+- scheduler now also consumes a cheap internal source-boundary cue
 
 ---
 
-## Stage 1：reference-guided warm start
+## Stage 1: Reference-guided warm start
 
-目标：
+Goal:
 
-- 真正让模型看 `source + sampled reference`
-- 学会 budget / redistribution 的基本映射
+- train the online rhythm path with cached source anchors and sampled reference rhythm conditioning
+- let the student first learn stable budget / redistribution / projection behavior
 
-当前仓库已支持：
+Current supervision surface:
 
-- dataset 在线构造 `rhythm_*_tgt`
-- guidance 监督
+- `rhythm_speech_exec_tgt`
+- `rhythm_pause_exec_tgt`
+- `rhythm_speech_budget_tgt`
+- `rhythm_pause_budget_tgt`
+- `rhythm_guidance_speech_tgt`
+- `rhythm_guidance_pause_tgt`
+
+This stage is suitable for structural training, but it is not the final ceiling.
+
+Current recommendation:
+
+- prefer cached/offline targets over unconditional runtime heuristic regeneration
+- use `rhythm_dataset_target_mode: prefer_cache`
 
 ---
 
-## Stage 2：teacher/distill
+## Stage 2: Latency-matched teacher distillation
 
-目标：
+Goal:
 
-- 用更强的离线教师替换 heuristic guidance ceiling
-- 做 latency-matched surface distillation
+- replace or supplement heuristic guidance with a stronger offline teacher
+- distill onto the same public execution surface under streaming constraints
 
-当前仓库已预留字段：
+Important principle:
+
+- do not distill unattainable full-context behavior directly
+- distill a latency-matched surface that the student can actually realize
+
+Reserved fields already exist:
 
 - `rhythm_teacher_speech_exec_tgt`
 - `rhythm_teacher_pause_exec_tgt`
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
 
-训练侧 loss 已支持：
+---
 
-- `rhythm_distill`
+## Stage 3: Retimed decoder training
 
-当前 projector 还已支持：
+Goal:
 
-- committed prefix freeze
-- sparser pause allocation
-- committed-prefix streaming extraction
+- reduce train/infer mismatch
+- let the decoder actually learn on the retimed execution canvas
 
-推荐：
+Recommended config direction:
 
-- 不蒸 raw hidden
-- 优先蒸 projector 后 surface
-- teacher/student 保持同一 public contract
+- `rhythm_apply_mode: always`
+- keep `L_recon` as the outer acoustic objective
+- use `rhythm_plan` to penalize local timing error and prefix cumulative drift
+
+This is one of the biggest remaining blockers before claiming strong-rhythm closure.
 
 ---
 
-## Stage 3：真实 streaming 验证
+## Stage 4: Streaming evaluation hardening
 
-重点看：
+Need stronger evaluation around:
 
-- committed prefix 增长
-- chunkwise mel 增量
-- commit frontier 连续性
-- backlog / clock_delta 是否失控
+- pause placement quality
+- local-rate transfer consistency
+- prefix no-rollback stability
+- long-utterance trace utilization
+- chunkwise mel / wav continuity
 
 ---
 
-## 一句话总结
+## Practical status summary
 
-当前仓库最合理的训练路线是：
+As of 2026-04-01:
 
-> heuristic warm start -> reference-guided training -> latency-matched teacher distillation -> streaming evaluation
+- the rhythm branch is **ready for warm-start / structural training**
+- it is **not yet ready to claim final strong-rhythm performance**
+
+The two biggest remaining milestones are:
+
+1. a stronger offline teacher
+2. decoder-side retimed training

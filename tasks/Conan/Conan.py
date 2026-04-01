@@ -216,6 +216,7 @@ class ConanTask(AuxDecoderMIDITask):
         losses["rhythm_exec_speech"] = rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
         losses["rhythm_exec_pause"] = rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
         losses["rhythm_budget"] = rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
+        losses["rhythm_plan"] = rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
         losses["rhythm_distill"] = rhythm_losses["rhythm_distill"] * hparams.get("lambda_rhythm_distill", 0.0)
 

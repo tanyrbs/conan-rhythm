@@ -6,34 +6,45 @@
 
 This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise Online Network for Zero-Shot Adaptive Voice Conversion**".
 
-> **Current repository note (2026-03-31)**  
-> This local branch now also contains an in-progress **Rhythm V2 clean mainline** under:
+> **Current repository note (2026-04-01)**  
+> This branch now contains a cleaner **Rhythm V2 / Minimal Strong-Rhythm** path for streaming rhythm transfer.
 >
-> - `docs/rhythm_module_vision.md`
-> - `docs/rhythm_migration_plan.md`
-> - `docs/rhythm_local_adaptation.md`
-> - `docs/rhythm_training_stages.md`
-> - `modules/Conan/rhythm/`
+> Core idea:
+>
+> - keep Conan's streaming content frontend and decoder/vocoder path
+> - remove rhythm control from the large style path
+> - use an explicit `RefRhythmDescriptor`
+> - use a single `MonotonicRhythmScheduler`
+> - keep `StreamingRhythmProjector` as the only hard timing authority
+> - inject a cheap internal `source_boundary_cue` instead of restoring boundary hints as public inputs
+>
+> Main files:
+>
+> - `modules/Conan/rhythm/reference_descriptor.py`
+> - `modules/Conan/rhythm/scheduler.py`
+> - `modules/Conan/rhythm/projector.py`
+> - `modules/Conan/rhythm/module.py`
 > - `tasks/Conan/rhythm/`
-> - `egs/conan_emformer_rhythm_v2.yaml`
+> - `docs/rhythm_module_vision.md`
+> - `docs/rhythm_training_stages.md`
 >
-> The new rhythm path follows:
+> Current status:
 >
-> - small public contract
-> - explicit reference rhythm stats/trace
-> - window budget + unit redistribution
-> - single projector execution authority
+> - explicit reference rhythm stats/trace is connected
+> - minimal descriptor + scheduler is connected
+> - projector already freezes committed prefix and uses sparser pause allocation
+> - trace sampling uses a fixed progress horizon
+> - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`
+> - dataset / loss path already reserves guidance and distillation fields
+> - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
+> - a cumulative `rhythm_plan` loss is now available for prefix drift control
+> - `scripts/smoke_test_rhythm_v2.py` now covers descriptor + stateful scheduler reuse
 >
-> Recent repository changes:
+> Still missing before claiming a full strong-rhythm training closure:
 >
-> - `data_gen/conan_binarizer.py` can now cache minimal rhythm fields when `binarization_args.with_rhythm_cache: true`
-> - `tasks/Conan/dataset.py` now builds reference-guided heuristic rhythm targets at runtime
-> - teacher/distill target fields are now reserved in the dataset/loss path
-> - `tasks/Conan/Conan.py::test_step` is back to chunkwise streaming evaluation
-> - chunkwise evaluation now uses committed-prefix mel increments
-> - projector now freezes committed prefix and applies sparser pause allocation
-> - reference trace sampling now uses a fixed progress horizon instead of long-prefix saturation
-> - `scripts/smoke_test_rhythm_v2.py` covers the new Rhythm V2 path
+> - offline teacher of sufficient quality
+> - fully retimed decoder training to remove train/infer mismatch
+> - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
 
 <p align="center">
   <a href="https://arxiv.org/abs/2507.14534"><b>📄 Read the Paper (arXiv)</b></a> &nbsp;|&nbsp;
