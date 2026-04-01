@@ -35,7 +35,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > Current status:
 >
 > - explicit reference rhythm stats/trace is connected
-> - minimal descriptor + scheduler is connected
+> - the maintained descriptor is an explicit baseline descriptor, not a final expressive prosody encoder
 > - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
 > - trace sampling uses a fixed progress horizon with anchor-progress phase updates
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`, but this sidecar is kept as a soft prior instead of a public control head
@@ -43,13 +43,13 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - explicit blank-slot scheduling is now public: projector / renderer / loss all use the same interleaved blank-slot graph
 > - renderer now also exports frame-level blank masks plus slot/unit indices for debugging and retimed training hooks
 > - the renderer is still deterministic/hard-expanded, but it now carries minimal phase features so long stretched slots are not rendered as pure flat repeats
-> - reference cache now also carries slow-rhythm memory cells, selector spans, and source-side phrase-group metadata
+> - reference cache can also carry slow-rhythm memory cells, selector spans, and source-side phrase-group metadata, but these are treated as sidecars instead of the maintained runtime-minimal contract
 > - dataset / loss path already reserves guidance and distillation fields
 > - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
 > - cached teacher surfaces now also carry allocation + prefix carry targets
-> - cache/runtime targets now expose `rhythm_blank_*` aliases in addition to legacy `rhythm_pause_*` keys
+> - runtime/batch targets now prefer `rhythm_pause_*`; `rhythm_blank_*` remains a cache/internal compatibility alias
 > - an optional `rhythm_plan` proxy remains available for ablations, but the mainline now keeps it disabled by default
-> - a dual-mode teacher/student skeleton is now wired: streaming execution + offline full-horizon execution + algorithmic teacher targets
+> - dual-mode teacher/student is now wired with a learned non-causal offline planner teacher plus the older algorithmic bootstrap targets
 > - formal schedule-only warm-start now defaults to cached-only + cached teacher surfaces
 > - stage-2 dual-mode KD config now has its own entry (`egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`)
 > - streaming metrics now track carry / backlog / blank-slot usage in addition to no-rollback deltas
@@ -57,9 +57,9 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > Still missing before claiming a full strong-rhythm training closure:
 >
-> - higher-quality offline teacher beyond the current algorithmic / dual-mode bootstrap
+> - stronger proof that the learned offline teacher improves real training runs beyond the current bootstrap level
 > - stronger proof that the new `retimed_train` stage closes train/infer mismatch robustly on real runs
-> - a learned non-causal offline teacher beyond the current algorithmic / shared-projector bootstrap
+> - stronger joint closure between retimed render, retimed acoustic targets, and pitch supervision on real runs
 > - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
 >
 > Current staging note:
@@ -80,7 +80,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - runtime heuristic targets are now a debug / fallback path, not the desired formal training path
 > - `egs/conan_emformer_rhythm_v2.yaml` stays transitional with `rhythm_dataset_target_mode: prefer_cache`
-> - `egs/conan_emformer_rhythm_v2_cached_only.yaml` is the stricter warm-start config
+> - `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is the maintained formal base config
+> - `egs/conan_emformer_rhythm_v2_cached_only.yaml` is kept as a legacy alias to that base
 > - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is now the formal cached-only stage-1 schedule config
 > - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the formal stage-2 schedule distillation config
 > - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config
@@ -95,7 +96,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > Current task focus:
 >
 > - projector-centric timing supervision
-> - projector-space public contract (`speech_exec`, `blank/pause_exec`, `commit_frontier`, `next_state`)
+> - projector-space public contract (`speech_exec`, `pause_exec`, `commit_frontier`, `next_state`)
 > - cached-only reproducibility
 > - dual-mode teacher/student schedule distillation
 > - schedule-only warm-start support (`egs/conan_emformer_rhythm_v2_schedule_only.yaml`)
@@ -254,6 +255,7 @@ python data_gen/tts/runs/binarize.py --config egs/conan_emformer_rhythm_v2_cache
 For formal Rhythm V2 experiments:
 
 - use the cached-only config for binarization
+- prefer the maintained `minimal_v1` base when starting a new formal training chain
 - keep `rhythm_binarize_teacher_targets: true`
 - re-binarize whenever `rhythm_cache_version` changes
 - treat `prefer_cache` only as a migration/debug mode
@@ -262,7 +264,8 @@ For formal Rhythm V2 experiments, binarization should be re-run with rhythm cach
 ### Configuration
 Update the configuration files in `egs/` directory to match your dataset:
 - `egs/conan_emformer_rhythm_v2.yaml`: transitional rhythm config (`prefer_cache`)
-- `egs/conan_emformer_rhythm_v2_cached_only.yaml`: formal cached-only config
+- `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`: maintained formal base config
+- `egs/conan_emformer_rhythm_v2_cached_only.yaml`: legacy alias to the maintained formal base
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml`: formal stage-1 schedule warm-start
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: formal stage-2 dual-mode schedule KD
 - `egs/conan_emformer_rhythm_v2_retimed_train.yaml`: retimed acoustic training stage

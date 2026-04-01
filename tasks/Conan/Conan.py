@@ -42,6 +42,7 @@ class ConanTask(AuxDecoderMIDITask):
         self.dataset_cls = ConanDataset
         self.mse_loss_fn = torch.nn.MSELoss()
         self._warned_retimed_pitch_supervision = False
+        self._disc_skip_for_retimed = False
         self._validate_rhythm_training_hparams()
         self.build_disc_model()
 
@@ -67,6 +68,11 @@ class ConanTask(AuxDecoderMIDITask):
         lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
         lambda_carry = hparams.get("lambda_rhythm_carry", None)
         lambda_cumplan = hparams.get("lambda_rhythm_cumplan", None)
+        enable_dual_teacher = bool(hparams.get("rhythm_enable_dual_mode_teacher", False))
+        enable_learned_offline_teacher = bool(hparams.get("rhythm_enable_learned_offline_teacher", True))
+        retimed_target_mode = ConanTask._resolve_retimed_target_mode()
+        use_retimed_pitch_target = bool(hparams.get("rhythm_use_retimed_pitch_target", False))
+        disable_pitch_when_retimed = bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", True))
         if lambda_carry is not None and lambda_cumplan is not None:
             if abs(float(lambda_carry) - float(lambda_cumplan)) > 1e-8:
                 errors.append("lambda_rhythm_carry and lambda_rhythm_cumplan are both set but disagree.")
@@ -79,8 +85,16 @@ class ConanTask(AuxDecoderMIDITask):
                 hparams.get("rhythm_enable_dual_mode_teacher", False)
             ):
                 errors.append("Offline distillation requires rhythm_enable_dual_mode_teacher: true.")
-        if bool(hparams.get("rhythm_enable_dual_mode_teacher", False)) and lambda_distill <= 0.0:
+        if enable_dual_teacher and not enable_learned_offline_teacher:
+            errors.append("rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true.")
+        if enable_dual_teacher and lambda_distill <= 0.0:
             warnings.append("Dual-mode teacher is enabled but lambda_rhythm_distill == 0.")
+        distill_conf_floor = float(hparams.get("rhythm_distill_confidence_floor", 0.05))
+        distill_conf_power = float(hparams.get("rhythm_distill_confidence_power", 1.0))
+        if not (0.0 < distill_conf_floor <= 1.0):
+            errors.append("rhythm_distill_confidence_floor must be in (0, 1].")
+        if distill_conf_power <= 0.0:
+            errors.append("rhythm_distill_confidence_power must be > 0.")
         if schedule_only and bool(hparams.get("rhythm_apply_train_override", False)):
             errors.append("rhythm_schedule_only_stage should not enable train-time retimed rendering.")
         if bool(hparams.get("rhythm_apply_train_override", False)) and not bool(
@@ -92,7 +106,17 @@ class ConanTask(AuxDecoderMIDITask):
             primary_surface = str(hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
             if retimed_source == "teacher" and primary_surface != "teacher":
                 errors.append("Teacher retimed targets should pair with rhythm_primary_target_surface: teacher.")
-            warnings.append("Train-time retimed rendering disables source-aligned pitch supervision unless retimed pitch targets exist.")
+            if retimed_target_mode == "online" and bool(hparams.get("rhythm_require_retimed_cache", False)):
+                warnings.append("Online retimed target mode keeps rhythm_require_retimed_cache enabled; cached targets will be treated only as a safety fallback.")
+            if not use_retimed_pitch_target and not disable_pitch_when_retimed:
+                errors.append(
+                    "Train-time retimed rendering must either enable rhythm_use_retimed_pitch_target "
+                    "or set rhythm_disable_pitch_loss_when_retimed: true."
+                )
+            if use_retimed_pitch_target:
+                warnings.append("Train-time retimed rendering will remap F0/UV onto the online frame plan before pitch supervision.")
+            else:
+                warnings.append("Train-time retimed rendering disables source-aligned pitch supervision unless retimed pitch targets exist.")
         if str(hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower() == "teacher":
             if not bool(hparams.get("rhythm_binarize_teacher_targets", False)):
                 warnings.append("Primary rhythm target surface is teacher but rhythm_binarize_teacher_targets is false.")
@@ -120,6 +144,10 @@ class ConanTask(AuxDecoderMIDITask):
             )
         if lambda_guidance > 0.0 and schedule_only:
             warnings.append("lambda_rhythm_guidance > 0 during schedule-only stage increases migration-path complexity.")
+        if "rhythm_min_unit_frames" in hparams:
+            errors.append(
+                "rhythm_min_unit_frames has been removed from the maintained rhythm path; delete the key or implement it explicitly before training."
+            )
         if errors:
             raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(errors))
         if warnings:
@@ -181,7 +209,7 @@ class ConanTask(AuxDecoderMIDITask):
             return False
         raise ValueError(f"Unsupported optional bool value: {value}")
 
-    def _resolve_rhythm_apply_override(self, *, infer: bool, test: bool, explicit=None):
+    def _resolve_rhythm_apply_override(self, *, infer: bool, test: bool, explicit=None, current_step=None):
         explicit_value = self._parse_optional_bool(explicit)
         if explicit_value is not None:
             enabled = explicit_value
@@ -190,16 +218,17 @@ class ConanTask(AuxDecoderMIDITask):
             enabled = self._parse_optional_bool(hparams.get(f"rhythm_apply_{stage}_override", None))
         if enabled is None:
             return None
+        effective_step = int(self.global_step if current_step is None else current_step)
         stage = "test" if test else ("valid" if infer else "train")
         start_step = int(hparams.get(f"rhythm_{stage}_render_start_steps", 0) or 0)
-        if enabled and stage in {"train", "valid"} and int(self.global_step) < start_step:
+        if enabled and stage in {"train", "valid"} and effective_step < start_step:
             return False
         retimed_target_start = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
         if (
             enabled
             and stage in {"train", "valid"}
             and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
-            and int(self.global_step) < retimed_target_start
+            and effective_step < retimed_target_start
         ):
             return False
         return enabled
@@ -311,40 +340,113 @@ class ConanTask(AuxDecoderMIDITask):
         prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
         return prefix_clock, prefix_backlog
 
-    def _resolve_acoustic_target(self, sample, *, apply_rhythm_render: bool, infer: bool, test: bool):
-        target = sample["mels"]
-        is_retimed = False
-        start_step = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
-        if (
-            bool(apply_rhythm_render)
-            and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
-            and int(self.global_step) >= start_step
-        ):
-            retimed = sample.get("rhythm_retimed_mel_tgt")
-            if retimed is not None:
-                target = retimed
-                is_retimed = True
-            else:
-                require_retimed = bool(hparams.get("rhythm_require_retimed_cache", False))
-                if require_retimed or (not test and self._resolve_rhythm_target_mode() == "cached_only"):
-                    stage = "test" if test else ("valid" if infer else "train")
-                    raise RuntimeError(
-                        "Rhythm retimed target is required for the active render path "
-                        f"({stage}) but rhythm_retimed_mel_tgt is missing. Re-binarize the dataset."
-                    )
-        return target, is_retimed
+    @staticmethod
+    def _normalize_distill_confidence(distill_confidence, *, batch_size: int, device: torch.device):
+        floor = float(hparams.get("rhythm_distill_confidence_floor", 0.05))
+        power = float(hparams.get("rhythm_distill_confidence_power", 1.0))
+        if distill_confidence is None:
+            confidence = torch.ones((batch_size, 1), device=device)
+        else:
+            confidence = distill_confidence.float().reshape(batch_size, -1)[:, :1].to(device=device)
+        confidence = confidence.clamp(min=floor, max=1.0)
+        if abs(power - 1.0) > 1e-8:
+            confidence = confidence.pow(power)
+        return confidence
 
-    def _resolve_acoustic_weight(self, sample, *, acoustic_target_is_retimed: bool):
-        if not acoustic_target_is_retimed:
+    @staticmethod
+    def _resolve_retimed_target_mode() -> str:
+        mode = str(hparams.get("rhythm_retimed_target_mode", "cached") or "cached").strip().lower()
+        aliases = {
+            "cache": "cached",
+            "cached_only": "cached",
+            "teacher": "cached",
+            "runtime": "online",
+            "online_only": "online",
+            "mixed": "hybrid",
+        }
+        resolved = aliases.get(mode, mode)
+        if resolved not in {"cached", "online", "hybrid"}:
+            raise ValueError(f"Unsupported rhythm_retimed_target_mode: {mode}")
+        return resolved
+
+    @staticmethod
+    def _merge_retimed_weight(frame_weight, confidence):
+        if frame_weight is None and confidence is None:
             return None
-        frame_weight = sample.get("rhythm_retimed_frame_weight")
-        confidence = sample.get("rhythm_retimed_target_confidence")
-        if confidence is None:
-            return frame_weight
-        confidence = confidence.float().clamp_min(float(hparams.get("rhythm_retimed_confidence_floor", 0.05)))
+        if confidence is not None:
+            confidence = confidence.float().clamp_min(float(hparams.get("rhythm_retimed_confidence_floor", 0.05)))
         if frame_weight is None:
             return confidence
-        return frame_weight.float() * confidence
+        frame_weight = frame_weight.float()
+        if confidence is None:
+            return frame_weight
+        while confidence.dim() < frame_weight.dim():
+            confidence = confidence.unsqueeze(-1)
+        return frame_weight * confidence
+
+    def _resolve_acoustic_target_post_model(
+        self,
+        sample,
+        model_out,
+        *,
+        apply_rhythm_render: bool,
+        infer: bool,
+        test: bool,
+        current_step=None,
+    ):
+        target = sample["mels"]
+        frame_weight = None
+        is_retimed = False
+        source = "source"
+        effective_step = int(self.global_step if current_step is None else current_step)
+        start_step = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
+        if (
+            not bool(apply_rhythm_render)
+            or not bool(hparams.get("rhythm_use_retimed_target_if_available", False))
+            or effective_step < start_step
+        ):
+            return target, is_retimed, frame_weight, source
+
+        stage = "test" if test else ("valid" if infer else "train")
+        target_mode = self._resolve_retimed_target_mode()
+        online_start = int(hparams.get("rhythm_online_retimed_target_start_steps", start_step) or start_step)
+        online_ready = effective_step >= online_start
+        prefer_online = target_mode in {"online", "hybrid"} and online_ready
+
+        if prefer_online:
+            online_target = model_out.get("rhythm_online_retimed_mel_tgt")
+            if online_target is not None:
+                target = online_target
+                frame_weight = self._merge_retimed_weight(
+                    model_out.get("rhythm_online_retimed_frame_weight"),
+                    None,
+                )
+                is_retimed = True
+                source = "online"
+                return target, is_retimed, frame_weight, source
+            if target_mode == "online":
+                raise RuntimeError(
+                    f"Rhythm online retimed target is required for the active render path ({stage}) but is unavailable."
+                )
+
+        cached_target = sample.get("rhythm_retimed_mel_tgt")
+        if cached_target is not None:
+            target = cached_target
+            frame_weight = self._merge_retimed_weight(
+                sample.get("rhythm_retimed_frame_weight"),
+                sample.get("rhythm_retimed_target_confidence"),
+            )
+            is_retimed = True
+            source = "cached"
+            return target, is_retimed, frame_weight, source
+
+        require_retimed = bool(hparams.get("rhythm_require_retimed_cache", False))
+        if require_retimed or (not test and self._resolve_rhythm_target_mode() == "cached_only"):
+            raise RuntimeError(
+                "Rhythm retimed target is required for the active render path "
+                f"({stage}) but neither online nor cached retimed targets are available."
+            )
+        return target, is_retimed, frame_weight, source
 
     @staticmethod
     def _resample_sequence_length(x: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -430,17 +532,14 @@ class ConanTask(AuxDecoderMIDITask):
                 device = value.device
                 break
         zero = torch.tensor(0.0, device=device or "cpu")
-        sched = zero
         if "rhythm_exec_speech" in losses:
-            sched = sched + losses["rhythm_exec_speech"].detach()
             losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
         if "rhythm_exec_pause" in losses:
-            sched = sched + losses["rhythm_exec_pause"].detach()
             losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
-        losses["L_sched"] = sched
         losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
         cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
         losses["L_cumplan"] = cumplan.detach() if isinstance(cumplan, torch.Tensor) else zero
+        losses["L_prefix_state"] = losses["L_cumplan"]
         losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
         base = zero
         for loss_name in self.mel_losses.keys():
@@ -485,11 +584,10 @@ class ConanTask(AuxDecoderMIDITask):
         # notes, note_durs, note_types = sample["notes"], sample["note_durs"], sample["note_types"]
 
         target = sample["mels"]
-        if test:
-            self.global_step = 200000
+        effective_global_step = 200000 if test else int(self.global_step)
         use_reference = (
             test
-            or self.global_step >= hparams["random_speaker_steps"]
+            or effective_global_step >= hparams["random_speaker_steps"]
             or bool(hparams.get("rhythm_force_reference_conditioning", False))
         )
         if use_reference:
@@ -500,24 +598,31 @@ class ConanTask(AuxDecoderMIDITask):
             infer=infer,
             test=test,
             explicit=kwargs.get("rhythm_apply_override"),
+            current_step=effective_global_step,
         )
         apply_rhythm_render = resolve_rhythm_apply_mode(
             hparams,
             infer=infer,
             override=rhythm_apply_override,
         )
-        acoustic_target, acoustic_target_is_retimed = self._resolve_acoustic_target(
-            sample,
-            apply_rhythm_render=bool(apply_rhythm_render),
-            infer=infer,
-            test=test,
+        retimed_stage_active = bool(
+            apply_rhythm_render
+            and not infer
+            and not test
+            and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
+            and effective_global_step >= int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
         )
-        acoustic_weight = self._resolve_acoustic_weight(
-            sample,
-            acoustic_target_is_retimed=acoustic_target_is_retimed,
+        use_retimed_pitch_target = bool(hparams.get("rhythm_use_retimed_pitch_target", False))
+        disable_source_pitch_supervision = bool(
+            retimed_stage_active
+            and (
+                not use_retimed_pitch_target
+                or f0 is None
+                or uv is None
+                or bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", False))
+            )
         )
-        disable_source_pitch_supervision = bool(acoustic_target_is_retimed and not infer and not test)
-        if disable_source_pitch_supervision and not self._warned_retimed_pitch_supervision:
+        if disable_source_pitch_supervision and retimed_stage_active and not self._warned_retimed_pitch_supervision:
             print("| Rhythm V2: retimed canvas active, disabling source-aligned pitch supervision for this run.")
             self._warned_retimed_pitch_supervision = True
         rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
@@ -562,7 +667,7 @@ class ConanTask(AuxDecoderMIDITask):
         output = self.model(content,spk_embed=spk_embed, target=target,ref=ref,
                             f0=None if disable_source_pitch_supervision else f0,
                             uv=None if disable_source_pitch_supervision else uv,
-                            infer=infer, global_steps=self.global_step,
+                            infer=infer, global_steps=effective_global_step,
                             content_lengths=sample.get("mel_lengths"),
                             ref_lengths=sample.get("ref_mel_lengths"),
                             rhythm_apply_override=rhythm_apply_override,
@@ -570,6 +675,14 @@ class ConanTask(AuxDecoderMIDITask):
                             rhythm_ref_conditioning=rhythm_ref_conditioning,
                             rhythm_source_cache=self._collect_rhythm_source_cache(sample),
                             rhythm_offline_source_cache=self._collect_rhythm_source_cache(sample, prefix="rhythm_offline_"))
+        acoustic_target, acoustic_target_is_retimed, acoustic_weight, acoustic_target_source = self._resolve_acoustic_target_post_model(
+            sample,
+            output,
+            apply_rhythm_render=bool(apply_rhythm_render),
+            infer=infer,
+            test=test,
+            current_step=effective_global_step,
+        )
         rhythm_execution = output.get("rhythm_execution")
         if rhythm_execution is not None and getattr(rhythm_execution, "planner", None) is not None:
             planner = rhythm_execution.planner
@@ -586,6 +699,7 @@ class ConanTask(AuxDecoderMIDITask):
         output["acoustic_target_mel"] = acoustic_target
         output["acoustic_target_is_retimed"] = bool(acoustic_target_is_retimed)
         output["acoustic_target_weight"] = acoustic_weight
+        output["acoustic_target_source"] = acoustic_target_source
         output["rhythm_pitch_supervision_disabled"] = float(disable_source_pitch_supervision)
         if acoustic_target_is_retimed:
             mel_out_aligned, acoustic_target, acoustic_weight = self._align_acoustic_target_to_output(
@@ -619,9 +733,11 @@ class ConanTask(AuxDecoderMIDITask):
         # mel2ph = sample['mel2ph']  # [B, T_s]
         if bool(output.get("rhythm_pitch_supervision_disabled", False)):
             return
-        content = sample['content']
-        f0 = sample['f0']
-        uv = sample['uv']
+        content = output.get("content", sample['content'])
+        f0 = output.get("retimed_f0_tgt", sample.get('f0'))
+        uv = output.get("retimed_uv_tgt", sample.get('uv'))
+        if f0 is None or uv is None:
+            return
         nonpadding = (content != -1).float()
         if hparams["f0_gen"] == "diff":
             losses["fdiff"] = output["fdiff"]
@@ -656,18 +772,18 @@ class ConanTask(AuxDecoderMIDITask):
         use_distill_prefix = use_distill and distill_prefix_weight > 0.0
         primary_surface = self._resolve_rhythm_primary_target_surface()
         distill_surface = self._resolve_rhythm_distill_surface()
-        pause_exec_key = "rhythm_blank_exec_tgt" if "rhythm_blank_exec_tgt" in sample else "rhythm_pause_exec_tgt"
-        pause_budget_key = "rhythm_blank_budget_tgt" if "rhythm_blank_budget_tgt" in sample else "rhythm_pause_budget_tgt"
-        guidance_pause_key = "rhythm_guidance_blank_tgt" if "rhythm_guidance_blank_tgt" in sample else "rhythm_guidance_pause_tgt"
+        pause_exec_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"
+        pause_budget_key = "rhythm_pause_budget_tgt" if "rhythm_pause_budget_tgt" in sample else "rhythm_blank_budget_tgt"
+        guidance_pause_key = "rhythm_guidance_pause_tgt" if "rhythm_guidance_pause_tgt" in sample else "rhythm_guidance_blank_tgt"
         distill_pause_key = (
-            "rhythm_teacher_blank_exec_tgt"
-            if "rhythm_teacher_blank_exec_tgt" in sample
-            else "rhythm_teacher_pause_exec_tgt"
+            "rhythm_teacher_pause_exec_tgt"
+            if "rhythm_teacher_pause_exec_tgt" in sample
+            else "rhythm_teacher_blank_exec_tgt"
         )
         distill_pause_budget_key = (
-            "rhythm_teacher_blank_budget_tgt"
-            if "rhythm_teacher_blank_budget_tgt" in sample
-            else "rhythm_teacher_pause_budget_tgt"
+            "rhythm_teacher_pause_budget_tgt"
+            if "rhythm_teacher_pause_budget_tgt" in sample
+            else "rhythm_teacher_blank_budget_tgt"
         )
         if primary_surface == "teacher":
             target_speech_key = "rhythm_teacher_speech_exec_tgt"
@@ -735,7 +851,9 @@ class ConanTask(AuxDecoderMIDITask):
                 if not use_distill_prefix:
                     distill_prefix_clock = None
                     distill_prefix_backlog = None
-                distill_confidence = distill_speech.new_ones((distill_speech.size(0), 1))
+                distill_confidence = output.get("rhythm_offline_confidence")
+                if distill_confidence is None:
+                    distill_confidence = distill_speech.new_ones((distill_speech.size(0), 1))
             if use_distill and distill_speech is None and distill_surface in {"auto", "algorithmic"} and algorithmic_teacher is not None:
                 distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
                 distill_pause = algorithmic_teacher.pause_exec_tgt.detach()
@@ -771,6 +889,12 @@ class ConanTask(AuxDecoderMIDITask):
                         unit_batch.dur_anchor_src,
                         unit_batch.unit_mask,
                     )
+            if use_distill:
+                distill_confidence = self._normalize_distill_confidence(
+                    distill_confidence,
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                )
             return RhythmLossTargets(
                 speech_exec_tgt=sample[target_speech_key],
                 pause_exec_tgt=sample[target_pause_key],
@@ -846,7 +970,12 @@ class ConanTask(AuxDecoderMIDITask):
             loss_output, model_out = self.run_model(sample, infer=False)
             self.model_out_gt = self.model_out = \
                 {k: v.detach() for k, v in model_out.items() if isinstance(v, torch.Tensor)}
-            if disc_start:
+            adv_disabled = bool(
+                model_out.get("acoustic_target_is_retimed", False)
+                and hparams.get("rhythm_disable_mel_adv_when_retimed", True)
+            )
+            self._disc_skip_for_retimed = adv_disabled
+            if disc_start and not adv_disabled:
                 mel_p = model_out['mel_out']
                 if hasattr(self.model, 'out2mel'):
                     mel_p = self.model.out2mel(mel_p)
@@ -864,18 +993,20 @@ class ConanTask(AuxDecoderMIDITask):
             #######################
             if disc_start and self.global_step % hparams['disc_interval'] == 0:
                 model_out = self.model_out_gt
-                mel_g = sample['mels']
-                mel_p = model_out['mel_out']
-                o = self.mel_disc(mel_g)
-                p, pc = o['y'], o['y_c']
-                o_ = self.mel_disc(mel_p)
-                p_, pc_ = o_['y'], o_['y_c']
-                if p_ is not None:
-                    loss_output["r"] = self.mse_loss_fn(p, p.new_ones(p.size()))
-                    loss_output["f"] = self.mse_loss_fn(p_, p_.new_zeros(p_.size()))
-                if pc_ is not None:
-                    loss_output["rc"] = self.mse_loss_fn(pc, pc.new_ones(pc.size()))
-                    loss_output["fc"] = self.mse_loss_fn(pc_, pc_.new_zeros(pc_.size()))
+                adv_disabled = bool(getattr(self, "_disc_skip_for_retimed", False))
+                if not adv_disabled:
+                    mel_g = model_out.get('acoustic_target_mel', sample['mels'])
+                    mel_p = model_out['mel_out']
+                    o = self.mel_disc(mel_g)
+                    p, pc = o['y'], o['y_c']
+                    o_ = self.mel_disc(mel_p)
+                    p_, pc_ = o_['y'], o_['y_c']
+                    if p_ is not None:
+                        loss_output["r"] = self.mse_loss_fn(p, p.new_ones(p.size()))
+                        loss_output["f"] = self.mse_loss_fn(p_, p_.new_zeros(p_.size()))
+                    if pc_ is not None:
+                        loss_output["rc"] = self.mse_loss_fn(pc, pc.new_ones(pc.size()))
+                        loss_output["fc"] = self.mse_loss_fn(pc_, pc_.new_zeros(pc_.size()))
             if len(loss_output) == 0:
                 return None
         total_loss = sum([loss_weights.get(k, 1) * v for k, v in loss_output.items() if isinstance(v, torch.Tensor) and v.requires_grad])

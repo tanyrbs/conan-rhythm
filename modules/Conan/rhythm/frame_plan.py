@@ -60,13 +60,14 @@ def build_interleaved_blank_slot_schedule(
     slot_mask = speech_duration_exec.new_zeros((batch_size, slot_count))
     slot_is_blank = torch.zeros((batch_size, slot_count), dtype=torch.long, device=speech_duration_exec.device)
     slot_unit_index = torch.zeros((batch_size, slot_count), dtype=torch.long, device=speech_duration_exec.device)
+    unit_ids = torch.arange(num_units, device=speech_duration_exec.device)[None, :]
     slot_duration[:, 0::2] = speech_duration_exec
     slot_duration[:, 1::2] = blank_duration_exec
     slot_mask[:, 0::2] = unit_mask
     slot_mask[:, 1::2] = unit_mask
     slot_is_blank[:, 1::2] = 1
-    slot_unit_index[:, 0::2] = torch.arange(num_units, device=speech_duration_exec.device)[None, :]
-    slot_unit_index[:, 1::2] = torch.arange(num_units, device=speech_duration_exec.device)[None, :]
+    slot_unit_index[:, 0::2] = unit_ids
+    slot_unit_index[:, 1::2] = unit_ids
     return BlankSlotSchedule(
         slot_duration_exec=slot_duration,
         slot_mask=slot_mask,
@@ -95,6 +96,7 @@ def build_frame_plan(
     frame_slot_index_list: list[torch.Tensor] = []
     frame_unit_index_list: list[torch.Tensor] = []
     frame_phase_feature_list: list[torch.Tensor] = []
+    valid_lengths: list[int] = []
 
     for batch_idx in range(slot_duration_exec.size(0)):
         src_cursor = 0
@@ -105,6 +107,7 @@ def build_frame_plan(
         frame_slot_index = []
         frame_unit_index = []
         frame_phase_features = []
+        valid_len = 0
         for slot_idx in range(visible_slots):
             duration = int(slot_duration_exec[batch_idx, slot_idx].item())
             if duration <= 0:
@@ -153,6 +156,7 @@ def build_frame_plan(
             frame_slot_index.append(torch.full((duration,), int(slot_idx), dtype=torch.long, device=device))
             frame_unit_index.append(torch.full((duration,), int(unit_idx), dtype=torch.long, device=device))
             frame_phase_features.append(phase_feat)
+            valid_len += duration
         if len(frame_src_index) <= 0:
             frame_src_index = [torch.full((1,), -1, dtype=torch.long, device=device)]
             frame_blank = [torch.ones((1,), dtype=torch.float32, device=device)]
@@ -164,6 +168,7 @@ def build_frame_plan(
         frame_slot_index_list.append(torch.cat(frame_slot_index, dim=0))
         frame_unit_index_list.append(torch.cat(frame_unit_index, dim=0))
         frame_phase_feature_list.append(torch.cat(frame_phase_features, dim=0))
+        valid_lengths.append(valid_len)
 
     frame_src_index = _pad_sequences(frame_src_index_list, pad_value=-1, dtype=torch.long)
     blank_mask = _pad_sequences(frame_blank_list, pad_value=0.0)
@@ -171,8 +176,9 @@ def build_frame_plan(
     frame_unit_index = _pad_sequences(frame_unit_index_list, pad_value=-1, dtype=torch.long)
     frame_phase_features = _pad_sequences(frame_phase_feature_list, pad_value=0.0)
     total_mask = torch.zeros_like(blank_mask)
-    for batch_idx, seq in enumerate(frame_src_index_list):
-        total_mask[batch_idx, : seq.size(0)] = 1.0
+    for batch_idx, valid_len in enumerate(valid_lengths):
+        if valid_len > 0:
+            total_mask[batch_idx, :valid_len] = 1.0
     blank_mask = blank_mask * total_mask
     speech_mask = (1.0 - blank_mask).clamp(0.0, 1.0) * total_mask
     return RhythmFramePlan(
@@ -187,13 +193,34 @@ def build_frame_plan(
     )
 
 
+def build_frame_plan_from_execution(
+    *,
+    dur_anchor_src: torch.Tensor,
+    speech_exec: torch.Tensor,
+    pause_exec: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> RhythmFramePlan:
+    slot_schedule = build_interleaved_blank_slot_schedule(
+        speech_duration_exec=speech_exec,
+        blank_duration_exec=pause_exec,
+        unit_mask=unit_mask,
+    )
+    return build_frame_plan(
+        dur_anchor_src=dur_anchor_src,
+        slot_duration_exec=slot_schedule.slot_duration_exec,
+        slot_mask=slot_schedule.slot_mask,
+        slot_is_blank=slot_schedule.slot_is_blank,
+        slot_unit_index=slot_schedule.slot_unit_index,
+    )
+
+
 def sample_tensor_by_frame_plan(
     source: torch.Tensor,
     frame_plan: RhythmFramePlan,
     *,
     blank_fill: torch.Tensor | float | int | None = None,
 ) -> torch.Tensor:
-    if source.dim() == 2:
+    if source.dim() == 1:
         source = source.unsqueeze(0)
     if source.dim() not in {2, 3}:
         raise ValueError(f"Unsupported source shape for frame-plan sampling: {tuple(source.shape)}")
@@ -206,11 +233,17 @@ def sample_tensor_by_frame_plan(
     for batch_idx in range(source.size(0)):
         src = source[batch_idx]
         indices = frame_plan.frame_src_index[batch_idx]
-        safe_indices = indices.clamp_min(0)
-        if src.dim() == 1:
-            gathered = src[safe_indices]
+        if src.size(0) <= 0:
+            if src.dim() == 1:
+                gathered = src.new_zeros(indices.shape)
+            else:
+                gathered = src.new_zeros((indices.size(0), *src.shape[1:]))
         else:
-            gathered = src.index_select(0, safe_indices)
+            safe_indices = indices.clamp(min=0, max=max(int(src.size(0)) - 1, 0))
+            if src.dim() == 1:
+                gathered = src[safe_indices]
+            else:
+                gathered = src.index_select(0, safe_indices)
         blank_mask = frame_plan.blank_mask[batch_idx] > 0.5
         if blank_mask.any():
             if blank_fill is None:

@@ -41,12 +41,12 @@ def build_source_boundary_cue(
 
     peak_score = torch.sigmoid(_masked_standardize(local_peak, unit_mask))
     jump_score = torch.sigmoid(_masked_standardize(local_jump, unit_mask))
-    cue = 0.35 * peak_score + 0.25 * jump_score
+    cue = 0.25 * peak_score + 0.15 * jump_score
 
     if sep_hint is not None:
-        cue = cue + 0.55 * sep_hint.float()
+        cue = cue + 0.40 * sep_hint.float()
     if boundary_confidence is not None:
-        cue = cue + 0.35 * boundary_confidence.float()
+        cue = cue + 0.20 * boundary_confidence.float()
     if open_run_mask is not None:
         cue = cue * (1.0 - 0.25 * open_run_mask.float())
     if sealed_mask is not None:

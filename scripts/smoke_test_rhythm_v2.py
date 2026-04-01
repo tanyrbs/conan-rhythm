@@ -86,8 +86,22 @@ if __name__ == '__main__':
     unitizer_state = stream_unitizer.init_state(batch_size=1)
     _, unitizer_state = stream_unitizer.step_token_lists([[1, 1, 2, 57]], unitizer_state)
     unitized_step2, unitizer_state = stream_unitizer.step_token_lists([[2, 2, 3, 3]], unitizer_state)
-    assert len(unitizer_state.raw_tokens[0]) == 8
+    assert unitizer_state.rows[0].units.tolist() == [1, 2, 2, 3]
+    assert unitizer_state.rows[0].durations.tolist() == [2, 1, 2, 2]
     assert unitized_step2[0].units == [1, 2, 2, 3]
+    frontend_state = frontend.init_stream_state(batch_size=1, device=torch.device("cpu"))
+    frontend_step1, frontend_state = frontend.step_content_tensor(
+        torch.tensor([[1, 1, 2, 57]], dtype=torch.long),
+        frontend_state,
+        content_lengths=torch.tensor([4], dtype=torch.long),
+    )
+    frontend_step2, frontend_state = frontend.step_content_tensor(
+        torch.tensor([[2, 2, 3, 3]], dtype=torch.long),
+        frontend_state,
+        content_lengths=torch.tensor([4], dtype=torch.long),
+    )
+    assert frontend_step1.content_units[0, :2].tolist() == [1, 2]
+    assert frontend_step2.content_units[0, :4].tolist() == [1, 2, 2, 3]
 
     state = model.init_state(batch_size=2, device=torch.device('cpu'))
     out1 = model(

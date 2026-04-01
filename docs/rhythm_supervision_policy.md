@@ -24,13 +24,13 @@ Current cached fields:
 
 - `rhythm_speech_exec_tgt`
 - `rhythm_blank_exec_tgt`
-- `rhythm_pause_exec_tgt` (legacy alias of the same executed blank surface)
+- `rhythm_pause_exec_tgt` (maintained runtime/batch name)
 - `rhythm_speech_budget_tgt`
 - `rhythm_blank_budget_tgt`
-- `rhythm_pause_budget_tgt` (legacy alias of the same blank-budget surface)
+- `rhythm_pause_budget_tgt` (maintained runtime/batch name)
 - `rhythm_guidance_speech_tgt`
 - `rhythm_guidance_blank_tgt`
-- `rhythm_guidance_pause_tgt` (legacy alias)
+- `rhythm_guidance_pause_tgt` (maintained runtime/batch name)
 
 ### Tier B: offline teacher surface
 
@@ -43,10 +43,10 @@ Current cached fields:
 
 - `rhythm_teacher_speech_exec_tgt`
 - `rhythm_teacher_blank_exec_tgt`
-- `rhythm_teacher_pause_exec_tgt` (legacy alias)
+- `rhythm_teacher_pause_exec_tgt` (maintained runtime/batch name)
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_blank_budget_tgt`
-- `rhythm_teacher_pause_budget_tgt` (legacy alias)
+- `rhythm_teacher_pause_budget_tgt` (maintained runtime/batch name)
 - `rhythm_teacher_prefix_clock_tgt`
 - `rhythm_teacher_prefix_backlog_tgt`
 
@@ -153,8 +153,8 @@ The rhythm path should stay minimal.
 
 Maintained naming preference:
 
-- use **blank** for the executed non-speech slot surface in docs/configs
-- keep **pause** only as a backward-compatible alias in cache/code paths
+- use **pause** for executed non-speech target surfaces in configs / runtime batches
+- keep **blank** only as a renderer / cache-compat alias where the interleaved blank-slot graph is helpful
 
 ### Core timing losses
 

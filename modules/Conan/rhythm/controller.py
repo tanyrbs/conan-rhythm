@@ -240,9 +240,7 @@ class UnitRedistributionHead(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_latent = torch.sigmoid(
-            self.boundary_head(x).squeeze(-1) + self.boundary_source_cue_weight * source_boundary_cue.float()
-        ) * unit_mask
+        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1)) * unit_mask
         pause_logits = self.pause_head(x).squeeze(-1)
         pause_logits = pause_logits + self.pause_boundary_latent_weight * boundary_latent
         pause_logits = pause_logits + self.pause_source_boundary_weight * source_boundary_cue.float()

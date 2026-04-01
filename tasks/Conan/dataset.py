@@ -20,6 +20,7 @@ from modules.Conan.rhythm.supervision import (
     build_source_rhythm_cache,
     with_blank_aliases,
 )
+from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
 
 class ConanDataset(FastSpeechDataset):
     _RHYTHM_SOURCE_CACHE_KEYS = (
@@ -29,6 +30,8 @@ class ConanDataset(FastSpeechDataset):
         "sealed_mask",
         "sep_hint",
         "boundary_confidence",
+    )
+    _RHYTHM_SOURCE_DEBUG_CACHE_KEYS = (
         "source_boundary_cue",
         "phrase_group_index",
         "phrase_group_pos",
@@ -37,6 +40,8 @@ class ConanDataset(FastSpeechDataset):
     _RHYTHM_REF_CACHE_KEYS = (
         "ref_rhythm_stats",
         "ref_rhythm_trace",
+    )
+    _RHYTHM_REF_DEBUG_CACHE_KEYS = (
         "slow_rhythm_memory",
         "slow_rhythm_summary",
         "selector_meta_indices",
@@ -87,11 +92,11 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_retimed_target_source_id",
         "rhythm_retimed_target_confidence",
     )
-    # Keep the batch schema layered even if the current training sample still
-    # carries all keys in one dict:
-    #   1) runtime-minimal contract: the maintained timing path
-    #   2) debug sidecars: useful for inspection / streaming audits
-    #   3) cache/audit metadata: used for fail-fast contract checks
+    # Keep the batch schema layered:
+    #   1) runtime-minimal contract: maintained timing path
+    #   2) runtime targets: maintained supervision surfaces
+    #   3) optional streaming sidecars: only when a stage actually needs them
+    #   4) debug/cache audit appendices: opt-in only
     _RHYTHM_RUNTIME_MINIMAL_KEYS = (
         "content_units",
         "dur_anchor_src",
@@ -102,17 +107,22 @@ class ConanDataset(FastSpeechDataset):
         "ref_rhythm_stats",
         "ref_rhythm_trace",
     )
-    _RHYTHM_DEBUG_SIDECAR_KEYS = (
-        "source_boundary_cue",
-        "phrase_group_index",
-        "phrase_group_pos",
-        "phrase_final_mask",
+    _RHYTHM_STREAMING_OFFLINE_KEYS = (
         "rhythm_offline_content_units",
         "rhythm_offline_dur_anchor_src",
         "rhythm_offline_open_run_mask",
         "rhythm_offline_sealed_mask",
         "rhythm_offline_sep_hint",
         "rhythm_offline_boundary_confidence",
+        "rhythm_stream_prefix_ratio",
+        "rhythm_stream_visible_units",
+        "rhythm_stream_full_units",
+    )
+    _RHYTHM_DEBUG_SIDECAR_KEYS = (
+        "source_boundary_cue",
+        "phrase_group_index",
+        "phrase_group_pos",
+        "phrase_final_mask",
         "rhythm_offline_source_boundary_cue",
         "rhythm_offline_phrase_group_index",
         "rhythm_offline_phrase_group_pos",
@@ -123,9 +133,6 @@ class ConanDataset(FastSpeechDataset):
         "selector_meta_scores",
         "selector_meta_starts",
         "selector_meta_ends",
-        "rhythm_stream_prefix_ratio",
-        "rhythm_stream_visible_units",
-        "rhythm_stream_full_units",
     )
     # Public/runtime batch contract prefers pause-* naming. Keep blank-* only as
     # cache/backward-compat aliases inside cached target validation / adaptation.
@@ -148,12 +155,6 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_retimed_frame_weight",
     )
     _RHYTHM_CACHE_AUDIT_KEYS = _RHYTHM_META_KEYS
-    _RHYTHM_OPTIONAL_SAMPLE_KEYS = tuple(dict.fromkeys(
-        _RHYTHM_RUNTIME_MINIMAL_KEYS
-        + _RHYTHM_DEBUG_SIDECAR_KEYS
-        + _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS
-        + _RHYTHM_CACHE_AUDIT_KEYS
-    ))
 
     def _resolve_primary_target_surface(self) -> str:
         surface = str(self.hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
@@ -207,6 +208,25 @@ class ConanDataset(FastSpeechDataset):
             and bool(self.hparams.get("rhythm_streaming_prefix_train", False))
         )
 
+    def _should_export_rhythm_debug_sidecars(self) -> bool:
+        return bool(self.hparams.get("rhythm_export_debug_sidecars", False))
+
+    def _should_export_rhythm_cache_audit(self) -> bool:
+        return bool(self.hparams.get("rhythm_export_cache_audit_to_sample", False))
+
+    def _should_export_streaming_offline_sidecars(self) -> bool:
+        return self._should_sample_streaming_prefix() or bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
+
+    def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
+        keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._RHYTHM_RUNTIME_TARGET_EXPORT_KEYS)
+        if self._should_export_streaming_offline_sidecars():
+            keys.extend(self._RHYTHM_STREAMING_OFFLINE_KEYS)
+        if self._should_export_rhythm_debug_sidecars():
+            keys.extend(self._RHYTHM_DEBUG_SIDECAR_KEYS)
+        if self._should_export_rhythm_cache_audit():
+            keys.extend(self._RHYTHM_CACHE_AUDIT_KEYS)
+        return tuple(dict.fromkeys(keys))
+
     def _select_streaming_visible_tokens(self, visible_tokens, *, item_name: str):
         full_tokens = np.asarray(visible_tokens).reshape(-1)
         full_len = int(full_tokens.shape[0])
@@ -240,6 +260,60 @@ class ConanDataset(FastSpeechDataset):
     @staticmethod
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
         return {f"{prefix}{key}": value for key, value in cache.items()}
+
+    def _adapt_source_cache_to_visible_prefix(self, *, item, visible_tokens) -> dict:
+        cache = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_CACHE_KEYS if key in item}
+        if len(cache) != len(self._RHYTHM_SOURCE_CACHE_KEYS):
+            missing = [key for key in self._RHYTHM_SOURCE_CACHE_KEYS if key not in cache]
+            raise RuntimeError(
+                f"Rhythm cached_only requires full source cache before prefix adaptation. Missing keys in "
+                f"{item.get('item_name', '<unknown-item>')}: {missing}"
+            )
+        remaining = int(np.asarray(visible_tokens).reshape(-1).shape[0])
+        full_units = np.asarray(cache["content_units"]).reshape(-1)
+        full_durations = np.asarray(cache["dur_anchor_src"]).reshape(-1)
+        full_sep = np.asarray(cache["sep_hint"]).reshape(-1)
+        out_units = []
+        out_durations = []
+        out_sep = []
+        for unit_id, duration, sep_flag in zip(full_units, full_durations, full_sep):
+            if remaining <= 0:
+                break
+            take = int(min(int(duration), remaining))
+            out_units.append(int(unit_id))
+            out_durations.append(take)
+            out_sep.append(int(sep_flag) if take == int(duration) else 0)
+            remaining -= take
+        if remaining > 0:
+            raise RuntimeError(
+                f"Visible prefix in {item.get('item_name', '<unknown-item>')} exceeds cached source duration. "
+                "Re-binarize the dataset."
+            )
+        if int(np.asarray(item["hubert"]).reshape(-1).shape[0]) > int(np.asarray(visible_tokens).reshape(-1).shape[0]) and len(out_sep) > 0:
+            out_sep[-1] = 0
+        open_run_mask = np.zeros((len(out_units),), dtype=np.int64)
+        sealed_mask = np.ones((len(out_units),), dtype=np.int64)
+        boundary_confidence = np.asarray(
+            estimate_boundary_confidence(out_durations, out_sep, open_run_mask.tolist()),
+            dtype=np.float32,
+        )
+        adapted = {
+            "content_units": np.asarray(out_units, dtype=np.int64),
+            "dur_anchor_src": np.asarray(out_durations, dtype=np.int64),
+            "open_run_mask": open_run_mask,
+            "sealed_mask": sealed_mask,
+            "sep_hint": np.asarray(out_sep, dtype=np.int64),
+            "boundary_confidence": boundary_confidence,
+        }
+        if self._should_export_rhythm_debug_sidecars():
+            full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
+            adapted.update({
+                "source_boundary_cue": boundary_confidence.copy() if "source_boundary_cue" in full_side else boundary_confidence.copy(),
+                "phrase_group_index": np.zeros_like(adapted["content_units"], dtype=np.int64),
+                "phrase_group_pos": np.zeros_like(boundary_confidence, dtype=np.float32),
+                "phrase_final_mask": np.zeros_like(boundary_confidence, dtype=np.float32),
+            })
+        return adapted
 
     def _expected_rhythm_cache_version(self) -> int:
         return int(self.hparams.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
@@ -417,16 +491,9 @@ class ConanDataset(FastSpeechDataset):
     def _validate_reference_conditioning_shapes(self, conditioning, *, item_name: str):
         stats = np.asarray(conditioning["ref_rhythm_stats"])
         trace = np.asarray(conditioning["ref_rhythm_trace"])
-        slow_memory = np.asarray(conditioning["slow_rhythm_memory"])
-        slow_summary = np.asarray(conditioning["slow_rhythm_summary"])
-        selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
-        selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
-        selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
-        selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
         stats_dim = int(self.hparams.get("rhythm_stats_dim", 6))
         trace_bins = int(self.hparams.get("rhythm_trace_bins", 24))
         trace_dim = int(self.hparams.get("rhythm_trace_dim", 5))
-        slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
         if stats.reshape(-1).shape[0] != stats_dim:
             raise RuntimeError(
                 f"Rhythm stats shape mismatch in {item_name}: found={tuple(stats.shape)}, expected_last_dim={stats_dim}."
@@ -435,6 +502,16 @@ class ConanDataset(FastSpeechDataset):
             raise RuntimeError(
                 f"Rhythm trace shape mismatch in {item_name}: found={tuple(trace.shape)}, expected=({trace_bins}, {trace_dim})."
             )
+        sidecar_keys = self._RHYTHM_REF_DEBUG_CACHE_KEYS
+        if not all(key in conditioning for key in sidecar_keys):
+            return
+        slow_memory = np.asarray(conditioning["slow_rhythm_memory"])
+        slow_summary = np.asarray(conditioning["slow_rhythm_summary"])
+        selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
+        selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
+        selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
+        selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
+        slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
         if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
             raise RuntimeError(
                 f"Slow rhythm memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
@@ -624,15 +701,7 @@ class ConanDataset(FastSpeechDataset):
             if int(full_tokens.shape[0]) == int(visible_tokens.shape[0]):
                 return cache
         if target_mode == "cached_only":
-            # Prefix rebuild is deterministic from visible tokens and avoids false failures when
-            # dataset sampling crops the source sequence.
-            return build_source_rhythm_cache(
-                visible_tokens,
-                silent_token=self.hparams.get("silent_token", 57),
-                separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
-                tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
-                phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
-            )
+            return self._adapt_source_cache_to_visible_prefix(item=item, visible_tokens=visible_tokens)
         return build_source_rhythm_cache(
             visible_tokens,
             silent_token=self.hparams.get("silent_token", 57),
@@ -811,7 +880,7 @@ class ConanDataset(FastSpeechDataset):
             item_name=item_name,
         )
 
-        optional_rhythm_keys = self._RHYTHM_OPTIONAL_SAMPLE_KEYS
+        optional_rhythm_keys = self._resolve_optional_sample_keys()
         rhythm_runtime_fields = {}
         source_cache = self._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):

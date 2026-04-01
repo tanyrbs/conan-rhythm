@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .contracts import RhythmTeacherTargets, StreamingRhythmState
+from .offline_teacher import OfflineRhythmTeacherPlanner
 from .projector import ProjectorConfig, StreamingRhythmProjector
 from .reference_descriptor import RefRhythmDescriptor
 from .scheduler import MonotonicRhythmScheduler
@@ -57,6 +58,18 @@ class StreamingRhythmModule(nn.Module):
             smooth_kernel=trace_smooth_kernel,
         )
         self.scheduler = MonotonicRhythmScheduler(
+            hidden_size=hidden_size,
+            stats_dim=stats_dim,
+            trace_dim=trace_dim,
+            max_total_logratio=max_total_logratio,
+            max_unit_logratio=max_unit_logratio,
+            pause_share_max=pause_share_max,
+            boundary_feature_scale=boundary_feature_scale,
+            boundary_source_cue_weight=boundary_source_cue_weight,
+            pause_boundary_latent_weight=pause_boundary_latent_weight,
+            pause_source_boundary_weight=pause_source_boundary_weight,
+        )
+        self.offline_teacher = OfflineRhythmTeacherPlanner(
             hidden_size=hidden_size,
             stats_dim=stats_dim,
             trace_dim=trace_dim,
@@ -149,6 +162,7 @@ class StreamingRhythmModule(nn.Module):
         trace_horizon: float | None = None,
         projector_reuse_prefix: bool = True,
         projector_force_full_commit: bool = False,
+        projector_pause_topk_ratio_override: float | None = None,
     ):
         ref_conditioning = self.build_reference_conditioning(
             ref_conditioning=ref_conditioning,
@@ -200,6 +214,7 @@ class StreamingRhythmModule(nn.Module):
             planner=planner,
             reuse_prefix=projector_reuse_prefix,
             force_full_commit=projector_force_full_commit,
+            pause_topk_ratio_override=projector_pause_topk_ratio_override,
         )
         return execution
 
@@ -265,6 +280,7 @@ class StreamingRhythmModule(nn.Module):
         offline_sealed_mask: torch.Tensor | None = None,
         offline_sep_hint: torch.Tensor | None = None,
         offline_boundary_confidence: torch.Tensor | None = None,
+        projector_pause_topk_ratio_override: float | None = None,
     ) -> dict[str, object]:
         streaming_execution = self.forward(
             content_units=content_units,
@@ -279,6 +295,7 @@ class StreamingRhythmModule(nn.Module):
             sep_hint=sep_hint,
             boundary_confidence=boundary_confidence,
             state=state,
+            projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
         )
         offline_content_units = content_units if offline_content_units is None else offline_content_units
         offline_dur_anchor_src = dur_anchor_src if offline_dur_anchor_src is None else offline_dur_anchor_src
@@ -291,7 +308,7 @@ class StreamingRhythmModule(nn.Module):
             if offline_unit_mask is None:
                 offline_unit_mask = offline_dur_anchor_src.gt(0).float()
             offline_sealed_mask = torch.ones_like(offline_unit_mask).float()
-        offline_execution = self.forward(
+        offline_execution, offline_confidence = self.forward_teacher(
             content_units=offline_content_units,
             dur_anchor_src=offline_dur_anchor_src,
             ref_conditioning=ref_conditioning,
@@ -303,10 +320,7 @@ class StreamingRhythmModule(nn.Module):
             sealed_mask=torch.ones_like(offline_sealed_mask).float(),
             sep_hint=offline_sep_hint,
             boundary_confidence=offline_boundary_confidence,
-            state=self.init_state(batch_size=offline_content_units.size(0), device=offline_content_units.device),
-            trace_horizon=1.0,
-            projector_reuse_prefix=False,
-            projector_force_full_commit=True,
+            projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=offline_content_units,
@@ -324,5 +338,72 @@ class StreamingRhythmModule(nn.Module):
         return {
             "streaming_execution": streaming_execution,
             "offline_execution": offline_execution,
+            "offline_confidence": offline_confidence,
             "algorithmic_teacher": algorithmic_teacher,
         }
+
+    def forward_teacher(
+        self,
+        *,
+        content_units: torch.Tensor,
+        dur_anchor_src: torch.Tensor,
+        ref_conditioning: dict[str, torch.Tensor] | None = None,
+        ref_rhythm_stats: torch.Tensor | None = None,
+        ref_rhythm_trace: torch.Tensor | None = None,
+        ref_mel: torch.Tensor | None = None,
+        unit_mask: torch.Tensor | None = None,
+        open_run_mask: torch.Tensor | None = None,
+        sealed_mask: torch.Tensor | None = None,
+        sep_hint: torch.Tensor | None = None,
+        boundary_confidence: torch.Tensor | None = None,
+        projector_pause_topk_ratio_override: float | None = None,
+    ) -> tuple[object, torch.Tensor]:
+        ref_conditioning = self.build_reference_conditioning(
+            ref_conditioning=ref_conditioning,
+            ref_rhythm_stats=ref_rhythm_stats,
+            ref_rhythm_trace=ref_rhythm_trace,
+            ref_mel=ref_mel,
+        )
+        if unit_mask is None:
+            unit_mask = dur_anchor_src.gt(0).float()
+        unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
+        source_boundary_cue = build_source_boundary_cue(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            sep_hint=sep_hint,
+            open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            boundary_confidence=boundary_confidence,
+        )
+        visible_sizes = unit_mask.float().sum(dim=1).long().clamp_min(1)
+        trace_context = self.sample_trace_window(
+            ref_conditioning=ref_conditioning,
+            phase_ptr=unit_mask.new_zeros((unit_mask.size(0),)),
+            window_size=content_units.size(1),
+            horizon=1.0,
+            visible_sizes=visible_sizes,
+        )
+        planner, confidence = self.offline_teacher(
+            unit_states=unit_embed,
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            ref_conditioning=ref_conditioning,
+            trace_context=trace_context,
+            source_boundary_cue=source_boundary_cue,
+        )
+        execution = self.projector(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            speech_budget_win=planner.speech_budget_win,
+            pause_budget_win=planner.pause_budget_win,
+            dur_logratio_unit=planner.dur_logratio_unit,
+            pause_weight_unit=planner.pause_weight_unit,
+            boundary_latent=planner.boundary_latent,
+            state=self.init_state(batch_size=content_units.size(0), device=content_units.device),
+            open_run_mask=torch.zeros_like(content_units) if open_run_mask is None else open_run_mask,
+            planner=planner,
+            reuse_prefix=False,
+            force_full_commit=True,
+            pause_topk_ratio_override=projector_pause_topk_ratio_override,
+        )
+        return execution, confidence

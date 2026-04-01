@@ -27,6 +27,7 @@ from modules.Conan.rhythm.bridge import (
     run_rhythm_frontend,
 )
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
+from modules.Conan.rhythm.supervision import build_online_retimed_bundle
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from modules.commons.transformer import SinusoidalPositionalEmbedding
 
@@ -55,7 +56,8 @@ class Conan(FastSpeech):
 
         hidden_size = hparams["hidden_size"]
         kernel_size = hparams["kernel_size"]
-        self.content_embedding = nn.Embedding(102, hidden_size)
+        content_vocab_size = int(hparams.get("content_vocab_size", hparams.get("content_embedding_dim", 102)))
+        self.content_embedding = nn.Embedding(content_vocab_size, hidden_size)
         # self.content_proj = nn.Sequential(
         #     nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, padding=kernel_size//2),
         #     # nn.Linear(80, hidden_size, bias=True)
@@ -158,6 +160,25 @@ class Conan(FastSpeech):
         frame_states = frame_states + gain * edge_scale * phase_residual
         return frame_states * total_mask.unsqueeze(-1)
 
+    def _resolve_rhythm_pause_topk_ratio(self, *, infer: bool, global_steps: int) -> float | None:
+        if not self.rhythm_enable_v2:
+            return None
+        final_ratio = float(self.hparams.get("rhythm_projector_pause_topk_ratio", 0.35))
+        if infer:
+            return float(max(0.0, min(1.0, final_ratio)))
+        start_ratio = float(self.hparams.get("rhythm_projector_pause_topk_ratio_train_start", 1.0))
+        end_ratio = float(self.hparams.get("rhythm_projector_pause_topk_ratio_train_end", final_ratio))
+        warmup_steps = int(self.hparams.get("rhythm_projector_pause_topk_ratio_warmup_steps", 0) or 0)
+        anneal_steps = int(self.hparams.get("rhythm_projector_pause_topk_ratio_anneal_steps", 20000) or 0)
+        start_ratio = float(max(0.0, min(1.0, start_ratio)))
+        end_ratio = float(max(0.0, min(1.0, end_ratio)))
+        if anneal_steps <= 0:
+            return end_ratio
+        if global_steps <= warmup_steps:
+            return start_ratio
+        progress = min(max((int(global_steps) - warmup_steps) / float(anneal_steps), 0.0), 1.0)
+        return float(start_ratio + (end_ratio - start_ratio) * progress)
+
     def forward(
         self,
         content,
@@ -214,6 +235,10 @@ class Conan(FastSpeech):
         if self.rhythm_enable_v2 and ref is not None:
             rhythm_source_cache = kwargs.get("rhythm_source_cache")
             rhythm_offline_source_cache = kwargs.get("rhythm_offline_source_cache")
+            projector_pause_topk_ratio_override = self._resolve_rhythm_pause_topk_ratio(
+                infer=bool(infer),
+                global_steps=int(global_steps),
+            )
             rhythm_bundle = run_rhythm_frontend(
                 rhythm_enable_v2=self.rhythm_enable_v2,
                 rhythm_unit_frontend=self.rhythm_unit_frontend,
@@ -227,7 +252,9 @@ class Conan(FastSpeech):
                 rhythm_source_cache=rhythm_source_cache,
                 rhythm_offline_source_cache=rhythm_offline_source_cache,
                 enable_dual_mode_teacher=bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)),
+                enable_learned_offline_teacher=bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True)),
                 enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
+                projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             )
             content_embed, tgt_nonpadding = attach_rhythm_outputs(
                 ret=ret,
@@ -241,6 +268,31 @@ class Conan(FastSpeech):
                 pause_state=self.rhythm_pause_state,
                 frame_state_post_fn=self._rhythm_render_frame_state_post,
             )
+            if bool(ret.get("rhythm_apply_render", 0.0)) and target is not None:
+                frame_plan = ret.get("rhythm_frame_plan")
+                if frame_plan is not None:
+                    online_bundle = build_online_retimed_bundle(
+                        mel=target,
+                        frame_plan=frame_plan,
+                        f0=f0 if f0 is not None and uv is not None else None,
+                        uv=uv if f0 is not None and uv is not None else None,
+                        pause_frame_weight=float(self.hparams.get("rhythm_retimed_pause_frame_weight", 0.20)),
+                        stretch_weight_min=float(self.hparams.get("rhythm_retimed_stretch_weight_min", 0.35)),
+                    )
+                    ret["rhythm_online_retimed_mel_tgt"] = online_bundle["mel_tgt"]
+                    ret["rhythm_online_retimed_frame_weight"] = online_bundle["frame_weight"]
+                    ret["rhythm_online_retimed_mel_len"] = online_bundle["mel_len"]
+                    if "f0_tgt" in online_bundle:
+                        ret["retimed_f0_tgt"] = online_bundle["f0_tgt"]
+                    if "uv_tgt" in online_bundle:
+                        ret["retimed_uv_tgt"] = online_bundle["uv_tgt"]
+                    if (
+                        bool(self.hparams.get("rhythm_use_retimed_pitch_target", False))
+                        and "retimed_f0_tgt" in ret
+                        and "retimed_uv_tgt" in ret
+                    ):
+                        f0 = ret["retimed_f0_tgt"]
+                        uv = ret["retimed_uv_tgt"]
 
         # pitch input = content embedding + style embedding
         pitch_inp = content_embed + style_embed

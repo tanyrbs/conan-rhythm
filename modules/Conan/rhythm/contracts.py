@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from .frame_plan import RhythmFramePlan
 
 
 @dataclass
@@ -23,6 +26,10 @@ class StreamingRhythmState:
     commit_frontier: torch.Tensor
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
+    phase_anchor_progress: Optional[torch.Tensor] = None
+    phase_anchor_total: Optional[torch.Tensor] = None
+    speech_budget_debt: Optional[torch.Tensor] = None
+    pause_budget_debt: Optional[torch.Tensor] = None
 
     @property
     def previous_blank_exec(self) -> Optional[torch.Tensor]:
@@ -58,6 +65,7 @@ class RhythmExecution:
     slot_mask: torch.Tensor
     slot_is_blank: torch.Tensor
     slot_unit_index: torch.Tensor
+    frame_plan: Optional["RhythmFramePlan"]
     planner: RhythmPlannerOutputs
     next_state: StreamingRhythmState
 

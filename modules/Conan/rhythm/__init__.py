@@ -13,6 +13,13 @@ from .contracts import (
     StreamingRhythmState,
 )
 from .controller import UnitRedistributionHead, WindowBudgetController
+from .frame_plan import (
+    RhythmFramePlan,
+    build_frame_plan,
+    build_frame_plan_from_execution,
+    build_frame_weight_from_plan,
+    sample_tensor_by_frame_plan,
+)
 from .module import StreamingRhythmModule
 from .reference_descriptor import RefRhythmDescriptor
 from .reference_encoder import (
@@ -39,6 +46,7 @@ from .supervision import (
     RHYTHM_TRACE_HOP_MS,
     RHYTHM_UNIT_HOP_MS,
     build_item_rhythm_bundle,
+    build_online_retimed_bundle,
     build_reference_guided_targets,
     build_reference_rhythm_conditioning,
     build_retimed_mel_target,
@@ -73,6 +81,10 @@ __all__ = [
     'WindowBudgetController',
     'attach_rhythm_outputs',
     'build_content_nonpadding',
+    'build_frame_plan',
+    'build_frame_plan_from_execution',
+    'build_frame_weight_from_plan',
+    'build_online_retimed_bundle',
     'RHYTHM_CACHE_VERSION',
     'RHYTHM_GUIDANCE_SURFACE_NAME',
     'RHYTHM_REFERENCE_MODE_STATIC_REF_FULL',
@@ -90,6 +102,7 @@ __all__ = [
     'build_source_rhythm_cache',
     'build_algorithmic_teacher_targets',
     'build_interleaved_blank_slot_schedule',
+    'sample_tensor_by_frame_plan',
     'resolve_content_lengths',
     'resolve_rhythm_apply_mode',
     'render_rhythm_sequence',
@@ -98,6 +111,7 @@ __all__ = [
     'BlankSlotSchedule',
     'RenderedRhythmSequence',
     'CompressedUnitSequence',
+    'RhythmFramePlan',
     'RhythmExecution',
     'RhythmPlannerOutputs',
     'RhythmPublicInputs',

@@ -111,6 +111,18 @@ def _normalize_distill(surface: str) -> str:
     return aliases.get(surface, surface)
 
 
+def _normalize_retimed_target_mode(mode: str) -> str:
+    aliases = {
+        "cache": "cached",
+        "cached_only": "cached",
+        "teacher": "cached",
+        "runtime": "online",
+        "online_only": "online",
+        "mixed": "hybrid",
+    }
+    return aliases.get(mode, mode)
+
+
 def _extract_scalar(value):
     arr = np.asarray(value)
     if arr.size <= 0:
@@ -160,7 +172,14 @@ def _detect_stage(hp: dict, config_path: str) -> str:
 
 
 def _detect_profile(hp: dict, config_path: str) -> str:
-    if bool(hp.get("rhythm_minimal_v1_profile", False)) or "minimal_v1" in str(config_path).lower():
+    is_minimal_flag = bool(hp.get("rhythm_minimal_v1_profile", False)) or "minimal_v1" in str(config_path).lower()
+    if (
+        is_minimal_flag
+        and not bool(hp.get("rhythm_enable_dual_mode_teacher", False))
+        and not bool(hp.get("rhythm_apply_train_override", False))
+        and not bool(hp.get("rhythm_apply_valid_override", False))
+        and _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower()) == "none"
+    ):
         return "minimal_v1"
     return "default"
 
@@ -226,6 +245,13 @@ def _validate_profile_contract(
 
     if not model_dry_run:
         warnings.append("minimal_v1 train-ready preflight should include --model_dry_run before starting training.")
+    if "rhythm_min_unit_frames" in hp:
+        legacy_min_unit = hp.get("rhythm_min_unit_frames")
+        if legacy_min_unit not in {None, "", 0, 0.0, "0", "0.0"}:
+            warnings.append(
+                "rhythm_min_unit_frames is a legacy/unsupported knob in the maintained path; "
+                "remove it instead of assuming it is active."
+            )
     return profile, errors, warnings
 
 
@@ -240,15 +266,55 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     require_cached_teacher = bool(hp.get("rhythm_require_cached_teacher", False))
     require_retimed_cache = bool(hp.get("rhythm_require_retimed_cache", False))
     enable_dual = bool(hp.get("rhythm_enable_dual_mode_teacher", False))
+    enable_learned_offline_teacher = bool(hp.get("rhythm_enable_learned_offline_teacher", True))
     schedule_only = bool(hp.get("rhythm_schedule_only_stage", False))
     optimize_module_only = bool(hp.get("rhythm_optimize_module_only", False))
     lambda_distill = float(hp.get("lambda_rhythm_distill", 0.0))
     apply_train = bool(hp.get("rhythm_apply_train_override", False))
     apply_valid = bool(hp.get("rhythm_apply_valid_override", False))
     use_retimed_target = bool(hp.get("rhythm_use_retimed_target_if_available", False))
+    retimed_target_mode = _normalize_retimed_target_mode(str(hp.get("rhythm_retimed_target_mode", "cached") or "cached").strip().lower())
+    use_retimed_pitch_target = bool(hp.get("rhythm_use_retimed_pitch_target", False))
+    disable_pitch_when_retimed = bool(hp.get("rhythm_disable_pitch_loss_when_retimed", True))
     retimed_source = str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
     binarize_teacher = bool(hp.get("rhythm_binarize_teacher_targets", False))
     binarize_retimed = bool(hp.get("rhythm_binarize_retimed_mel_targets", False))
+    disable_mel_adv_when_retimed = bool(hp.get("rhythm_disable_mel_adv_when_retimed", True))
+    lambda_mel_adv = float(hp.get("lambda_mel_adv", 0.0))
+    pause_topk_ratio = float(hp.get("rhythm_projector_pause_topk_ratio", 0.35))
+    pause_topk_ratio_train_start = float(hp.get("rhythm_projector_pause_topk_ratio_train_start", 1.0))
+    pause_topk_ratio_train_end = float(hp.get("rhythm_projector_pause_topk_ratio_train_end", pause_topk_ratio))
+    pause_topk_ratio_anneal_steps = int(hp.get("rhythm_projector_pause_topk_ratio_anneal_steps", 20000) or 0)
+    pause_topk_ratio_warmup_steps = int(hp.get("rhythm_projector_pause_topk_ratio_warmup_steps", 0) or 0)
+    distill_conf_floor = float(hp.get("rhythm_distill_confidence_floor", 0.05))
+    distill_conf_power = float(hp.get("rhythm_distill_confidence_power", 1.0))
+
+    if retimed_target_mode not in {"cached", "online", "hybrid"}:
+        errors.append(f"Unsupported rhythm_retimed_target_mode: {retimed_target_mode}")
+    if enable_dual and not enable_learned_offline_teacher:
+        errors.append("rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true.")
+    for name, value in {
+        "rhythm_projector_pause_topk_ratio": pause_topk_ratio,
+        "rhythm_projector_pause_topk_ratio_train_start": pause_topk_ratio_train_start,
+        "rhythm_projector_pause_topk_ratio_train_end": pause_topk_ratio_train_end,
+    }.items():
+        if not (0.0 <= value <= 1.0):
+            errors.append(f"{name} must be in [0, 1].")
+    if pause_topk_ratio_anneal_steps < 0:
+        errors.append("rhythm_projector_pause_topk_ratio_anneal_steps must be >= 0.")
+    if pause_topk_ratio_warmup_steps < 0:
+        errors.append("rhythm_projector_pause_topk_ratio_warmup_steps must be >= 0.")
+    if pause_topk_ratio_train_start < pause_topk_ratio_train_end:
+        warnings.append("pause top-k anneal is configured sparse->dense; maintained path usually uses dense->sparse.")
+    if not (0.0 < distill_conf_floor <= 1.0):
+        errors.append("rhythm_distill_confidence_floor must be in (0, 1].")
+    if distill_conf_power <= 0.0:
+        errors.append("rhythm_distill_confidence_power must be > 0.")
+    if (apply_train or apply_valid) and not use_retimed_pitch_target and not disable_pitch_when_retimed:
+        errors.append(
+            "Retimed train/valid rendering must either enable rhythm_use_retimed_pitch_target "
+            "or set rhythm_disable_pitch_loss_when_retimed: true."
+        )
 
     if stage == "schedule_only":
         if target_mode != "cached_only":
@@ -313,6 +379,10 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal retimed-train stage requires rhythm_binarize_teacher_targets: true.")
         if not binarize_retimed:
             errors.append("Formal retimed-train stage requires rhythm_binarize_retimed_mel_targets: true.")
+        if lambda_mel_adv > 0.0 and not disable_mel_adv_when_retimed:
+            errors.append("Formal retimed-train stage should disable mel GAN on the retimed canvas.")
+        if retimed_target_mode == "online":
+            warnings.append("Formal retimed-train stage uses online-only retimed targets; cached retimed targets will not act as a warm-start fallback.")
     else:
         if profile != "minimal_v1":
             warnings.append(

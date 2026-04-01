@@ -41,10 +41,10 @@ Current supervision surface:
 
 - `rhythm_speech_exec_tgt`
 - `rhythm_pause_exec_tgt`
-- `rhythm_blank_exec_tgt` (alias of the same surface)
+- `rhythm_blank_exec_tgt` (cache/internal compatibility alias)
 - `rhythm_speech_budget_tgt`
 - `rhythm_pause_budget_tgt`
-- `rhythm_blank_budget_tgt` (alias of the same surface)
+- `rhythm_blank_budget_tgt` (cache/internal compatibility alias)
 - `rhythm_guidance_speech_tgt`
 - `rhythm_guidance_pause_tgt`
 - `rhythm_guidance_blank_tgt`
@@ -85,10 +85,10 @@ Reserved fields already exist:
 
 - `rhythm_teacher_speech_exec_tgt`
 - `rhythm_teacher_pause_exec_tgt`
-- `rhythm_teacher_blank_exec_tgt`
+- `rhythm_teacher_blank_exec_tgt` (cache/internal compatibility alias)
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
-- `rhythm_teacher_blank_budget_tgt`
+- `rhythm_teacher_blank_budget_tgt` (cache/internal compatibility alias)
 - `rhythm_teacher_prefix_clock_tgt`
 - `rhythm_teacher_prefix_backlog_tgt`
 

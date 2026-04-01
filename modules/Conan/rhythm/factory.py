@@ -20,8 +20,14 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
 
 
 def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule:
+    num_units = int(
+        hparams.get(
+            'content_vocab_size',
+            hparams.get('content_num_units', hparams.get('content_num_embeddings', 102)),
+        )
+    )
     return StreamingRhythmModule(
-        num_units=int(hparams.get('content_embedding_dim', 102)),
+        num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
         trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
         stats_dim=int(hparams.get('rhythm_stats_dim', 6)),
@@ -34,9 +40,9 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
-        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.35)),
-        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.35)),
-        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
+        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.20)),
+        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
+        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         projector_config=build_projector_config_from_hparams(hparams),
         teacher_config=AlgorithmicTeacherConfig(
             rate_scale_min=float(hparams.get('rhythm_teacher_rate_scale_min', 0.55)),

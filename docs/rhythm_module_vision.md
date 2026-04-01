@@ -59,7 +59,7 @@ public execution contract.
 ### Binding execution contract (projector-owned)
 
 1. `speech_exec`
-2. `blank_exec` / `pause_exec`
+2. `pause_exec` (`blank_exec` kept only as an internal/cache alias)
 3. `commit_frontier`
 4. `next_state`
 
@@ -138,7 +138,7 @@ Important contract note:
 
 - scheduler tensors are useful to inspect and lightly regularize
 - but the **maintained binding contract** should live one step later, at projector execution
-- in other words: the planner may expose budgets and redistribution logits, but the system should report and compare `speech_exec / blank_exec / commit_frontier / next_state` as the real outcome
+- in other words: the planner may expose budgets and redistribution logits, but the system should report and compare `speech_exec / pause_exec / commit_frontier / next_state` as the real outcome
 
 Important implementation note:
 
@@ -168,7 +168,7 @@ The projector is the place where timing becomes binding.
 Recommended maintained output semantics:
 
 - `speech_exec`
-- `blank_exec` / `pause_exec`
+- `pause_exec` (`blank_exec` remains an internal alias on the blank-slot graph)
 - `commit_frontier`
 - `next_state`
 

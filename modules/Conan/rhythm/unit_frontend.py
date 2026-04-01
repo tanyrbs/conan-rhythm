@@ -191,7 +191,6 @@ class RhythmUnitFrontend:
     ) -> RhythmUnitBatch:
         if content.dim() != 2:
             raise ValueError(f"content must be rank-2 [B,T], got {tuple(content.shape)}")
-        batch_tokens = []
         batch_size, total_steps = content.shape
         if content_lengths is None:
             content_lengths = torch.full(
@@ -200,16 +199,17 @@ class RhythmUnitFrontend:
                 dtype=torch.long,
                 device=content.device,
             )
-        for batch_idx in range(batch_size):
-            valid_len = int(content_lengths[batch_idx].item())
-            valid_len = max(0, min(valid_len, int(total_steps)))
-            tokens = content[batch_idx, :valid_len].detach().cpu().tolist()
-            batch_tokens.append(tokens)
-        return self.from_token_lists(
-            batch_tokens,
-            mark_last_open=mark_last_open,
+        state = self.init_stream_state(
+            batch_size,
             device=content.device,
         )
+        batch, _ = self.step_content_tensor(
+            content,
+            state,
+            content_lengths=content_lengths,
+            mark_last_open=mark_last_open,
+        )
+        return batch
 
     def from_precomputed(
         self,

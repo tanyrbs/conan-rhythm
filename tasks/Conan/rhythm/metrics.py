@@ -255,12 +255,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         metrics["rhythm_metric_retimed_weight_mean"] = _safe_mean(acoustic_target_weight.float())
 
     if sample is not None:
-        pause_target_key = "rhythm_blank_exec_tgt" if "rhythm_blank_exec_tgt" in sample else "rhythm_pause_exec_tgt"
-        pause_budget_key = "rhythm_blank_budget_tgt" if "rhythm_blank_budget_tgt" in sample else "rhythm_pause_budget_tgt"
+        pause_target_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"
+        pause_budget_key = "rhythm_pause_budget_tgt" if "rhythm_pause_budget_tgt" in sample else "rhythm_blank_budget_tgt"
         teacher_pause_key = (
-            "rhythm_teacher_blank_exec_tgt"
-            if "rhythm_teacher_blank_exec_tgt" in sample
-            else "rhythm_teacher_pause_exec_tgt"
+            "rhythm_teacher_pause_exec_tgt"
+            if "rhythm_teacher_pause_exec_tgt" in sample
+            else "rhythm_teacher_blank_exec_tgt"
         )
         if "rhythm_speech_budget_tgt" in sample:
             metrics["rhythm_metric_budget_speech_l1"] = (

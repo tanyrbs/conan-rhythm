@@ -5,11 +5,14 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 # and additionally enable the shared-projector full-context branch.
 # Stage-2 intentionally still stays in schedule-only / module-only mode;
 # stage-3 is where joint retimed acoustic closure begins.
+rhythm_minimal_v1_profile: false
 rhythm_schedule_only_stage: true
 rhythm_optimize_module_only: true
 rhythm_distill_surface: offline
 rhythm_enable_dual_mode_teacher: true
+rhythm_enable_learned_offline_teacher: true
 rhythm_enable_algorithmic_teacher: false
+rhythm_retimed_target_mode: cached
 lambda_rhythm_distill: 0.25
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0

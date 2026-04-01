@@ -47,13 +47,33 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
     prev_pause_exec = None
     rhythm_state = None
     rhythm_ref_conditioning = None
+    rhythm_unitizer_state = None
     final_output = None
+    rhythm_frontend = getattr(getattr(task, "model", None), "rhythm_unit_frontend", None)
 
     for chunk_idx in range(total_chunks):
+        start_idx = chunk_idx * tokens_per_chunk
         end_idx = min((chunk_idx + 1) * tokens_per_chunk, total_tokens)
         sample_chunk = {k: v for k, v in sample.items()}
-        sample_chunk["content"] = content_full[:, :end_idx]
-        sample_chunk["mel_lengths"] = torch.tensor([end_idx], dtype=torch.long, device=content_full.device)
+        chunk_tokens = content_full[:, start_idx:end_idx]
+        chunk_len = int(chunk_tokens.size(1))
+        sample_chunk["content"] = chunk_tokens
+        sample_chunk["mel_lengths"] = torch.tensor([chunk_len], dtype=torch.long, device=content_full.device)
+        if rhythm_frontend is not None:
+            if rhythm_unitizer_state is None:
+                rhythm_unitizer_state = rhythm_frontend.init_stream_state(batch_size=1, device=content_full.device)
+            unit_batch, rhythm_unitizer_state = rhythm_frontend.step_content_tensor(
+                chunk_tokens,
+                state=rhythm_unitizer_state,
+                content_lengths=sample_chunk["mel_lengths"],
+                mark_last_open=True,
+            )
+            sample_chunk["content_units"] = unit_batch.content_units
+            sample_chunk["dur_anchor_src"] = unit_batch.dur_anchor_src
+            sample_chunk["open_run_mask"] = unit_batch.open_run_mask
+            sample_chunk["sealed_mask"] = unit_batch.sealed_mask
+            sample_chunk["sep_hint"] = unit_batch.sep_hint
+            sample_chunk["boundary_confidence"] = unit_batch.boundary_confidence
         losses, outputs = task.run_model(
             sample_chunk,
             infer=True,
