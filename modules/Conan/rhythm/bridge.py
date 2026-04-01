@@ -73,8 +73,7 @@ def run_rhythm_frontend(
             sealed_mask=unit_batch.sealed_mask,
             sep_hint=unit_batch.sep_hint,
             boundary_confidence=unit_batch.boundary_confidence,
-            ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
-            ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+            ref_conditioning=rhythm_ref_conditioning,
             state=rhythm_state,
         )
         execution = dual_outputs["streaming_execution"]
@@ -89,8 +88,7 @@ def run_rhythm_frontend(
             sealed_mask=unit_batch.sealed_mask,
             sep_hint=unit_batch.sep_hint,
             boundary_confidence=unit_batch.boundary_confidence,
-            ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
-            ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+            ref_conditioning=rhythm_ref_conditioning,
             state=rhythm_state,
         )
         offline_execution = None
@@ -104,8 +102,7 @@ def run_rhythm_frontend(
                 sealed_mask=unit_batch.sealed_mask,
                 sep_hint=unit_batch.sep_hint,
                 boundary_confidence=unit_batch.boundary_confidence,
-                ref_rhythm_stats=rhythm_ref_conditioning["ref_rhythm_stats"],
-                ref_rhythm_trace=rhythm_ref_conditioning["ref_rhythm_trace"],
+                ref_conditioning=rhythm_ref_conditioning,
             )
     return {
         "unit_batch": unit_batch,

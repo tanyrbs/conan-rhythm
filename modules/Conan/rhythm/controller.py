@@ -59,6 +59,7 @@ class WindowBudgetController(nn.Module):
         self.anchor_proj = nn.Linear(1, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
+        self.slow_proj = nn.Linear(trace_dim, hidden_size)
         self.stats_proj = nn.Linear(stats_dim, hidden_size)
         self.phase_proj = nn.Linear(1, hidden_size)
         self.backlog_proj = nn.Linear(2, hidden_size)
@@ -69,7 +70,7 @@ class WindowBudgetController(nn.Module):
             ResidualCausalBlock(hidden_size, dilation=4),
         ])
         self.pool_mlp = nn.Sequential(
-            nn.Linear(hidden_size + trace_dim + stats_dim + 5, hidden_size),
+            nn.Linear(hidden_size + trace_dim + trace_dim + stats_dim + 5, hidden_size),
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
@@ -86,6 +87,7 @@ class WindowBudgetController(nn.Module):
         unit_mask: torch.Tensor,
         ref_rhythm_stats: torch.Tensor,
         trace_context: torch.Tensor,
+        slow_rhythm_summary: torch.Tensor | None,
         source_boundary_cue: torch.Tensor | None,
         phase_ptr: torch.Tensor,
         backlog: torch.Tensor,
@@ -95,6 +97,8 @@ class WindowBudgetController(nn.Module):
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
         if source_boundary_cue is None:
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
+        if slow_rhythm_summary is None:
+            slow_rhythm_summary = trace_context.mean(dim=1)
         boundary_feat = source_boundary_cue.float().unsqueeze(-1)
         phase = phase_ptr.view(-1, 1, 1).expand(-1, unit_states.size(1), -1)
         backlog_pair = torch.stack([backlog.float(), clock_delta.float()], dim=-1)
@@ -105,6 +109,7 @@ class WindowBudgetController(nn.Module):
             + self.anchor_proj(src_log)
             + self.boundary_proj(boundary_feat)
             + self.trace_proj(trace_context)
+            + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
             + self.stats_proj(ref_rhythm_stats).unsqueeze(1)
             + self.phase_proj(phase)
             + self.backlog_proj(backlog_pair)
@@ -121,6 +126,7 @@ class WindowBudgetController(nn.Module):
             [
                 pooled_units,
                 pooled_trace,
+                slow_rhythm_summary,
                 ref_rhythm_stats,
                 pooled_anchor.unsqueeze(-1),
                 pooled_boundary.unsqueeze(-1),
@@ -165,6 +171,7 @@ class UnitRedistributionHead(nn.Module):
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
+        self.slow_proj = nn.Linear(trace_dim, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
@@ -181,13 +188,21 @@ class UnitRedistributionHead(nn.Module):
         hidden: torch.Tensor,
         trace_context: torch.Tensor,
         unit_mask: torch.Tensor,
+        slow_rhythm_summary: torch.Tensor | None = None,
         source_boundary_cue: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
         if source_boundary_cue is None:
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
+        if slow_rhythm_summary is None:
+            slow_rhythm_summary = masked_mean(trace_context, unit_mask, dim=1)
         boundary_feat = source_boundary_cue.float().unsqueeze(-1)
-        x = hidden + self.trace_proj(trace_context) + self.boundary_proj(boundary_feat)
+        x = (
+            hidden
+            + self.trace_proj(trace_context)
+            + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
+            + self.boundary_proj(boundary_feat)
+        )
         x = self.in_proj(x)
         for block in self.blocks:
             x = block(x)

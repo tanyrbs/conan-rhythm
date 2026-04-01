@@ -63,3 +63,5 @@ class RhythmTeacherTargets:
     allocation_tgt: torch.Tensor
     confidence: torch.Tensor
     trace_context: torch.Tensor
+    prefix_clock_tgt: torch.Tensor
+    prefix_backlog_tgt: torch.Tensor

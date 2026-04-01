@@ -24,11 +24,23 @@ class ConanDataset(FastSpeechDataset):
         "content_units",
         "dur_anchor_src",
         "open_run_mask",
+        "sealed_mask",
         "sep_hint",
+        "boundary_confidence",
+        "source_boundary_cue",
+        "phrase_group_index",
+        "phrase_group_pos",
+        "phrase_final_mask",
     )
     _RHYTHM_REF_CACHE_KEYS = (
         "ref_rhythm_stats",
         "ref_rhythm_trace",
+        "slow_rhythm_memory",
+        "slow_rhythm_summary",
+        "selector_meta_indices",
+        "selector_meta_scores",
+        "selector_meta_starts",
+        "selector_meta_ends",
     )
     _RHYTHM_TARGET_KEYS = (
         "rhythm_speech_exec_tgt",
@@ -41,6 +53,9 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_teacher_pause_exec_tgt",
         "rhythm_teacher_speech_budget_tgt",
         "rhythm_teacher_pause_budget_tgt",
+        "rhythm_teacher_allocation_tgt",
+        "rhythm_teacher_prefix_clock_tgt",
+        "rhythm_teacher_prefix_backlog_tgt",
     )
     _RHYTHM_META_KEYS = (
         "rhythm_cache_version",
@@ -48,6 +63,9 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_trace_hop_ms",
         "rhythm_trace_bins",
         "rhythm_trace_horizon",
+        "rhythm_slow_topk",
+        "rhythm_selector_cell_size",
+        "rhythm_source_phrase_threshold",
         "rhythm_reference_mode_id",
         "rhythm_target_confidence",
         "rhythm_guidance_confidence",
@@ -108,6 +126,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_trace_hop_ms": int(self.hparams.get("rhythm_trace_hop_ms", RHYTHM_TRACE_HOP_MS)),
             "rhythm_trace_bins": int(self.hparams.get("rhythm_trace_bins", 24)),
             "rhythm_trace_horizon": float(self.hparams.get("rhythm_trace_horizon", 0.35)),
+            "rhythm_slow_topk": int(self.hparams.get("rhythm_slow_topk", 6)),
+            "rhythm_selector_cell_size": int(self.hparams.get("rhythm_selector_cell_size", 3)),
+            "rhythm_source_phrase_threshold": float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             "rhythm_reference_mode_id": int(
                 self.hparams.get("rhythm_reference_mode_id", RHYTHM_REFERENCE_MODE_STATIC_REF_FULL)
             ),
@@ -152,6 +173,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_trace_hop_ms",
             "rhythm_trace_bins",
             "rhythm_trace_horizon",
+            "rhythm_slow_topk",
+            "rhythm_selector_cell_size",
+            "rhythm_source_phrase_threshold",
             "rhythm_reference_mode_id",
             "rhythm_target_confidence",
             "rhythm_guidance_confidence",
@@ -176,6 +200,9 @@ class ConanDataset(FastSpeechDataset):
                 "rhythm_teacher_pause_exec_tgt",
                 "rhythm_teacher_speech_budget_tgt",
                 "rhythm_teacher_pause_budget_tgt",
+                "rhythm_teacher_allocation_tgt",
+                "rhythm_teacher_prefix_clock_tgt",
+                "rhythm_teacher_prefix_backlog_tgt",
                 "rhythm_teacher_confidence",
                 "rhythm_teacher_surface_name",
             ])
@@ -217,9 +244,6 @@ class ConanDataset(FastSpeechDataset):
 
     def _validate_source_cache_shapes(self, cache, *, item_name: str):
         lengths = {key: int(np.asarray(cache[key]).reshape(-1).shape[0]) for key in self._RHYTHM_SOURCE_CACHE_KEYS}
-        for key in ("sealed_mask", "boundary_confidence"):
-            if key in cache:
-                lengths[key] = int(np.asarray(cache[key]).reshape(-1).shape[0])
         if len(set(lengths.values())) != 1:
             raise RuntimeError(
                 f"Rhythm source cache shape mismatch in {item_name}: {lengths}. Re-binarize the dataset."
@@ -228,9 +252,16 @@ class ConanDataset(FastSpeechDataset):
     def _validate_reference_conditioning_shapes(self, conditioning, *, item_name: str):
         stats = np.asarray(conditioning["ref_rhythm_stats"])
         trace = np.asarray(conditioning["ref_rhythm_trace"])
+        slow_memory = np.asarray(conditioning["slow_rhythm_memory"])
+        slow_summary = np.asarray(conditioning["slow_rhythm_summary"])
+        selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
+        selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
+        selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
+        selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
         stats_dim = int(self.hparams.get("rhythm_stats_dim", 6))
         trace_bins = int(self.hparams.get("rhythm_trace_bins", 24))
         trace_dim = int(self.hparams.get("rhythm_trace_dim", 5))
+        slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
         if stats.reshape(-1).shape[0] != stats_dim:
             raise RuntimeError(
                 f"Rhythm stats shape mismatch in {item_name}: found={tuple(stats.shape)}, expected_last_dim={stats_dim}."
@@ -239,6 +270,38 @@ class ConanDataset(FastSpeechDataset):
             raise RuntimeError(
                 f"Rhythm trace shape mismatch in {item_name}: found={tuple(trace.shape)}, expected=({trace_bins}, {trace_dim})."
             )
+        if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
+            raise RuntimeError(
+                f"Slow rhythm memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
+            )
+        if slow_memory.shape[0] > slow_topk:
+            raise RuntimeError(
+                f"Slow rhythm memory count mismatch in {item_name}: found={slow_memory.shape[0]}, expected<= {slow_topk}."
+            )
+        if slow_summary.reshape(-1).shape[0] != trace_dim:
+            raise RuntimeError(
+                f"Slow rhythm summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={trace_dim}."
+            )
+        selector_len = int(slow_memory.shape[0])
+        selector_lengths = {
+            "selector_meta_indices": int(selector_indices.shape[0]),
+            "selector_meta_scores": int(selector_scores.shape[0]),
+            "selector_meta_starts": int(selector_starts.shape[0]),
+            "selector_meta_ends": int(selector_ends.shape[0]),
+        }
+        if len(set(selector_lengths.values()) | {selector_len}) != 1:
+            raise RuntimeError(
+                f"Selector metadata shape mismatch in {item_name}: slow_memory={selector_len}, meta={selector_lengths}."
+            )
+        if selector_len > 0:
+            if selector_indices.min() < 0 or selector_indices.max() >= trace_bins:
+                raise RuntimeError(
+                    f"Selector indices out of range in {item_name}: min={selector_indices.min()}, max={selector_indices.max()}, trace_bins={trace_bins}."
+                )
+            if selector_starts.min() < 0 or selector_ends.max() >= trace_bins or np.any(selector_starts > selector_ends):
+                raise RuntimeError(
+                    f"Selector cell spans invalid in {item_name}: starts={selector_starts.tolist()}, ends={selector_ends.tolist()}, trace_bins={trace_bins}."
+                )
 
     def _validate_target_shapes(self, targets, *, item_name: str, expected_units: int):
         unit_keys = [
@@ -248,6 +311,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_guidance_pause_tgt",
             "rhythm_teacher_speech_exec_tgt",
             "rhythm_teacher_pause_exec_tgt",
+            "rhythm_teacher_allocation_tgt",
+            "rhythm_teacher_prefix_clock_tgt",
+            "rhythm_teacher_prefix_backlog_tgt",
         ]
         for key in unit_keys:
             if key not in targets:
@@ -314,10 +380,17 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_guidance_pause_tgt",
             "rhythm_teacher_speech_exec_tgt",
             "rhythm_teacher_pause_exec_tgt",
+            "rhythm_teacher_allocation_tgt",
+            "rhythm_teacher_prefix_clock_tgt",
+            "rhythm_teacher_prefix_backlog_tgt",
         ]
         for key in unit_keys:
             if key in adapted:
                 adapted[key] = np.asarray(adapted[key]).reshape(-1)[:visible_units].astype(np.float32)
+        if "rhythm_teacher_allocation_tgt" in adapted:
+            alloc = np.asarray(adapted["rhythm_teacher_allocation_tgt"]).reshape(-1).astype(np.float32)
+            denom = float(np.maximum(alloc.sum(), 1e-6))
+            adapted["rhythm_teacher_allocation_tgt"] = alloc / denom
         if "rhythm_speech_exec_tgt" in adapted:
             adapted["rhythm_speech_budget_tgt"] = np.asarray(
                 [float(np.asarray(adapted["rhythm_speech_exec_tgt"]).sum())], dtype=np.float32
@@ -385,12 +458,14 @@ class ConanDataset(FastSpeechDataset):
                 silent_token=self.hparams.get("silent_token", 57),
                 separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
                 tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+                phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             )
         return build_source_rhythm_cache(
             visible_tokens,
             silent_token=self.hparams.get("silent_token", 57),
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+            phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
 
     def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str):
@@ -422,6 +497,9 @@ class ConanDataset(FastSpeechDataset):
             sample["ref_mel"],
             trace_bins=int(self.hparams.get("rhythm_trace_bins", 24)),
             trace_horizon=float(self.hparams.get("rhythm_trace_horizon", 0.35)),
+            smooth_kernel=int(self.hparams.get("rhythm_trace_smooth_kernel", 5)),
+            slow_topk=int(self.hparams.get("rhythm_slow_topk", 6)),
+            selector_cell_size=int(self.hparams.get("rhythm_selector_cell_size", 3)),
         )
         self._validate_reference_conditioning_shapes(conditioning, item_name="<runtime-ref-conditioning>")
         return conditioning
@@ -444,7 +522,7 @@ class ConanDataset(FastSpeechDataset):
         teacher_kwargs = dict(
             dur_anchor_src=source_cache["dur_anchor_src"],
             unit_mask=unit_mask,
-            source_boundary_cue=source_cache.get("boundary_confidence"),
+            source_boundary_cue=source_cache.get("source_boundary_cue", source_cache.get("boundary_confidence")),
             ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
             ref_rhythm_trace=ref_conditioning["ref_rhythm_trace"],
             rate_scale_min=float(self.hparams.get("rhythm_teacher_rate_scale_min", 0.55)),
@@ -549,13 +627,26 @@ class ConanDataset(FastSpeechDataset):
             "sealed_mask",
             "sep_hint",
             "boundary_confidence",
+            "source_boundary_cue",
+            "phrase_group_index",
+            "phrase_group_pos",
+            "phrase_final_mask",
             "ref_rhythm_stats",
             "ref_rhythm_trace",
+            "slow_rhythm_memory",
+            "slow_rhythm_summary",
+            "selector_meta_indices",
+            "selector_meta_scores",
+            "selector_meta_starts",
+            "selector_meta_ends",
             "rhythm_cache_version",
             "rhythm_unit_hop_ms",
             "rhythm_trace_hop_ms",
             "rhythm_trace_bins",
             "rhythm_trace_horizon",
+            "rhythm_slow_topk",
+            "rhythm_selector_cell_size",
+            "rhythm_source_phrase_threshold",
             "rhythm_reference_mode_id",
             "rhythm_target_confidence",
             "rhythm_guidance_confidence",
@@ -572,6 +663,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_teacher_pause_exec_tgt",
             "rhythm_teacher_speech_budget_tgt",
             "rhythm_teacher_pause_budget_tgt",
+            "rhythm_teacher_allocation_tgt",
+            "rhythm_teacher_prefix_clock_tgt",
+            "rhythm_teacher_prefix_backlog_tgt",
             "rhythm_retimed_mel_tgt",
             "rhythm_retimed_mel_len",
             "rhythm_retimed_frame_weight",
@@ -598,21 +692,36 @@ class ConanDataset(FastSpeechDataset):
                 value = item[key]
             else:
                 continue
-            if key == "ref_rhythm_trace":
+            if key in {"ref_rhythm_trace", "slow_rhythm_memory"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif "stats" in key or "budget" in key:
+            elif key in {
+                "source_boundary_cue",
+                "phrase_group_pos",
+                "phrase_final_mask",
+                "slow_rhythm_summary",
+                "selector_meta_scores",
+                "rhythm_teacher_allocation_tgt",
+                "rhythm_teacher_prefix_clock_tgt",
+                "rhythm_teacher_prefix_backlog_tgt",
+            } or "stats" in key or "budget" in key:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"sealed_mask", "boundary_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon"}:
+            elif key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {
+                "phrase_group_index",
+                "selector_meta_indices",
+                "selector_meta_starts",
+                "selector_meta_ends",
                 "rhythm_cache_version",
                 "rhythm_unit_hop_ms",
                 "rhythm_trace_hop_ms",
                 "rhythm_trace_bins",
+                "rhythm_slow_topk",
+                "rhythm_selector_cell_size",
                 "rhythm_reference_mode_id",
                 "rhythm_retimed_target_source_id",
             }:
@@ -668,13 +777,26 @@ class ConanDataset(FastSpeechDataset):
             "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
             "boundary_confidence": ("float", 0.0),
+            "source_boundary_cue": ("float", 0.0),
+            "phrase_group_index": ("long", 0),
+            "phrase_group_pos": ("float", 0.0),
+            "phrase_final_mask": ("float", 0.0),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
+            "slow_rhythm_memory": ("float", 0.0),
+            "slow_rhythm_summary": ("float", 0.0),
+            "selector_meta_indices": ("long", 0),
+            "selector_meta_scores": ("float", 0.0),
+            "selector_meta_starts": ("long", 0),
+            "selector_meta_ends": ("long", 0),
             "rhythm_cache_version": ("long", 0),
             "rhythm_unit_hop_ms": ("long", 0),
             "rhythm_trace_hop_ms": ("long", 0),
             "rhythm_trace_bins": ("long", 0),
             "rhythm_trace_horizon": ("float", 0.0),
+            "rhythm_slow_topk": ("long", 0),
+            "rhythm_selector_cell_size": ("long", 0),
+            "rhythm_source_phrase_threshold": ("float", 0.0),
             "rhythm_reference_mode_id": ("long", 0),
             "rhythm_target_confidence": ("float", 0.0),
             "rhythm_guidance_confidence": ("float", 0.0),
@@ -691,6 +813,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
             "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
             "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
+            "rhythm_teacher_allocation_tgt": ("float", 0.0),
+            "rhythm_teacher_prefix_clock_tgt": ("float", 0.0),
+            "rhythm_teacher_prefix_backlog_tgt": ("float", 0.0),
             "rhythm_retimed_mel_tgt": ("float", 0.0),
             "rhythm_retimed_mel_len": ("long", 0),
             "rhythm_retimed_frame_weight": ("float", 0.0),

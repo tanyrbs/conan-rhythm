@@ -47,6 +47,8 @@ if __name__ == '__main__':
     ref_conditioning = model.encode_reference(ref_mel)
     print('ref descriptor keys:', sorted(ref_conditioning.keys()))
     assert 'global_rate' in ref_conditioning and 'boundary_trace' in ref_conditioning
+    assert 'slow_rhythm_memory' in ref_conditioning and 'selector_meta_indices' in ref_conditioning
+    assert 'selector_meta_starts' in ref_conditioning and 'selector_meta_ends' in ref_conditioning
     assert batch.sealed_mask.shape == batch.open_run_mask.shape
     assert batch.boundary_confidence.shape == batch.open_run_mask.shape
 
@@ -66,6 +68,7 @@ if __name__ == '__main__':
     algo_teacher = dual["algorithmic_teacher"]
     assert offline_exec.commit_frontier.tolist() == batch.unit_mask.sum(dim=1).long().tolist()
     assert algo_teacher.allocation_tgt.shape == batch.unit_mask.shape
+    assert algo_teacher.prefix_clock_tgt.shape == batch.unit_mask.shape
 
     stream_unitizer = StreamingRunLengthUnitizer(silent_token=57, separator_aware=True)
     unitizer_state = stream_unitizer.init_state(batch_size=1)
@@ -93,6 +96,8 @@ if __name__ == '__main__':
         ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
         state=out1.next_state,
     )
+    assert out1.slot_duration_exec.shape[1] == batch.content_units.shape[1] * 2
+    assert out1.slot_is_blank[:, 1::2].sum().item() > 0
 
     guidance = build_reference_guided_targets(
         dur_anchor_src=batch.dur_anchor_src[0].cpu().numpy(),
@@ -147,6 +152,8 @@ if __name__ == '__main__':
     print('source_boundary_cue max:', float(out1.planner.source_boundary_cue.max().item()))
     print('offline total corr metric:', float(metrics['rhythm_metric_offline_online_total_corr']))
     print('algorithmic teacher alloc kl:', float(metrics['rhythm_metric_algorithmic_teacher_alloc_kl']))
+    print('slow memory shape:', tuple(ref_conditioning['slow_rhythm_memory'].shape))
+    print('blank slot ratio metric:', float(metrics['rhythm_metric_blank_slot_ratio_mean']))
     print('retimed mel len:', int(retimed['rhythm_retimed_mel_len'][0]))
     print('retimed frame weight mean:', float(retimed['rhythm_retimed_frame_weight'].mean()))
     print('guidance keys:', sorted(guidance.keys()))
@@ -158,11 +165,17 @@ if __name__ == '__main__':
     print('trace horizon:', float(cached_bundle['rhythm_trace_horizon'][0]))
     print('target confidence:', float(cached_bundle['rhythm_target_confidence'][0]))
     print('teacher confidence:', float(cached_bundle['rhythm_teacher_confidence'][0]))
+    print('selector starts:', cached_bundle['selector_meta_starts'].tolist())
+    print('selector ends:', cached_bundle['selector_meta_ends'].tolist())
+    print('phrase groups:', cached_bundle['phrase_group_index'].tolist())
     print('retimed source id:', int(cached_bundle['rhythm_retimed_target_source_id'][0]))
     print('retimed confidence:', float(cached_bundle['rhythm_retimed_target_confidence'][0]))
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr']))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1']))
+    print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean']))
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr']) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1']) < 1e-6
-    assert float(metrics['rhythm_metric_offline_online_total_corr']) >= 0.0
+    offline_corr = float(metrics['rhythm_metric_offline_online_total_corr'])
+    assert np.isfinite(offline_corr)
+    assert abs(offline_corr) <= 1.0 + 1e-6

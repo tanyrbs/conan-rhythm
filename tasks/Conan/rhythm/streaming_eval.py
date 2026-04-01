@@ -15,6 +15,9 @@ class StreamingEvalResult:
     committed_mel_lengths: list[int]
     commit_history: list[list[int]]
     prefix_exec_deltas: list[float]
+    backlog_history: list[float]
+    clock_history: list[float]
+    blank_ratio_history: list[float]
 
 
 def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4) -> StreamingEvalResult:
@@ -35,6 +38,9 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
     committed_mel_lengths = []
     commit_history = []
     prefix_exec_deltas = []
+    backlog_history = []
+    clock_history = []
+    blank_ratio_history = []
     prev_committed_len = 0
     prev_commit_units = 0
     prev_speech_exec = None
@@ -74,7 +80,7 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
         execution = outputs.get("rhythm_execution")
         if execution is not None and prev_speech_exec is not None and prev_pause_exec is not None and prev_commit_units > 0:
             curr_speech = execution.speech_duration_exec[0, :prev_commit_units]
-            curr_pause = execution.pause_after_exec[0, :prev_commit_units]
+            curr_pause = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[0, :prev_commit_units]
             delta = torch.cat(
                 [
                     (curr_speech - prev_speech_exec[0, :prev_commit_units]).abs(),
@@ -87,8 +93,23 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
             prefix_exec_deltas.append(0.0)
         if execution is not None:
             prev_speech_exec = execution.speech_duration_exec.detach()
-            prev_pause_exec = execution.pause_after_exec.detach()
+            prev_pause_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec).detach()
+            unit_batch = outputs.get("rhythm_unit_batch")
+            if unit_batch is not None:
+                unit_mask = unit_batch.unit_mask[0].float()
+                visible = unit_mask.sum().clamp_min(1.0)
+                blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[0]
+                blank_ratio_history.append(float(((blank_exec > 0.5).float() * unit_mask).sum().item() / visible.item()))
+            else:
+                blank_ratio_history.append(0.0)
         prev_commit_units = int(commit_list[0]) if len(commit_list) > 0 else 0
+        state_next = outputs.get("rhythm_state_next")
+        if state_next is not None:
+            backlog_history.append(float(state_next.backlog[0].item()))
+            clock_history.append(float(state_next.clock_delta[0].item()))
+        else:
+            backlog_history.append(0.0)
+            clock_history.append(0.0)
         final_output = outputs
 
     final_mel = final_output["mel_out"][0]
@@ -105,4 +126,7 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
         committed_mel_lengths=committed_mel_lengths,
         commit_history=commit_history,
         prefix_exec_deltas=prefix_exec_deltas,
+        backlog_history=backlog_history,
+        clock_history=clock_history,
+        blank_ratio_history=blank_ratio_history,
     )

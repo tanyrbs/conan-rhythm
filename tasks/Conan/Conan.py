@@ -46,7 +46,31 @@ class ConanTask(AuxDecoderMIDITask):
     def build_tts_model(self):
         # dict_size = len(self.token_encoder)
         self.model = Conan(0, hparams)
-        self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+        if bool(hparams.get("rhythm_optimize_module_only", False)):
+            rhythm_params = self._collect_rhythm_gen_params()
+            self.gen_params = rhythm_params if len(rhythm_params) > 0 else [p for p in self.model.parameters() if p.requires_grad]
+        else:
+            self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+
+    def _collect_rhythm_gen_params(self):
+        if self.model is None or not getattr(self.model, "rhythm_enable_v2", False):
+            return []
+        params = []
+        if getattr(self.model, "rhythm_module", None) is not None:
+            params.extend(list(self.model.rhythm_module.parameters()))
+        if bool(hparams.get("rhythm_optimize_pause_state", False)) and getattr(self.model, "rhythm_pause_state", None) is not None:
+            params.append(self.model.rhythm_pause_state)
+        dedup = []
+        seen = set()
+        for param in params:
+            if param is None or not getattr(param, "requires_grad", False):
+                continue
+            key = id(param)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(param)
+        return dedup
 
     def build_disc_model(self):
         disc_win_num = hparams['disc_win_num']
@@ -107,6 +131,16 @@ class ConanTask(AuxDecoderMIDITask):
             "always": "runtime_only",
         }
         return aliases.get(mode, mode)
+
+    @staticmethod
+    def _build_prefix_carry_from_exec(speech_exec, pause_exec, dur_anchor_src, unit_mask):
+        unit_mask = unit_mask.float()
+        prefix_clock = torch.cumsum(
+            ((speech_exec.float() + pause_exec.float()) - dur_anchor_src.float()) * unit_mask,
+            dim=1,
+        ) * unit_mask
+        prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
+        return prefix_clock, prefix_backlog
 
     def _resolve_acoustic_target(self, sample, *, apply_rhythm_render: bool, infer: bool, test: bool):
         target = sample["mels"]
@@ -296,6 +330,17 @@ class ConanTask(AuxDecoderMIDITask):
                     "ref_rhythm_stats": ref_stats,
                     "ref_rhythm_trace": ref_trace,
                 }
+                for extra_key in (
+                    "slow_rhythm_memory",
+                    "slow_rhythm_summary",
+                    "selector_meta_indices",
+                    "selector_meta_scores",
+                    "selector_meta_starts",
+                    "selector_meta_ends",
+                ):
+                    extra_value = sample.get(extra_key)
+                    if extra_value is not None:
+                        rhythm_ref_conditioning[extra_key] = extra_value
         # assert False, f'content: {content.shape}, target: {target.shape},spk_embed: {spk_embed.shape}'
         # if not infer:
         #     tech_drop = {
@@ -339,11 +384,14 @@ class ConanTask(AuxDecoderMIDITask):
             output["acoustic_target_weight"] = acoustic_weight
         
         if not test:
-            self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
-            # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
-            self.add_pitch_loss(output, sample, losses)
+            schedule_only_stage = bool(hparams.get("rhythm_schedule_only_stage", False))
+            output["rhythm_schedule_only_stage"] = float(schedule_only_stage)
+            if not schedule_only_stage:
+                self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
+                # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
+                self.add_pitch_loss(output, sample, losses)
             self.add_rhythm_loss(output, sample, losses)
-            if hparams['style']:
+            if hparams['style'] and not schedule_only_stage:
                 if self.global_step > hparams['forcing'] and self.global_step < hparams['random_speaker_steps']:
                     losses['gloss'] = output['gloss']
                 if self.global_step > hparams['vq_start']:
@@ -386,19 +434,28 @@ class ConanTask(AuxDecoderMIDITask):
             "rhythm_pause_budget_tgt",
         ]
         if all(key in sample for key in explicit_keys):
+            unit_batch = output["rhythm_unit_batch"]
             guidance_speech = sample.get("rhythm_guidance_speech_tgt")
             guidance_pause = sample.get("rhythm_guidance_pause_tgt")
             distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
             distill_pause = sample.get("rhythm_teacher_pause_exec_tgt")
             distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt")
             distill_pause_budget = sample.get("rhythm_teacher_pause_budget_tgt")
-            distill_allocation = None
+            distill_allocation = sample.get("rhythm_teacher_allocation_tgt")
+            distill_prefix_clock = sample.get("rhythm_teacher_prefix_clock_tgt")
+            distill_prefix_backlog = sample.get("rhythm_teacher_prefix_backlog_tgt")
             distill_confidence = sample.get("rhythm_teacher_confidence")
             if distill_speech is None and runtime_teacher is not None:
                 distill_speech = runtime_teacher.speech_duration_exec.detach()
-                distill_pause = runtime_teacher.pause_after_exec.detach()
+                distill_pause = getattr(runtime_teacher, "blank_duration_exec", runtime_teacher.pause_after_exec).detach()
                 distill_speech_budget = runtime_teacher.planner.speech_budget_win.detach()
                 distill_pause_budget = runtime_teacher.planner.pause_budget_win.detach()
+                distill_prefix_clock, distill_prefix_backlog = self._build_prefix_carry_from_exec(
+                    distill_speech,
+                    distill_pause,
+                    unit_batch.dur_anchor_src,
+                    unit_batch.unit_mask,
+                )
                 distill_confidence = torch.ones_like(distill_speech_budget)
             if distill_speech is None and algorithmic_teacher is not None:
                 distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
@@ -406,15 +463,26 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_speech_budget = algorithmic_teacher.speech_budget_tgt.detach()
                 distill_pause_budget = algorithmic_teacher.pause_budget_tgt.detach()
                 distill_allocation = algorithmic_teacher.allocation_tgt.detach()
+                distill_prefix_clock = algorithmic_teacher.prefix_clock_tgt.detach()
+                distill_prefix_backlog = algorithmic_teacher.prefix_backlog_tgt.detach()
                 distill_confidence = algorithmic_teacher.confidence.detach()
             elif distill_speech is not None and distill_pause is not None:
-                distill_allocation = (distill_speech.float() + distill_pause.float())
+                if distill_allocation is None:
+                    distill_allocation = (distill_speech.float() + distill_pause.float())
+                if distill_prefix_clock is None or distill_prefix_backlog is None:
+                    distill_prefix_clock, distill_prefix_backlog = self._build_prefix_carry_from_exec(
+                        distill_speech,
+                        distill_pause,
+                        unit_batch.dur_anchor_src,
+                        unit_batch.unit_mask,
+                    )
             return RhythmLossTargets(
                 speech_exec_tgt=sample["rhythm_speech_exec_tgt"],
                 pause_exec_tgt=sample["rhythm_pause_exec_tgt"],
                 speech_budget_tgt=sample["rhythm_speech_budget_tgt"],
                 pause_budget_tgt=sample["rhythm_pause_budget_tgt"],
-                unit_mask=output["rhythm_unit_batch"].unit_mask,
+                unit_mask=unit_batch.unit_mask,
+                dur_anchor_src=unit_batch.dur_anchor_src,
                 plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
                 plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
                 sample_confidence=sample.get("rhythm_target_confidence"),
@@ -426,6 +494,8 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_speech_budget_tgt=distill_speech_budget,
                 distill_pause_budget_tgt=distill_pause_budget,
                 distill_allocation_tgt=distill_allocation,
+                distill_prefix_clock_tgt=distill_prefix_clock,
+                distill_prefix_backlog_tgt=distill_prefix_backlog,
                 distill_confidence=distill_confidence,
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
@@ -444,6 +514,7 @@ class ConanTask(AuxDecoderMIDITask):
             speech_budget_tgt=speech_budget_tgt,
             pause_budget_tgt=pause_budget_tgt,
             unit_mask=unit_mask,
+            dur_anchor_src=unit_batch.dur_anchor_src,
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
             sample_confidence=torch.ones((unit_mask.size(0), 1), device=unit_mask.device),
@@ -619,9 +690,13 @@ class ConanTask(AuxDecoderMIDITask):
             nn.utils.clip_grad_norm_(self.disc_params, hparams["clip_grad_norm"])
 
     def on_after_optimization(self, epoch, batch_idx, optimizer, optimizer_idx):
-        if self.scheduler is not None:
-            self.scheduler[0].step(self.global_step // hparams['accumulate_grad_batches'])
-            self.scheduler[1].step(self.global_step // hparams['accumulate_grad_batches'])
+        if self.scheduler is None:
+            return
+        if isinstance(self.scheduler, (list, tuple)):
+            if 0 <= optimizer_idx < len(self.scheduler) and self.scheduler[optimizer_idx] is not None:
+                self.scheduler[optimizer_idx].step(self.global_step // hparams['accumulate_grad_batches'])
+            return
+        self.scheduler.step(self.global_step // hparams['accumulate_grad_batches'])
 
 def self_clone(x):
     if x == None:

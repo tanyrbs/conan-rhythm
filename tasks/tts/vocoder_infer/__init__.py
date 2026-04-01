@@ -1,2 +1,7 @@
 from . import hifigan
-from . import hifigan_nsf
+
+try:
+    from . import hifigan_nsf
+except ModuleNotFoundError:
+    # Training / structural debugging can proceed without NSF vocoder extras.
+    hifigan_nsf = None

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .reference_encoder import ReferenceRhythmEncoder
+from .reference_selector import ReferenceSelector
 
 
 class RefRhythmDescriptor(nn.Module):
@@ -20,6 +21,8 @@ class RefRhythmDescriptor(nn.Module):
         trace_bins: int = 24,
         trace_horizon: float = 0.35,
         smooth_kernel: int = 5,
+        slow_topk: int = 6,
+        selector_cell_size: int = 3,
     ) -> None:
         super().__init__()
         self.encoder = ReferenceRhythmEncoder(
@@ -27,16 +30,41 @@ class RefRhythmDescriptor(nn.Module):
             trace_horizon=trace_horizon,
             smooth_kernel=smooth_kernel,
         )
+        self.selector = ReferenceSelector(
+            slow_topk=slow_topk,
+            cell_size=selector_cell_size,
+        )
 
     @staticmethod
     def from_stats_trace(
         ref_rhythm_stats: torch.Tensor,
         ref_rhythm_trace: torch.Tensor,
+        selector: ReferenceSelector | None = None,
     ) -> dict[str, torch.Tensor]:
         global_rate = torch.reciprocal(ref_rhythm_stats[:, 2:3].clamp_min(1.0))
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
         boundary_trace = ref_rhythm_trace[:, :, 2:3]
+        if selector is None:
+            slow_memory = ref_rhythm_trace
+            slow_indices = torch.arange(ref_rhythm_trace.size(1), device=ref_rhythm_trace.device)[None, :].expand(ref_rhythm_trace.size(0), -1)
+            slow_scores = boundary_trace.squeeze(-1)
+        else:
+            selection = selector(ref_rhythm_trace)
+            slow_memory = selection.slow_rhythm_memory
+            slow_indices = selection.slow_rhythm_indices
+            slow_scores = selection.slow_rhythm_scores
+            slow_starts = selection.slow_rhythm_starts
+            slow_ends = selection.slow_rhythm_ends
+        score_weight = slow_scores.clamp_min(0.0)
+        if slow_memory.dim() == 3:
+            weight = score_weight.unsqueeze(-1)
+            slow_summary = (slow_memory * (1.0 + weight)).sum(dim=1) / (1.0 + weight).sum(dim=1).clamp_min(1e-6)
+        else:
+            slow_summary = slow_memory
+        if selector is None:
+            slow_starts = slow_indices
+            slow_ends = slow_indices
         return {
             "ref_rhythm_stats": ref_rhythm_stats,
             "ref_rhythm_trace": ref_rhythm_trace,
@@ -44,6 +72,12 @@ class RefRhythmDescriptor(nn.Module):
             "pause_ratio": pause_ratio,
             "local_rate_trace": local_rate_trace,
             "boundary_trace": boundary_trace,
+            "slow_rhythm_memory": slow_memory,
+            "slow_rhythm_summary": slow_summary,
+            "selector_meta_indices": slow_indices,
+            "selector_meta_scores": slow_scores,
+            "selector_meta_starts": slow_starts,
+            "selector_meta_ends": slow_ends,
         }
 
     def forward(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -51,6 +85,7 @@ class RefRhythmDescriptor(nn.Module):
         return self.from_stats_trace(
             encoded["ref_rhythm_stats"],
             encoded["ref_rhythm_trace"],
+            selector=self.selector,
         )
 
     def sample_trace_window(

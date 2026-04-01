@@ -6,11 +6,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .reference_encoder import ReferenceRhythmEncoder, sample_progress_trace
+from .reference_descriptor import RefRhythmDescriptor
+from .reference_encoder import sample_progress_trace
+from .source_boundary import build_source_boundary_cue
 from .teacher import AlgorithmicTeacherConfig, build_algorithmic_teacher_targets
 from .unit_frontend import RhythmUnitFrontend
 
-RHYTHM_CACHE_VERSION = 3
+RHYTHM_CACHE_VERSION = 4
 RHYTHM_UNIT_HOP_MS = 20
 RHYTHM_TRACE_HOP_MS = 80
 RHYTHM_REFERENCE_MODE_STATIC_REF_FULL = 0
@@ -54,10 +56,19 @@ def _cached_frontend(
 
 
 @lru_cache(maxsize=16)
-def _cached_reference_encoder(trace_bins: int, trace_horizon: float) -> ReferenceRhythmEncoder:
-    return ReferenceRhythmEncoder(
+def _cached_reference_descriptor(
+    trace_bins: int,
+    trace_horizon: float,
+    smooth_kernel: int,
+    slow_topk: int,
+    selector_cell_size: int,
+) -> RefRhythmDescriptor:
+    return RefRhythmDescriptor(
         trace_bins=trace_bins,
         trace_horizon=trace_horizon,
+        smooth_kernel=smooth_kernel,
+        slow_topk=slow_topk,
+        selector_cell_size=selector_cell_size,
     )
 
 
@@ -67,6 +78,7 @@ def build_source_rhythm_cache(
     silent_token: int | None = None,
     separator_aware: bool = True,
     tail_open_units: int = 1,
+    phrase_boundary_threshold: float = 0.55,
 ) -> dict[str, np.ndarray]:
     frontend = _cached_frontend(
         silent_token=silent_token,
@@ -77,13 +89,78 @@ def build_source_rhythm_cache(
         [_as_token_list(content_tokens)],
         mark_last_open=False,
     )
-    return {
+    source_cache = {
         "content_units": batch.content_units[0].cpu().numpy().astype(np.int64),
         "dur_anchor_src": batch.dur_anchor_src[0].cpu().numpy().astype(np.int64),
         "open_run_mask": batch.open_run_mask[0].cpu().numpy().astype(np.int64),
         "sealed_mask": batch.sealed_mask[0].cpu().numpy().astype(np.int64),
         "sep_hint": batch.sep_hint[0].cpu().numpy().astype(np.int64),
         "boundary_confidence": batch.boundary_confidence[0].cpu().numpy().astype(np.float32),
+    }
+    source_cache.update(
+        build_source_phrase_cache(
+            dur_anchor_src=source_cache["dur_anchor_src"],
+            sep_hint=source_cache["sep_hint"],
+            open_run_mask=source_cache["open_run_mask"],
+            sealed_mask=source_cache["sealed_mask"],
+            boundary_confidence=source_cache["boundary_confidence"],
+            phrase_boundary_threshold=phrase_boundary_threshold,
+        )
+    )
+    return source_cache
+
+
+def build_source_phrase_cache(
+    *,
+    dur_anchor_src,
+    sep_hint,
+    open_run_mask,
+    sealed_mask,
+    boundary_confidence,
+    phrase_boundary_threshold: float = 0.55,
+) -> dict[str, np.ndarray]:
+    dur_anchor_src = torch.tensor(np.asarray(dur_anchor_src), dtype=torch.float32).unsqueeze(0)
+    sep_hint = torch.tensor(np.asarray(sep_hint), dtype=torch.long).unsqueeze(0)
+    open_run_mask = torch.tensor(np.asarray(open_run_mask), dtype=torch.long).unsqueeze(0)
+    sealed_mask = torch.tensor(np.asarray(sealed_mask), dtype=torch.float32).unsqueeze(0)
+    boundary_confidence = torch.tensor(np.asarray(boundary_confidence), dtype=torch.float32).unsqueeze(0)
+    unit_mask = dur_anchor_src.gt(0).float()
+    source_boundary_cue = build_source_boundary_cue(
+        dur_anchor_src=dur_anchor_src,
+        unit_mask=unit_mask,
+        sep_hint=sep_hint,
+        open_run_mask=open_run_mask,
+        sealed_mask=sealed_mask,
+        boundary_confidence=boundary_confidence,
+    )[0]
+    visible = int(unit_mask[0].sum().item())
+    phrase_group_index = torch.zeros_like(source_boundary_cue, dtype=torch.long)
+    phrase_group_pos = torch.zeros_like(source_boundary_cue)
+    phrase_final_mask = torch.zeros_like(source_boundary_cue)
+    if visible > 0:
+        break_mask = (source_boundary_cue[:visible] >= float(phrase_boundary_threshold)).float()
+        if sep_hint.size(1) >= visible:
+            break_mask = torch.maximum(break_mask, sep_hint[0, :visible].float())
+        phrase_starts = [0]
+        for idx in range(max(visible - 1, 0)):
+            if float(break_mask[idx].item()) > 0:
+                phrase_starts.append(idx + 1)
+                phrase_final_mask[idx] = 1.0
+        phrase_final_mask[visible - 1] = 1.0
+        phrase_starts = sorted(set(int(x) for x in phrase_starts if 0 <= int(x) < visible))
+        for group_id, start in enumerate(phrase_starts):
+            end = phrase_starts[group_id + 1] if group_id + 1 < len(phrase_starts) else visible
+            length = max(1, end - start)
+            phrase_group_index[start:end] = group_id
+            if length == 1:
+                phrase_group_pos[start] = 1.0
+            else:
+                phrase_group_pos[start:end] = torch.linspace(0.0, 1.0, steps=length)
+    return {
+        "source_boundary_cue": source_boundary_cue.cpu().numpy().astype(np.float32),
+        "phrase_group_index": phrase_group_index.cpu().numpy().astype(np.int64),
+        "phrase_group_pos": phrase_group_pos.cpu().numpy().astype(np.float32),
+        "phrase_final_mask": phrase_final_mask.cpu().numpy().astype(np.float32),
     }
 
 
@@ -92,16 +169,30 @@ def build_reference_rhythm_conditioning(
     *,
     trace_bins: int = 24,
     trace_horizon: float = 0.35,
+    smooth_kernel: int = 5,
+    slow_topk: int = 6,
+    selector_cell_size: int = 3,
 ) -> dict[str, np.ndarray]:
-    encoder = _cached_reference_encoder(
+    descriptor = _cached_reference_descriptor(
         trace_bins=trace_bins,
         trace_horizon=float(trace_horizon),
+        smooth_kernel=int(smooth_kernel),
+        slow_topk=int(slow_topk),
+        selector_cell_size=int(selector_cell_size),
     )
-    conditioning = encoder(_as_mel_tensor(ref_mel))
-    return {
-        "ref_rhythm_stats": conditioning["ref_rhythm_stats"][0].cpu().numpy().astype(np.float32),
-        "ref_rhythm_trace": conditioning["ref_rhythm_trace"][0].cpu().numpy().astype(np.float32),
-    }
+    conditioning = descriptor(_as_mel_tensor(ref_mel))
+    out = {}
+    for key, value in conditioning.items():
+        array = value[0].detach().cpu().numpy()
+        if key in {
+            "selector_meta_indices",
+            "selector_meta_starts",
+            "selector_meta_ends",
+        }:
+            out[key] = array.astype(np.int64)
+        else:
+            out[key] = array.astype(np.float32)
+    return out
 
 
 def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -143,6 +234,9 @@ def _build_cache_metadata(
     *,
     trace_bins: int,
     trace_horizon: float,
+    slow_topk: int,
+    selector_cell_size: int,
+    source_phrase_threshold: float,
     target_confidence: float,
     guidance_confidence: float,
     retimed_target_source: str | None = None,
@@ -155,6 +249,9 @@ def _build_cache_metadata(
         "rhythm_trace_hop_ms": np.asarray([RHYTHM_TRACE_HOP_MS], dtype=np.int64),
         "rhythm_trace_bins": np.asarray([int(trace_bins)], dtype=np.int64),
         "rhythm_trace_horizon": np.asarray([float(trace_horizon)], dtype=np.float32),
+        "rhythm_slow_topk": np.asarray([int(slow_topk)], dtype=np.int64),
+        "rhythm_selector_cell_size": np.asarray([int(selector_cell_size)], dtype=np.int64),
+        "rhythm_source_phrase_threshold": np.asarray([float(source_phrase_threshold)], dtype=np.float32),
         "rhythm_reference_mode_id": np.asarray([RHYTHM_REFERENCE_MODE_STATIC_REF_FULL], dtype=np.int64),
         "rhythm_target_confidence": np.asarray([float(target_confidence)], dtype=np.float32),
         "rhythm_guidance_confidence": np.asarray([float(guidance_confidence)], dtype=np.float32),
@@ -457,6 +554,9 @@ def build_reference_teacher_targets(
         "rhythm_teacher_pause_exec_tgt": teacher.pause_exec_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_speech_budget_tgt": teacher.speech_budget_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_pause_budget_tgt": teacher.pause_budget_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_allocation_tgt": teacher.allocation_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_prefix_clock_tgt": teacher.prefix_clock_tgt[0].cpu().numpy().astype(np.float32),
+        "rhythm_teacher_prefix_backlog_tgt": teacher.prefix_backlog_tgt[0].cpu().numpy().astype(np.float32),
         "rhythm_teacher_confidence": teacher.confidence[0].cpu().numpy().astype(np.float32),
     }
 
@@ -470,6 +570,10 @@ def build_item_rhythm_bundle(
     tail_open_units: int = 1,
     trace_bins: int = 24,
     trace_horizon: float = 0.35,
+    trace_smooth_kernel: int = 5,
+    slow_topk: int = 6,
+    selector_cell_size: int = 3,
+    source_phrase_threshold: float = 0.55,
     include_self_targets: bool = True,
     include_teacher_targets: bool = False,
     include_retimed_mel_target: bool = False,
@@ -483,11 +587,15 @@ def build_item_rhythm_bundle(
         silent_token=silent_token,
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
+        phrase_boundary_threshold=source_phrase_threshold,
     )
     conditioning = build_reference_rhythm_conditioning(
         mel,
         trace_bins=trace_bins,
         trace_horizon=trace_horizon,
+        smooth_kernel=trace_smooth_kernel,
+        slow_topk=slow_topk,
+        selector_cell_size=selector_cell_size,
     )
     bundle = {**source, **conditioning}
     guided = None
@@ -506,7 +614,7 @@ def build_item_rhythm_bundle(
             build_reference_teacher_targets(
                 dur_anchor_src=source["dur_anchor_src"],
                 unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
-                source_boundary_cue=source.get("boundary_confidence"),
+                source_boundary_cue=source.get("source_boundary_cue", source.get("boundary_confidence")),
                 ref_rhythm_stats=conditioning["ref_rhythm_stats"],
                 ref_rhythm_trace=conditioning["ref_rhythm_trace"],
                 **teacher_kwargs,
@@ -549,6 +657,9 @@ def build_item_rhythm_bundle(
         _build_cache_metadata(
             trace_bins=trace_bins,
             trace_horizon=trace_horizon,
+            slow_topk=slow_topk,
+            selector_cell_size=selector_cell_size,
+            source_phrase_threshold=source_phrase_threshold,
             target_confidence=target_confidence,
             guidance_confidence=guidance_confidence,
             retimed_target_source=retimed_target_source,

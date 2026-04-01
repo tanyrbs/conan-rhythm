@@ -1,0 +1,8 @@
+base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
+
+# Stage-2 schedule distillation:
+# keep cached teacher surfaces as the offline floor,
+# and additionally enable the shared-projector full-context branch.
+rhythm_enable_dual_mode_teacher: true
+rhythm_enable_algorithmic_teacher: false
+lambda_rhythm_distill: 0.25

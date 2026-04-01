@@ -10,13 +10,16 @@ rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_budget_win, pause_budget_win, dur_logratio_unit, pause_weight_unit]
-rhythm_public_losses: [L_recon, L_plan, L_guidance, L_distill]
+rhythm_public_losses: [L_sched, L_budget, L_kd, L_base]
 
 rhythm_stats_dim: 6
 rhythm_trace_dim: 5
 rhythm_trace_bins: 24
 rhythm_trace_horizon: 0.35
-rhythm_cache_version: 3
+rhythm_cache_version: 4
+rhythm_slow_topk: 6
+rhythm_selector_cell_size: 3
+rhythm_source_phrase_threshold: 0.55
 rhythm_hidden_size: 256
 rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
@@ -82,11 +85,16 @@ rhythm_projector_pause_min_boundary_weight: 0.10
 lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.25
-lambda_rhythm_plan: 1.0
+# Keep the extra planner-proxy loss disabled in the mainline.
+# Schedule supervision should come primarily from exec/budget/distill.
+lambda_rhythm_plan: 0.0
 rhythm_plan_local_weight: 0.5
 rhythm_plan_cum_weight: 1.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
 rhythm_require_retimed_cache: false
 rhythm_require_cached_teacher: false
+rhythm_schedule_only_stage: false
+rhythm_optimize_module_only: false
+rhythm_optimize_pause_state: false
 rhythm_retimed_confidence_floor: 0.05

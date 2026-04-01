@@ -20,7 +20,8 @@ from .reference_encoder import (
     REF_RHYTHM_TRACE_KEYS,
     ReferenceRhythmEncoder,
 )
-from .renderer import render_rhythm_sequence
+from .reference_selector import ReferenceSelection, ReferenceSelector
+from .renderer import BlankSlotSchedule, build_interleaved_blank_slot_schedule, render_rhythm_sequence
 from .scheduler import MonotonicRhythmScheduler
 from .source_boundary import build_source_boundary_cue
 from .supervision import (
@@ -37,6 +38,7 @@ from .supervision import (
     build_reference_rhythm_conditioning,
     build_retimed_mel_target,
     build_reference_teacher_targets,
+    build_source_phrase_cache,
     build_source_rhythm_cache,
 )
 from .teacher import (
@@ -58,6 +60,8 @@ __all__ = [
     'REF_RHYTHM_STATS_KEYS',
     'REF_RHYTHM_TRACE_KEYS',
     'MonotonicRhythmScheduler',
+    'ReferenceSelection',
+    'ReferenceSelector',
     'ReferenceRhythmEncoder',
     'RefRhythmDescriptor',
     'UnitRedistributionHead',
@@ -77,13 +81,16 @@ __all__ = [
     'build_reference_rhythm_conditioning',
     'build_retimed_mel_target',
     'build_reference_teacher_targets',
+    'build_source_phrase_cache',
     'build_source_rhythm_cache',
     'build_algorithmic_teacher_targets',
+    'build_interleaved_blank_slot_schedule',
     'resolve_content_lengths',
     'resolve_rhythm_apply_mode',
     'render_rhythm_sequence',
     'AlgorithmicRhythmTeacher',
     'AlgorithmicTeacherConfig',
+    'BlankSlotSchedule',
     'CompressedUnitSequence',
     'RhythmExecution',
     'RhythmPlannerOutputs',

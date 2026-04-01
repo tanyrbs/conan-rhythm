@@ -57,6 +57,22 @@ def _masked_kl(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> tor
     return (tgt * (torch.log(tgt) - torch.log(pred))).sum(dim=1).mean()
 
 
+def _build_prefix_carry(
+    *,
+    speech_exec: torch.Tensor,
+    blank_exec: torch.Tensor,
+    dur_anchor_src: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    unit_mask = unit_mask.float()
+    prefix_clock = torch.cumsum(
+        ((speech_exec.float() + blank_exec.float()) - dur_anchor_src.float()) * unit_mask,
+        dim=1,
+    ) * unit_mask
+    prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
+    return prefix_clock, prefix_backlog
+
+
 def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
     execution = output.get("rhythm_execution")
     if execution is None:
@@ -78,6 +94,14 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     pause_total = blank_exec.float().sum(dim=1)
     total_exec = (speech_total + pause_total).clamp_min(1e-6)
     commit_ratio = execution.commit_frontier.float() / visible_units
+    pred_prefix_clock, pred_prefix_backlog = _build_prefix_carry(
+        speech_exec=execution.speech_duration_exec,
+        blank_exec=blank_exec,
+        dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else execution.speech_duration_exec,
+        unit_mask=unit_mask,
+    )
+    final_indices = (visible_units.long() - 1).clamp_min(0).unsqueeze(1)
+    final_prefix_clock = pred_prefix_clock.gather(1, final_indices).squeeze(1)
 
     metrics = {
         "rhythm_metric_speech_budget_mean": _safe_mean(planner.speech_budget_win.squeeze(-1)),
@@ -92,7 +116,16 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_budget_violation_mean": _safe_mean(
             ((speech_total + pause_total) - (planner.speech_budget_win.squeeze(-1) + planner.pause_budget_win.squeeze(-1))).abs()
         ),
+        "rhythm_metric_prefix_clock_abs_mean": _safe_mean(pred_prefix_clock.abs()),
+        "rhythm_metric_prefix_backlog_mean": _safe_mean(pred_prefix_backlog),
+        "rhythm_metric_prefix_backlog_max": pred_prefix_backlog.max(),
+        "rhythm_metric_deadline_final_abs_mean": _safe_mean(final_prefix_clock.abs()),
     }
+    metrics["rhythm_metric_local_rate_transfer_corr"] = _masked_corr(
+        execution.speech_duration_exec.float(),
+        planner.trace_context[:, :, 1].float(),
+        unit_mask,
+    )
     metrics["rhythm_metric_pause_trace_corr"] = _masked_corr(
         blank_exec.float(),
         planner.trace_context[:, :, 0].float(),
@@ -119,10 +152,27 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 "rhythm_metric_phase_mean": _safe_mean(state_next.phase_ptr),
                 "rhythm_metric_backlog_mean": _safe_mean(state_next.backlog),
                 "rhythm_metric_clock_delta_mean": _safe_mean(state_next.clock_delta),
+                "rhythm_metric_clock_delta_abs_mean": _safe_mean(state_next.clock_delta.abs()),
             }
         )
+    ref_conditioning = output.get("rhythm_ref_conditioning")
+    if ref_conditioning is not None:
+        selector_scores = ref_conditioning.get("selector_meta_scores")
+        slow_summary = ref_conditioning.get("slow_rhythm_summary")
+        if selector_scores is not None:
+            metrics["rhythm_metric_selector_score_mean"] = _safe_mean(selector_scores.float())
+            metrics["rhythm_metric_selector_score_max"] = selector_scores.float().max()
+        if slow_summary is not None:
+            metrics["rhythm_metric_slow_summary_norm_mean"] = _safe_mean(torch.norm(slow_summary.float(), dim=-1))
     offline_execution = output.get("rhythm_offline_execution")
     if offline_execution is not None:
+        offline_blank = getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec)
+        offline_prefix_clock, offline_prefix_backlog = _build_prefix_carry(
+            speech_exec=offline_execution.speech_duration_exec,
+            blank_exec=offline_blank,
+            dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else offline_execution.speech_duration_exec,
+            unit_mask=unit_mask,
+        )
         metrics["rhythm_metric_offline_online_speech_l1"] = _masked_l1(
             execution.speech_duration_exec,
             offline_execution.speech_duration_exec,
@@ -130,17 +180,27 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         )
         metrics["rhythm_metric_offline_online_pause_l1"] = _masked_l1(
             blank_exec,
-            getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            offline_blank,
             unit_mask,
         )
         metrics["rhythm_metric_offline_online_total_corr"] = _masked_corr(
             execution.speech_duration_exec + blank_exec,
-            offline_execution.speech_duration_exec + getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            offline_execution.speech_duration_exec + offline_blank,
             unit_mask,
         )
         metrics["rhythm_metric_offline_online_alloc_kl"] = _masked_kl(
             execution.speech_duration_exec + blank_exec,
-            offline_execution.speech_duration_exec + getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            offline_execution.speech_duration_exec + offline_blank,
+            unit_mask,
+        )
+        metrics["rhythm_metric_offline_online_prefix_clock_l1"] = _masked_l1(
+            pred_prefix_clock,
+            offline_prefix_clock,
+            unit_mask,
+        )
+        metrics["rhythm_metric_offline_online_prefix_backlog_l1"] = _masked_l1(
+            pred_prefix_backlog,
+            offline_prefix_backlog,
             unit_mask,
         )
     algorithmic_teacher = output.get("rhythm_algorithmic_teacher")
@@ -154,6 +214,16 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         metrics["rhythm_metric_algorithmic_teacher_alloc_kl"] = _masked_kl(
             execution.speech_duration_exec + blank_exec,
             algorithmic_teacher.allocation_tgt,
+            unit_mask,
+        )
+        metrics["rhythm_metric_algorithmic_teacher_prefix_clock_l1"] = _masked_l1(
+            pred_prefix_clock,
+            algorithmic_teacher.prefix_clock_tgt,
+            unit_mask,
+        )
+        metrics["rhythm_metric_algorithmic_teacher_prefix_backlog_l1"] = _masked_l1(
+            pred_prefix_backlog,
+            algorithmic_teacher.prefix_backlog_tgt,
             unit_mask,
         )
     metrics["rhythm_metric_acoustic_target_is_retimed"] = execution.speech_duration_exec.new_tensor(
@@ -230,6 +300,24 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_teacher_speech_exec_tgt"] + sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )
+        if "rhythm_teacher_allocation_tgt" in sample:
+            metrics["rhythm_metric_distill_alloc_kl"] = _masked_kl(
+                execution.speech_duration_exec + blank_exec,
+                sample["rhythm_teacher_allocation_tgt"],
+                unit_mask,
+            )
+        if "rhythm_teacher_prefix_clock_tgt" in sample:
+            metrics["rhythm_metric_distill_prefix_clock_l1"] = _masked_l1(
+                pred_prefix_clock,
+                sample["rhythm_teacher_prefix_clock_tgt"],
+                unit_mask,
+            )
+        if "rhythm_teacher_prefix_backlog_tgt" in sample:
+            metrics["rhythm_metric_distill_prefix_backlog_l1"] = _masked_l1(
+                pred_prefix_backlog,
+                sample["rhythm_teacher_prefix_backlog_tgt"],
+                unit_mask,
+            )
         if "rhythm_target_confidence" in sample:
             metrics["rhythm_metric_target_confidence_mean"] = _safe_mean(sample["rhythm_target_confidence"].float())
         if "rhythm_guidance_confidence" in sample:
@@ -252,12 +340,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
 def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
     mel_lengths = list(stream_result.mel_lengths)
     commit_history = list(stream_result.commit_history)
+    backlog_history = list(getattr(stream_result, "backlog_history", []))
+    clock_history = list(getattr(stream_result, "clock_history", []))
+    blank_ratio_history = list(getattr(stream_result, "blank_ratio_history", []))
     if len(mel_lengths) <= 0:
         return {
             "stream_num_chunks": 0.0,
             "stream_final_mel_len": 0.0,
             "stream_mean_chunk_mel_delta": 0.0,
             "stream_mean_commit_delta": 0.0,
+            "stream_mean_backlog": 0.0,
+            "stream_max_backlog": 0.0,
+            "stream_mean_clock_abs": 0.0,
+            "stream_max_clock_abs": 0.0,
+            "stream_mean_blank_ratio": 0.0,
         }
     mel_deltas = [mel_lengths[0]]
     mel_deltas.extend(max(0, mel_lengths[idx] - mel_lengths[idx - 1]) for idx in range(1, len(mel_lengths)))
@@ -286,4 +382,9 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         "stream_mean_prefix_exec_delta": float(sum(prefix_exec_deltas) / max(len(prefix_exec_deltas), 1)) if len(prefix_exec_deltas) > 0 else 0.0,
         "stream_max_prefix_exec_delta": float(max(prefix_exec_deltas)) if len(prefix_exec_deltas) > 0 else 0.0,
         "stream_commit_monotonic_violations": float(commit_monotonic_violations),
+        "stream_mean_backlog": float(sum(backlog_history) / max(len(backlog_history), 1)) if len(backlog_history) > 0 else 0.0,
+        "stream_max_backlog": float(max(backlog_history)) if len(backlog_history) > 0 else 0.0,
+        "stream_mean_clock_abs": float(sum(abs(x) for x in clock_history) / max(len(clock_history), 1)) if len(clock_history) > 0 else 0.0,
+        "stream_max_clock_abs": float(max(abs(x) for x in clock_history)) if len(clock_history) > 0 else 0.0,
+        "stream_mean_blank_ratio": float(sum(blank_ratio_history) / max(len(blank_ratio_history), 1)) if len(blank_ratio_history) > 0 else 0.0,
     }

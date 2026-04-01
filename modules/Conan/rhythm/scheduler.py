@@ -59,6 +59,7 @@ class MonotonicRhythmScheduler(nn.Module):
             unit_mask=unit_mask,
             ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
             trace_context=trace_context,
+            slow_rhythm_summary=ref_conditioning.get("slow_rhythm_summary"),
             source_boundary_cue=source_boundary_cue,
             phase_ptr=state.phase_ptr,
             backlog=state.backlog,
@@ -68,6 +69,7 @@ class MonotonicRhythmScheduler(nn.Module):
             hidden=budget_outputs["hidden"],
             trace_context=trace_context,
             unit_mask=unit_mask,
+            slow_rhythm_summary=ref_conditioning.get("slow_rhythm_summary"),
             source_boundary_cue=source_boundary_cue,
         )
         return RhythmPlannerOutputs(

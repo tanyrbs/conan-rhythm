@@ -20,6 +20,7 @@ Current state:
 - scheduler now also consumes a cheap internal source-boundary cue
 - unit frontend now exports `sealed_mask + boundary_confidence`
 - a stateful run-length unitizer helper is now available for incremental debugging
+- explicit blank-slot graph is now public in projector / renderer / loss
 
 ---
 
@@ -38,6 +39,8 @@ Current supervision surface:
 - `rhythm_pause_budget_tgt`
 - `rhythm_guidance_speech_tgt`
 - `rhythm_guidance_pause_tgt`
+- cached source phrase metadata (`source_boundary_cue`, `phrase_group_*`)
+- cached slow-rhythm selector outputs (`slow_rhythm_memory`, `selector_meta_*`)
 
 This stage is suitable for structural training, but it is not the final ceiling.
 
@@ -46,6 +49,8 @@ Current recommendation:
 - prefer cached/offline targets over unconditional runtime heuristic regeneration
 - use `rhythm_dataset_target_mode: cached_only` for formal experiments
 - keep `prefer_cache` only as a migration / debug stage while refreshing caches
+- for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
+- that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
 
 ---
 
@@ -67,6 +72,9 @@ Reserved fields already exist:
 - `rhythm_teacher_pause_exec_tgt`
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
+- `rhythm_teacher_allocation_tgt`
+- `rhythm_teacher_prefix_clock_tgt`
+- `rhythm_teacher_prefix_backlog_tgt`
 
 Important terminology note:
 
@@ -75,6 +83,7 @@ Important terminology note:
   - streaming branch = stateful projector path
   - offline branch = full-horizon / no-prefix-reuse projector pass
   - algorithmic teacher = explicit schedule bootstrap
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the formal stage-2 config
 - it still does **not** yet have a true learned non-causal offline teacher model
 - docs and experiments should keep that distinction explicit
 
@@ -110,6 +119,7 @@ Current bridge step already in repo:
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
 - the minimal rhythm route can bypass the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal `L_recon + L_plan` objective
+- rhythm cache contract is now versioned at `rhythm_cache_version: 4`
 - config now also exposes staged rollout knobs:
   - `rhythm_train_render_start_steps`
   - `rhythm_valid_render_start_steps`
@@ -120,8 +130,9 @@ Current bridge step already in repo:
 Recommended future config direction after retimed targets exist:
 
 - enable train-time retimed rendering explicitly
-- keep `L_recon` as the outer acoustic objective
-- keep `rhythm_plan` as the main timing objective, with cumulative drift weighted above local shape
+- keep `L_base` as the outer acoustic objective
+- keep the main timing path on `L_sched + L_budget + L_kd`
+- treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.
 
@@ -157,9 +168,11 @@ The two biggest remaining milestones are:
 Right now the repository should focus on:
 
 1. projector-centric timing supervision
-2. cached-only reproducibility
-3. retimed train/infer closure
-4. streaming regression hardening
+2. schedule-only warm start before joint acoustic finetune
+3. cached-only reproducibility
+4. dual-mode schedule KD on the same projector contract
+5. retimed train/infer closure
+6. streaming regression hardening
 
 ## Future expansion
 

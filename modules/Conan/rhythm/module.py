@@ -34,6 +34,8 @@ class StreamingRhythmModule(nn.Module):
         stats_dim: int = 6,
         trace_dim: int = 5,
         trace_horizon: float = 0.35,
+        slow_topk: int = 6,
+        selector_cell_size: int = 3,
         trace_smooth_kernel: int = 5,
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
@@ -46,6 +48,8 @@ class StreamingRhythmModule(nn.Module):
         self.reference_descriptor = RefRhythmDescriptor(
             trace_bins=trace_bins,
             trace_horizon=trace_horizon,
+            slow_topk=slow_topk,
+            selector_cell_size=selector_cell_size,
             smooth_kernel=trace_smooth_kernel,
         )
         self.scheduler = MonotonicRhythmScheduler(
@@ -73,12 +77,31 @@ class StreamingRhythmModule(nn.Module):
     def build_reference_conditioning(
         self,
         *,
+        ref_conditioning: dict[str, torch.Tensor] | None = None,
         ref_rhythm_stats: torch.Tensor | None = None,
         ref_rhythm_trace: torch.Tensor | None = None,
         ref_mel: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        if ref_conditioning is not None:
+            if "ref_rhythm_stats" not in ref_conditioning or "ref_rhythm_trace" not in ref_conditioning:
+                raise ValueError("ref_conditioning must contain ref_rhythm_stats and ref_rhythm_trace.")
+            enriched = self.reference_descriptor.from_stats_trace(
+                ref_conditioning["ref_rhythm_stats"],
+                ref_conditioning["ref_rhythm_trace"],
+                selector=self.reference_descriptor.selector,
+            )
+            enriched.update({k: v for k, v in ref_conditioning.items() if v is not None})
+            if "slow_rhythm_summary" not in enriched and "slow_rhythm_memory" in enriched:
+                slow_memory = enriched["slow_rhythm_memory"]
+                if slow_memory.dim() == 3:
+                    enriched["slow_rhythm_summary"] = slow_memory.mean(dim=1)
+            return enriched
         if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
-            return self.reference_descriptor.from_stats_trace(ref_rhythm_stats, ref_rhythm_trace)
+            return self.reference_descriptor.from_stats_trace(
+                ref_rhythm_stats,
+                ref_rhythm_trace,
+                selector=self.reference_descriptor.selector,
+            )
         if ref_mel is None:
             raise ValueError('Need either (ref_rhythm_stats, ref_rhythm_trace) or ref_mel.')
         return self.encode_reference(ref_mel)
@@ -105,6 +128,7 @@ class StreamingRhythmModule(nn.Module):
         *,
         content_units: torch.Tensor,
         dur_anchor_src: torch.Tensor,
+        ref_conditioning: dict[str, torch.Tensor] | None = None,
         ref_rhythm_stats: torch.Tensor | None = None,
         ref_rhythm_trace: torch.Tensor | None = None,
         ref_mel: torch.Tensor | None = None,
@@ -119,6 +143,7 @@ class StreamingRhythmModule(nn.Module):
         projector_force_full_commit: bool = False,
     ):
         ref_conditioning = self.build_reference_conditioning(
+            ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
@@ -175,6 +200,7 @@ class StreamingRhythmModule(nn.Module):
         *,
         content_units: torch.Tensor,
         dur_anchor_src: torch.Tensor,
+        ref_conditioning: dict[str, torch.Tensor] | None = None,
         ref_rhythm_stats: torch.Tensor | None = None,
         ref_rhythm_trace: torch.Tensor | None = None,
         ref_mel: torch.Tensor | None = None,
@@ -186,6 +212,7 @@ class StreamingRhythmModule(nn.Module):
     ) -> RhythmTeacherTargets:
         del content_units
         ref_conditioning = self.build_reference_conditioning(
+            ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
@@ -213,6 +240,7 @@ class StreamingRhythmModule(nn.Module):
         *,
         content_units: torch.Tensor,
         dur_anchor_src: torch.Tensor,
+        ref_conditioning: dict[str, torch.Tensor] | None = None,
         ref_rhythm_stats: torch.Tensor | None = None,
         ref_rhythm_trace: torch.Tensor | None = None,
         ref_mel: torch.Tensor | None = None,
@@ -226,6 +254,7 @@ class StreamingRhythmModule(nn.Module):
         streaming_execution = self.forward(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
+            ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
@@ -239,6 +268,7 @@ class StreamingRhythmModule(nn.Module):
         offline_execution = self.forward(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
+            ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
@@ -255,6 +285,7 @@ class StreamingRhythmModule(nn.Module):
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
+            ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,

@@ -14,6 +14,7 @@ class RhythmLossTargets:
     speech_budget_tgt: torch.Tensor
     pause_budget_tgt: torch.Tensor
     unit_mask: torch.Tensor
+    dur_anchor_src: torch.Tensor
     plan_local_weight: float = 0.5
     plan_cum_weight: float = 1.0
     sample_confidence: Optional[torch.Tensor] = None
@@ -25,6 +26,8 @@ class RhythmLossTargets:
     distill_speech_budget_tgt: Optional[torch.Tensor] = None
     distill_pause_budget_tgt: Optional[torch.Tensor] = None
     distill_allocation_tgt: Optional[torch.Tensor] = None
+    distill_prefix_clock_tgt: Optional[torch.Tensor] = None
+    distill_prefix_backlog_tgt: Optional[torch.Tensor] = None
     distill_confidence: Optional[torch.Tensor] = None
 
 
@@ -87,6 +90,22 @@ def _batch_kl_div(
     tgt = _masked_normalize(tgt, mask).clamp_min(1e-6)
     loss = (tgt * (torch.log(tgt) - torch.log(pred))).sum(dim=1)
     return _reduce_batch_loss(loss, batch_weight)
+
+
+def _build_prefix_carry(
+    *,
+    speech_exec: torch.Tensor,
+    blank_exec: torch.Tensor,
+    dur_anchor_src: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    unit_mask = unit_mask.float()
+    prefix_clock = torch.cumsum(
+        ((speech_exec + blank_exec) - dur_anchor_src.float()) * unit_mask,
+        dim=1,
+    ) * unit_mask
+    prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
+    return prefix_clock, prefix_backlog
 
 
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
@@ -172,6 +191,29 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             targets.distill_pause_budget_tgt.float(),
             batch_weight=targets.distill_confidence,
         )
+        if targets.distill_prefix_clock_tgt is not None or targets.distill_prefix_backlog_tgt is not None:
+            pred_prefix_clock, pred_prefix_backlog = _build_prefix_carry(
+                speech_exec=execution.speech_duration_exec.float(),
+                blank_exec=blank_exec.float(),
+                dur_anchor_src=targets.dur_anchor_src.float(),
+                unit_mask=unit_mask,
+            )
+            if targets.distill_prefix_clock_tgt is not None:
+                l_distill = l_distill + _masked_huber(
+                    pred_prefix_clock,
+                    targets.distill_prefix_clock_tgt.float(),
+                    unit_mask,
+                    beta=1.0,
+                    batch_weight=targets.distill_confidence,
+                )
+            if targets.distill_prefix_backlog_tgt is not None:
+                l_distill = l_distill + _masked_huber(
+                    pred_prefix_backlog,
+                    targets.distill_prefix_backlog_tgt.float(),
+                    unit_mask,
+                    beta=1.0,
+                    batch_weight=targets.distill_confidence,
+                )
         if targets.distill_allocation_tgt is not None:
             l_distill = l_distill + _batch_kl_div(
                 execution.speech_duration_exec + blank_exec,

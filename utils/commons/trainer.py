@@ -1,9 +1,14 @@
 import random
-import subprocess
+import shutil
 import traceback
 from datetime import datetime
 
-from torch.cuda.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+    _TORCH_AMP_NEW_API = True
+except ImportError:  # pragma: no cover
+    from torch.cuda.amp import GradScaler, autocast
+    _TORCH_AMP_NEW_API = False
 import numpy as np
 import torch.optim
 import torch.utils.data
@@ -107,7 +112,11 @@ class Trainer:
         self.val_check_interval = val_check_interval
         self.tb_log_interval = tb_log_interval
         self.amp = amp
-        self.amp_scalar = GradScaler()
+        scaler_enabled = bool(self.amp and torch.cuda.is_available())
+        if _TORCH_AMP_NEW_API:
+            self.amp_scalar = GradScaler(device='cuda', enabled=scaler_enabled)
+        else:  # pragma: no cover
+            self.amp_scalar = GradScaler(enabled=scaler_enabled)
 
     def test(self, task_cls):
         self.testing = True
@@ -322,7 +331,10 @@ class Trainer:
                         param.requires_grad = True
 
             # forward pass
-            with autocast(enabled=self.amp):
+            autocast_kwargs = {"enabled": self.amp}
+            if _TORCH_AMP_NEW_API:
+                autocast_kwargs["device_type"] = 'cuda'
+            with autocast(**autocast_kwargs):
                 if self.on_gpu:
                     batch = move_to_cuda(copy.copy(batch), self.root_gpu)
                 args = [batch, batch_idx, opt_idx]
@@ -540,20 +552,35 @@ class Trainer:
         os.makedirs(f'{self.work_dir}/terminal_logs', exist_ok=True)
         # Tee(f'{self.work_dir}/terminal_logs/log_{t}.txt', 'w')
 
+    def _copy_code_path(self, source_path: str, code_dir: str):
+        source_path = os.path.normpath(source_path)
+        if not os.path.exists(source_path):
+            return
+        if os.path.isfile(source_path):
+            if not (source_path.endswith('.py') or source_path.endswith('.yaml')):
+                return
+            dst_path = os.path.join(code_dir, source_path)
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+            shutil.copy2(source_path, dst_path)
+            return
+        for root, dirs, files in os.walk(source_path):
+            dirs[:] = [d for d in dirs if d != '__pycache__']
+            rel_root = os.path.normpath(root)
+            dst_root = os.path.join(code_dir, rel_root)
+            os.makedirs(dst_root, exist_ok=True)
+            for file_name in files:
+                if not (file_name.endswith('.py') or file_name.endswith('.yaml')):
+                    continue
+                src_file = os.path.join(root, file_name)
+                dst_file = os.path.join(dst_root, file_name)
+                os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+
     def save_codes(self):
         if len(hparams['save_codes']) > 0:
             t = datetime.now().strftime('%Y%m%d%H%M%S')
-            code_dir = f'{self.work_dir}/codes/{t}'
-            subprocess.check_call(f'mkdir -p "{code_dir}"', shell=True)
+            code_dir = os.path.join(self.work_dir, 'codes', t)
+            os.makedirs(code_dir, exist_ok=True)
             for c in hparams['save_codes']:
-                if os.path.exists(c):
-                    subprocess.check_call(
-                        f'rsync -aR '
-                        f'--include="*.py" '
-                        f'--include="*.yaml" '
-                        f'--exclude="__pycache__" '
-                        f'--include="*/" '
-                        f'--exclude="*" '
-                        f'"./{c}" "{code_dir}/"',
-                        shell=True)
+                self._copy_code_path(c, code_dir)
             print(f"| Copied codes to {code_dir}.")

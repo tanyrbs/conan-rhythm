@@ -91,6 +91,22 @@ def _estimate_confidence(
     return confidence.clamp(0.05, 1.0).unsqueeze(-1)
 
 
+def _build_prefix_carry_targets(
+    *,
+    dur_anchor_src: torch.Tensor,
+    speech_exec: torch.Tensor,
+    pause_exec: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    unit_mask = unit_mask.float()
+    prefix_clock = torch.cumsum(
+        ((speech_exec + pause_exec) - dur_anchor_src.float()) * unit_mask,
+        dim=1,
+    ) * unit_mask
+    prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
+    return prefix_clock, prefix_backlog
+
+
 def build_algorithmic_teacher_targets(
     *,
     dur_anchor_src: torch.Tensor,
@@ -165,6 +181,12 @@ def build_algorithmic_teacher_targets(
     pause_exec = pause_scores * pause_budget
 
     allocation_tgt = _masked_normalize(speech_exec + pause_exec, unit_mask)
+    prefix_clock_tgt, prefix_backlog_tgt = _build_prefix_carry_targets(
+        dur_anchor_src=dur_anchor_src,
+        speech_exec=speech_exec,
+        pause_exec=pause_exec,
+        unit_mask=unit_mask,
+    )
     confidence = _estimate_confidence(
         trace_context=trace_context,
         ref_rhythm_stats=ref_rhythm_stats,
@@ -179,6 +201,8 @@ def build_algorithmic_teacher_targets(
         allocation_tgt=allocation_tgt,
         confidence=confidence,
         trace_context=trace_context,
+        prefix_clock_tgt=prefix_clock_tgt,
+        prefix_backlog_tgt=prefix_backlog_tgt,
     )
 
 
