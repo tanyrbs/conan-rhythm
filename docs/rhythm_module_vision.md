@@ -52,22 +52,34 @@ It is built cheaply from source-side separator evidence and source duration shap
 3. `dur_logratio_unit`
 4. `pause_weight_unit`
 
-### Losses (4)
+### Losses (mainline + staged)
+
+Mainline timing losses:
 
 1. `L_exec_speech`
 2. `L_exec_pause`
 3. `L_budget`
-4. `L_guidance` / `L_distill`
+4. `L_carry`
 
-`L_guidance` is the current warm-start surface.
-`L_distill` is reserved for latency-matched teacher distillation, not naive full-context imitation.
+Staged / optional:
+
+5. `L_distill`
+6. `L_base`
+
+Interpretation:
+
+- `L_exec_*` is the main supervision surface because projector execution is the actual timing authority
+- `L_budget` is a light streaming guardrail, not the main target
+- `L_carry` supervises cumulative prefix debt / backlog directly
+- `L_distill` is reserved for latency-matched teacher distillation, not naive full-context imitation
+- `L_base` is the outer acoustic closure once retimed decoder training is enabled
 
 Current objective priority in practice:
 
-- core: `L_recon + L_plan`
-- warm-start: add `L_guidance` when cached guidance targets exist
-- phase-2: add `L_distill` only when a stronger offline teacher surface exists
-- within `L_plan`, cumulative prefix drift should carry more weight than local shape error
+- schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_carry`
+- phase-2 KD: add `L_distill`, preferably on executed speech/pause plus optional prefix carry
+- retimed acoustic stage: add light `L_base`
+- `L_plan` and `L_guidance` remain available only as internal ablations/debug paths
 
 ---
 
@@ -111,6 +123,12 @@ content/unit states + source anchor + explicit ref rhythm + streaming state
 
 This is more appropriate for a strong-rhythm system than exposing many loosely coupled heads at the public surface.
 
+Important implementation note:
+
+- `source_boundary_cue` is a **soft source-side prior**
+- it should help commit safety / phrase safety
+- it should not dominate pause placement over reference rhythm conditioning
+
 ---
 
 ## 5. Projector authority
@@ -122,9 +140,10 @@ The projector remains the only hard execution authority.
 Current implemented properties:
 
 - committed-prefix freeze
+- prefix-constrained feasible-budget lift
 - sparse pause allocation
 - commit frontier tracking
-- phase / backlog / clock state carry-over
+- anchor-progress phase / backlog / clock state carry-over
 
 This means the system is no longer treating the planner output as already-executed timing.
 The projector is the place where timing becomes binding.

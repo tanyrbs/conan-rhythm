@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable
 
 import torch
@@ -23,6 +24,7 @@ class RenderedRhythmSequence:
     total_mask: torch.Tensor
     frame_slot_index: torch.Tensor
     frame_unit_index: torch.Tensor
+    frame_phase_features: torch.Tensor
 
 
 def _pad_sequences(
@@ -84,13 +86,14 @@ def render_rhythm_sequence(
     silent_token: int,
     speech_state_fn: Callable[[torch.Tensor], torch.Tensor],
     pause_state: torch.Tensor,
+    frame_state_post_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ) -> RenderedRhythmSequence:
     """Render unit-level rhythm decisions into frame-level decoder inputs.
 
-    The renderer is deliberately kept simple:
-    - speech frames repeat the unit speech state
-    - pause frames repeat a learned pause state
-    - pause token id is the configured silent token
+    The renderer keeps hard schedule ownership while adding minimal within-slot phase cues:
+    - speech frames still originate from repeated unit speech states
+    - blank frames still originate from a learned pause state
+    - per-frame phase features are exposed so a tiny residual path can realize long stretch/compress more cleanly
     """
 
     slot_duration_exec = torch.round(slot_duration_exec.float()).long().clamp_min(0)
@@ -107,6 +110,7 @@ def render_rhythm_sequence(
     frame_blank_list: list[torch.Tensor] = []
     frame_slot_index_list: list[torch.Tensor] = []
     frame_unit_index_list: list[torch.Tensor] = []
+    frame_phase_feature_list: list[torch.Tensor] = []
 
     for batch_idx in range(batch_size):
         states = []
@@ -114,6 +118,7 @@ def render_rhythm_sequence(
         blank_mask = []
         slot_indices = []
         unit_indices = []
+        phase_features = []
         num_slots = int(slot_mask[batch_idx].sum().item())
         for slot_idx in range(num_slots):
             duration = int(slot_duration_exec[batch_idx, slot_idx].item())
@@ -122,6 +127,23 @@ def render_rhythm_sequence(
             unit_idx = int(slot_unit_index[batch_idx, slot_idx].item())
             is_blank = int(slot_is_blank[batch_idx, slot_idx].item()) > 0
             unit_id = int(content_units[batch_idx, unit_idx].item())
+            if duration <= 1:
+                phase = torch.zeros((duration,), dtype=torch.float32, device=device)
+            else:
+                phase = torch.linspace(0.0, 1.0, duration, dtype=torch.float32, device=device)
+            edge = torch.abs(2.0 * phase - 1.0)
+            phase_features.append(
+                torch.stack(
+                    [
+                        phase,
+                        1.0 - phase,
+                        2.0 * phase - 1.0,
+                        torch.full((duration,), float(math.log1p(float(duration))), dtype=torch.float32, device=device),
+                        edge,
+                    ],
+                    dim=-1,
+                )
+            )
             if is_blank:
                 pause_state_seq = pause_state.view(1, hidden_size).expand(duration, -1).to(device=device)
                 states.append(pause_state_seq)
@@ -140,23 +162,29 @@ def render_rhythm_sequence(
             blank_mask = [torch.ones((1,), dtype=torch.float32, device=device)]
             slot_indices = [torch.zeros((1,), dtype=torch.long, device=device)]
             unit_indices = [torch.zeros((1,), dtype=torch.long, device=device)]
+            phase_features = [torch.zeros((1, 5), dtype=torch.float32, device=device)]
         frame_state_list.append(torch.cat(states, dim=0))
         frame_token_list.append(torch.cat(tokens, dim=0))
         frame_blank_list.append(torch.cat(blank_mask, dim=0))
         frame_slot_index_list.append(torch.cat(slot_indices, dim=0))
         frame_unit_index_list.append(torch.cat(unit_indices, dim=0))
+        frame_phase_feature_list.append(torch.cat(phase_features, dim=0))
 
     frame_states = _pad_sequences(frame_state_list, pad_value=0.0)
     frame_tokens = _pad_sequences(frame_token_list, pad_value=int(silent_token), dtype=torch.long)
     blank_mask = _pad_sequences(frame_blank_list, pad_value=0.0)
     frame_slot_index = _pad_sequences(frame_slot_index_list, pad_value=-1, dtype=torch.long)
     frame_unit_index = _pad_sequences(frame_unit_index_list, pad_value=-1, dtype=torch.long)
+    frame_phase_features = _pad_sequences(frame_phase_feature_list, pad_value=0.0)
     speech_mask = (1.0 - blank_mask).clamp(0.0, 1.0)
     total_mask = torch.zeros_like(speech_mask)
     for batch_idx, seq in enumerate(frame_token_list):
         total_mask[batch_idx, : seq.size(0)] = 1.0
     blank_mask = blank_mask * total_mask
     speech_mask = speech_mask * total_mask
+    if frame_state_post_fn is not None:
+        frame_states = frame_state_post_fn(frame_states, frame_phase_features, blank_mask, total_mask)
+        frame_states = frame_states * total_mask.unsqueeze(-1)
     return RenderedRhythmSequence(
         frame_states=frame_states,
         frame_tokens=frame_tokens,
@@ -165,4 +193,5 @@ def render_rhythm_sequence(
         total_mask=total_mask,
         frame_slot_index=frame_slot_index,
         frame_unit_index=frame_unit_index,
+        frame_phase_features=frame_phase_features,
     )

@@ -10,7 +10,7 @@ rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_budget_win, pause_budget_win, dur_logratio_unit, pause_weight_unit]
-rhythm_public_losses: [L_sched, L_budget, L_kd, L_base]
+rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_carry, L_kd, L_base]
 
 rhythm_stats_dim: 6
 rhythm_trace_dim: 5
@@ -24,6 +24,11 @@ rhythm_hidden_size: 256
 rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
 rhythm_pause_share_max: 0.45
+# Keep source-boundary cues as soft priors, not dominant pause-placement owners.
+rhythm_boundary_feature_scale: 0.35
+rhythm_boundary_source_cue_weight: 0.35
+rhythm_pause_boundary_latent_weight: 0.35
+rhythm_pause_source_boundary_weight: 0.20
 rhythm_separator_aware: true
 rhythm_tail_open_units: 1
 rhythm_apply_mode: infer
@@ -51,6 +56,12 @@ rhythm_retimed_stretch_weight_min: 0.35
 rhythm_dataset_target_mode: prefer_cache
 rhythm_primary_target_surface: guidance
 rhythm_distill_surface: auto
+rhythm_streaming_prefix_train: false
+rhythm_streaming_prefix_deterministic: true
+rhythm_streaming_prefix_min_ratio: 0.50
+rhythm_streaming_prefix_max_ratio: 0.90
+rhythm_streaming_prefix_min_tokens: 8
+rhythm_streaming_prefix_multiple: 4
 # Cached rhythm targets in the current repo are self-conditioned surfaces.
 # Keep rhythm conditioning self-consistent unless a pairwise offline cache is introduced later.
 rhythm_cached_reference_policy: self
@@ -69,6 +80,7 @@ rhythm_teacher_local_rate_strength: 0.45
 rhythm_teacher_segment_bias_strength: 0.30
 rhythm_teacher_pause_strength: 1.10
 rhythm_teacher_boundary_strength: 1.50
+rhythm_teacher_source_boundary_pause_weight: 0.35
 rhythm_teacher_pause_budget_ratio_cap: 0.80
 rhythm_teacher_speech_smooth_kernel: 3
 rhythm_teacher_pause_topk_ratio: 0.30
@@ -83,19 +95,23 @@ rhythm_projector_tail_hold_units: 2
 rhythm_projector_boundary_commit_threshold: 0.45
 rhythm_projector_pause_topk_ratio: 0.35
 rhythm_projector_pause_min_boundary_weight: 0.10
+rhythm_projector_pause_boundary_bias_weight: 0.15
+rhythm_renderer_phase_init_gain: 0.10
 
 lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.25
+lambda_rhythm_carry: 0.15
 # Keep the extra planner-proxy loss disabled in the mainline.
-# Schedule supervision should come primarily from exec/budget/distill.
+# Schedule supervision should come primarily from executed speech/pause,
+# plus a light budget/carry guardrail.
 lambda_rhythm_plan: 0.0
 rhythm_plan_local_weight: 0.5
 rhythm_plan_cum_weight: 1.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
-rhythm_distill_budget_weight: 0.5
-rhythm_distill_allocation_weight: 0.5
+rhythm_distill_budget_weight: 0.0
+rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.25
 rhythm_require_retimed_cache: false
 rhythm_require_cached_teacher: false

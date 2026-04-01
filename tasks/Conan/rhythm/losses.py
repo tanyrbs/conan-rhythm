@@ -143,6 +143,18 @@ def _normalize_prefix_carry(prefix: torch.Tensor, dur_anchor_src: torch.Tensor, 
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
     unit_mask = targets.unit_mask.float()
     blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)
+    pred_prefix_clock, pred_prefix_backlog = _build_prefix_carry(
+        speech_exec=execution.speech_duration_exec.float(),
+        blank_exec=blank_exec.float(),
+        dur_anchor_src=targets.dur_anchor_src.float(),
+        unit_mask=unit_mask,
+    )
+    target_prefix_clock, target_prefix_backlog = _build_prefix_carry(
+        speech_exec=targets.speech_exec_tgt.float(),
+        blank_exec=targets.pause_exec_tgt.float(),
+        dur_anchor_src=targets.dur_anchor_src.float(),
+        unit_mask=unit_mask,
+    )
     l_exec_speech = _masked_log_huber(
         execution.speech_duration_exec,
         targets.speech_exec_tgt.float(),
@@ -166,6 +178,19 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             torch.log1p(targets.pause_budget_tgt.float().clamp_min(0.0)),
             batch_weight=targets.sample_confidence,
         )
+    )
+    l_carry = _masked_huber(
+        _normalize_prefix_carry(pred_prefix_clock, targets.dur_anchor_src.float(), unit_mask),
+        _normalize_prefix_carry(target_prefix_clock, targets.dur_anchor_src.float(), unit_mask),
+        unit_mask,
+        beta=0.25,
+        batch_weight=targets.sample_confidence,
+    ) + _masked_huber(
+        _normalize_prefix_carry(pred_prefix_backlog, targets.dur_anchor_src.float(), unit_mask),
+        _normalize_prefix_carry(target_prefix_backlog, targets.dur_anchor_src.float(), unit_mask),
+        unit_mask,
+        beta=0.25,
+        batch_weight=targets.sample_confidence,
     )
     exec_total = (execution.speech_duration_exec + blank_exec).float()
     target_total = (targets.speech_exec_tgt + targets.pause_exec_tgt).float()
@@ -198,12 +223,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         )
     else:
         l_guidance = execution.speech_duration_exec.new_tensor(0.0)
-    if (
-        targets.distill_speech_tgt is not None
-        and targets.distill_pause_tgt is not None
-        and targets.distill_speech_budget_tgt is not None
-        and targets.distill_pause_budget_tgt is not None
-    ):
+    if targets.distill_speech_tgt is not None and targets.distill_pause_tgt is not None:
         l_distill = _masked_log_huber(
             execution.speech_duration_exec,
             targets.distill_speech_tgt.float(),
@@ -215,23 +235,22 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             unit_mask,
             batch_weight=targets.distill_confidence,
         )
-        budget_distill = _batch_l1(
-            torch.log1p(execution.planner.speech_budget_win.float().clamp_min(0.0)),
-            torch.log1p(targets.distill_speech_budget_tgt.float().clamp_min(0.0)),
-            batch_weight=targets.distill_confidence,
-        ) + _batch_l1(
-            torch.log1p(execution.planner.pause_budget_win.float().clamp_min(0.0)),
-            torch.log1p(targets.distill_pause_budget_tgt.float().clamp_min(0.0)),
-            batch_weight=targets.distill_confidence,
-        )
-        l_distill = l_distill + float(targets.distill_budget_weight) * budget_distill
-        if targets.distill_prefix_clock_tgt is not None or targets.distill_prefix_backlog_tgt is not None:
-            pred_prefix_clock, pred_prefix_backlog = _build_prefix_carry(
-                speech_exec=execution.speech_duration_exec.float(),
-                blank_exec=blank_exec.float(),
-                dur_anchor_src=targets.dur_anchor_src.float(),
-                unit_mask=unit_mask,
+        if (
+            float(targets.distill_budget_weight) > 0.0
+            and targets.distill_speech_budget_tgt is not None
+            and targets.distill_pause_budget_tgt is not None
+        ):
+            budget_distill = _batch_l1(
+                torch.log1p(execution.planner.speech_budget_win.float().clamp_min(0.0)),
+                torch.log1p(targets.distill_speech_budget_tgt.float().clamp_min(0.0)),
+                batch_weight=targets.distill_confidence,
+            ) + _batch_l1(
+                torch.log1p(execution.planner.pause_budget_win.float().clamp_min(0.0)),
+                torch.log1p(targets.distill_pause_budget_tgt.float().clamp_min(0.0)),
+                batch_weight=targets.distill_confidence,
             )
+            l_distill = l_distill + float(targets.distill_budget_weight) * budget_distill
+        if targets.distill_prefix_clock_tgt is not None or targets.distill_prefix_backlog_tgt is not None:
             prefix_loss = execution.speech_duration_exec.new_tensor(0.0)
             if targets.distill_prefix_clock_tgt is not None:
                 prefix_loss = prefix_loss + _masked_huber(
@@ -250,7 +269,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                     batch_weight=targets.distill_confidence,
                 )
             l_distill = l_distill + float(targets.distill_prefix_weight) * prefix_loss
-        if targets.distill_allocation_tgt is not None:
+        if float(targets.distill_allocation_weight) > 0.0 and targets.distill_allocation_tgt is not None:
             l_distill = l_distill + float(targets.distill_allocation_weight) * _batch_kl_div(
                 execution.speech_duration_exec + blank_exec,
                 targets.distill_allocation_tgt.float(),
@@ -263,10 +282,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_budget': l_budget,
+        'rhythm_carry': l_carry,
         'rhythm_plan_local': l_plan_local,
         'rhythm_plan_cum': l_plan_cum,
         'rhythm_plan': l_plan,
         'rhythm_guidance': l_guidance,
         'rhythm_distill': l_distill,
-        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_plan + l_guidance + l_distill,
+        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + l_distill,
     }

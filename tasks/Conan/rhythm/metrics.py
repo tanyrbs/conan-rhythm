@@ -73,6 +73,10 @@ def _build_prefix_carry(
     return prefix_clock, prefix_backlog
 
 
+def _slice_to_visible_prefix(tensor: torch.Tensor, target_units: int) -> torch.Tensor:
+    return tensor[:, :target_units]
+
+
 def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
     execution = output.get("rhythm_execution")
     if execution is None:
@@ -175,16 +179,21 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             metrics["rhythm_metric_slow_summary_norm_mean"] = _safe_mean(torch.norm(slow_summary.float(), dim=-1))
     offline_execution = output.get("rhythm_offline_execution")
     if offline_execution is not None:
-        offline_blank = getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec)
+        target_units = execution.speech_duration_exec.size(1)
+        offline_speech = _slice_to_visible_prefix(offline_execution.speech_duration_exec, target_units)
+        offline_blank = _slice_to_visible_prefix(
+            getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
+            target_units,
+        )
         offline_prefix_clock, offline_prefix_backlog = _build_prefix_carry(
-            speech_exec=offline_execution.speech_duration_exec,
+            speech_exec=offline_speech,
             blank_exec=offline_blank,
             dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else offline_execution.speech_duration_exec,
             unit_mask=unit_mask,
         )
         metrics["rhythm_metric_offline_online_speech_l1"] = _masked_l1(
             execution.speech_duration_exec,
-            offline_execution.speech_duration_exec,
+            offline_speech,
             unit_mask,
         )
         metrics["rhythm_metric_offline_online_pause_l1"] = _masked_l1(
@@ -194,12 +203,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         )
         metrics["rhythm_metric_offline_online_total_corr"] = _masked_corr(
             execution.speech_duration_exec + blank_exec,
-            offline_execution.speech_duration_exec + offline_blank,
+            offline_speech + offline_blank,
             unit_mask,
         )
         metrics["rhythm_metric_offline_online_alloc_kl"] = _masked_kl(
             execution.speech_duration_exec + blank_exec,
-            offline_execution.speech_duration_exec + offline_blank,
+            offline_speech + offline_blank,
             unit_mask,
         )
         metrics["rhythm_metric_offline_online_prefix_clock_l1"] = _masked_l1(
@@ -360,6 +369,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             metrics["rhythm_metric_trace_bins_mean"] = _safe_mean(sample["rhythm_trace_bins"].float())
         if "rhythm_trace_horizon" in sample:
             metrics["rhythm_metric_trace_horizon_mean"] = _safe_mean(sample["rhythm_trace_horizon"].float())
+        if "rhythm_stream_prefix_ratio" in sample:
+            metrics["rhythm_metric_stream_prefix_ratio"] = _safe_mean(sample["rhythm_stream_prefix_ratio"].float())
+        if "rhythm_stream_visible_units" in sample:
+            metrics["rhythm_metric_stream_visible_units"] = _safe_mean(sample["rhythm_stream_visible_units"].float())
+        if "rhythm_stream_full_units" in sample:
+            metrics["rhythm_metric_stream_full_units"] = _safe_mean(sample["rhythm_stream_full_units"].float())
     return metrics
 
 

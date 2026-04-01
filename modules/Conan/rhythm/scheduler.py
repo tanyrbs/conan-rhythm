@@ -27,6 +27,10 @@ class MonotonicRhythmScheduler(nn.Module):
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
+        boundary_feature_scale: float = 0.35,
+        boundary_source_cue_weight: float = 0.35,
+        pause_boundary_latent_weight: float = 0.35,
+        pause_source_boundary_weight: float = 0.20,
     ) -> None:
         super().__init__()
         self.window_budget = WindowBudgetController(
@@ -35,11 +39,16 @@ class MonotonicRhythmScheduler(nn.Module):
             trace_dim=trace_dim,
             max_total_logratio=max_total_logratio,
             pause_share_max=pause_share_max,
+            boundary_feature_scale=boundary_feature_scale,
         )
         self.unit_redistribution = UnitRedistributionHead(
             hidden_size=hidden_size,
             trace_dim=trace_dim,
             max_unit_logratio=max_unit_logratio,
+            boundary_feature_scale=boundary_feature_scale,
+            boundary_source_cue_weight=boundary_source_cue_weight,
+            pause_boundary_latent_weight=pause_boundary_latent_weight,
+            pause_source_boundary_weight=pause_source_boundary_weight,
         )
 
     def forward(

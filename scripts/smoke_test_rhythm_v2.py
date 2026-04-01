@@ -38,8 +38,12 @@ if __name__ == '__main__':
     }
     frontend = RhythmUnitFrontend(silent_token=57, separator_aware=True)
     batch = frontend.from_token_lists([
-        [1, 1, 1, 2, 2, 57, 3, 3, 4, 4],
-        [5, 5, 6, 6, 6, 7, 57, 8, 8, 8],
+        [1, 1, 1, 2, 2, 57, 3, 3, 4, 4, 5, 5],
+        [5, 5, 6, 6, 6, 7, 57, 8, 8, 8, 9, 9],
+    ], device=torch.device('cpu'))
+    prefix_batch = frontend.from_token_lists([
+        [1, 1, 1, 2, 2, 57, 3, 3],
+        [5, 5, 6, 6, 6, 7, 57, 8],
     ], device=torch.device('cpu'))
     model = build_streaming_rhythm_module_from_hparams(hparams)
 
@@ -53,20 +57,28 @@ if __name__ == '__main__':
     assert batch.boundary_confidence.shape == batch.open_run_mask.shape
 
     dual = model.forward_dual(
-        content_units=batch.content_units,
-        dur_anchor_src=batch.dur_anchor_src,
-        unit_mask=batch.unit_mask,
-        open_run_mask=batch.open_run_mask,
-        sealed_mask=batch.sealed_mask,
-        sep_hint=batch.sep_hint,
-        boundary_confidence=batch.boundary_confidence,
+        content_units=prefix_batch.content_units,
+        dur_anchor_src=prefix_batch.dur_anchor_src,
+        unit_mask=prefix_batch.unit_mask,
+        open_run_mask=prefix_batch.open_run_mask,
+        sealed_mask=prefix_batch.sealed_mask,
+        sep_hint=prefix_batch.sep_hint,
+        boundary_confidence=prefix_batch.boundary_confidence,
         ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
         ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
         state=model.init_state(batch_size=2, device=torch.device('cpu')),
+        offline_content_units=batch.content_units,
+        offline_dur_anchor_src=batch.dur_anchor_src,
+        offline_unit_mask=batch.unit_mask,
+        offline_open_run_mask=batch.open_run_mask,
+        offline_sealed_mask=batch.sealed_mask,
+        offline_sep_hint=batch.sep_hint,
+        offline_boundary_confidence=batch.boundary_confidence,
     )
     offline_exec = dual["offline_execution"]
     algo_teacher = dual["algorithmic_teacher"]
     assert offline_exec.commit_frontier.tolist() == batch.unit_mask.sum(dim=1).long().tolist()
+    assert dual["streaming_execution"].speech_duration_exec.size(1) < offline_exec.speech_duration_exec.size(1)
     assert algo_teacher.allocation_tgt.shape == batch.unit_mask.shape
     assert algo_teacher.prefix_clock_tgt.shape == batch.unit_mask.shape
 
@@ -153,6 +165,7 @@ if __name__ == '__main__':
     print('phase_ptr step2:', out2.next_state.phase_ptr.tolist())
     print('source_boundary_cue max:', float(out1.planner.source_boundary_cue.max().item()))
     print('offline total corr metric:', float(metrics['rhythm_metric_offline_online_total_corr']))
+    print('offline stream prefix ratio:', float(prefix_batch.unit_mask.sum().item() / batch.unit_mask.sum().item()))
     print('algorithmic teacher alloc kl:', float(metrics['rhythm_metric_algorithmic_teacher_alloc_kl']))
     print('slow memory shape:', tuple(ref_conditioning['slow_rhythm_memory'].shape))
     print('blank slot ratio metric:', float(metrics['rhythm_metric_blank_slot_ratio_mean']))

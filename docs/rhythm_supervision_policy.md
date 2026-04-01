@@ -47,6 +47,12 @@ Current cached fields:
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
 - `rhythm_teacher_blank_budget_tgt`
+- `rhythm_teacher_prefix_clock_tgt`
+- `rhythm_teacher_prefix_backlog_tgt`
+
+Optional cached ablation fields may still exist:
+
+- `rhythm_teacher_allocation_tgt`
 
 Important distinction:
 
@@ -117,7 +123,7 @@ Practical rule:
 - source-side cropped prefixes may be deterministically rebuilt from visible tokens
 - cached target surfaces may be prefix-adapted and retimed targets rebuilt for cropped views
 
-Current cache version: `3`
+Current cache version: `4`
 
 ---
 
@@ -129,28 +135,33 @@ The rhythm path should stay minimal.
 
 - `L_exec_speech`
 - `L_exec_pause`
-- `L_plan`
 - small-weight `L_budget`
+- small-weight `L_carry`
 
 Interpretation:
 
 - `L_exec_*` supervises executed timing directly
-- `L_plan` is the main drift-control loss
 - `L_budget` keeps the streaming budget honest
+- `L_carry` keeps cumulative prefix debt / backlog honest
 
 Current practical weighting in config:
 
-- `rhythm_plan_local_weight = 0.5`
-- `rhythm_plan_cum_weight = 1.0`
+- `lambda_rhythm_budget = 0.10 ~ 0.25`
+- `lambda_rhythm_carry = 0.10 ~ 0.20`
 
-That means cumulative prefix drift is intentionally weighted higher than local shape.
+`L_plan` and `L_guidance` may still exist in code for ablations / migration, but they are not the maintained mainline objective.
 
 ### Optional staged losses
 
-- `L_guidance`
 - `L_distill`
+- `L_base`
 
-These should stay off by default unless the experiment explicitly needs them.
+Policy:
+
+- `L_distill` should focus on the student-reachable executed surface
+- default distill target = speech exec + blank exec
+- prefix carry distill is optional and preferred over heavier allocation/budget distill
+- allocation/budget distill should remain off by default unless the experiment explicitly needs them
 
 ---
 

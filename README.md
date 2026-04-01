@@ -35,12 +35,13 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - explicit reference rhythm stats/trace is connected
 > - minimal descriptor + scheduler is connected
-> - projector already freezes committed prefix and uses sparser pause allocation
-> - trace sampling uses a fixed progress horizon
-> - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`
+> - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
+> - trace sampling uses a fixed progress horizon with anchor-progress phase updates
+> - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`, but this sidecar is kept as a soft prior instead of a public control head
 > - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
 > - explicit blank-slot scheduling is now public: projector / renderer / loss all use the same interleaved blank-slot graph
 > - renderer now also exports frame-level blank masks plus slot/unit indices for debugging and retimed training hooks
+> - the renderer is still deterministic/hard-expanded, but it now carries minimal phase features so long stretched slots are not rendered as pure flat repeats
 > - reference cache now also carries slow-rhythm memory cells, selector spans, and source-side phrase-group metadata
 > - dataset / loss path already reserves guidance and distillation fields
 > - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
@@ -66,8 +67,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - test/inference already uses the retimed rhythm execution path
 > - train-time retimed rendering should only be enabled after retimed acoustic targets are prepared
 > - the binarizer can now cache a first-pass `rhythm_retimed_mel_tgt` built from cached rhythm targets
-> - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but bypass the heavier local style/prosody adaptor on the rhythm route
-> - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as `L_sched + L_budget + L_kd + light L_base`
+> - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but disable the heavier local style/prosody adaptor path entirely
+> - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as executed speech/pause supervision + light budget/carry guardrails + light `L_base`
 > - staged rollout knobs now exist for future train-time retimed experiments:
 >   - `rhythm_train_render_start_steps`
 >   - `rhythm_valid_render_start_steps`

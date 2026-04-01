@@ -40,6 +40,10 @@ class StreamingRhythmModule(nn.Module):
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
+        boundary_feature_scale: float = 0.35,
+        boundary_source_cue_weight: float = 0.35,
+        pause_boundary_latent_weight: float = 0.35,
+        pause_source_boundary_weight: float = 0.20,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
     ) -> None:
@@ -59,6 +63,10 @@ class StreamingRhythmModule(nn.Module):
             max_total_logratio=max_total_logratio,
             max_unit_logratio=max_unit_logratio,
             pause_share_max=pause_share_max,
+            boundary_feature_scale=boundary_feature_scale,
+            boundary_source_cue_weight=boundary_source_cue_weight,
+            pause_boundary_latent_weight=pause_boundary_latent_weight,
+            pause_source_boundary_weight=pause_source_boundary_weight,
         )
         self.projector = StreamingRhythmProjector(projector_config)
         self.teacher = AlgorithmicRhythmTeacher(teacher_config)

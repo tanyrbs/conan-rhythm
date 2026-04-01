@@ -1,5 +1,6 @@
 
 from tasks.tts.dataset_utils import FastSpeechDataset
+import hashlib
 import torch
 from utils.commons.dataset_utils import collate_1d_or_2d
 import numpy as np
@@ -125,6 +126,46 @@ class ConanDataset(FastSpeechDataset):
             "always": "runtime_only",
         }
         return aliases.get(mode, mode)
+
+    def _should_sample_streaming_prefix(self) -> bool:
+        return (
+            self.prefix == "train"
+            and bool(self.hparams.get("rhythm_streaming_prefix_train", False))
+        )
+
+    def _select_streaming_visible_tokens(self, visible_tokens, *, item_name: str):
+        full_tokens = np.asarray(visible_tokens).reshape(-1)
+        full_len = int(full_tokens.shape[0])
+        if not self._should_sample_streaming_prefix() or full_len <= 1:
+            return full_tokens
+        min_ratio = float(self.hparams.get("rhythm_streaming_prefix_min_ratio", 0.5))
+        max_ratio = float(self.hparams.get("rhythm_streaming_prefix_max_ratio", 0.9))
+        min_ratio = max(0.05, min(0.99, min_ratio))
+        max_ratio = max(min_ratio, min(0.99, max_ratio))
+        min_tokens = max(1, int(self.hparams.get("rhythm_streaming_prefix_min_tokens", 8)))
+        multiple = max(1, int(self.hparams.get("rhythm_streaming_prefix_multiple", 1)))
+        max_prefix = max(min(full_len - 1, full_len), 1)
+        if max_prefix <= min_tokens:
+            return full_tokens
+        if bool(self.hparams.get("rhythm_streaming_prefix_deterministic", True)):
+            key = f"{item_name}|{self.prefix}|{int(self.hparams.get('seed', 0))}"
+            digest = hashlib.md5(key.encode("utf-8")).hexdigest()
+            sample_u = int(digest[:8], 16) / float(0xFFFFFFFF)
+        else:
+            sample_u = float(np.random.uniform(0.0, 1.0))
+        ratio = min_ratio + (max_ratio - min_ratio) * sample_u
+        target_len = int(round(full_len * ratio))
+        target_len = max(min_tokens, min(full_len - 1, target_len))
+        if multiple > 1:
+            target_len = max(min_tokens, (target_len // multiple) * multiple)
+        target_len = max(min_tokens, min(full_len - 1, target_len))
+        if target_len >= full_len:
+            return full_tokens
+        return full_tokens[:target_len]
+
+    @staticmethod
+    def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
+        return {f"{prefix}{key}": value for key, value in cache.items()}
 
     def _expected_rhythm_cache_version(self) -> int:
         return int(self.hparams.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
@@ -689,6 +730,12 @@ class ConanDataset(FastSpeechDataset):
             content_visible = list(item['hubert'][:visible_len])
         sample["content"] = torch.LongTensor(content_visible)
         target_mode = self._resolve_rhythm_target_mode()
+        item_name = str(item.get("item_name", "<unknown-item>"))
+        full_visible_tokens = np.asarray(content_visible, dtype=np.int64)
+        stream_visible_tokens = self._select_streaming_visible_tokens(
+            full_visible_tokens,
+            item_name=item_name,
+        )
 
         optional_rhythm_keys = [
             "content_units",
@@ -701,6 +748,16 @@ class ConanDataset(FastSpeechDataset):
             "phrase_group_index",
             "phrase_group_pos",
             "phrase_final_mask",
+            "rhythm_offline_content_units",
+            "rhythm_offline_dur_anchor_src",
+            "rhythm_offline_open_run_mask",
+            "rhythm_offline_sealed_mask",
+            "rhythm_offline_sep_hint",
+            "rhythm_offline_boundary_confidence",
+            "rhythm_offline_source_boundary_cue",
+            "rhythm_offline_phrase_group_index",
+            "rhythm_offline_phrase_group_pos",
+            "rhythm_offline_phrase_final_mask",
             "ref_rhythm_stats",
             "ref_rhythm_trace",
             "slow_rhythm_memory",
@@ -744,9 +801,28 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_retimed_mel_tgt",
             "rhythm_retimed_mel_len",
             "rhythm_retimed_frame_weight",
+            "rhythm_stream_prefix_ratio",
+            "rhythm_stream_visible_units",
+            "rhythm_stream_full_units",
         ]
         rhythm_runtime_fields = {}
-        source_cache = self._get_source_rhythm_cache(item, sample["content"].cpu().numpy(), target_mode=target_mode)
+        source_cache = self._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
+        if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):
+            offline_source_cache = self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)
+            rhythm_runtime_fields.update(self._prefix_source_cache(offline_source_cache, prefix="rhythm_offline_"))
+            stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+            offline_units = int(np.asarray(offline_source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+            rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([stream_units], dtype=np.float32)
+            rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([offline_units], dtype=np.float32)
+            rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray(
+                [float(stream_units) / float(max(offline_units, 1))],
+                dtype=np.float32,
+            )
+        else:
+            units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+            rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([units], dtype=np.float32)
+            rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([units], dtype=np.float32)
+            rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray([1.0], dtype=np.float32)
         rhythm_ref_item = item if self._should_use_self_rhythm_reference(item, target_mode=target_mode) else ref_item
         ref_conditioning = self._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
         rhythm_runtime_fields.update(source_cache)
@@ -778,9 +854,15 @@ class ConanDataset(FastSpeechDataset):
                 "rhythm_teacher_allocation_tgt",
                 "rhythm_teacher_prefix_clock_tgt",
                 "rhythm_teacher_prefix_backlog_tgt",
+                "rhythm_offline_source_boundary_cue",
+                "rhythm_offline_phrase_group_pos",
+                "rhythm_offline_phrase_final_mask",
+                "rhythm_stream_prefix_ratio",
+                "rhythm_stream_visible_units",
+                "rhythm_stream_full_units",
             } or "stats" in key or "budget" in key:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"sealed_mask", "boundary_confidence"}:
+            elif key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
@@ -788,6 +870,11 @@ class ConanDataset(FastSpeechDataset):
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {
                 "phrase_group_index",
+                "rhythm_offline_content_units",
+                "rhythm_offline_dur_anchor_src",
+                "rhythm_offline_open_run_mask",
+                "rhythm_offline_sep_hint",
+                "rhythm_offline_phrase_group_index",
                 "selector_meta_indices",
                 "selector_meta_starts",
                 "selector_meta_ends",
@@ -856,6 +943,16 @@ class ConanDataset(FastSpeechDataset):
             "phrase_group_index": ("long", 0),
             "phrase_group_pos": ("float", 0.0),
             "phrase_final_mask": ("float", 0.0),
+            "rhythm_offline_content_units": ("long", 0),
+            "rhythm_offline_dur_anchor_src": ("long", 0),
+            "rhythm_offline_open_run_mask": ("long", 0),
+            "rhythm_offline_sealed_mask": ("float", 0.0),
+            "rhythm_offline_sep_hint": ("long", 0),
+            "rhythm_offline_boundary_confidence": ("float", 0.0),
+            "rhythm_offline_source_boundary_cue": ("float", 0.0),
+            "rhythm_offline_phrase_group_index": ("long", 0),
+            "rhythm_offline_phrase_group_pos": ("float", 0.0),
+            "rhythm_offline_phrase_final_mask": ("float", 0.0),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
             "slow_rhythm_memory": ("float", 0.0),
@@ -899,6 +996,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_retimed_mel_tgt": ("float", 0.0),
             "rhythm_retimed_mel_len": ("long", 0),
             "rhythm_retimed_frame_weight": ("float", 0.0),
+            "rhythm_stream_prefix_ratio": ("float", 0.0),
+            "rhythm_stream_visible_units": ("float", 0.0),
+            "rhythm_stream_full_units": ("float", 0.0),
         }
         for key, (dtype_name, pad_value) in optional_collate.items():
             if all(key in s for s in samples):

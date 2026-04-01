@@ -55,6 +55,11 @@ Current recommendation:
 - keep `prefer_cache` only as a migration / debug stage while refreshing caches
 - for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
 - that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
+- stage-1 objective should stay minimal:
+  - `L_exec_speech`
+  - `L_exec_pause`
+  - light `L_budget`
+  - light `L_carry`
 
 ---
 
@@ -78,9 +83,12 @@ Reserved fields already exist:
 - `rhythm_teacher_speech_budget_tgt`
 - `rhythm_teacher_pause_budget_tgt`
 - `rhythm_teacher_blank_budget_tgt`
-- `rhythm_teacher_allocation_tgt`
 - `rhythm_teacher_prefix_clock_tgt`
 - `rhythm_teacher_prefix_backlog_tgt`
+
+Optional ablation-only field:
+
+- `rhythm_teacher_allocation_tgt`
 
 Important terminology note:
 
@@ -123,8 +131,8 @@ Current bridge step already in repo:
 - task code now resolves `rhythm_apply_mode` and retimed acoustic targets from the same flag, so train/test render and target selection no longer drift apart
 - cached-only retimed training now fails fast if retimed cache is required but missing or mismatched
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
-- the minimal rhythm route can bypass the heavier local style/prosody adaptor and keep only global timbre conditioning
-- the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal `L_recon + L_plan` objective
+- the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
+- the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
 - rhythm cache contract is now versioned at `rhythm_cache_version: 4`
 - config now also exposes staged rollout knobs:
   - `rhythm_train_render_start_steps`
@@ -137,7 +145,8 @@ Recommended future config direction after retimed targets exist:
 
 - enable train-time retimed rendering explicitly
 - keep `L_base` as the outer acoustic objective
-- keep the main timing path on `L_sched + L_budget + L_kd`
+- keep the main timing path on executed speech/pause + light budget/carry
+- keep KD focused on executed speech/pause plus optional prefix carry
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.

@@ -86,6 +86,14 @@ class Conan(FastSpeech):
             )
             self.rhythm_module = build_streaming_rhythm_module_from_hparams(hparams)
             self.rhythm_pause_state = nn.Parameter(torch.zeros(hidden_size))
+            self.rhythm_render_phase_mlp = nn.Sequential(
+                nn.Linear(6, hidden_size),
+                nn.SiLU(),
+                nn.Linear(hidden_size, hidden_size),
+            )
+            self.rhythm_render_phase_gain = nn.Parameter(
+                torch.tensor(float(hparams.get("rhythm_renderer_phase_init_gain", 0.10)))
+            )
 
         if hparams["style"] and not self.rhythm_minimal_style_only:
             self.padding_idx = 0
@@ -134,6 +142,21 @@ class Conan(FastSpeech):
         unit_embed = self.content_embedding(unit_ids)
         unit_embed = self.content_proj(unit_embed.transpose(1, 2)).transpose(1, 2)
         return unit_embed
+
+    def _rhythm_render_frame_state_post(
+        self,
+        frame_states: torch.Tensor,
+        frame_phase_features: torch.Tensor,
+        blank_mask: torch.Tensor,
+        total_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        edge_scale = (0.5 + 0.5 * frame_phase_features[..., 4:5]).clamp(0.0, 1.0)
+        blank_feat = blank_mask.unsqueeze(-1).float()
+        phase_input = torch.cat([frame_phase_features.float(), blank_feat], dim=-1)
+        phase_residual = self.rhythm_render_phase_mlp(phase_input)
+        gain = torch.tanh(self.rhythm_render_phase_gain).view(1, 1, 1)
+        frame_states = frame_states + gain * edge_scale * phase_residual
+        return frame_states * total_mask.unsqueeze(-1)
 
     def forward(
         self,
@@ -216,6 +239,7 @@ class Conan(FastSpeech):
                 rhythm_apply_override=rhythm_apply_override,
                 speech_state_fn=self._unit_speech_state_fn,
                 pause_state=self.rhythm_pause_state,
+                frame_state_post_fn=self._rhythm_render_frame_state_post,
             )
 
         # pitch input = content embedding + style embedding

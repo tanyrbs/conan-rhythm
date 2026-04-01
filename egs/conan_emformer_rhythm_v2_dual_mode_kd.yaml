@@ -7,4 +7,8 @@ rhythm_primary_target_surface: teacher
 rhythm_distill_surface: offline
 rhythm_enable_dual_mode_teacher: true
 rhythm_enable_algorithmic_teacher: false
+lambda_rhythm_carry: 0.15
 lambda_rhythm_distill: 0.25
+rhythm_distill_budget_weight: 0.0
+rhythm_distill_allocation_weight: 0.0
+rhythm_distill_prefix_weight: 0.25

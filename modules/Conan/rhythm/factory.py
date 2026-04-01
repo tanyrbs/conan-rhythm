@@ -13,6 +13,7 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         boundary_commit_threshold=float(hparams.get('rhythm_projector_boundary_commit_threshold', 0.45)),
         pause_topk_ratio=float(hparams.get('rhythm_projector_pause_topk_ratio', 0.35)),
         pause_min_boundary_weight=float(hparams.get('rhythm_projector_pause_min_boundary_weight', 0.10)),
+        pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
     )
 
 
@@ -30,6 +31,10 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
+        boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
+        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.35)),
+        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.35)),
+        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
         projector_config=build_projector_config_from_hparams(hparams),
         teacher_config=AlgorithmicTeacherConfig(
             rate_scale_min=float(hparams.get('rhythm_teacher_rate_scale_min', 0.55)),
@@ -38,6 +43,7 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
             segment_bias_strength=float(hparams.get('rhythm_teacher_segment_bias_strength', 0.30)),
             pause_strength=float(hparams.get('rhythm_teacher_pause_strength', 1.10)),
             boundary_strength=float(hparams.get('rhythm_teacher_boundary_strength', 1.50)),
+            source_boundary_pause_weight=float(hparams.get('rhythm_teacher_source_boundary_pause_weight', 0.35)),
             pause_budget_ratio_cap=float(hparams.get('rhythm_teacher_pause_budget_ratio_cap', 0.80)),
             speech_smooth_kernel=int(hparams.get('rhythm_teacher_speech_smooth_kernel', 3)),
             pause_topk_ratio=float(hparams.get('rhythm_teacher_pause_topk_ratio', 0.30)),

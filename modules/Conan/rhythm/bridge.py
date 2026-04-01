@@ -156,6 +156,7 @@ def attach_rhythm_outputs(
     rhythm_apply_override=None,
     speech_state_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
     pause_state: torch.Tensor | None = None,
+    frame_state_post_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ):
     if rhythm_bundle is None:
         return content_embed, tgt_nonpadding
@@ -215,6 +216,7 @@ def attach_rhythm_outputs(
         silent_token=hparams.get("silent_token", 57),
         speech_state_fn=speech_state_fn,
         pause_state=pause_state,
+        frame_state_post_fn=frame_state_post_fn,
     )
     ret["content"] = rendered.frame_tokens
     ret["content_rhythm_rendered"] = rendered.frame_tokens
@@ -224,4 +226,5 @@ def attach_rhythm_outputs(
     ret["rhythm_blank_mask"] = rendered.blank_mask
     ret["rhythm_render_slot_index"] = rendered.frame_slot_index
     ret["rhythm_render_unit_index"] = rendered.frame_unit_index
+    ret["rhythm_render_phase_features"] = rendered.frame_phase_features
     return rendered.frame_states, rendered.total_mask[:, :, None]

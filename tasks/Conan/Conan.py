@@ -60,6 +60,10 @@ class ConanTask(AuxDecoderMIDITask):
             params.extend(list(self.model.rhythm_module.parameters()))
         if bool(hparams.get("rhythm_optimize_pause_state", False)) and getattr(self.model, "rhythm_pause_state", None) is not None:
             params.append(self.model.rhythm_pause_state)
+        if getattr(self.model, "rhythm_render_phase_mlp", None) is not None:
+            params.extend(list(self.model.rhythm_render_phase_mlp.parameters()))
+        if getattr(self.model, "rhythm_render_phase_gain", None) is not None:
+            params.append(self.model.rhythm_render_phase_gain)
         dedup = []
         seen = set()
         for param in params:
@@ -338,6 +342,31 @@ class ConanTask(AuxDecoderMIDITask):
         weights = self._expand_frame_weight(frame_weight, target[:, 0])
         return (ssim_loss * weights).sum() / weights.sum().clamp_min(1.0)
 
+    def _update_public_loss_aliases(self, losses):
+        device = None
+        for value in losses.values():
+            if isinstance(value, torch.Tensor):
+                device = value.device
+                break
+        zero = torch.tensor(0.0, device=device or "cpu")
+        sched = zero
+        if "rhythm_exec_speech" in losses:
+            sched = sched + losses["rhythm_exec_speech"].detach()
+            losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
+        if "rhythm_exec_pause" in losses:
+            sched = sched + losses["rhythm_exec_pause"].detach()
+            losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
+        losses["L_sched"] = sched
+        losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
+        losses["L_carry"] = losses.get("rhythm_carry", zero).detach() if isinstance(losses.get("rhythm_carry"), torch.Tensor) else zero
+        losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
+        base = zero
+        for loss_name in self.mel_losses.keys():
+            value = losses.get(loss_name)
+            if isinstance(value, torch.Tensor):
+                base = base + value.detach()
+        losses["L_base"] = base
+
     def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
         if frame_weight is None:
             self.add_mel_loss(mel_out, target, losses)
@@ -483,6 +512,7 @@ class ConanTask(AuxDecoderMIDITask):
                 if self.global_step > hparams['vq_start']:
                     losses['vq_loss'] = output['vq_loss']
                     losses['ppl'] = output['ppl']
+            self._update_public_loss_aliases(losses)
         
         return losses, output
 
@@ -571,15 +601,21 @@ class ConanTask(AuxDecoderMIDITask):
             if distill_speech is None and distill_surface in {"auto", "offline"} and runtime_teacher is not None:
                 distill_speech = runtime_teacher.speech_duration_exec.detach()
                 distill_pause = getattr(runtime_teacher, "blank_duration_exec", runtime_teacher.pause_after_exec).detach()
-                distill_speech_budget = runtime_teacher.planner.speech_budget_win.detach()
-                distill_pause_budget = runtime_teacher.planner.pause_budget_win.detach()
-                distill_prefix_clock, distill_prefix_backlog = self._build_prefix_carry_from_exec(
+                (
                     distill_speech,
                     distill_pause,
-                    unit_batch.dur_anchor_src,
-                    unit_batch.unit_mask,
+                    distill_speech_budget,
+                    distill_pause_budget,
+                    distill_allocation,
+                    distill_prefix_clock,
+                    distill_prefix_backlog,
+                ) = self._slice_rhythm_surface_to_student(
+                    speech_exec=distill_speech,
+                    pause_exec=distill_pause,
+                    student_units=unit_batch.dur_anchor_src.size(1),
+                    dur_anchor_src=unit_batch.dur_anchor_src,
+                    unit_mask=unit_batch.unit_mask,
                 )
-                distill_allocation = (distill_speech.float() + distill_pause.float())
                 distill_confidence = torch.ones_like(distill_speech_budget)
             if distill_speech is None and distill_surface in {"auto", "algorithmic"} and algorithmic_teacher is not None:
                 distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
@@ -591,6 +627,22 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_prefix_backlog = algorithmic_teacher.prefix_backlog_tgt.detach()
                 distill_confidence = algorithmic_teacher.confidence.detach()
             elif distill_speech is not None and distill_pause is not None:
+                if distill_speech.size(1) != unit_batch.dur_anchor_src.size(1):
+                    (
+                        distill_speech,
+                        distill_pause,
+                        distill_speech_budget,
+                        distill_pause_budget,
+                        distill_allocation,
+                        distill_prefix_clock,
+                        distill_prefix_backlog,
+                    ) = self._slice_rhythm_surface_to_student(
+                        speech_exec=distill_speech,
+                        pause_exec=distill_pause,
+                        student_units=unit_batch.dur_anchor_src.size(1),
+                        dur_anchor_src=unit_batch.dur_anchor_src,
+                        unit_mask=unit_batch.unit_mask,
+                    )
                 if distill_allocation is None:
                     distill_allocation = (distill_speech.float() + distill_pause.float())
                 if distill_prefix_clock is None or distill_prefix_backlog is None:
@@ -658,6 +710,7 @@ class ConanTask(AuxDecoderMIDITask):
         losses["rhythm_exec_speech"] = rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
         losses["rhythm_exec_pause"] = rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
         losses["rhythm_budget"] = rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
+        losses["rhythm_carry"] = rhythm_losses["rhythm_carry"] * hparams.get("lambda_rhythm_carry", 0.15)
         losses["rhythm_plan"] = rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
         losses["rhythm_distill"] = rhythm_losses["rhythm_distill"] * hparams.get("lambda_rhythm_distill", 0.0)

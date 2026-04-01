@@ -49,12 +49,14 @@ class WindowBudgetController(nn.Module):
         pause_share_min: float = 0.0,
         pause_share_max: float = 0.45,
         min_speech_frames: float = 1.0,
+        boundary_feature_scale: float = 0.35,
     ) -> None:
         super().__init__()
         self.max_total_logratio = float(max_total_logratio)
         self.pause_share_min = float(pause_share_min)
         self.pause_share_max = float(max(pause_share_min, pause_share_max))
         self.min_speech_frames = float(min_speech_frames)
+        self.boundary_feature_scale = float(boundary_feature_scale)
 
         self.anchor_proj = nn.Linear(1, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
@@ -99,7 +101,7 @@ class WindowBudgetController(nn.Module):
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
         if slow_rhythm_summary is None:
             slow_rhythm_summary = trace_context.mean(dim=1)
-        boundary_feat = source_boundary_cue.float().unsqueeze(-1)
+        boundary_feat = (source_boundary_cue.float() * self.boundary_feature_scale).unsqueeze(-1)
         phase = phase_ptr.view(-1, 1, 1).expand(-1, unit_states.size(1), -1)
         backlog_pair = torch.stack([backlog.float(), clock_delta.float()], dim=-1)
         backlog_pair = backlog_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
@@ -167,9 +169,17 @@ class UnitRedistributionHead(nn.Module):
         trace_dim: int,
         *,
         max_unit_logratio: float = 0.6,
+        boundary_feature_scale: float = 0.35,
+        boundary_source_cue_weight: float = 0.35,
+        pause_boundary_latent_weight: float = 0.35,
+        pause_source_boundary_weight: float = 0.20,
     ) -> None:
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
+        self.boundary_feature_scale = float(boundary_feature_scale)
+        self.boundary_source_cue_weight = float(boundary_source_cue_weight)
+        self.pause_boundary_latent_weight = float(pause_boundary_latent_weight)
+        self.pause_source_boundary_weight = float(pause_source_boundary_weight)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
         self.slow_proj = nn.Linear(trace_dim, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
@@ -196,7 +206,7 @@ class UnitRedistributionHead(nn.Module):
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
         if slow_rhythm_summary is None:
             slow_rhythm_summary = masked_mean(trace_context, unit_mask, dim=1)
-        boundary_feat = source_boundary_cue.float().unsqueeze(-1)
+        boundary_feat = (source_boundary_cue.float() * self.boundary_feature_scale).unsqueeze(-1)
         x = (
             hidden
             + self.trace_proj(trace_context)
@@ -211,8 +221,12 @@ class UnitRedistributionHead(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1) + source_boundary_cue.float()) * unit_mask
-        pause_logits = self.pause_head(x).squeeze(-1) + 0.75 * boundary_latent + 0.60 * source_boundary_cue.float()
+        boundary_latent = torch.sigmoid(
+            self.boundary_head(x).squeeze(-1) + self.boundary_source_cue_weight * source_boundary_cue.float()
+        ) * unit_mask
+        pause_logits = self.pause_head(x).squeeze(-1)
+        pause_logits = pause_logits + self.pause_boundary_latent_weight * boundary_latent
+        pause_logits = pause_logits + self.pause_source_boundary_weight * source_boundary_cue.float()
         pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
 
         return {

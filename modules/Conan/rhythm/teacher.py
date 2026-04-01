@@ -18,6 +18,7 @@ class AlgorithmicTeacherConfig:
     segment_bias_strength: float = 0.30
     pause_strength: float = 1.10
     boundary_strength: float = 1.50
+    source_boundary_pause_weight: float = 0.35
     pause_budget_ratio_cap: float = 0.80
     speech_smooth_kernel: int = 3
     pause_topk_ratio: float = 0.30
@@ -170,7 +171,7 @@ def build_algorithmic_teacher_targets(
 
     pause_seed = cfg.pause_strength * _masked_standardize(trace_context[:, :, 0], unit_mask)
     pause_seed = pause_seed + cfg.boundary_strength * _masked_standardize(trace_context[:, :, 2], unit_mask)
-    pause_seed = pause_seed + 0.75 * source_boundary_cue.float()
+    pause_seed = pause_seed + cfg.source_boundary_pause_weight * source_boundary_cue.float()
     pause_scores = torch.exp(pause_seed) * unit_mask
     pause_scores = _sparsify_scores(
         pause_scores,
