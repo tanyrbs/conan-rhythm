@@ -1,0 +1,19 @@
+base_config: egs/conan_emformer_rhythm_v2.yaml
+
+# Controlled experiment: train/valid on the retimed canvas after a warmup.
+# Keep this separate from the conservative main config.
+rhythm_apply_train_override: true
+rhythm_apply_valid_override: true
+rhythm_train_render_start_steps: 20000
+rhythm_valid_render_start_steps: 20000
+rhythm_retimed_target_start_steps: 20000
+
+# Prefer offline/cached rhythm targets when available.
+rhythm_dataset_target_mode: prefer_cache
+rhythm_binarize_teacher_targets: true
+rhythm_dataset_build_teacher_from_ref: true
+rhythm_binarize_retimed_mel_source: teacher
+
+# Turn on the teacher/distill path only for this staged experiment.
+lambda_rhythm_guidance: 0.10
+lambda_rhythm_distill: 0.25

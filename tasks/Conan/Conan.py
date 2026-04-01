@@ -14,6 +14,9 @@ import random
 from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
+from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
+from utils.nn.seq_utils import weights_nonzero_speech
+from utils.metrics.ssim import ssim
 
 
 class ConanEmbTask(AuxDecoderMIDITask):
@@ -54,6 +57,156 @@ class ConanTask(AuxDecoderMIDITask):
         )
         self.disc_params = list(self.mel_disc.parameters())
 
+    @staticmethod
+    def _parse_optional_bool(value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"", "none", "null", "auto", "default"}:
+            return None
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Unsupported optional bool value: {value}")
+
+    def _resolve_rhythm_apply_override(self, *, infer: bool, test: bool, explicit=None):
+        explicit_value = self._parse_optional_bool(explicit)
+        if explicit_value is not None:
+            enabled = explicit_value
+        else:
+            stage = "test" if test else ("valid" if infer else "train")
+            enabled = self._parse_optional_bool(hparams.get(f"rhythm_apply_{stage}_override", None))
+        if enabled is None:
+            return None
+        stage = "test" if test else ("valid" if infer else "train")
+        start_step = int(hparams.get(f"rhythm_{stage}_render_start_steps", 0) or 0)
+        if enabled and stage in {"train", "valid"} and int(self.global_step) < start_step:
+            return False
+        retimed_target_start = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
+        if (
+            enabled
+            and stage in {"train", "valid"}
+            and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
+            and int(self.global_step) < retimed_target_start
+        ):
+            return False
+        return enabled
+
+    def _resolve_acoustic_target(self, sample, *, apply_rhythm_render: bool):
+        target = sample["mels"]
+        is_retimed = False
+        start_step = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
+        if (
+            bool(apply_rhythm_render)
+            and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
+            and int(self.global_step) >= start_step
+        ):
+            retimed = sample.get("rhythm_retimed_mel_tgt")
+            if retimed is not None:
+                target = retimed
+                is_retimed = True
+        return target, is_retimed
+
+    def _resolve_acoustic_weight(self, sample, *, acoustic_target_is_retimed: bool):
+        if not acoustic_target_is_retimed:
+            return None
+        return sample.get("rhythm_retimed_frame_weight")
+
+    @staticmethod
+    def _resample_sequence_length(x: torch.Tensor, target_len: int) -> torch.Tensor:
+        if x.size(1) == target_len:
+            return x
+        if target_len <= 0:
+            return x[:, :0]
+        if x.size(1) <= 0:
+            return x.new_zeros((x.size(0), target_len, x.size(2)))
+        if x.dim() != 3:
+            raise ValueError(f"Expected rank-3 tensor [B,T,C], got {tuple(x.shape)}")
+        resized = F.interpolate(
+            x.transpose(1, 2),
+            size=target_len,
+            mode='linear',
+            align_corners=False,
+        )
+        return resized.transpose(1, 2)
+
+    @staticmethod
+    def _resample_weight_length(weight: torch.Tensor, target_len: int) -> torch.Tensor:
+        if weight.size(1) == target_len:
+            return weight
+        if target_len <= 0:
+            return weight[:, :0]
+        if weight.size(1) <= 0:
+            return weight.new_zeros((weight.size(0), target_len))
+        resized = F.interpolate(
+            weight.unsqueeze(1),
+            size=target_len,
+            mode='linear',
+            align_corners=False,
+        )
+        return resized.squeeze(1)
+
+    def _align_acoustic_target_to_output(self, mel_out, acoustic_target, acoustic_weight):
+        if mel_out.size(1) == acoustic_target.size(1):
+            return mel_out, acoustic_target, acoustic_weight
+        if bool(hparams.get("rhythm_resample_retimed_target_to_output", True)):
+            acoustic_target = self._resample_sequence_length(acoustic_target, mel_out.size(1))
+            if acoustic_weight is not None:
+                acoustic_weight = self._resample_weight_length(acoustic_weight.float(), mel_out.size(1))
+            return mel_out, acoustic_target, acoustic_weight
+        target_len = min(int(mel_out.size(1)), int(acoustic_target.size(1)))
+        acoustic_target = acoustic_target[:, :target_len]
+        mel_out = mel_out[:, :target_len]
+        if acoustic_weight is not None:
+            acoustic_weight = acoustic_weight[:, :target_len]
+        return mel_out, acoustic_target, acoustic_weight
+
+    @staticmethod
+    def _expand_frame_weight(weight: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if weight is None:
+            return weights_nonzero_speech(target)
+        weight = weight.float()
+        if weight.dim() == 1:
+            weight = weight.unsqueeze(0)
+        while weight.dim() < target.dim():
+            weight = weight.unsqueeze(-1)
+        return weight
+
+    def _weighted_l1_loss(self, decoder_output, target, frame_weight):
+        loss = F.l1_loss(decoder_output, target, reduction='none')
+        weights = self._expand_frame_weight(frame_weight, target)
+        return (loss * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _weighted_mse_loss(self, decoder_output, target, frame_weight):
+        loss = F.mse_loss(decoder_output, target, reduction='none')
+        weights = self._expand_frame_weight(frame_weight, target)
+        return (loss * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _weighted_ssim_loss(self, decoder_output, target, frame_weight, bias=6.0):
+        decoder_output = decoder_output[:, None] + bias
+        target = target[:, None] + bias
+        ssim_loss = 1 - ssim(decoder_output, target, size_average=False)
+        weights = self._expand_frame_weight(frame_weight, target[:, 0])
+        return (ssim_loss * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
+        if frame_weight is None:
+            self.add_mel_loss(mel_out, target, losses)
+            return
+        for loss_name, lambd in self.mel_losses.items():
+            if loss_name == "l1":
+                loss = self._weighted_l1_loss(mel_out, target, frame_weight)
+            elif loss_name == "mse":
+                loss = self._weighted_mse_loss(mel_out, target, frame_weight)
+            elif loss_name == "ssim":
+                loss = self._weighted_ssim_loss(mel_out, target, frame_weight)
+            else:
+                loss = getattr(self, f'{loss_name}_loss')(mel_out, target)
+            losses[loss_name] = loss * lambd
+
     def drop_multi(self, tech, drop_p):
         if torch.rand(1) < drop_p:
             tech = torch.ones_like(tech, dtype=tech.dtype) * 2
@@ -86,6 +239,24 @@ class ConanTask(AuxDecoderMIDITask):
             ref = sample['ref_mels']
         else:
             ref = target
+        rhythm_apply_override = self._resolve_rhythm_apply_override(
+            infer=infer,
+            test=test,
+            explicit=kwargs.get("rhythm_apply_override"),
+        )
+        apply_rhythm_render = resolve_rhythm_apply_mode(
+            hparams,
+            infer=infer,
+            override=rhythm_apply_override,
+        )
+        acoustic_target, acoustic_target_is_retimed = self._resolve_acoustic_target(
+            sample,
+            apply_rhythm_render=bool(apply_rhythm_render),
+        )
+        acoustic_weight = self._resolve_acoustic_weight(
+            sample,
+            acoustic_target_is_retimed=acoustic_target_is_retimed,
+        )
         rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
         if rhythm_ref_conditioning is None:
             ref_stats = sample.get("ref_rhythm_stats")
@@ -119,14 +290,26 @@ class ConanTask(AuxDecoderMIDITask):
                             infer=infer, global_steps=self.global_step,
                             content_lengths=sample.get("mel_lengths"),
                             ref_lengths=sample.get("ref_mel_lengths"),
-                            rhythm_apply_override=bool(test),
+                            rhythm_apply_override=rhythm_apply_override,
                             rhythm_state=kwargs.get("rhythm_state"),
                             rhythm_ref_conditioning=rhythm_ref_conditioning)
         
         losses = {}
+        output["acoustic_target_mel"] = acoustic_target
+        output["acoustic_target_is_retimed"] = bool(acoustic_target_is_retimed)
+        output["acoustic_target_weight"] = acoustic_weight
+        if acoustic_target_is_retimed:
+            mel_out_aligned, acoustic_target, acoustic_weight = self._align_acoustic_target_to_output(
+                output['mel_out'],
+                acoustic_target,
+                acoustic_weight,
+            )
+            output['mel_out'] = mel_out_aligned
+            output["acoustic_target_mel"] = acoustic_target
+            output["acoustic_target_weight"] = acoustic_weight
         
         if not test:
-            self.add_mel_loss(output['mel_out'], target, losses)
+            self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
             # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
             self.add_pitch_loss(output, sample, losses)
             self.add_rhythm_loss(output, sample, losses)
@@ -279,15 +462,20 @@ class ConanTask(AuxDecoderMIDITask):
         if batch_idx < hparams['num_valid_plots']:
             sr = hparams["audio_sample_rate"]
             gt_f0 = denorm_f0(sample['f0'], sample["uv"])
-            wav_gt = self.vocoder.spec2wav(sample["mels"][0].cpu().numpy(), f0=gt_f0[0].cpu().numpy())
+            acoustic_target = model_out.get("acoustic_target_mel", sample["mels"])
+            acoustic_target_is_retimed = bool(model_out.get("acoustic_target_is_retimed", False))
+            if acoustic_target_is_retimed:
+                wav_gt = self.vocoder.spec2wav(acoustic_target[0].cpu().numpy())
+            else:
+                wav_gt = self.vocoder.spec2wav(acoustic_target[0].cpu().numpy(), f0=gt_f0[0].cpu().numpy())
             self.logger.add_audio(f'wav_gt_{batch_idx}', wav_gt, self.global_step, sr)
 
             wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy(), f0=model_out["f0_denorm_pred"][0].cpu().numpy())
             self.logger.add_audio(f'wav_pred_{batch_idx}', wav_pred, self.global_step, sr)
-            self.plot_mel(batch_idx, sample['mels'], model_out['mel_out'][0], f'mel_{batch_idx}')
+            self.plot_mel(batch_idx, acoustic_target, model_out['mel_out'][0], f'mel_{batch_idx}')
             self.logger.add_figure(
                 f'f0_{batch_idx}',
-                f0_to_figure(gt_f0[0], None, model_out["f0_denorm_pred"][0]),
+                f0_to_figure(None if acoustic_target_is_retimed else gt_f0[0], None, model_out["f0_denorm_pred"][0]),
                 self.global_step)
         return outputs
     

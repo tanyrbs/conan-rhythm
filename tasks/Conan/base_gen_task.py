@@ -64,8 +64,9 @@ def mel2ph_to_dur(mel2ph, T_txt, max_dur=None):
 
 def f0_to_figure(f0_gt, f0_cwt=None, f0_pred=None):
     fig = plt.figure(figsize=(12, 8))
-    f0_gt = f0_gt.cpu().numpy()
-    plt.plot(f0_gt, color='r', label='gt')
+    if f0_gt is not None:
+        f0_gt = f0_gt.cpu().numpy()
+        plt.plot(f0_gt, color='r', label='gt')
     if f0_cwt is not None:
         f0_cwt = f0_cwt.cpu().numpy()
         plt.plot(f0_cwt, color='b', label='ref')

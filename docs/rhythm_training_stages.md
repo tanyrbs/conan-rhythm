@@ -69,11 +69,38 @@ Goal:
 - reduce train/infer mismatch
 - let the decoder actually learn on the retimed execution canvas
 
-Recommended config direction:
+Current repository status:
 
-- `rhythm_apply_mode: always`
+- `rhythm_apply_train_override: false`
+- `rhythm_apply_valid_override: false`
+- `rhythm_apply_test_override: true`
+- `rhythm_binarize_retimed_mel_targets: true`
+- `rhythm_use_retimed_target_if_available: true`
+
+This is intentional.
+The project is still keeping train/valid on the source-aligned canvas until retimed target supervision is available.
+Otherwise acoustic reconstruction would be shape-inconsistent with ground-truth mel.
+
+Current bridge step already in repo:
+
+- binarizer can cache a first-pass `rhythm_retimed_mel_tgt`
+- cached retimed targets now also carry a per-frame confidence / weight surface
+- task code can switch mel reconstruction target to that cached retimed target when train-time rhythm rendering is enabled
+- task code now resolves `rhythm_apply_mode` and retimed acoustic targets from the same flag, so train/test render and target selection no longer drift apart
+- retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
+- the minimal rhythm route can bypass the heavier local style/prosody adaptor and keep only global timbre conditioning
+- the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal `L_recon + L_plan` objective
+- config now also exposes staged rollout knobs:
+  - `rhythm_train_render_start_steps`
+  - `rhythm_valid_render_start_steps`
+  - `rhythm_retimed_target_start_steps`
+- a staged experiment config is now provided at `egs/conan_emformer_rhythm_v2_retimed_train.yaml`
+
+Recommended future config direction after retimed targets exist:
+
+- enable train-time retimed rendering explicitly
 - keep `L_recon` as the outer acoustic objective
-- use `rhythm_plan` to penalize local timing error and prefix cumulative drift
+- keep `rhythm_plan` as the main timing objective
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.
 

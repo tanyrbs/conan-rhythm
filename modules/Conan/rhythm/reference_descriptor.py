@@ -60,10 +60,12 @@ class RefRhythmDescriptor(nn.Module):
         window_size: int,
         *,
         horizon: float | None = None,
+        visible_sizes: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.encoder.sample_trace_window(
             ref_conditioning["ref_rhythm_trace"],
             phase_ptr=phase_ptr,
             window_size=window_size,
             horizon=horizon,
+            visible_sizes=visible_sizes,
         )

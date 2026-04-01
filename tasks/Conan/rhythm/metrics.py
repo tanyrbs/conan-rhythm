@@ -19,6 +19,33 @@ def _masked_l1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> tor
     return ((pred.float() - tgt.float()).abs() * mask).sum() / denom
 
 
+def _masked_corr(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.float()
+    denom = mask.sum().clamp_min(1.0)
+    pred_mean = (pred.float() * mask).sum(dim=1) / denom
+    tgt_mean = (tgt.float() * mask).sum(dim=1) / denom
+    pred_center = (pred.float() - pred_mean[:, None]) * mask
+    tgt_center = (tgt.float() - tgt_mean[:, None]) * mask
+    cov = (pred_center * tgt_center).sum(dim=1)
+    pred_var = (pred_center ** 2).sum(dim=1).clamp_min(1e-6)
+    tgt_var = (tgt_center ** 2).sum(dim=1).clamp_min(1e-6)
+    corr = cov / (pred_var.sqrt() * tgt_var.sqrt())
+    return corr.mean()
+
+
+def _masked_event_f1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, *, threshold: float = 0.5):
+    mask_bool = mask > 0
+    pred_evt = (pred.float() > threshold) & mask_bool
+    tgt_evt = (tgt.float() > threshold) & mask_bool
+    tp = (pred_evt & tgt_evt).float().sum(dim=1)
+    fp = (pred_evt & (~tgt_evt)).float().sum(dim=1)
+    fn = ((~pred_evt) & tgt_evt).float().sum(dim=1)
+    precision = tp / (tp + fp).clamp_min(1.0)
+    recall = tp / (tp + fn).clamp_min(1.0)
+    f1 = 2 * precision * recall / (precision + recall).clamp_min(1e-6)
+    return precision.mean(), recall.mean(), f1.mean()
+
+
 def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
     execution = output.get("rhythm_execution")
     if execution is None:
@@ -46,9 +73,13 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_speech_total_mean": _safe_mean(speech_total),
         "rhythm_metric_pause_total_mean": _safe_mean(pause_total),
         "rhythm_metric_pause_share_mean": _safe_mean(pause_total / total_exec),
+        "rhythm_metric_pause_event_ratio_mean": _safe_mean((execution.pause_after_exec.float() > 0.5).float().sum(dim=1) / visible_units),
         "rhythm_metric_expand_ratio_mean": _safe_mean(speech_total / anchor_total.clamp_min(1.0)),
         "rhythm_metric_commit_ratio_mean": _safe_mean(commit_ratio),
     }
+    source_boundary_cue = output.get("source_boundary_cue")
+    if source_boundary_cue is not None:
+        metrics["rhythm_metric_source_boundary_mean"] = _safe_mean(source_boundary_cue.float())
 
     state_next = output.get("rhythm_state_next")
     if state_next is not None:
@@ -59,6 +90,15 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 "rhythm_metric_clock_delta_mean": _safe_mean(state_next.clock_delta),
             }
         )
+    metrics["rhythm_metric_acoustic_target_is_retimed"] = execution.speech_duration_exec.new_tensor(
+        1.0 if bool(output.get("acoustic_target_is_retimed", False)) else 0.0
+    )
+    metrics["rhythm_metric_apply_render_mean"] = execution.speech_duration_exec.new_tensor(
+        float(output.get("rhythm_apply_render", 0.0))
+    )
+    acoustic_target_weight = output.get("acoustic_target_weight")
+    if acoustic_target_weight is not None:
+        metrics["rhythm_metric_retimed_weight_mean"] = _safe_mean(acoustic_target_weight.float())
 
     if sample is not None:
         if "rhythm_speech_budget_tgt" in sample:
@@ -81,6 +121,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 sample["rhythm_pause_exec_tgt"],
                 unit_mask,
             )
+            pause_p, pause_r, pause_f1 = _masked_event_f1(
+                execution.pause_after_exec,
+                sample["rhythm_pause_exec_tgt"],
+                unit_mask,
+            )
+            metrics["rhythm_metric_pause_event_precision"] = pause_p
+            metrics["rhythm_metric_pause_event_recall"] = pause_r
+            metrics["rhythm_metric_pause_event_f1"] = pause_f1
+        if "rhythm_speech_exec_tgt" in sample and "rhythm_pause_exec_tgt" in sample:
+            metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
+                execution.speech_duration_exec + execution.pause_after_exec,
+                sample["rhythm_speech_exec_tgt"] + sample["rhythm_pause_exec_tgt"],
+                unit_mask,
+            )
         if "rhythm_teacher_speech_exec_tgt" in sample:
             metrics["rhythm_metric_distill_speech_l1"] = _masked_l1(
                 execution.speech_duration_exec,
@@ -91,6 +145,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             metrics["rhythm_metric_distill_pause_l1"] = _masked_l1(
                 execution.pause_after_exec,
                 sample["rhythm_teacher_pause_exec_tgt"],
+                unit_mask,
+            )
+            pause_p, pause_r, pause_f1 = _masked_event_f1(
+                execution.pause_after_exec,
+                sample["rhythm_teacher_pause_exec_tgt"],
+                unit_mask,
+            )
+            metrics["rhythm_metric_distill_pause_event_precision"] = pause_p
+            metrics["rhythm_metric_distill_pause_event_recall"] = pause_r
+            metrics["rhythm_metric_distill_pause_event_f1"] = pause_f1
+        if "rhythm_teacher_speech_exec_tgt" in sample and "rhythm_teacher_pause_exec_tgt" in sample:
+            metrics["rhythm_metric_distill_total_corr"] = _masked_corr(
+                execution.speech_duration_exec + execution.pause_after_exec,
+                sample["rhythm_teacher_speech_exec_tgt"] + sample["rhythm_teacher_pause_exec_tgt"],
                 unit_mask,
             )
     return metrics
@@ -111,6 +179,9 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
     commit_values = [float(hist[0]) if len(hist) > 0 else 0.0 for hist in commit_history]
     commit_deltas = [commit_values[0]]
     commit_deltas.extend(max(0.0, commit_values[idx] - commit_values[idx - 1]) for idx in range(1, len(commit_values)))
+    commit_monotonic_violations = sum(
+        1 for idx in range(1, len(commit_values)) if commit_values[idx] < commit_values[idx - 1]
+    )
     committed_lengths = list(getattr(stream_result, "committed_mel_lengths", []))
     committed_deltas = []
     if len(committed_lengths) > 0:
@@ -128,4 +199,5 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         "stream_final_committed_mel_len": float(committed_lengths[-1]) if len(committed_lengths) > 0 else 0.0,
         "stream_mean_committed_mel_delta": float(sum(committed_deltas) / max(len(committed_deltas), 1)) if len(committed_deltas) > 0 else 0.0,
         "stream_max_prefix_exec_delta": float(max(prefix_exec_deltas)) if len(prefix_exec_deltas) > 0 else 0.0,
+        "stream_commit_monotonic_violations": float(commit_monotonic_violations),
     }

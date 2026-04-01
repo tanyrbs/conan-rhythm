@@ -140,6 +140,7 @@ Already connected:
 - descriptor wrapper
 - monotonic scheduler wrapper
 - cheap source-boundary sidecar
+- optional rhythm-only staging that bypasses the heavier local style/prosody adaptor while keeping global timbre conditioning
 - projector freeze / sparse pause / fixed-horizon trace sampling
 - dataset cached-target preference
 - teacher/distill field reservation

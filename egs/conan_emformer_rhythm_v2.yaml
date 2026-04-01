@@ -1,4 +1,5 @@
 base_config: egs/conan_emformer.yaml
+mel_losses: "l1:1.0"
 
 binarization_args:
   with_rhythm_cache: true
@@ -6,6 +7,7 @@ binarization_args:
 # Rhythm V2 clean mainline
 rhythm_enable_v2: true
 rhythm_runtime_mode: v2_clean
+rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_budget_win, pause_budget_win, dur_logratio_unit, pause_weight_unit]
 rhythm_public_losses: [L_recon, L_plan, L_guidance, L_distill]
@@ -20,11 +22,23 @@ rhythm_max_unit_logratio: 0.6
 rhythm_pause_share_max: 0.45
 rhythm_separator_aware: true
 rhythm_tail_open_units: 1
-rhythm_apply_mode: always
+rhythm_apply_mode: infer
+rhythm_apply_train_override: false   # keep decoder on source canvas until retimed target training is ready
+rhythm_apply_valid_override: false   # validation loss stays shape-aligned with ground-truth mel
+rhythm_apply_test_override: true     # streaming test/infer should exercise the real retimed execution path
+rhythm_train_render_start_steps: 0
+rhythm_valid_render_start_steps: 0
 rhythm_force_reference_conditioning: true
 rhythm_train_identity_fallback: false
 rhythm_binarize_self_targets: true
 rhythm_binarize_teacher_targets: false
+rhythm_binarize_retimed_mel_targets: true
+rhythm_binarize_retimed_mel_source: guidance
+rhythm_use_retimed_target_if_available: true
+rhythm_resample_retimed_target_to_output: true
+rhythm_retimed_target_start_steps: 0
+rhythm_retimed_pause_frame_weight: 0.20
+rhythm_retimed_stretch_weight_min: 0.35
 rhythm_dataset_target_mode: prefer_cache
 rhythm_dataset_build_guidance_from_ref: true
 rhythm_dataset_build_teacher_from_ref: false
@@ -35,6 +49,15 @@ rhythm_guidance_segment_bias_strength: 0.25
 rhythm_guidance_pause_strength: 1.00
 rhythm_guidance_boundary_strength: 1.25
 rhythm_guidance_pause_budget_ratio_cap: 0.75
+rhythm_teacher_rate_scale_min: 0.55
+rhythm_teacher_rate_scale_max: 1.95
+rhythm_teacher_local_rate_strength: 0.45
+rhythm_teacher_segment_bias_strength: 0.30
+rhythm_teacher_pause_strength: 1.10
+rhythm_teacher_boundary_strength: 1.50
+rhythm_teacher_pause_budget_ratio_cap: 0.80
+rhythm_teacher_speech_smooth_kernel: 3
+rhythm_teacher_pause_topk_ratio: 0.30
 rhythm_test_chunkwise: true
 rhythm_test_tokens_per_chunk: 4
 

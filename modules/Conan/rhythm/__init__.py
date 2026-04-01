@@ -26,6 +26,7 @@ from .supervision import (
     build_item_rhythm_bundle,
     build_reference_guided_targets,
     build_reference_rhythm_conditioning,
+    build_retimed_mel_target,
     build_reference_teacher_targets,
     build_source_rhythm_cache,
 )
@@ -44,6 +45,7 @@ __all__ = [
     'build_item_rhythm_bundle',
     'build_reference_guided_targets',
     'build_reference_rhythm_conditioning',
+    'build_retimed_mel_target',
     'build_reference_teacher_targets',
     'build_source_rhythm_cache',
     'resolve_content_lengths',

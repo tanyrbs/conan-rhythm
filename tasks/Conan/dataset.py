@@ -78,11 +78,26 @@ class ConanDataset(FastSpeechDataset):
             boundary_strength=float(self.hparams.get("rhythm_guidance_boundary_strength", 1.25)),
             pause_budget_ratio_cap=float(self.hparams.get("rhythm_guidance_pause_budget_ratio_cap", 0.75)),
         )
+        teacher_kwargs = dict(
+            dur_anchor_src=source_cache["dur_anchor_src"],
+            unit_mask=unit_mask,
+            ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
+            ref_rhythm_trace=ref_conditioning["ref_rhythm_trace"],
+            rate_scale_min=float(self.hparams.get("rhythm_teacher_rate_scale_min", 0.55)),
+            rate_scale_max=float(self.hparams.get("rhythm_teacher_rate_scale_max", 1.95)),
+            local_rate_strength=float(self.hparams.get("rhythm_teacher_local_rate_strength", 0.45)),
+            segment_bias_strength=float(self.hparams.get("rhythm_teacher_segment_bias_strength", 0.30)),
+            pause_strength=float(self.hparams.get("rhythm_teacher_pause_strength", 1.10)),
+            boundary_strength=float(self.hparams.get("rhythm_teacher_boundary_strength", 1.50)),
+            pause_budget_ratio_cap=float(self.hparams.get("rhythm_teacher_pause_budget_ratio_cap", 0.80)),
+            speech_smooth_kernel=int(self.hparams.get("rhythm_teacher_speech_smooth_kernel", 3)),
+            pause_topk_ratio=float(self.hparams.get("rhythm_teacher_pause_topk_ratio", 0.30)),
+        )
         targets = {}
         if self.hparams.get("rhythm_dataset_build_guidance_from_ref", True):
             targets.update(build_reference_guided_targets(**shared_kwargs))
         if self.hparams.get("rhythm_dataset_build_teacher_from_ref", False):
-            targets.update(build_reference_teacher_targets(**shared_kwargs))
+            targets.update(build_reference_teacher_targets(**teacher_kwargs))
         return targets
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning):
@@ -138,6 +153,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_teacher_pause_exec_tgt",
             "rhythm_teacher_speech_budget_tgt",
             "rhythm_teacher_pause_budget_tgt",
+            "rhythm_retimed_mel_tgt",
+            "rhythm_retimed_mel_len",
+            "rhythm_retimed_frame_weight",
         ]
         rhythm_runtime_fields = {}
         source_cache = self._get_source_rhythm_cache(item, sample["content"].cpu().numpy())
@@ -162,6 +180,12 @@ class ConanDataset(FastSpeechDataset):
             if key == "ref_rhythm_trace":
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif "stats" in key or "budget" in key:
+                sample[key] = torch.tensor(value, dtype=torch.float32)
+            elif key == "rhythm_retimed_mel_tgt":
+                sample[key] = torch.tensor(value, dtype=torch.float32)
+            elif key == "rhythm_retimed_mel_len":
+                sample[key] = torch.tensor(value, dtype=torch.long)
+            elif key == "rhythm_retimed_frame_weight":
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             else:
                 sample[key] = torch.tensor(value)
@@ -218,6 +242,9 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
             "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
             "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
+            "rhythm_retimed_mel_tgt": ("float", 0.0),
+            "rhythm_retimed_mel_len": ("long", 0),
+            "rhythm_retimed_frame_weight": ("float", 0.0),
         }
         for key, (dtype_name, pad_value) in optional_collate.items():
             if all(key in s for s in samples):

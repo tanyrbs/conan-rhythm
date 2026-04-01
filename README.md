@@ -45,6 +45,19 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - offline teacher of sufficient quality
 > - fully retimed decoder training to remove train/infer mismatch
 > - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
+>
+> Current staging note:
+>
+> - train/valid still keep decoder reconstruction on the source-aligned canvas
+> - test/inference already uses the retimed rhythm execution path
+> - train-time retimed rendering should only be enabled after retimed acoustic targets are prepared
+> - the binarizer can now cache a first-pass `rhythm_retimed_mel_tgt` built from cached rhythm targets
+> - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but bypass the heavier local style/prosody adaptor on the rhythm route
+> - the rhythm route also overrides `mel_losses: "l1:1.0"` to match the current minimal `L_recon + L_plan` training philosophy
+> - staged rollout knobs now exist for future train-time retimed experiments:
+>   - `rhythm_train_render_start_steps`
+>   - `rhythm_valid_render_start_steps`
+>   - `rhythm_retimed_target_start_steps`
 
 <p align="center">
   <a href="https://arxiv.org/abs/2507.14534"><b>📄 Read the Paper (arXiv)</b></a> &nbsp;|&nbsp;

@@ -77,6 +77,7 @@ class Conan(FastSpeech):
         )
 
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
+        self.rhythm_minimal_style_only = bool(hparams.get("rhythm_minimal_style_only", False))
         if self.rhythm_enable_v2:
             self.rhythm_unit_frontend = RhythmUnitFrontend(
                 silent_token=hparams.get("silent_token", 57),
@@ -86,7 +87,7 @@ class Conan(FastSpeech):
             self.rhythm_module = build_streaming_rhythm_module_from_hparams(hparams)
             self.rhythm_pause_state = nn.Parameter(torch.zeros(hidden_size))
 
-        if hparams["style"]:
+        if hparams["style"] and not self.rhythm_minimal_style_only:
             self.padding_idx = 0
             self.prosody_extractor = LocalStyleAdaptor(
                 self.hidden_size, hparams["nVQ"], self.padding_idx
@@ -214,7 +215,7 @@ class Conan(FastSpeech):
         # pitch input = content embedding + style embedding
         pitch_inp = content_embed + style_embed
 
-        if hparams["style"]:
+        if hparams["style"] and not self.rhythm_minimal_style_only:
             # add prosody VQ
             prosody = self.get_prosody(pitch_inp, ref, ret, infer, global_steps)
 

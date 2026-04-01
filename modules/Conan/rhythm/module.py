@@ -87,12 +87,14 @@ class StreamingRhythmModule(nn.Module):
         phase_ptr: torch.Tensor,
         window_size: int,
         horizon: float | None = None,
+        visible_sizes: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.reference_descriptor.sample_trace_window(
             ref_conditioning,
             phase_ptr=phase_ptr,
             window_size=window_size,
             horizon=horizon,
+            visible_sizes=visible_sizes,
         )
 
     def forward(
@@ -125,10 +127,12 @@ class StreamingRhythmModule(nn.Module):
             sep_hint=sep_hint,
             open_run_mask=open_run_mask,
         )
+        visible_sizes = unit_mask.float().sum(dim=1).long().clamp_min(1)
         trace_context = self.sample_trace_window(
             ref_conditioning=ref_conditioning,
             phase_ptr=state.phase_ptr,
             window_size=content_units.size(1),
+            visible_sizes=visible_sizes,
         )
         planner = self.scheduler(
             unit_states=unit_embed,

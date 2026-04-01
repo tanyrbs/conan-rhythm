@@ -89,6 +89,7 @@ def sample_progress_trace(
     window_size: int,
     *,
     horizon: float = 0.35,
+    visible_sizes: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if trace.dim() != 3:
         raise ValueError(f"trace must be [B, bins, dim], got {tuple(trace.shape)}")
@@ -100,8 +101,27 @@ def sample_progress_trace(
             f"phase_ptr must be [B] or [B,1], got {tuple(phase_ptr.shape)} for batch_size={batch_size}"
         )
     horizon = float(max(0.01, min(1.0, horizon)))
-    offsets = torch.linspace(0.0, horizon, window_size, device=trace.device) if window_size > 0 else trace.new_zeros((0,))
-    positions = (phase_ptr[:, None] + offsets[None, :]).clamp(0.0, 1.0)
+    if window_size <= 0:
+        positions = trace.new_zeros((batch_size, 0))
+    elif visible_sizes is None:
+        offsets = torch.linspace(0.0, horizon, window_size, device=trace.device)
+        positions = (phase_ptr[:, None] + offsets[None, :]).clamp(0.0, 1.0)
+    else:
+        visible_sizes = visible_sizes.long().to(device=trace.device)
+        if visible_sizes.dim() != 1 or visible_sizes.size(0) != batch_size:
+            raise ValueError(
+                f"visible_sizes must be [B], got {tuple(visible_sizes.shape)} for batch_size={batch_size}"
+            )
+        step_ids = torch.arange(window_size, device=trace.device, dtype=torch.float32)[None, :]
+        denom = (visible_sizes.float().clamp_min(1.0) - 1.0).unsqueeze(-1)
+        denom = torch.where(visible_sizes.unsqueeze(-1) > 1, denom, torch.ones_like(denom))
+        offsets = (step_ids / denom).clamp(0.0, 1.0) * horizon
+        offsets = torch.where(
+            visible_sizes.unsqueeze(-1) > 1,
+            offsets,
+            torch.zeros_like(offsets),
+        )
+        positions = (phase_ptr[:, None] + offsets).clamp(0.0, 1.0)
     scaled = positions * max(trace_bins - 1, 1)
     left = torch.floor(scaled).long().clamp(0, max(trace_bins - 1, 0))
     right = (left + 1).clamp(0, max(trace_bins - 1, 0))
@@ -215,10 +235,12 @@ class ReferenceRhythmEncoder(nn.Module):
         window_size: int,
         *,
         horizon: float | None = None,
+        visible_sizes: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return sample_progress_trace(
             ref_rhythm_trace,
             phase_ptr,
             window_size,
             horizon=self.trace_horizon if horizon is None else horizon,
+            visible_sizes=visible_sizes,
         )

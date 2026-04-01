@@ -19,6 +19,20 @@ from modules.Conan.rhythm.supervision import build_item_rhythm_bundle
 np.seterr(divide='ignore', invalid='ignore')
 
 
+def _rhythm_teacher_kwargs_from_hparams():
+    return {
+        'rate_scale_min': float(hparams.get('rhythm_teacher_rate_scale_min', 0.55)),
+        'rate_scale_max': float(hparams.get('rhythm_teacher_rate_scale_max', 1.95)),
+        'local_rate_strength': float(hparams.get('rhythm_teacher_local_rate_strength', 0.45)),
+        'segment_bias_strength': float(hparams.get('rhythm_teacher_segment_bias_strength', 0.30)),
+        'pause_strength': float(hparams.get('rhythm_teacher_pause_strength', 1.10)),
+        'boundary_strength': float(hparams.get('rhythm_teacher_boundary_strength', 1.50)),
+        'pause_budget_ratio_cap': float(hparams.get('rhythm_teacher_pause_budget_ratio_cap', 0.80)),
+        'speech_smooth_kernel': int(hparams.get('rhythm_teacher_speech_smooth_kernel', 3)),
+        'pause_topk_ratio': float(hparams.get('rhythm_teacher_pause_topk_ratio', 0.30)),
+    }
+
+
 class BinarizationError(Exception):
     pass
 
@@ -388,6 +402,11 @@ class ConanBinarizer(VCBinarizer):
                     trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
                     include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
                     include_teacher_targets=bool(hparams.get('rhythm_binarize_teacher_targets', False)),
+                    include_retimed_mel_target=bool(hparams.get('rhythm_binarize_retimed_mel_targets', False)),
+                    retimed_mel_target_source=str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance')),
+                    retimed_pause_frame_weight=float(hparams.get('rhythm_retimed_pause_frame_weight', 0.20)),
+                    retimed_stretch_weight_min=float(hparams.get('rhythm_retimed_stretch_weight_min', 0.35)),
+                    teacher_kwargs=_rhythm_teacher_kwargs_from_hparams(),
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
@@ -468,6 +487,11 @@ class EmformerBinarizer(VCBinarizer):
                     trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
                     include_self_targets=bool(hparams.get('rhythm_binarize_self_targets', True)),
                     include_teacher_targets=bool(hparams.get('rhythm_binarize_teacher_targets', False)),
+                    include_retimed_mel_target=bool(hparams.get('rhythm_binarize_retimed_mel_targets', False)),
+                    retimed_mel_target_source=str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance')),
+                    retimed_pause_frame_weight=float(hparams.get('rhythm_retimed_pause_frame_weight', 0.20)),
+                    retimed_stretch_weight_min=float(hparams.get('rhythm_retimed_stretch_weight_min', 0.35)),
+                    teacher_kwargs=_rhythm_teacher_kwargs_from_hparams(),
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
