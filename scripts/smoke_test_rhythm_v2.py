@@ -89,6 +89,16 @@ if __name__ == '__main__':
     assert bool(getattr(schedule_model, "enable_learned_offline_teacher", True)) is False
     print('schedule-only runtime offline teacher enabled:', bool(getattr(schedule_model, "enable_learned_offline_teacher", True)))
 
+    strict_hparams = dict(schedule_hparams)
+    strict_hparams.update({
+        'rhythm_strict_mainline': True,
+        'rhythm_enable_learned_offline_teacher': False,
+    })
+    strict_model = build_streaming_rhythm_module_from_hparams(strict_hparams)
+    assert strict_model.projector.config.pause_selection_mode == 'simple'
+    assert strict_model.projector.config.use_boundary_commit_guard is False
+    assert strict_model.projector.config.build_render_plan is False
+
     ref_mel = torch.randn(2, 80, 64)
     ref_conditioning = model.encode_reference(ref_mel)
     print('ref descriptor keys:', sorted(ref_conditioning.keys()))
@@ -155,6 +165,21 @@ if __name__ == '__main__':
     assert frontend_step2.content_units[0, :4].tolist() == [1, 2, 2, 3]
 
     state = model.init_state(batch_size=2, device=torch.device('cpu'))
+    strict_out = strict_model(
+        content_units=batch.content_units,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        open_run_mask=batch.open_run_mask,
+        ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
+        ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
+        state=strict_model.init_state(batch_size=2, device=torch.device('cpu')),
+    )
+    assert strict_out.slot_duration_exec is None
+    assert strict_out.slot_mask is None
+    assert strict_out.slot_is_blank is None
+    assert strict_out.slot_unit_index is None
+    assert strict_out.frame_plan is None
+
     out1 = model(
         content_units=batch.content_units,
         dur_anchor_src=batch.dur_anchor_src,

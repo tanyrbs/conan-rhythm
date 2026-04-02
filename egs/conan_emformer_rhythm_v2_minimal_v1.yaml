@@ -4,6 +4,7 @@ base_config: egs/conan_emformer_rhythm_v2.yaml
 # canonical formal base for all maintained training stages.
 # Keep the runtime path narrow and cache-first before any stage-specific override.
 rhythm_minimal_v1_profile: true
+rhythm_strict_mainline: true
 rhythm_dataset_target_mode: cached_only
 rhythm_cached_reference_policy: self
 
@@ -11,6 +12,7 @@ rhythm_cached_reference_policy: self
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none
 rhythm_require_cached_teacher: true
+rhythm_enable_learned_offline_teacher: false
 
 # Keep preprocessing/cache generation teacher-ready, but do not rebuild guidance/teacher targets at runtime.
 rhythm_binarize_teacher_targets: true

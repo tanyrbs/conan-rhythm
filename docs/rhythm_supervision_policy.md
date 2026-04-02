@@ -65,6 +65,7 @@ Do not collapse those two claims.
 Maintained usage preference:
 
 - use teacher surfaces as the primary **target source** when teacher-first cached training is enabled
+- maintained stage-1/stage-3 configs now mark this contract explicitly with `rhythm_strict_mainline: true`
 - keep extra KD losses (`L_distill*`) optional, stage-specific, and off by default in the maintained chain
 - do not keep task-side surrogate pause execution in the maintained path; if pause gradients disappear, fix the projector branch itself
 - keep schedule-only runtime teacher branch off (`rhythm_enable_learned_offline_teacher: false`); stage-1 should not pay runtime teacher complexity
@@ -172,6 +173,11 @@ State semantics note:
 - `phase_ptr` is a committed-progress state and must be monotonic
 - visible-prefix growth without new commit should not move `phase_ptr` backward
 - trace-window sampling should follow committed progress, not fluctuating visible-prefix ratios
+- projector should remain a thin contract layer on the strict mainline:
+  - keep feasible-budget lifting
+  - default to simple pause allocation
+  - disable boundary commit guard unless a research branch explicitly needs it
+  - do not eagerly build slot/frame render artifacts on non-render stages
 
 ---
 
@@ -239,6 +245,7 @@ Maintained default:
 
 - keep `L_distill*` disabled in the default formal chain (`schedule_only -> retimed_train`)
 - if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
+- strict-mainline fast path now builds rhythm loss targets directly from the primary cached surface when guidance/distill are both disabled, instead of routing through runtime teacher / algorithmic teacher branches
 
 Maintained chain note:
 

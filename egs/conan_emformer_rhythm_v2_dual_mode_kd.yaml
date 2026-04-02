@@ -7,6 +7,7 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 #   schedule_only -> retimed_train
 # when you want the strict compact-mainline path first.
 rhythm_minimal_v1_profile: false
+rhythm_strict_mainline: false
 # Dual-mode KD emits runtime offline execution; keep this false so preflight
 # does not treat this stage as pure schedule-only.
 rhythm_schedule_only_stage: false

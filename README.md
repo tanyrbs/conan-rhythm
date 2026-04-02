@@ -39,12 +39,16 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - explicit reference rhythm stats/trace is connected
 > - the maintained descriptor is an explicit baseline descriptor, not a final expressive prosody encoder
 > - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
+> - maintained strict-mainline configs now make the formal path explicit in code (`rhythm_strict_mainline: true` for `minimal_v1` / `schedule_only` / `retimed_train`, `false` for optional `dual_mode_kd`)
+> - strict mainline hard-rejects runtime teacher / algorithmic teacher / guidance / distill objectives instead of relying on convention
+> - strict mainline also keeps projector thinner by default: simple pause allocation, no boundary commit guard, and no eager slot/frame-plan materialization
 > - trace sampling uses a fixed progress horizon with anchor-progress phase updates
 > - `phase_ptr` is maintained as **committed-progress state** (monotonic, no rollback on visible-prefix growth), not as a naive visible-prefix ratio
 > - projector execution now keeps zero-budget speech/pause branches differentiable during training, so the pause path no longer silently drops out when the min-speech floor temporarily absorbs the full window budget
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`, but this sidecar is kept as a soft prior instead of a public control head
 > - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
 > - projector now also emits a shared frame plan, so renderer and online/hybrid retimed supervision consume the same frame map
+> - slot schedule / frame plan are now lazy on the strict mainline; they are only materialized when render / retimed acoustic closure actually needs them
 > - renderer now exports frame-level blank masks, slot/unit indices, source-frame indices, and phase features for debugging plus retimed training hooks
 > - the renderer is still deterministic/hard-expanded, but it now carries minimal phase features so long stretched slots are not rendered as pure flat repeats
 > - reference cache can also carry slow-rhythm memory cells, selector spans, and source-side phrase-group metadata, but these are treated as sidecars instead of the maintained runtime-minimal contract

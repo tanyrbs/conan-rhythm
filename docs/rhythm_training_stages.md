@@ -32,6 +32,9 @@ Current state:
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 - projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
+- strict maintained stage configs now set `rhythm_strict_mainline: true`, so schedule-only / retimed-train paths hard-reject runtime teacher, guidance loss, distill loss, and algorithmic-teacher branches
+- strict mainline also keeps projector on a thinner contract by default (`pause_selection_mode=simple`, `use_boundary_commit_guard=false`, `build_render_plan=false`)
+- slot schedule / frame plan are now lazily materialized only when render / retimed closure actually needs them; strict non-render paths keep these fields absent
 - latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `dual_mode_kd`, and one-step `retimed_train`
 - latest local CPU probe also passed on the smoke bundle for `retimed_train` over 20 updates, with finite losses, finite clipped gradients, and non-zero parameter deltas on the content / rhythm-scheduler / decoder / pitch path
 
@@ -66,6 +69,7 @@ Current recommendation:
 - for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
 - that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
 - that config now also explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`)
+- that config is now also a hard strict-mainline entry, so KD/guidance/runtime-teacher branches are rejected instead of being silently left available
 - stage-1 module-only config now also enables the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disables pitch/F0 requirements (`use_pitch_embed: false`, `binarization_args.with_f0: false`) so warm-start runs do not pay unnecessary decoder/pitch extraction cost
 - the module-only acoustic fast path is automatically gated off once train-time retimed rendering is active; formal retimed closure should still run the real decoder path instead of a fake zero-cost shortcut
 - stage-1 objective should stay minimal:
@@ -140,6 +144,7 @@ Current repository status:
 - the formal stage-3 config `egs/conan_emformer_rhythm_v2_retimed_train.yaml` now explicitly sets:
   - `rhythm_apply_train_override: true`
   - `rhythm_apply_valid_override: true`
+  - `rhythm_strict_mainline: true`
   - `rhythm_train_render_start_steps: 0`
   - `rhythm_valid_render_start_steps: 0`
   - `rhythm_retimed_target_start_steps: 0`

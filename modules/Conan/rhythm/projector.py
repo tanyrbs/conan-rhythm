@@ -20,6 +20,48 @@ class ProjectorConfig:
     pause_boundary_bias_weight: float = 0.15
     pause_train_soft: bool = True
     pause_soft_temperature: float = 0.12
+    pause_selection_mode: str = "sparse"
+    use_boundary_commit_guard: bool = True
+    build_render_plan: bool = True
+
+
+def _allocate_pause_budget(
+    *,
+    candidate_scores: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_budget_win: torch.Tensor,
+    previous_pause_exec: torch.Tensor | None,
+    commit_frontier: torch.Tensor,
+    reuse_prefix: bool,
+) -> torch.Tensor:
+    total_units = candidate_scores.size(1)
+    pause_rows = []
+    for batch_idx in range(candidate_scores.size(0)):
+        mask_row = unit_mask[batch_idx : batch_idx + 1].float()
+        budget_row = pause_budget_win[batch_idx].reshape(1, 1).float()
+        frontier = int(commit_frontier[batch_idx].item())
+        prefix_row = candidate_scores.new_zeros((1, total_units))
+        valid_frontier = 0
+        if reuse_prefix and previous_pause_exec is not None and batch_idx < previous_pause_exec.size(0) and frontier > 0:
+            valid_frontier = min(frontier, int(previous_pause_exec.size(1)), total_units)
+            prefix = previous_pause_exec[batch_idx : batch_idx + 1, :valid_frontier].float() * mask_row[:, :valid_frontier]
+            if valid_frontier < total_units:
+                prefix_row = torch.cat([prefix, prefix.new_zeros((1, total_units - valid_frontier))], dim=1)
+            else:
+                prefix_row = prefix
+        tail_mask = mask_row.clone()
+        if valid_frontier > 0:
+            tail_mask[:, :valid_frontier] = 0.0
+        if float(tail_mask.sum().item()) <= 0:
+            pause_rows.append(prefix_row)
+            continue
+        remaining_budget = (budget_row - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
+        fallback = tail_mask / tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        tail_candidate = candidate_scores[batch_idx : batch_idx + 1].float().clamp_min(0.0) * tail_mask
+        total = (tail_candidate + fallback * 1e-6).sum(dim=1, keepdim=True).clamp_min(1e-6)
+        tail_values = (tail_candidate + fallback * 1e-6) * (remaining_budget / total)
+        pause_rows.append(prefix_row + tail_values * tail_mask)
+    return torch.cat(pause_rows, dim=0) * unit_mask.float()
 
 
 def _project_pause_impl(
@@ -41,7 +83,7 @@ def _project_pause_impl(
     boundary_bias = pause_boundary_bias_weight * (
         pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
     )
-    scores = (scores + boundary_bias) * unit_mask
+    scores = (scores + boundary_bias) * unit_mask.float()
     total_units = scores.size(1)
     sparse_rows = []
     for batch_idx in range(scores.size(0)):
@@ -67,39 +109,35 @@ def _project_pause_impl(
         if visible < total_units:
             selected = torch.cat([selected, selected.new_zeros((total_units - visible,))], dim=0)
         sparse_rows.append(selected.unsqueeze(0))
-    sparse_scores = torch.cat(sparse_rows, dim=0) * unit_mask
+    sparse_scores = torch.cat(sparse_rows, dim=0) * unit_mask.float()
+    return _allocate_pause_budget(
+        candidate_scores=sparse_scores,
+        unit_mask=unit_mask,
+        pause_budget_win=pause_budget_win,
+        previous_pause_exec=previous_pause_exec,
+        commit_frontier=commit_frontier,
+        reuse_prefix=reuse_prefix,
+    )
 
-    pause_rows = []
-    for batch_idx in range(sparse_scores.size(0)):
-        mask_row = unit_mask[batch_idx : batch_idx + 1]
-        budget_row = pause_budget_win[batch_idx].reshape(1, 1)
-        frontier = int(commit_frontier[batch_idx].item())
-        prefix_row = sparse_scores.new_zeros((1, total_units))
-        if reuse_prefix and previous_pause_exec is not None and batch_idx < previous_pause_exec.size(0) and frontier > 0:
-            valid_frontier = min(frontier, int(previous_pause_exec.size(1)), total_units)
-            prefix = previous_pause_exec[batch_idx : batch_idx + 1, :valid_frontier].float() * mask_row[:, :valid_frontier]
-            if valid_frontier < total_units:
-                prefix_row = torch.cat([prefix, prefix.new_zeros((1, total_units - valid_frontier))], dim=1)
-            else:
-                prefix_row = prefix
-        else:
-            valid_frontier = 0
-        tail_mask = mask_row.clone()
-        if valid_frontier > 0:
-            tail_mask = torch.cat(
-                [tail_mask.new_zeros((1, valid_frontier)), tail_mask[:, valid_frontier:]],
-                dim=1,
-            )
-        if float(tail_mask.sum().item()) <= 0:
-            pause_rows.append(prefix_row)
-            continue
-        remaining_budget = (budget_row - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
-        fallback = tail_mask / tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        tail_candidate = sparse_scores[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask
-        total = (tail_candidate * tail_mask + fallback * 1e-6).sum(dim=1, keepdim=True).clamp_min(1e-6)
-        tail_values = (tail_candidate + fallback * 1e-6) * (remaining_budget / total)
-        pause_rows.append(prefix_row + tail_values * tail_mask)
-    return torch.cat(pause_rows, dim=0) * unit_mask
+
+def _project_pause_simple_impl(
+    *,
+    pause_weight_unit: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_budget_win: torch.Tensor,
+    previous_pause_exec: torch.Tensor | None,
+    commit_frontier: torch.Tensor,
+    reuse_prefix: bool,
+) -> torch.Tensor:
+    scores = pause_weight_unit.float().clamp_min(0.0) * unit_mask.float()
+    return _allocate_pause_budget(
+        candidate_scores=scores,
+        unit_mask=unit_mask,
+        pause_budget_win=pause_budget_win,
+        previous_pause_exec=previous_pause_exec,
+        commit_frontier=commit_frontier,
+        reuse_prefix=reuse_prefix,
+    )
 
 
 class StreamingRhythmProjector(nn.Module):
@@ -162,12 +200,28 @@ class StreamingRhythmProjector(nn.Module):
                         previous_pause[batch_idx, :valid_frontier].float()
                         * unit_mask[batch_idx, :valid_frontier].float()
                     ).sum()
-            min_tail_speech = tail_mask.sum() * float(self.config.min_speech_frames)
-            speech_floor = prefix_speech + min_tail_speech
-            pause_floor = prefix_pause
-            speech_rows.append(torch.maximum(speech_budget_row, speech_floor))
-            pause_rows.append(torch.maximum(pause_budget_row, pause_floor))
-        return torch.stack(speech_rows, dim=0), torch.stack(pause_rows, dim=0)
+            active_tail = int(tail_mask.sum().item())
+            min_tail_speech = float(active_tail) * float(self.config.min_speech_frames)
+            required_speech = prefix_speech + speech_budget_row.new_tensor(min_tail_speech)
+            if float(speech_budget_row.item()) < float(required_speech.item()):
+                deficit = required_speech - speech_budget_row
+                speech_budget_row = required_speech
+                pause_budget_row = pause_budget_row + deficit
+            max_expand = float(self.config.max_speech_expand)
+            if max_expand > 0.0 and active_tail > 0:
+                tail_anchor = (dur_anchor_src[batch_idx].float() * tail_mask).sum()
+                max_tail_speech = tail_anchor.clamp_min(0.0) * max_expand
+                max_total_speech = prefix_speech + max_tail_speech
+                if float(speech_budget_row.item()) > float(max_total_speech.item()):
+                    overflow = speech_budget_row - max_total_speech
+                    speech_budget_row = max_total_speech
+                    pause_budget_row = pause_budget_row + overflow
+            if float(pause_budget_row.item()) < float(prefix_pause.item()):
+                speech_budget_row = speech_budget_row + (prefix_pause - pause_budget_row)
+                pause_budget_row = prefix_pause
+            speech_rows.append(speech_budget_row.reshape(1, 1))
+            pause_rows.append(pause_budget_row.reshape(1, 1))
+        return torch.cat(speech_rows, dim=0), torch.cat(pause_rows, dim=0)
 
     def _project_speech(
         self,
@@ -179,33 +233,51 @@ class StreamingRhythmProjector(nn.Module):
         state: StreamingRhythmState,
         reuse_prefix: bool,
     ) -> torch.Tensor:
-        base = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * torch.exp(dur_logratio_unit.float())
-        max_speech = dur_anchor_src.float().clamp_min(self.config.min_speech_frames) * self.config.max_speech_expand
-        min_speech = torch.full_like(base, float(self.config.min_speech_frames))
-        candidate = torch.maximum(torch.minimum(base, max_speech), min_speech) * unit_mask
-        speech = candidate.new_zeros(candidate.shape)
-        previous = state.previous_speech_exec
-        for batch_idx in range(candidate.size(0)):
-            mask_row = unit_mask[batch_idx]
-            budget_row = speech_budget_win[batch_idx : batch_idx + 1]
+        scaled = dur_anchor_src.float() * torch.exp(dur_logratio_unit.float())
+        scaled = scaled * unit_mask
+        speech_rows = []
+        for batch_idx in range(scaled.size(0)):
+            mask_row = unit_mask[batch_idx : batch_idx + 1]
+            budget_row = speech_budget_win[batch_idx].reshape(1, 1)
             frontier = int(state.commit_frontier[batch_idx].item())
-            if reuse_prefix and previous is not None and batch_idx < previous.size(0) and frontier > 0:
-                valid_frontier = min(frontier, int(previous.size(1)), int(candidate.size(1)))
-                prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
-                speech[batch_idx, :valid_frontier] = prefix
+            prefix_row = scaled.new_zeros((1, scaled.size(1)))
+            if reuse_prefix and state.previous_speech_exec is not None and batch_idx < state.previous_speech_exec.size(0) and frontier > 0:
+                valid_frontier = min(frontier, int(state.previous_speech_exec.size(1)), int(scaled.size(1)))
+                prefix = state.previous_speech_exec[batch_idx : batch_idx + 1, :valid_frontier].float() * mask_row[:, :valid_frontier]
+                if valid_frontier < scaled.size(1):
+                    prefix_row = torch.cat([prefix, prefix.new_zeros((1, scaled.size(1) - valid_frontier))], dim=1)
+                else:
+                    prefix_row = prefix
             else:
                 valid_frontier = 0
             tail_mask = mask_row.clone()
             if valid_frontier > 0:
-                tail_mask[:valid_frontier] = 0.0
-            remaining_budget = (budget_row.squeeze(0) - speech[batch_idx].sum()).clamp_min(0.0)
-            if tail_mask.sum() > 0:
-                tail_values = self._renormalize_to_budget(
-                    candidate[batch_idx : batch_idx + 1],
-                    tail_mask.unsqueeze(0),
-                    remaining_budget.view(1, 1),
-                )[0]
-                speech[batch_idx] = speech[batch_idx] + tail_values * tail_mask
+                tail_mask = torch.cat(
+                    [tail_mask.new_zeros((1, valid_frontier)), tail_mask[:, valid_frontier:]],
+                    dim=1,
+                )
+            remaining_budget = (budget_row - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
+            if float(tail_mask.sum().item()) <= 0:
+                speech_rows.append(prefix_row)
+                continue
+            tail_values = scaled[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask
+            minimum = tail_mask * float(self.config.min_speech_frames)
+            tail_values = torch.maximum(tail_values, minimum)
+            max_expand = float(self.config.max_speech_expand)
+            if max_expand > 0.0:
+                max_values = (dur_anchor_src[batch_idx : batch_idx + 1].float().clamp_min(0.0) * max_expand) * tail_mask
+                tail_values = torch.minimum(tail_values, torch.maximum(max_values, minimum))
+            total = (tail_values * tail_mask).sum(dim=1, keepdim=True)
+            if float(total.item()) <= 0.0:
+                fallback = minimum
+                total = fallback.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                tail_values = fallback * (remaining_budget / total)
+            else:
+                tail_values = self._renormalize_to_budget(tail_values * tail_mask, tail_mask, remaining_budget)
+            speech_rows.append(prefix_row + tail_values * tail_mask)
+        speech = torch.cat(speech_rows, dim=0)
+        speech = torch.maximum(speech, unit_mask * float(self.config.min_speech_frames))
+        speech = self._renormalize_to_budget(speech * unit_mask, unit_mask, speech_budget_win)
         return speech * unit_mask
 
     def _project_pause(
@@ -220,6 +292,16 @@ class StreamingRhythmProjector(nn.Module):
         soft_pause_selection: bool,
         pause_topk_ratio_override: float | None = None,
     ) -> torch.Tensor:
+        selection_mode = str(self.config.pause_selection_mode or "sparse").strip().lower()
+        if selection_mode == "simple":
+            return _project_pause_simple_impl(
+                pause_weight_unit=pause_weight_unit,
+                unit_mask=unit_mask,
+                pause_budget_win=pause_budget_win,
+                previous_pause_exec=state.previous_pause_exec,
+                commit_frontier=state.commit_frontier,
+                reuse_prefix=reuse_prefix,
+            )
         topk_ratio = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
         topk_ratio = float(max(0.0, min(1.0, topk_ratio)))
         temperature = float(max(1e-4, self.config.pause_soft_temperature))
@@ -264,7 +346,12 @@ class StreamingRhythmProjector(nn.Module):
                     break
                 closed_prefix = unit_idx + 1
             candidate = min(release_cap, closed_prefix)
-            if candidate > 0 and boundary_latent is not None and candidate < visible:
+            if (
+                bool(self.config.use_boundary_commit_guard)
+                and candidate > 0
+                and boundary_latent is not None
+                and candidate < visible
+            ):
                 boundary_value = float(boundary_latent[batch_idx, candidate - 1].item())
                 if boundary_value < float(self.config.boundary_commit_threshold):
                     candidate = max(prev, candidate - 1)
@@ -421,17 +508,28 @@ class StreamingRhythmProjector(nn.Module):
             pause_topk_ratio_override=pause_topk_ratio_override,
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
-        slot_schedule = build_interleaved_blank_slot_schedule(
-            speech_duration_exec=speech_duration_exec,
-            blank_duration_exec=pause_after_exec,
-            unit_mask=unit_mask,
-        )
-        frame_plan = build_frame_plan_from_execution(
-            dur_anchor_src=dur_anchor_src,
-            speech_exec=speech_duration_exec,
-            pause_exec=pause_after_exec,
-            unit_mask=unit_mask,
-        )
+        slot_schedule = None
+        frame_plan = None
+        slot_duration_exec = None
+        slot_mask = None
+        slot_is_blank = None
+        slot_unit_index = None
+        if bool(self.config.build_render_plan):
+            slot_schedule = build_interleaved_blank_slot_schedule(
+                speech_duration_exec=speech_duration_exec,
+                blank_duration_exec=pause_after_exec,
+                unit_mask=unit_mask,
+            )
+            frame_plan = build_frame_plan_from_execution(
+                dur_anchor_src=dur_anchor_src,
+                speech_exec=speech_duration_exec,
+                pause_exec=pause_after_exec,
+                unit_mask=unit_mask,
+            )
+            slot_duration_exec = slot_schedule.slot_duration_exec
+            slot_mask = slot_schedule.slot_mask
+            slot_is_blank = slot_schedule.slot_is_blank
+            slot_unit_index = slot_schedule.slot_unit_index
         commit_frontier = self._compute_commit_frontier(
             state=state,
             unit_mask=unit_mask,
@@ -455,10 +553,10 @@ class StreamingRhythmProjector(nn.Module):
             pause_after_exec=pause_after_exec,
             effective_duration_exec=effective_duration_exec,
             commit_frontier=commit_frontier,
-            slot_duration_exec=slot_schedule.slot_duration_exec,
-            slot_mask=slot_schedule.slot_mask,
-            slot_is_blank=slot_schedule.slot_is_blank,
-            slot_unit_index=slot_schedule.slot_unit_index,
+            slot_duration_exec=slot_duration_exec,
+            slot_mask=slot_mask,
+            slot_is_blank=slot_is_blank,
+            slot_unit_index=slot_unit_index,
             frame_plan=frame_plan,
             planner=execution_planner,
             next_state=next_state,

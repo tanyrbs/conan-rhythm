@@ -61,28 +61,28 @@ class RhythmExecution:
     pause_after_exec: torch.Tensor
     effective_duration_exec: torch.Tensor
     commit_frontier: torch.Tensor
-    slot_duration_exec: torch.Tensor
-    slot_mask: torch.Tensor
-    slot_is_blank: torch.Tensor
-    slot_unit_index: torch.Tensor
+    slot_duration_exec: Optional[torch.Tensor]
+    slot_mask: Optional[torch.Tensor]
+    slot_is_blank: Optional[torch.Tensor]
+    slot_unit_index: Optional[torch.Tensor]
     frame_plan: Optional["RhythmFramePlan"]
     planner: RhythmPlannerOutputs
     next_state: StreamingRhythmState
 
     @property
-    def blank_slot_duration_exec(self) -> torch.Tensor:
+    def blank_slot_duration_exec(self) -> Optional[torch.Tensor]:
         return self.slot_duration_exec
 
     @property
-    def blank_slot_mask(self) -> torch.Tensor:
+    def blank_slot_mask(self) -> Optional[torch.Tensor]:
         return self.slot_mask
 
     @property
-    def blank_slot_is_blank(self) -> torch.Tensor:
+    def blank_slot_is_blank(self) -> Optional[torch.Tensor]:
         return self.slot_is_blank
 
     @property
-    def blank_slot_unit_index(self) -> torch.Tensor:
+    def blank_slot_unit_index(self) -> Optional[torch.Tensor]:
         return self.slot_unit_index
 
 

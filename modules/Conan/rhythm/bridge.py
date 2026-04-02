@@ -4,6 +4,7 @@ from typing import Callable
 
 import torch
 
+from .frame_plan import build_frame_plan, build_interleaved_blank_slot_schedule
 from .renderer import render_rhythm_sequence
 
 
@@ -38,6 +39,58 @@ def resolve_rhythm_apply_mode(hparams, *, infer: bool = False, override=None) ->
     if mode in {"train", "training"}:
         return not bool(infer)
     return bool(infer)
+
+
+def materialize_rhythm_render_plan(*, execution, dur_anchor_src: torch.Tensor, unit_mask: torch.Tensor):
+    if execution is None:
+        raise ValueError("execution is required to materialize rhythm render artifacts.")
+    slot_duration_exec = execution.slot_duration_exec
+    slot_mask = execution.slot_mask
+    slot_is_blank = execution.slot_is_blank
+    slot_unit_index = execution.slot_unit_index
+    if (
+        slot_duration_exec is None
+        or slot_mask is None
+        or slot_is_blank is None
+        or slot_unit_index is None
+    ):
+        slot_schedule = build_interleaved_blank_slot_schedule(
+            speech_duration_exec=execution.speech_duration_exec,
+            blank_duration_exec=execution.blank_duration_exec,
+            unit_mask=unit_mask,
+        )
+        slot_duration_exec = slot_schedule.slot_duration_exec
+        slot_mask = slot_schedule.slot_mask
+        slot_is_blank = slot_schedule.slot_is_blank
+        slot_unit_index = slot_schedule.slot_unit_index
+        execution.slot_duration_exec = slot_duration_exec
+        execution.slot_mask = slot_mask
+        execution.slot_is_blank = slot_is_blank
+        execution.slot_unit_index = slot_unit_index
+    if execution.frame_plan is None:
+        execution.frame_plan = build_frame_plan(
+            dur_anchor_src=dur_anchor_src,
+            slot_duration_exec=slot_duration_exec,
+            slot_mask=slot_mask,
+            slot_is_blank=slot_is_blank,
+            slot_unit_index=slot_unit_index,
+        )
+    return execution
+
+
+def _attach_slot_outputs(ret: dict, execution) -> None:
+    if execution.slot_duration_exec is None:
+        return
+    ret["slot_duration_exec"] = execution.slot_duration_exec
+    ret["slot_mask"] = execution.slot_mask
+    ret["slot_is_blank"] = execution.slot_is_blank
+    ret["slot_unit_index"] = execution.slot_unit_index
+    ret["blank_slot_duration_exec"] = execution.blank_slot_duration_exec
+    ret["blank_slot_mask"] = execution.blank_slot_mask
+    ret["blank_slot_is_blank"] = execution.blank_slot_is_blank
+    ret["blank_slot_unit_index"] = execution.blank_slot_unit_index
+    if execution.frame_plan is not None:
+        ret["rhythm_frame_plan"] = execution.frame_plan
 
 
 def run_rhythm_frontend(
@@ -84,7 +137,7 @@ def run_rhythm_frontend(
     if rhythm_ref_conditioning is None:
         rhythm_ref_conditioning = rhythm_module.encode_reference(ref)
     offline_unit_batch = None
-    if rhythm_offline_source_cache is not None:
+    if rhythm_offline_source_cache is not None and enable_dual_mode_teacher and not infer:
         offline_unit_batch = rhythm_unit_frontend.from_precomputed(
             content_units=rhythm_offline_source_cache["content_units"],
             dur_anchor_src=rhythm_offline_source_cache["dur_anchor_src"],
@@ -200,15 +253,9 @@ def attach_rhythm_outputs(
     ret["pause_after_exec"] = execution.pause_after_exec
     ret["effective_duration_exec"] = execution.effective_duration_exec
     ret["commit_frontier"] = execution.commit_frontier
-    ret["slot_duration_exec"] = execution.slot_duration_exec
-    ret["slot_mask"] = execution.slot_mask
-    ret["slot_is_blank"] = execution.slot_is_blank
-    ret["slot_unit_index"] = execution.slot_unit_index
-    ret["rhythm_frame_plan"] = execution.frame_plan
-    ret["blank_slot_duration_exec"] = execution.blank_slot_duration_exec
-    ret["blank_slot_mask"] = execution.blank_slot_mask
-    ret["blank_slot_is_blank"] = execution.blank_slot_is_blank
-    ret["blank_slot_unit_index"] = execution.blank_slot_unit_index
+    if execution.frame_plan is not None:
+        ret["rhythm_frame_plan"] = execution.frame_plan
+    _attach_slot_outputs(ret, execution)
     ret["sealed_mask"] = unit_batch.sealed_mask
     ret["boundary_confidence"] = unit_batch.boundary_confidence
     if rhythm_bundle.get("offline_execution") is not None:
@@ -239,6 +286,12 @@ def attach_rhythm_outputs(
         return content_embed, tgt_nonpadding
     if speech_state_fn is None or pause_state is None:
         raise ValueError("speech_state_fn and pause_state are required when rhythm render is enabled.")
+    execution = materialize_rhythm_render_plan(
+        execution=execution,
+        dur_anchor_src=unit_batch.dur_anchor_src,
+        unit_mask=unit_batch.unit_mask,
+    )
+    _attach_slot_outputs(ret, execution)
     rendered = render_rhythm_sequence(
         content_units=unit_batch.content_units,
         silent_token=hparams.get("silent_token", 57),

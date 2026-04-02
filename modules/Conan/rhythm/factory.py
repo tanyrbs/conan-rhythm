@@ -6,7 +6,24 @@ from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
 
 
+def _use_strict_mainline(hparams) -> bool:
+    explicit = hparams.get('rhythm_strict_mainline', None)
+    if explicit is not None:
+        return bool(explicit)
+    return bool(hparams.get('rhythm_minimal_v1_profile', False))
+
+
 def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
+    strict_mainline = _use_strict_mainline(hparams)
+    pause_selection_mode = str(
+        hparams.get(
+            'rhythm_projector_pause_selection_mode',
+            'simple' if strict_mainline else 'sparse',
+        )
+        or ('simple' if strict_mainline else 'sparse')
+    ).strip().lower()
+    if pause_selection_mode not in {'simple', 'sparse'}:
+        raise ValueError(f'Unsupported rhythm_projector_pause_selection_mode: {pause_selection_mode}')
     return ProjectorConfig(
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
         max_speech_expand=float(hparams.get('rhythm_projector_max_speech_expand', 3.0)),
@@ -17,6 +34,13 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
         pause_train_soft=bool(hparams.get('rhythm_projector_pause_train_soft', True)),
         pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
+        pause_selection_mode=pause_selection_mode,
+        use_boundary_commit_guard=bool(
+            hparams.get('rhythm_projector_use_boundary_commit_guard', not strict_mainline)
+        ),
+        build_render_plan=bool(
+            hparams.get('rhythm_projector_build_render_plan', not strict_mainline)
+        ),
     )
 
 
@@ -25,6 +49,10 @@ def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
     explicit_runtime = hparams.get('rhythm_runtime_enable_learned_offline_teacher', None)
     if explicit_runtime is not None:
         return bool(explicit_runtime)
+
+    # Maintained strict mainline keeps runtime teacher branches off.
+    if _use_strict_mainline(hparams):
+        return False
 
     # Dual-mode branch requires the learned offline teacher runtime path.
     if bool(hparams.get('rhythm_enable_dual_mode_teacher', False)):

@@ -70,6 +70,7 @@ class ConanTask(AuxDecoderMIDITask):
         warnings = []
         target_mode = ConanTask._resolve_rhythm_target_mode()
         schedule_only = bool(hparams.get("rhythm_schedule_only_stage", False))
+        strict_mainline = ConanTask._use_rhythm_strict_mainline()
         distill_surface = str(hparams.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
         lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0))
         lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
@@ -80,6 +81,20 @@ class ConanTask(AuxDecoderMIDITask):
         lambda_cumplan = hparams.get("lambda_rhythm_cumplan", None)
         enable_dual_teacher = bool(hparams.get("rhythm_enable_dual_mode_teacher", False))
         enable_learned_offline_teacher = bool(hparams.get("rhythm_enable_learned_offline_teacher", True))
+        runtime_learned_teacher_override = hparams.get("rhythm_runtime_enable_learned_offline_teacher", None)
+        if strict_mainline:
+            if lambda_guidance > 0.0:
+                errors.append("rhythm_strict_mainline requires lambda_rhythm_guidance: 0.")
+            if lambda_distill > 0.0:
+                errors.append("rhythm_strict_mainline requires lambda_rhythm_distill: 0.")
+            if enable_dual_teacher:
+                errors.append("rhythm_strict_mainline requires rhythm_enable_dual_mode_teacher: false.")
+            if bool(hparams.get("rhythm_enable_algorithmic_teacher", False)):
+                errors.append("rhythm_strict_mainline requires rhythm_enable_algorithmic_teacher: false.")
+            if enable_learned_offline_teacher:
+                errors.append("rhythm_strict_mainline requires rhythm_enable_learned_offline_teacher: false.")
+            if runtime_learned_teacher_override is not None and bool(runtime_learned_teacher_override):
+                errors.append("rhythm_strict_mainline requires rhythm_runtime_enable_learned_offline_teacher: false.")
         retimed_target_mode = ConanTask._resolve_retimed_target_mode()
         use_retimed_pitch_target = bool(hparams.get("rhythm_use_retimed_pitch_target", False))
         disable_pitch_when_retimed = bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", True))
@@ -200,9 +215,13 @@ class ConanTask(AuxDecoderMIDITask):
             params.extend(list(self.model.rhythm_module.parameters()))
         if bool(hparams.get("rhythm_optimize_pause_state", False)) and getattr(self.model, "rhythm_pause_state", None) is not None:
             params.append(self.model.rhythm_pause_state)
-        if getattr(self.model, "rhythm_render_phase_mlp", None) is not None:
+        optimize_render_params = bool(hparams.get("rhythm_apply_train_override", False))
+        if not optimize_render_params:
+            apply_mode = str(hparams.get("rhythm_apply_mode", "infer") or "infer").strip().lower()
+            optimize_render_params = apply_mode in {"always", "all", "train", "training"}
+        if optimize_render_params and getattr(self.model, "rhythm_render_phase_mlp", None) is not None:
             params.extend(list(self.model.rhythm_render_phase_mlp.parameters()))
-        if getattr(self.model, "rhythm_render_phase_gain", None) is not None:
+        if optimize_render_params and getattr(self.model, "rhythm_render_phase_gain", None) is not None:
             params.append(self.model.rhythm_render_phase_gain)
         dedup = []
         seen = set()
@@ -327,6 +346,13 @@ class ConanTask(AuxDecoderMIDITask):
         if resolved not in {"auto", "none", "cache", "offline", "algorithmic"}:
             raise ValueError(f"Unsupported rhythm_distill_surface: {surface}")
         return resolved
+
+    @staticmethod
+    def _use_rhythm_strict_mainline() -> bool:
+        explicit = hparams.get("rhythm_strict_mainline", None)
+        if explicit is not None:
+            return bool(explicit)
+        return bool(hparams.get("rhythm_minimal_v1_profile", False))
 
     @staticmethod
     def _collect_rhythm_source_cache(sample, *, prefix: str = ""):
@@ -1070,6 +1096,60 @@ class ConanTask(AuxDecoderMIDITask):
         )
         return teacher_execution, targets
 
+    def _build_rhythm_mainline_targets(self, output, sample):
+        unit_batch = output.get("rhythm_unit_batch")
+        if unit_batch is None:
+            return None
+        primary_surface = self._resolve_rhythm_primary_target_surface()
+        pause_exec_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"
+        pause_budget_key = "rhythm_pause_budget_tgt" if "rhythm_pause_budget_tgt" in sample else "rhythm_blank_budget_tgt"
+        teacher_pause_key = (
+            "rhythm_teacher_pause_exec_tgt"
+            if "rhythm_teacher_pause_exec_tgt" in sample
+            else "rhythm_teacher_blank_exec_tgt"
+        )
+        teacher_pause_budget_key = (
+            "rhythm_teacher_pause_budget_tgt"
+            if "rhythm_teacher_pause_budget_tgt" in sample
+            else "rhythm_teacher_blank_budget_tgt"
+        )
+        if primary_surface == "teacher":
+            target_speech_key = "rhythm_teacher_speech_exec_tgt"
+            target_pause_key = teacher_pause_key
+            target_speech_budget_key = "rhythm_teacher_speech_budget_tgt"
+            target_pause_budget_key = teacher_pause_budget_key
+            sample_confidence = sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence"))
+        else:
+            target_speech_key = "rhythm_speech_exec_tgt"
+            target_pause_key = pause_exec_key
+            target_speech_budget_key = "rhythm_speech_budget_tgt"
+            target_pause_budget_key = pause_budget_key
+            sample_confidence = sample.get("rhythm_target_confidence")
+        required_keys = (
+            target_speech_key,
+            target_pause_key,
+            target_speech_budget_key,
+            target_pause_budget_key,
+        )
+        if not all(key in sample for key in required_keys):
+            return None
+        return RhythmLossTargets(
+            speech_exec_tgt=sample[target_speech_key],
+            pause_exec_tgt=sample[target_pause_key],
+            speech_budget_tgt=sample[target_speech_budget_key],
+            pause_budget_tgt=sample[target_pause_budget_key],
+            unit_mask=unit_batch.unit_mask,
+            dur_anchor_src=unit_batch.dur_anchor_src,
+            plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
+            plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            sample_confidence=sample_confidence,
+            distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
+            distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
+            distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
+            pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
+            feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+        )
+
     def _build_rhythm_loss_targets(self, output, sample):
         if "rhythm_execution" not in output or output["rhythm_execution"] is None:
             return None
@@ -1085,6 +1165,10 @@ class ConanTask(AuxDecoderMIDITask):
         use_distill_budget = use_distill and distill_budget_weight > 0.0
         use_distill_allocation = use_distill and distill_allocation_weight > 0.0
         use_distill_prefix = use_distill and distill_prefix_weight > 0.0
+        if self._use_rhythm_strict_mainline() and not use_guidance and not use_distill:
+            mainline_targets = self._build_rhythm_mainline_targets(output, sample)
+            if mainline_targets is not None:
+                return mainline_targets
         primary_surface = self._resolve_rhythm_primary_target_surface()
         distill_surface = self._resolve_rhythm_distill_surface()
         pause_exec_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"

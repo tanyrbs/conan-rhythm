@@ -131,11 +131,22 @@ class ConanRhythmAdapter(nn.Module):
             global_steps=int(global_steps),
             teacher=False,
         )
-        teacher_source_boundary_scale_override = self._resolve_source_boundary_scale(
-            infer=bool(infer),
-            global_steps=int(global_steps),
-            teacher=True,
+        runtime_teacher_enabled = bool(
+            getattr(
+                self.module,
+                "enable_learned_offline_teacher",
+                self.hparams.get("rhythm_enable_learned_offline_teacher", False),
+            )
         )
+        dual_mode_teacher_enabled = bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)) and not bool(infer)
+        algorithmic_teacher_enabled = bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)) and not bool(infer)
+        teacher_source_boundary_scale_override = None
+        if dual_mode_teacher_enabled or algorithmic_teacher_enabled:
+            teacher_source_boundary_scale_override = self._resolve_source_boundary_scale(
+                infer=bool(infer),
+                global_steps=int(global_steps),
+                teacher=True,
+            )
         if projector_pause_topk_ratio_override is not None:
             ret["rhythm_projector_pause_topk_ratio"] = torch.full(
                 (content.size(0), 1),
@@ -157,13 +168,6 @@ class ConanRhythmAdapter(nn.Module):
                 dtype=content_embed.dtype,
                 device=content.device,
             )
-        runtime_teacher_enabled = bool(
-            getattr(
-                self.module,
-                "enable_learned_offline_teacher",
-                self.hparams.get("rhythm_enable_learned_offline_teacher", False),
-            )
-        )
         rhythm_bundle = run_rhythm_frontend(
             rhythm_enable_v2=True,
             rhythm_unit_frontend=self.unit_frontend,
@@ -176,9 +180,9 @@ class ConanRhythmAdapter(nn.Module):
             rhythm_ref_conditioning=rhythm_ref_conditioning,
             rhythm_source_cache=rhythm_source_cache,
             rhythm_offline_source_cache=rhythm_offline_source_cache,
-            enable_dual_mode_teacher=bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)),
+            enable_dual_mode_teacher=dual_mode_teacher_enabled,
             enable_learned_offline_teacher=runtime_teacher_enabled,
-            enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
+            enable_algorithmic_teacher=algorithmic_teacher_enabled,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
