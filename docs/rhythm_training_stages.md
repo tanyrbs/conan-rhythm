@@ -27,10 +27,12 @@ Current state:
 - `scripts/preflight_rhythm_v2.py` can now fail fast on cache/config mismatches before training starts
 - preflight now also checks cached-only contract metadata, teacher/retimed surface identity, and whether `ConanDataset` filtering empties a split
 - optional `--model_dry_run` also checks dataset collation + one no-grad ConanTask forward before a long run
+- `scripts/cpu_probe_rhythm_train.py` now provides a stricter CPU-side mini-train probe (real batch collation + forward/backward + grad/param checks) before committing to a longer run
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 - projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
 - latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `dual_mode_kd`, and one-step `retimed_train`
+- latest local CPU probe also passed on the smoke bundle for `retimed_train` over 20 updates, with finite losses, finite clipped gradients, and non-zero parameter deltas on the content / rhythm-scheduler / decoder / pitch path
 
 ---
 

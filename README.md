@@ -64,6 +64,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - streaming metrics now track carry / backlog / blank-slot usage in addition to no-rollback deltas
 > - `scripts/smoke_test_rhythm_v2.py` now covers descriptor + stateful scheduler reuse
 > - current train-ready checks that now pass locally: `py_compile`, `scripts/smoke_test_rhythm_v2.py`, train-only `scripts/preflight_rhythm_v2.py --model_dry_run` for `schedule_only` / `dual_mode_kd` / `retimed_train`, one-step `schedule_only`, one-step `dual_mode_kd`, one-step `retimed_train`
+> - a new CPU mini-train probe is now available at `scripts/cpu_probe_rhythm_train.py`; the current local smoke run passed for `retimed_train` over 20 CPU updates with finite losses/gradients and observable parameter updates
 >
 > Still missing before claiming a full strong-rhythm training closure:
 >
@@ -339,6 +340,22 @@ Formal expectation:
 - `train` and `valid` must both pass raw cache inspection **and** survive `ConanDataset` filtering
 - repeat preflight with the exact config for each stage
 - the bundled smoke cache is only for structural sanity checks; if its `valid` split is intentionally filtered empty, use `--splits train` for smoke-only checks, but do not treat that as formal training readiness
+
+Before a real long run, you can also do a CPU mini-train probe on the same config:
+```bash
+python scripts/cpu_probe_rhythm_train.py \
+    --config egs/conan_emformer_rhythm_v2_retimed_train.yaml \
+    --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 \
+    --processed_data_dir data/processed/libritts_single \
+    --steps 20
+```
+
+What this probe checks:
+
+- real dataset collation + model forward/backward on CPU
+- loss decomposition (`L_base`, `L_rhythm_exec`, `L_stream_state`, `L_pitch`)
+- gradient finiteness and clipped gradient norm
+- whether representative parameters actually move
 
 Recommended formal path:
 
