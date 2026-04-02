@@ -172,6 +172,8 @@ def _resolve_expected_teacher_target_source_id(hp: dict) -> int:
 def _detect_stage(hp: dict, config_path: str) -> str:
     distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
     config_name = str(config_path).lower()
+    if bool(hp.get("rhythm_teacher_only_stage", False)) or "offline_teacher" in config_name or "teacher_only" in config_name:
+        return "offline_teacher"
     if (
         bool(hp.get("rhythm_apply_train_override", False))
         or bool(hp.get("rhythm_apply_valid_override", False))
@@ -306,6 +308,7 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     expected_teacher_source = _resolve_expected_teacher_target_source(hp)
     expected_teacher_surface = _resolve_expected_teacher_surface(hp)
     schedule_only = bool(hp.get("rhythm_schedule_only_stage", False))
+    strict_mainline = bool(hp.get("rhythm_strict_mainline", False))
     optimize_module_only = bool(hp.get("rhythm_optimize_module_only", False))
     lambda_distill = float(hp.get("lambda_rhythm_distill", 0.0))
     lambda_teacher_aux = float(hp.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)
@@ -413,7 +416,33 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         if missing_public:
             warnings.append(f"rhythm_public_losses is missing maintained mainline aliases: {missing_public}.")
 
-    if stage == "schedule_only":
+    if stage == "offline_teacher":
+        if strict_mainline:
+            warnings.append(
+                "offline_teacher is a teacher-asset build path; keep rhythm_strict_mainline=false for the maintained student mainline."
+            )
+        if not enable_learned_offline_teacher:
+            errors.append("offline_teacher stage requires rhythm_enable_learned_offline_teacher: true.")
+        if not runtime_offline_teacher_enable:
+            errors.append("offline_teacher stage requires runtime offline teacher branch enabled.")
+        if enable_dual:
+            errors.append("offline_teacher stage should keep rhythm_enable_dual_mode_teacher: false.")
+        if lambda_distill > 0.0:
+            errors.append("offline_teacher stage should keep lambda_rhythm_distill: 0.")
+        if lambda_teacher_aux > 0.0:
+            errors.append("offline_teacher stage should keep lambda_rhythm_teacher_aux: 0.")
+        if primary == "teacher":
+            errors.append(
+                "offline_teacher stage should not use rhythm_primary_target_surface: teacher; "
+                "bootstrap the teacher from guidance/self targets."
+            )
+        teacher_target_source = _resolve_expected_teacher_target_source(hp)
+        if teacher_target_source != "algorithmic":
+            warnings.append(
+                "offline_teacher stage does not consume learned_offline teacher caches; "
+                "prefer rhythm_teacher_target_source: algorithmic for clarity."
+            )
+    elif stage == "schedule_only":
         if target_mode != "cached_only":
             errors.append("Formal schedule-only stage should use rhythm_dataset_target_mode: cached_only.")
         if primary != "teacher":
@@ -492,7 +521,8 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             warnings.append("Teacher->student KD stage usually keeps rhythm_optimize_module_only: true for a short maintained stage-2 path.")
     elif stage == "dual_mode_kd":
         warnings.append(
-            "dual_mode_kd resolves to a legacy research path. Maintained chain is now schedule_only -> teacher_student_kd -> retimed_train."
+            "dual_mode_kd resolves to a legacy research path. Maintained student chain is now "
+            "schedule_only -> teacher_student_kd -> retimed_train; offline_teacher is a separate teacher-asset build path."
         )
         if not enable_dual:
             errors.append("Legacy dual-mode KD stage requires rhythm_enable_dual_mode_teacher: true.")
@@ -589,7 +619,8 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         if profile != "minimal_v1":
             warnings.append(
                 "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
-                "(schedule_only -> teacher_student_kd -> retimed_train, with dual_mode_kd kept only as a legacy research branch)."
+                "(offline_teacher -> teacher_student_kd -> retimed_train, with schedule_only kept as the pure cached-student warm start "
+                "and dual_mode_kd kept only as a legacy research branch)."
             )
         if (
             not enable_dual

@@ -5,6 +5,7 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 # while keeping training/runtime completely student-only.
 # This stage exists to sharpen the schedule before opening retimed acoustic closure;
 # it should not reintroduce any live runtime teacher dependency.
+# Requires exported learned_offline teacher assets to already be present in the cache build.
 rhythm_minimal_v1_profile: false
 rhythm_strict_mainline: true
 rhythm_schedule_only_stage: false

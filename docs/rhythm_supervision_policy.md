@@ -249,7 +249,8 @@ Maintained default:
 
 Maintained chain note:
 
-- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is the stage-1 formal entry (runtime learned teacher disabled)
+- `egs/conan_emformer_rhythm_v2_offline_teacher.yaml` is the offline teacher asset-build entry (runtime learned teacher enabled, no student KD, no acoustic path)
+- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is the stage-1 formal student entry (runtime learned teacher disabled)
 - `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, distillation kept on cached execution/prefix surfaces)
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as an optional legacy runtime-teacher branch
 - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stage-3 formal joint entry

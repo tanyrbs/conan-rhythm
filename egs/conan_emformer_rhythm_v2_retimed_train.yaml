@@ -3,6 +3,7 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 # Controlled experiment: train/valid on the retimed canvas as the formal joint stage.
 # Keep this separate from the conservative transitional main config.
 # This is the formal stage-3 entrypoint after schedule-only warmup.
+# Requires exported learned_offline teacher assets to already be present in the cache build.
 rhythm_minimal_v1_profile: false
 rhythm_strict_mainline: true
 rhythm_apply_train_override: true

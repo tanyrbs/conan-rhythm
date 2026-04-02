@@ -40,6 +40,30 @@ Current state:
 
 ---
 
+## Stage 0.5: Offline teacher asset build
+
+Goal:
+
+- train the learned offline planner teacher as a first-class model stage
+- export stable `learned_offline` teacher `.npz` assets before the maintained student chain
+
+Current recommendation:
+
+- use `egs/conan_emformer_rhythm_v2_offline_teacher.yaml`
+- keep this stage rhythm-only (`rhythm_teacher_only_stage: true`, no acoustic path)
+- bootstrap the teacher from cached guidance/self targets, not from teacher KD
+- export `{item_name}.teacher.npz` with `scripts/export_offline_teacher_assets.py`
+- point later student-stage binarization at that export directory via `rhythm_teacher_target_dir`
+
+Important contract:
+
+- this stage is **not** the maintained student mainline, so keep `rhythm_strict_mainline: false`
+- it should keep `rhythm_primary_target_surface: guidance`
+- it should keep runtime learned teacher enabled
+- it should keep dual-mode KD disabled
+
+---
+
 ## Stage 1: Reference-guided warm start
 
 Goal:

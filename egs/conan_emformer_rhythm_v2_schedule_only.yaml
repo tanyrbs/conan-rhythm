@@ -3,6 +3,7 @@ base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 # Stage-1 rhythm bootstrap: train the timing stack first.
 # This keeps supervision close to executed speech/pause + light budget / cumulative-plan,
 # and avoids letting acoustic losses dominate before schedule learning stabilizes.
+# Requires precomputed learned_offline teacher assets during cache build.
 rhythm_minimal_v1_profile: false
 rhythm_strict_mainline: true
 rhythm_schedule_only_stage: true

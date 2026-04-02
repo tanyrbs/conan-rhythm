@@ -1,0 +1,54 @@
+base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
+
+# Separate offline-teacher asset build.
+# Train the learned offline planner teacher directly from cached guidance/self targets,
+# then export learned_offline teacher surfaces for the student-only chain.
+rhythm_minimal_v1_profile: false
+rhythm_strict_mainline: false
+rhythm_teacher_only_stage: true
+rhythm_schedule_only_stage: false
+rhythm_optimize_module_only: true
+rhythm_fastpath_disable_acoustic_when_module_only: true
+rhythm_compact_joint_loss: false
+
+# Teacher asset build should stay fully offline/full-context and should not depend on
+# the runtime dual-mode branch or on teacher->student KD losses.
+rhythm_dataset_target_mode: cached_only
+rhythm_primary_target_surface: guidance
+rhythm_teacher_target_source: algorithmic
+rhythm_distill_surface: none
+rhythm_require_cached_teacher: false
+rhythm_enable_dual_mode_teacher: false
+rhythm_enable_learned_offline_teacher: true
+rhythm_runtime_enable_learned_offline_teacher: true
+rhythm_enable_algorithmic_teacher: false
+rhythm_dataset_build_teacher_from_ref: false
+rhythm_dataset_build_guidance_from_ref: false
+rhythm_binarize_teacher_targets: false
+rhythm_binarize_retimed_mel_targets: false
+rhythm_binarize_retimed_mel_source: guidance
+rhythm_use_retimed_target_if_available: false
+rhythm_require_retimed_cache: false
+rhythm_apply_train_override: false
+rhythm_apply_valid_override: false
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
+
+# Teacher training stays on the same executed surface contract.
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.0
+lambda_rhythm_teacher_aux: 0.0
+lambda_rhythm_exec_speech: 1.0
+lambda_rhythm_exec_pause: 1.0
+lambda_rhythm_budget: 0.08
+lambda_rhythm_cumplan: 0.12
+lambda_rhythm_plan: 0.0
+lambda_mel_adv: 0.0
+rhythm_pause_exec_boundary_boost: 0.75
+rhythm_pause_boundary_weight: 0.35
+rhythm_feasible_debt_weight: 0.05
+
+# Teacher asset build should stay rhythm-only.
+use_pitch_embed: false
+binarization_args:
+  with_f0: false

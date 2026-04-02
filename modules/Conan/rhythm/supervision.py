@@ -466,6 +466,50 @@ def _complete_learned_teacher_bundle(
     return with_blank_aliases(bundle)
 
 
+def build_learned_offline_teacher_bundle(
+    *,
+    speech_exec_tgt,
+    pause_exec_tgt,
+    dur_anchor_src,
+    unit_mask=None,
+    confidence: float | np.ndarray = 1.0,
+) -> dict[str, np.ndarray]:
+    dur_anchor_src = np.asarray(dur_anchor_src, dtype=np.float32).reshape(-1)
+    if unit_mask is None:
+        unit_mask = (dur_anchor_src > 0).astype(np.float32)
+    else:
+        unit_mask = np.asarray(unit_mask, dtype=np.float32).reshape(-1)
+    speech_exec = np.asarray(speech_exec_tgt, dtype=np.float32).reshape(-1)
+    pause_exec = np.asarray(pause_exec_tgt, dtype=np.float32).reshape(-1)
+    expected_units = int(dur_anchor_src.shape[0])
+    if speech_exec.shape[0] != expected_units or pause_exec.shape[0] != expected_units:
+        raise ValueError(
+            "build_learned_offline_teacher_bundle expects full-length unit surfaces: "
+            f"speech={speech_exec.shape[0]}, pause={pause_exec.shape[0]}, expected={expected_units}."
+        )
+    allocation = ((speech_exec + pause_exec) * unit_mask).astype(np.float32)
+    prefix_clock, prefix_backlog = _build_prefix_targets_from_exec_numpy(
+        speech_exec,
+        pause_exec,
+        dur_anchor_src,
+    )
+    confidence_value = float(np.asarray(confidence, dtype=np.float32).reshape(-1)[0])
+    return with_blank_aliases({
+        "rhythm_teacher_speech_exec_tgt": speech_exec.astype(np.float32),
+        "rhythm_teacher_pause_exec_tgt": pause_exec.astype(np.float32),
+        "rhythm_teacher_speech_budget_tgt": _sum_exec_budget(speech_exec),
+        "rhythm_teacher_pause_budget_tgt": _sum_exec_budget(pause_exec),
+        "rhythm_teacher_allocation_tgt": allocation,
+        "rhythm_teacher_prefix_clock_tgt": prefix_clock.astype(np.float32),
+        "rhythm_teacher_prefix_backlog_tgt": prefix_backlog.astype(np.float32),
+        "rhythm_teacher_confidence": np.asarray([confidence_value], dtype=np.float32),
+        "rhythm_teacher_surface_name": np.asarray([RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME], dtype=np.str_),
+        "rhythm_teacher_target_source_id": np.asarray(
+            [RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE], dtype=np.int64
+        ),
+    })
+
+
 def _resample_segment(segment: torch.Tensor, target_len: int) -> torch.Tensor:
     if target_len <= 0:
         return segment.new_zeros((0, segment.size(-1)))

@@ -50,7 +50,17 @@ class ConanTask(AuxDecoderMIDITask):
     def build_tts_model(self):
         # dict_size = len(self.token_encoder)
         self.model = Conan(0, hparams)
-        if bool(hparams.get("rhythm_optimize_module_only", False)):
+        teacher_only_stage = bool(hparams.get("rhythm_teacher_only_stage", False))
+        if teacher_only_stage:
+            teacher_params = self._collect_offline_teacher_gen_params()
+            if len(teacher_params) > 0:
+                trainable_param_ids = {id(param) for param in teacher_params}
+                for param in self.model.parameters():
+                    param.requires_grad = id(param) in trainable_param_ids
+                self.gen_params = [param for param in teacher_params if param.requires_grad]
+            else:
+                self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+        elif bool(hparams.get("rhythm_optimize_module_only", False)):
             rhythm_params = self._collect_rhythm_gen_params()
             if len(rhythm_params) > 0:
                 trainable_param_ids = {id(param) for param in rhythm_params}
@@ -70,6 +80,7 @@ class ConanTask(AuxDecoderMIDITask):
         warnings = []
         target_mode = ConanTask._resolve_rhythm_target_mode()
         schedule_only = bool(hparams.get("rhythm_schedule_only_stage", False))
+        teacher_only_stage = bool(hparams.get("rhythm_teacher_only_stage", False))
         strict_mainline = ConanTask._use_rhythm_strict_mainline()
         distill_surface = ConanTask._resolve_rhythm_distill_surface()
         lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0))
@@ -208,6 +219,47 @@ class ConanTask(AuxDecoderMIDITask):
             errors.append(
                 "rhythm_min_unit_frames has been removed from the maintained rhythm path; delete the key or implement it explicitly before training."
             )
+        if teacher_only_stage:
+            if schedule_only:
+                errors.append("rhythm_teacher_only_stage is incompatible with rhythm_schedule_only_stage.")
+            if strict_mainline:
+                warnings.append(
+                    "rhythm_teacher_only_stage is a teacher-asset build path; keep rhythm_strict_mainline=false "
+                    "and do not treat it as the maintained student mainline."
+                )
+            if not enable_learned_offline_teacher:
+                errors.append("rhythm_teacher_only_stage requires rhythm_enable_learned_offline_teacher: true.")
+            if runtime_learned_teacher_override is False:
+                errors.append(
+                    "rhythm_teacher_only_stage requires rhythm_runtime_enable_learned_offline_teacher to resolve true."
+                )
+            if enable_dual_teacher:
+                errors.append("rhythm_teacher_only_stage should not enable rhythm_enable_dual_mode_teacher.")
+            if lambda_distill > 0.0:
+                errors.append("rhythm_teacher_only_stage should keep lambda_rhythm_distill: 0.")
+            if lambda_guidance > 0.0:
+                warnings.append(
+                    "rhythm_teacher_only_stage usually trains directly on cached guidance/self targets; "
+                    "lambda_rhythm_guidance > 0 is rarely needed."
+                )
+            if lambda_teacher_aux > 0.0:
+                errors.append("rhythm_teacher_only_stage should keep lambda_rhythm_teacher_aux: 0.")
+            if ConanTask._resolve_rhythm_primary_target_surface() == "teacher":
+                errors.append(
+                    "rhythm_teacher_only_stage should not use rhythm_primary_target_surface: teacher; "
+                    "bootstrap the offline teacher from guidance/self targets instead."
+                )
+            teacher_source = str(hparams.get("rhythm_teacher_target_source", "algorithmic") or "algorithmic").strip().lower()
+            if teacher_source not in {"algorithmic", "algo", "heuristic", "legacy", "rule", "rules"}:
+                warnings.append(
+                    "rhythm_teacher_only_stage does not consume learned_offline teacher caches; "
+                    "prefer rhythm_teacher_target_source: algorithmic for clarity."
+                )
+            if ConanTask._resolve_rhythm_target_mode() == "runtime_only":
+                warnings.append(
+                    "rhythm_teacher_only_stage with rhythm_dataset_target_mode=runtime_only weakens reproducibility; "
+                    "prefer cached_only or prefer_cache."
+                )
         if errors:
             raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(errors))
         if warnings:
@@ -231,6 +283,31 @@ class ConanTask(AuxDecoderMIDITask):
             params.extend(list(self.model.rhythm_render_phase_mlp.parameters()))
         if optimize_render_params and getattr(self.model, "rhythm_render_phase_gain", None) is not None:
             params.append(self.model.rhythm_render_phase_gain)
+        dedup = []
+        seen = set()
+        for param in params:
+            if param is None or not getattr(param, "requires_grad", False):
+                continue
+            key = id(param)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(param)
+        return dedup
+
+    def _collect_offline_teacher_gen_params(self):
+        if self.model is None or not getattr(self.model, "rhythm_enable_v2", False):
+            return []
+        rhythm_module = getattr(self.model, "rhythm_module", None)
+        if rhythm_module is None:
+            return []
+        params = []
+        if getattr(rhythm_module, "unit_embedding", None) is not None:
+            params.extend(list(rhythm_module.unit_embedding.parameters()))
+        if getattr(rhythm_module, "reference_descriptor", None) is not None:
+            params.extend(list(rhythm_module.reference_descriptor.parameters()))
+        if getattr(rhythm_module, "offline_teacher", None) is not None:
+            params.extend(list(rhythm_module.offline_teacher.parameters()))
         dedup = []
         seen = set()
         for param in params:
@@ -779,6 +856,98 @@ class ConanTask(AuxDecoderMIDITask):
             random_tech = torch.rand_like(tech, dtype=torch.float32)
             tech[random_tech < drop_p] = 2
         return tech
+
+    def _run_offline_teacher_model(self, sample, *, infer: bool, test: bool, **kwargs):
+        if infer or test:
+            return None
+        if not getattr(self.model, "rhythm_enable_v2", False):
+            return None
+        rhythm_module = getattr(self.model, "rhythm_module", None)
+        if rhythm_module is None or getattr(rhythm_module, "offline_teacher", None) is None:
+            raise RuntimeError(
+                "rhythm_teacher_only_stage requires the learned offline teacher runtime branch to be instantiated."
+            )
+        source_cache = self._collect_rhythm_source_cache(sample)
+        if source_cache is None:
+            raise RuntimeError("rhythm_teacher_only_stage requires cached source-unit fields in the batch.")
+        unit_batch = self.model.rhythm_unit_frontend.from_precomputed(
+            content_units=source_cache["content_units"],
+            dur_anchor_src=source_cache["dur_anchor_src"],
+            unit_mask=source_cache.get("unit_mask"),
+            open_run_mask=source_cache.get("open_run_mask"),
+            sealed_mask=source_cache.get("sealed_mask"),
+            sep_hint=source_cache.get("sep_hint"),
+            boundary_confidence=source_cache.get("boundary_confidence"),
+        )
+        rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
+        if rhythm_ref_conditioning is None:
+            ref_stats = sample.get("ref_rhythm_stats")
+            ref_trace = sample.get("ref_rhythm_trace")
+            if ref_stats is None or ref_trace is None:
+                raise RuntimeError("rhythm_teacher_only_stage requires ref_rhythm_stats and ref_rhythm_trace.")
+            rhythm_ref_conditioning = {
+                "ref_rhythm_stats": ref_stats,
+                "ref_rhythm_trace": ref_trace,
+            }
+            for extra_key in (
+                "slow_rhythm_memory",
+                "slow_rhythm_summary",
+                "selector_meta_indices",
+                "selector_meta_scores",
+                "selector_meta_starts",
+                "selector_meta_ends",
+            ):
+                extra_value = sample.get(extra_key)
+                if extra_value is not None:
+                    rhythm_ref_conditioning[extra_key] = extra_value
+        teacher_scale = self.model._resolve_rhythm_source_boundary_scale(
+            infer=False,
+            global_steps=int(self.global_step),
+            teacher=True,
+        )
+        pause_ratio = self.model._resolve_rhythm_pause_topk_ratio(
+            infer=False,
+            global_steps=int(self.global_step),
+        )
+        execution, confidence = rhythm_module.forward_teacher(
+            content_units=unit_batch.content_units,
+            dur_anchor_src=unit_batch.dur_anchor_src,
+            ref_conditioning=rhythm_ref_conditioning,
+            unit_mask=unit_batch.unit_mask,
+            open_run_mask=torch.zeros_like(unit_batch.content_units),
+            sealed_mask=torch.ones_like(unit_batch.unit_mask).float(),
+            sep_hint=unit_batch.sep_hint,
+            boundary_confidence=unit_batch.boundary_confidence,
+            projector_pause_topk_ratio_override=pause_ratio,
+            source_boundary_scale_override=teacher_scale,
+        )
+        output = {
+            "rhythm_execution": execution,
+            "rhythm_unit_batch": unit_batch,
+            "disable_acoustic_train_path": 1.0,
+            "rhythm_schedule_only_stage": 0.0,
+            "rhythm_teacher_only_stage": 1.0,
+            "rhythm_offline_confidence": confidence.get("overall") if isinstance(confidence, dict) else None,
+            "rhythm_offline_confidence_exec": confidence.get("exec") if isinstance(confidence, dict) else None,
+            "rhythm_offline_confidence_budget": confidence.get("budget") if isinstance(confidence, dict) else None,
+            "rhythm_offline_confidence_prefix": confidence.get("prefix") if isinstance(confidence, dict) else None,
+            "rhythm_offline_confidence_allocation": confidence.get("allocation") if isinstance(confidence, dict) else None,
+        }
+        planner = getattr(execution, "planner", None)
+        if planner is not None:
+            for attr_name in (
+                "feasible_speech_budget_delta",
+                "feasible_pause_budget_delta",
+                "feasible_total_budget_delta",
+            ):
+                attr_value = getattr(planner, attr_name, None)
+                if attr_value is not None:
+                    output[attr_name] = attr_value
+        losses = {}
+        self.add_rhythm_loss(output, sample, losses)
+        self._compact_rhythm_optimizer_losses(losses, schedule_only_stage=False)
+        self._update_public_loss_aliases(losses)
+        return losses, output
             
     def run_model(self, sample, infer=False, test=False, **kwargs):
         # txt_tokens = sample["txt_tokens"]
@@ -854,6 +1023,15 @@ class ConanTask(AuxDecoderMIDITask):
                     extra_value = sample.get(extra_key)
                     if extra_value is not None:
                         rhythm_ref_conditioning[extra_key] = extra_value
+        if bool(hparams.get("rhythm_teacher_only_stage", False)):
+            teacher_only_result = self._run_offline_teacher_model(
+                sample,
+                infer=infer,
+                test=test,
+                rhythm_ref_conditioning=rhythm_ref_conditioning,
+            )
+            if teacher_only_result is not None:
+                return teacher_only_result
         # assert False, f'content: {content.shape}, target: {target.shape},spk_embed: {spk_embed.shape}'
         # if not infer:
         #     tech_drop = {

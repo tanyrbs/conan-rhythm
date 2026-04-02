@@ -18,6 +18,7 @@ from modules.Conan.rhythm.supervision import (
     RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC,
     RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE,
     build_item_rhythm_bundle,
+    build_learned_offline_teacher_bundle,
     build_reference_guided_targets,
     build_reference_teacher_targets,
     build_retimed_mel_target,
@@ -322,6 +323,12 @@ if __name__ == '__main__':
         teacher_target_source="learned_offline",
         teacher_bundle_override=learned_teacher_override,
     )
+    exported_learned_bundle = build_learned_offline_teacher_bundle(
+        speech_exec_tgt=learned_bundle["rhythm_teacher_speech_exec_tgt"],
+        pause_exec_tgt=learned_bundle["rhythm_teacher_pause_exec_tgt"],
+        dur_anchor_src=learned_bundle["dur_anchor_src"],
+        confidence=learned_bundle["rhythm_teacher_confidence"],
+    )
     metrics = build_rhythm_metric_dict(
         {
             "rhythm_execution": out1,
@@ -439,6 +446,8 @@ if __name__ == '__main__':
     assert _scalar_str(cached_bundle["rhythm_retimed_target_surface_name"]) == RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME
     assert _scalar_str(learned_bundle["rhythm_teacher_surface_name"]) == RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
     assert int(learned_bundle["rhythm_teacher_target_source_id"][0]) == int(RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE)
+    assert _scalar_str(exported_learned_bundle["rhythm_teacher_surface_name"]) == RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
+    assert int(exported_learned_bundle["rhythm_teacher_target_source_id"][0]) == int(RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE)
     assert int(learned_bundle["rhythm_retimed_target_source_id"][0]) == int(RHYTHM_RETIMED_SOURCE_TEACHER)
     assert _scalar_str(learned_bundle["rhythm_retimed_target_surface_name"]) == RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
     assert "rhythm_teacher_prefix_clock_tgt" in learned_bundle
