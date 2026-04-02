@@ -273,13 +273,24 @@ class StreamingRhythmProjector(nn.Module):
         for batch_idx in range(batch_size):
             prev = int(state.commit_frontier[batch_idx].item())
             curr = int(commit_frontier[batch_idx].item())
+            prev_phase = state.phase_ptr[batch_idx].float().clamp(0.0, 1.0)
+            prev_phase_progress = next_phase_progress[batch_idx].float().clamp_min(0.0)
+            prev_phase_total = next_phase_total[batch_idx].float().clamp_min(1.0)
             visible_anchor = dur_anchor_src[batch_idx].float().clamp_min(0.0)
             visible_anchor_total = visible_anchor.sum().clamp_min(1.0)
             committed_anchor = visible_anchor[:curr].sum()
-            next_phase_progress[batch_idx] = committed_anchor
-            next_phase_total[batch_idx] = visible_anchor_total
-            next_phase[batch_idx] = (committed_anchor / visible_anchor_total).clamp(0.0, 1.0)
+            # phase_ptr tracks committed progress, not current visible-prefix ratio.
+            # Keep both progress and denominator monotonic to avoid phase rollback/jitter.
+            monotonic_phase_progress = torch.maximum(prev_phase_progress, committed_anchor)
+            monotonic_phase_total = torch.maximum(prev_phase_total, visible_anchor_total)
+            raw_phase = (monotonic_phase_progress / monotonic_phase_total).clamp(0.0, 1.0)
+            next_phase_progress[batch_idx] = monotonic_phase_progress
+            next_phase_total[batch_idx] = monotonic_phase_total
+            next_phase[batch_idx] = torch.maximum(prev_phase, raw_phase)
             if curr <= prev:
+                next_phase_progress[batch_idx] = prev_phase_progress
+                next_phase_total[batch_idx] = prev_phase_total
+                next_phase[batch_idx] = prev_phase
                 continue
             exec_prefix = effective_duration_exec[batch_idx, prev:curr].sum()
             src_prefix = dur_anchor_src[batch_idx, prev:curr].float().sum()

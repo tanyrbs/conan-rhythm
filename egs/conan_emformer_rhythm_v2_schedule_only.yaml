@@ -7,13 +7,22 @@ rhythm_minimal_v1_profile: false
 rhythm_schedule_only_stage: true
 rhythm_optimize_module_only: true
 rhythm_optimize_pause_state: false
+rhythm_compact_joint_loss: false
 
 # Stage-1 is the first maintained formal config in the chain.
 rhythm_streaming_prefix_train: true
 rhythm_streaming_prefix_min_ratio: 0.45
 rhythm_streaming_prefix_max_ratio: 0.75
+rhythm_prefix_tail_open_units: 1
+rhythm_strict_content_mel_contract: true
+rhythm_content_mel_tolerance: 0
 rhythm_enable_algorithmic_teacher: false
 rhythm_enable_dual_mode_teacher: false
+lambda_rhythm_budget: 0.05
+lambda_rhythm_cumplan: 0.12
+lambda_rhythm_plan: 0.0
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.0
 lambda_mel_adv: 0.0
 
 # Warm-start the projector with a fixed learning rate; long warmup makes the tiny schedule losses move too slowly.

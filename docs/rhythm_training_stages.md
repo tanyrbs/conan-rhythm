@@ -27,6 +27,7 @@ Current state:
 - preflight now also checks cached-only contract metadata, teacher/retimed surface identity, and whether `ConanDataset` filtering empties a split
 - optional `--model_dry_run` also checks dataset collation + one no-grad ConanTask forward before a long run
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
+- projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 
 ---
 
@@ -45,11 +46,9 @@ Current supervision surface:
 - `rhythm_speech_budget_tgt`
 - `rhythm_pause_budget_tgt`
 - `rhythm_blank_budget_tgt` (cache/internal compatibility alias)
-- `rhythm_guidance_speech_tgt`
-- `rhythm_guidance_pause_tgt`
-- `rhythm_guidance_blank_tgt`
-- cached source phrase metadata (`source_boundary_cue`, `phrase_group_*`)
-- cached slow-rhythm selector outputs (`slow_rhythm_memory`, `selector_meta_*`)
+- `rhythm_target_confidence`
+- optional `rhythm_guidance_*` targets only when guidance ablations are active
+- source phrase metadata / selector outputs should stay in debug sidecars, not the default runtime batch
 
 This stage is suitable for structural training, but it is not the final ceiling.
 
@@ -64,7 +63,9 @@ Current recommendation:
   - `L_exec_speech`
   - `L_exec_pause`
   - light `L_budget`
-  - light `L_cumplan`
+  - light `L_prefix_state`
+- no extra KD/guidance/proxy losses in the maintained stage-1 default
+- prefix-cropped training views should keep truncated tails open/unsealed for realistic streaming semantics
 
 ---
 
@@ -98,15 +99,14 @@ Optional ablation-only field:
 
 Important terminology note:
 
-- the repository currently has a stronger **offline teacher surface**
-- it now also has a **dual-mode schedule teacher skeleton**
-  - streaming branch = stateful projector path
-  - offline branch = full-horizon / no-prefix-reuse projector pass
-  - algorithmic teacher = explicit schedule bootstrap
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the formal stage-2 config
-- formal stage-2 intentionally still inherits the stage-1 schedule-only scaffold (`rhythm_schedule_only_stage: true`, `rhythm_optimize_module_only: true`)
-- it still does **not** yet have a true learned non-causal offline teacher model
-- docs and experiments should keep that distinction explicit
+- the repository now has a learned **non-causal offline planner teacher**
+- dual-mode schedule KD now means:
+  - streaming branch = causal student scheduler + shared projector contract
+  - offline branch = non-causal planner teacher + shared projector contract
+  - algorithmic teacher = explicit bootstrap / fallback surface
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is an optional stage-2 branch config
+- docs and experiments should still keep the distinction explicit: learned offline teacher is stronger than student replay, but it is still a planner teacher, not a second acoustic model
+- maintained default training chain does **not** require this stage; prefer teacher-first target surfaces before adding KD losses
 
 ---
 
@@ -134,11 +134,12 @@ Current bridge step already in repo:
 - binarizer can cache a first-pass `rhythm_retimed_mel_tgt`
 - cached retimed targets now also carry a per-frame confidence / weight surface
 - cached retimed targets now also carry source identity / cache-contract metadata
-- task code can switch mel reconstruction target to that cached retimed target when train-time rhythm rendering is enabled
-- task code now resolves `rhythm_apply_mode` and retimed acoustic targets from the same flag, so train/test render and target selection no longer drift apart
+- projector now emits the shared frame plan that renderer + online retimed supervision both consume
+- task code now resolves `rhythm_apply_mode` and retimed acoustic targets after model forward, so current execution can drive `cached` / `online` / `hybrid` target selection
 - cached-only retimed training now fails fast if retimed cache is required but missing or mismatched
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
-- until dedicated retimed pitch targets exist, stage-3 disables source-aligned pitch supervision automatically to avoid shape-mismatch and train/infer drift
+- online retimed bundle can now also build F0/UV targets from the same frame plan; if that path is disabled or unavailable, source-aligned pitch supervision is automatically gated off
+- mel GAN should stay disabled on the retimed canvas unless real/fake targets are explicitly aligned to the same acoustic canvas
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
 - rhythm cache contract is now versioned at `rhythm_cache_version: 4`
@@ -147,7 +148,7 @@ Current bridge step already in repo:
 - `rhythm_valid_render_start_steps`
 - `rhythm_retimed_target_start_steps`
 - a staged experiment config is now provided at `egs/conan_emformer_rhythm_v2_retimed_train.yaml`
-- that stage now explicitly inherits `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` and is the first formal joint stage that turns `rhythm_schedule_only_stage: false`
+- that stage may inherit the dual-mode KD scaffold for convenience, but it is the first formal joint stage and does not require KD to be enabled
 - a stricter cached-only warm-start config is now provided at `egs/conan_emformer_rhythm_v2_cached_only.yaml`
 
 Recommended future config direction after retimed targets exist:
@@ -155,7 +156,8 @@ Recommended future config direction after retimed targets exist:
 - enable train-time retimed rendering explicitly
 - keep `L_base` as the outer acoustic objective
 - keep the main timing path on executed speech/pause + light budget / cumulative-plan guardrail
-- keep KD focused on executed speech/pause plus optional prefix carry
+- keep optimizer view compact in joint mode: `L_base + L_rhythm_exec + L_stream_state (+ optional L_pitch)`
+- keep KD focused on executed speech/pause plus optional prefix carry + tiny budget only when explicitly enabled
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 - treat scheduler outputs as debug/regression tensors, and treat projector execution as the real maintained contract
 
@@ -185,8 +187,8 @@ As of 2026-04-01:
 
 The two biggest remaining milestones are:
 
-1. a stronger offline teacher
-2. decoder-side retimed training
+1. stronger empirical proof that the learned offline teacher beats bootstrap/student-replay baselines in real runs
+2. stronger empirical proof that retimed decoder closure remains stable beyond smoke / dry-run coverage
 
 ## Current task focus
 
@@ -195,15 +197,15 @@ Right now the repository should focus on:
 1. projector-centric timing supervision
 2. schedule-only warm start before joint acoustic finetune
 3. cached-only reproducibility
-4. dual-mode schedule KD on the same projector contract
-5. retimed train/infer closure
-6. streaming regression hardening
+4. retimed train/infer closure
+5. streaming regression hardening
+6. optional dual-mode schedule KD branch experiments (not default maintained path)
 
 ## Future expansion
 
 After the current stage is stable, expand in this order:
 
-1. stronger offline teacher / dual-mode distillation
+1. stronger offline teacher / dual-mode distillation evidence
 2. richer rhythm-specific evaluation
 3. progressive reference streaming
 4. optional finer-grained micro-timing refinement

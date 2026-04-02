@@ -38,14 +38,16 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - the maintained descriptor is an explicit baseline descriptor, not a final expressive prosody encoder
 > - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
 > - trace sampling uses a fixed progress horizon with anchor-progress phase updates
+> - `phase_ptr` is maintained as **committed-progress state** (monotonic, no rollback on visible-prefix growth), not as a naive visible-prefix ratio
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`, but this sidecar is kept as a soft prior instead of a public control head
 > - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
-> - explicit blank-slot scheduling is now public: projector / renderer / loss all use the same interleaved blank-slot graph
-> - renderer now also exports frame-level blank masks plus slot/unit indices for debugging and retimed training hooks
+> - projector now also emits a shared frame plan, so renderer and online/hybrid retimed supervision consume the same frame map
+> - renderer now exports frame-level blank masks, slot/unit indices, source-frame indices, and phase features for debugging plus retimed training hooks
 > - the renderer is still deterministic/hard-expanded, but it now carries minimal phase features so long stretched slots are not rendered as pure flat repeats
 > - reference cache can also carry slow-rhythm memory cells, selector spans, and source-side phrase-group metadata, but these are treated as sidecars instead of the maintained runtime-minimal contract
-> - dataset / loss path already reserves guidance and distillation fields
+> - dataset/runtime batch now exports stage-needed rhythm targets instead of always materializing the full cache sidecar into every sample
 > - dataset can now prefer offline cached rhythm targets instead of always regenerating runtime heuristics
+> - when prefix views are reconstructed from cached source units, truncated tails are kept `open/unsealed` instead of being forced fully closed
 > - cached teacher surfaces now also carry allocation + prefix carry targets
 > - runtime/batch targets now prefer `rhythm_pause_*`; `rhythm_blank_*` remains a cache/internal compatibility alias
 > - an optional `rhythm_plan` proxy remains available for ablations, but the mainline now keeps it disabled by default
@@ -66,11 +68,11 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 >
 > - the default main config still keeps train/valid decoder reconstruction on the source-aligned canvas
 > - test/inference already uses the retimed rhythm execution path
-> - train-time retimed rendering should only be enabled after retimed acoustic targets are prepared
-> - the binarizer can now cache a first-pass `rhythm_retimed_mel_tgt` built from cached rhythm targets
+> - train-time retimed rendering should still be staged in, but the task now supports cached / online / hybrid retimed acoustic targets on the same frame plan
+> - the binarizer still caches a first-pass `rhythm_retimed_mel_tgt`, while train-time online retimed targets now come from the current execution frame plan
 > - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but disable the heavier local style/prosody adaptor path entirely
 > - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as executed speech/pause supervision + light budget + cumulative-plan guardrail + light `L_base`
-> - when train/valid switch to the retimed canvas, source-aligned pitch supervision is automatically disabled unless retimed pitch targets are introduced later
+> - when train/valid switch to the retimed canvas, the task now prefers retimed pitch targets; if those are disabled or unavailable, source-aligned pitch supervision is automatically gated off
 > - staged rollout knobs now exist for future train-time retimed experiments:
 >   - `rhythm_train_render_start_steps`
 >   - `rhythm_valid_render_start_steps`
@@ -83,8 +85,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is the maintained formal base config
 > - `egs/conan_emformer_rhythm_v2_cached_only.yaml` is kept as a legacy alias to that base
 > - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is now the formal cached-only stage-1 schedule config
-> - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the formal stage-2 schedule distillation config
-> - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config
+> - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` remains an optional stage-2 KD branch, not the default maintained training path
+> - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config and the formal joint-training entry
 > - cached-only experiments now validate a stricter rhythm cache contract (`rhythm_cache_version: 4`)
 > - current cached targets are self-conditioned surfaces, so cache-based rhythm conditioning defaults to `rhythm_cached_reference_policy: self`
 >
@@ -98,7 +100,6 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - projector-centric timing supervision
 > - projector-space public contract (`speech_exec`, `pause_exec`, `commit_frontier`, `next_state`)
 > - cached-only reproducibility
-> - dual-mode teacher/student schedule distillation
 > - schedule-only warm-start support (`egs/conan_emformer_rhythm_v2_schedule_only.yaml`)
 > - retimed train/infer closure
 > - stronger streaming regression
@@ -202,8 +203,9 @@ If rhythm cache generation is enabled, the binarizer can additionally cache:
 Keep the cache / batch schema layered:
 
 - runtime-minimal contract: `content_units`, `dur_anchor_src`, `ref_rhythm_stats`, `ref_rhythm_trace`
-- debug sidecars: source phrase cues, offline prefix views, selector spans, streaming prefix stats
-- cache/audit bundle: cache version, hop/trace contract, confidence, retimed source metadata
+- runtime-target contract: executed speech/pause targets, light budget targets, stage-needed confidence / teacher / retimed targets
+- streaming/offline sidecars: offline source-cache views plus streaming prefix counters, only when dual-mode / prefix sampling actually needs them
+- debug/cache appendix: source phrase cues, selector spans, cache version, hop/trace contract, retimed source metadata
 
 Example:
 ```text
@@ -257,6 +259,7 @@ For formal Rhythm V2 experiments:
 - use the cached-only config for binarization
 - prefer the maintained `minimal_v1` base when starting a new formal training chain
 - keep `rhythm_binarize_teacher_targets: true`
+- treat teacher surfaces as the preferred **target source**; do not assume KD is required in the default training chain
 - re-binarize whenever `rhythm_cache_version` changes
 - treat `prefer_cache` only as a migration/debug mode
 
@@ -267,7 +270,7 @@ Update the configuration files in `egs/` directory to match your dataset:
 - `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`: maintained formal base config
 - `egs/conan_emformer_rhythm_v2_cached_only.yaml`: legacy alias to the maintained formal base
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml`: formal stage-1 schedule warm-start
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: formal stage-2 dual-mode schedule KD
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: optional stage-2 dual-mode schedule KD branch
 - `egs/conan_emformer_rhythm_v2_retimed_train.yaml`: retimed acoustic training stage
 - `egs/conan_emformer.yaml`: legacy / baseline main training configuration
 - `egs/emformer.yaml`: Emformer training configuration
@@ -326,8 +329,11 @@ Formal expectation:
 Recommended formal path:
 
 1. `schedule_only`
-2. `dual_mode_kd`
-3. `retimed_train`
+2. `retimed_train`
+
+Optional branch:
+
+- insert `dual_mode_kd` between stage-1 and stage-2 when explicitly running KD experiments
 
 Transitional warm-start:
 ```bash

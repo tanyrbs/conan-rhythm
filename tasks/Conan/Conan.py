@@ -66,6 +66,9 @@ class ConanTask(AuxDecoderMIDITask):
         distill_surface = str(hparams.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
         lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0))
         lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
+        distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        distill_allocation_weight = float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+        distill_prefix_weight = float(hparams.get("rhythm_distill_prefix_weight", 0.25))
         lambda_carry = hparams.get("lambda_rhythm_carry", None)
         lambda_cumplan = hparams.get("lambda_rhythm_cumplan", None)
         enable_dual_teacher = bool(hparams.get("rhythm_enable_dual_mode_teacher", False))
@@ -162,6 +165,15 @@ class ConanTask(AuxDecoderMIDITask):
             )
         if lambda_guidance > 0.0 and schedule_only:
             warnings.append("lambda_rhythm_guidance > 0 during schedule-only stage increases migration-path complexity.")
+        if enable_dual_teacher or bool(hparams.get("rhythm_apply_train_override", False)):
+            if lambda_guidance > 0.0:
+                warnings.append("Maintained dual-mode/retimed path recommends lambda_rhythm_guidance: 0.")
+            if distill_allocation_weight > 0.0:
+                warnings.append("Maintained dual-mode/retimed path recommends rhythm_distill_allocation_weight: 0.")
+            if distill_budget_weight > 0.15:
+                warnings.append("Maintained dual-mode/retimed path recommends a tiny rhythm_distill_budget_weight (<= 0.15).")
+            if distill_prefix_weight <= 0.0 and lambda_distill > 0.0:
+                warnings.append("Dual-mode distillation without prefix supervision is weaker than the maintained path.")
         if "rhythm_min_unit_frames" in hparams:
             errors.append(
                 "rhythm_min_unit_frames has been removed from the maintained rhythm path; delete the key or implement it explicitly before training."
@@ -575,12 +587,108 @@ class ConanTask(AuxDecoderMIDITask):
         losses["L_cumplan"] = cumplan.detach() if isinstance(cumplan, torch.Tensor) else zero
         losses["L_prefix_state"] = losses["L_cumplan"]
         losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
-        base = zero
+        rhythm_exec = losses.get("rhythm_exec")
+        losses["L_rhythm_exec"] = rhythm_exec.detach() if isinstance(rhythm_exec, torch.Tensor) else zero
+        stream_state = losses.get("rhythm_stream_state")
+        losses["L_stream_state"] = stream_state.detach() if isinstance(stream_state, torch.Tensor) else zero
+        pitch_value = losses.get("pitch")
+        if not isinstance(pitch_value, torch.Tensor):
+            pitch_value = zero
+            for loss_name in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
+                value = losses.get(loss_name)
+                if isinstance(value, torch.Tensor):
+                    pitch_value = pitch_value + value.detach()
+        else:
+            pitch_value = pitch_value.detach()
+        losses["L_pitch"] = pitch_value
+        losses["L_distill_exec"] = losses.get("rhythm_distill_exec", zero).detach() if isinstance(losses.get("rhythm_distill_exec"), torch.Tensor) else zero
+        losses["L_distill_budget"] = losses.get("rhythm_distill_budget", zero).detach() if isinstance(losses.get("rhythm_distill_budget"), torch.Tensor) else zero
+        losses["L_distill_prefix"] = losses.get("rhythm_distill_prefix", zero).detach() if isinstance(losses.get("rhythm_distill_prefix"), torch.Tensor) else zero
+        base_value = losses.get("base")
+        if isinstance(base_value, torch.Tensor):
+            base = base_value.detach()
+        else:
+            base = zero
+            for loss_name in self.mel_losses.keys():
+                value = losses.get(loss_name)
+                if isinstance(value, torch.Tensor):
+                    base = base + value.detach()
+        losses["L_base"] = base
+
+    @staticmethod
+    def _detach_loss_value(losses, key):
+        value = losses.get(key)
+        if isinstance(value, torch.Tensor):
+            losses[key] = value.detach()
+        return value
+
+    def _compact_base_optimizer_losses(self, losses, *, schedule_only_stage: bool):
+        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
+            return
+        base_terms = []
+        base_keys = []
         for loss_name in self.mel_losses.keys():
             value = losses.get(loss_name)
             if isinstance(value, torch.Tensor):
-                base = base + value.detach()
-        losses["L_base"] = base
+                base_keys.append(loss_name)
+                if value.requires_grad:
+                    base_terms.append(value)
+        if not base_terms:
+            return
+        losses["base"] = sum(base_terms)
+        for key in base_keys:
+            self._detach_loss_value(losses, key)
+
+    def _compact_pitch_optimizer_losses(self, losses, *, schedule_only_stage: bool):
+        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
+            return
+        pitch_keys = []
+        pitch_terms = []
+        for key in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
+            value = losses.get(key)
+            if isinstance(value, torch.Tensor):
+                pitch_keys.append(key)
+                if value.requires_grad:
+                    pitch_terms.append(value)
+        if not pitch_terms:
+            return
+        losses["pitch"] = sum(pitch_terms)
+        for key in pitch_keys:
+            self._detach_loss_value(losses, key)
+
+    def _compact_rhythm_optimizer_losses(self, losses, *, schedule_only_stage: bool):
+        # Keep these available for logging/ablation, but keep them out of optimizer by default.
+        if not bool(hparams.get("rhythm_enable_aux_optimizer_losses", False)):
+            for key in ("rhythm_plan", "rhythm_guidance", "rhythm_distill"):
+                self._detach_loss_value(losses, key)
+        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
+            return
+        exec_terms = []
+        exec_keys = []
+        for key in ("rhythm_exec_speech", "rhythm_exec_pause"):
+            value = losses.get(key)
+            if isinstance(value, torch.Tensor):
+                exec_keys.append(key)
+                if value.requires_grad:
+                    exec_terms.append(value)
+        if exec_terms:
+            losses["rhythm_exec"] = sum(exec_terms)
+            for key in exec_keys:
+                self._detach_loss_value(losses, key)
+        budget = losses.get("rhythm_budget")
+        cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
+        state_terms = []
+        if isinstance(budget, torch.Tensor) and budget.requires_grad:
+            state_terms.append(float(hparams.get("rhythm_joint_budget_macro_weight", 0.35)) * budget)
+        if isinstance(cumplan, torch.Tensor) and cumplan.requires_grad:
+            state_terms.append(float(hparams.get("rhythm_joint_cumplan_macro_weight", 0.65)) * cumplan)
+        if state_terms:
+            losses["rhythm_stream_state"] = sum(state_terms)
+        self._detach_loss_value(losses, "rhythm_budget")
+        if "rhythm_cumplan" in losses:
+            self._detach_loss_value(losses, "rhythm_cumplan")
+        elif "rhythm_carry" in losses:
+            self._detach_loss_value(losses, "rhythm_carry")
 
     def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
         if frame_weight is None:
@@ -753,12 +861,23 @@ class ConanTask(AuxDecoderMIDITask):
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
                 self.add_pitch_loss(output, sample, losses)
             self.add_rhythm_loss(output, sample, losses)
-            if hparams['style'] and not schedule_only_stage:
-                if self.global_step > hparams['forcing'] and self.global_step < hparams['random_speaker_steps']:
+            if (
+                hparams['style']
+                and not schedule_only_stage
+                and not getattr(self.model, "rhythm_minimal_style_only", False)
+            ):
+                if (
+                    self.global_step > hparams['forcing']
+                    and self.global_step < hparams['random_speaker_steps']
+                    and 'gloss' in output
+                ):
                     losses['gloss'] = output['gloss']
-                if self.global_step > hparams['vq_start']:
+                if self.global_step > hparams['vq_start'] and 'vq_loss' in output and 'ppl' in output:
                     losses['vq_loss'] = output['vq_loss']
                     losses['ppl'] = output['ppl']
+            self._compact_base_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
+            self._compact_pitch_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
+            self._compact_rhythm_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
             self._update_public_loss_aliases(losses)
         
         return losses, output
@@ -1027,6 +1146,23 @@ class ConanTask(AuxDecoderMIDITask):
         losses["rhythm_plan"] = rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
         losses["rhythm_distill"] = rhythm_losses["rhythm_distill"] * hparams.get("lambda_rhythm_distill", 0.0)
+        lambda_distill = hparams.get("lambda_rhythm_distill", 0.0)
+        losses["rhythm_distill_exec"] = (rhythm_losses["rhythm_distill_exec"] * lambda_distill).detach()
+        losses["rhythm_distill_budget"] = (
+            rhythm_losses["rhythm_distill_budget"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        ).detach()
+        losses["rhythm_distill_prefix"] = (
+            rhythm_losses["rhythm_distill_prefix"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_prefix_weight", 0.25))
+        ).detach()
+        losses["rhythm_distill_allocation"] = (
+            rhythm_losses["rhythm_distill_allocation"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+        ).detach()
 
             
     def _training_step(self, sample, batch_idx, optimizer_idx):

@@ -19,6 +19,11 @@ class AlgorithmicTeacherConfig:
     pause_strength: float = 1.10
     boundary_strength: float = 1.50
     source_boundary_pause_weight: float = 0.35
+    source_boundary_prior_clip: float = 1.50
+    source_boundary_gate_floor: float = 0.05
+    source_boundary_gate_ceiling: float = 0.55
+    source_boundary_agreement_center: float = 0.15
+    source_boundary_agreement_scale: float = 4.0
     pause_budget_ratio_cap: float = 0.80
     speech_smooth_kernel: int = 3
     pause_topk_ratio: float = 0.30
@@ -43,6 +48,16 @@ def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 def _masked_normalize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     x = x * mask.float()
     return x / x.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+
+def _masked_cosine_similarity(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.float()
+    x_masked = x * mask
+    y_masked = y * mask
+    dot = (x_masked * y_masked).sum(dim=1)
+    x_norm = x_masked.square().sum(dim=1).clamp_min(1e-6).sqrt()
+    y_norm = y_masked.square().sum(dim=1).clamp_min(1e-6).sqrt()
+    return dot / (x_norm * y_norm).clamp_min(1e-6)
 
 
 def _smooth_1d(x: torch.Tensor, kernel_size: int) -> torch.Tensor:
@@ -90,6 +105,31 @@ def _estimate_confidence(
     confidence = confidence + 0.10 * torch.exp(-local_rate_var.clamp_min(0.0))
     confidence = confidence + float(smoother_bonus)
     return confidence.clamp(0.05, 1.0).unsqueeze(-1)
+
+
+def _build_source_boundary_pause_prior(
+    *,
+    source_boundary_cue: torch.Tensor,
+    trace_boundary_context: torch.Tensor,
+    unit_mask: torch.Tensor,
+    cfg: AlgorithmicTeacherConfig,
+) -> torch.Tensor:
+    source_prior = _masked_standardize(source_boundary_cue.float(), unit_mask)
+    source_prior = source_prior.clamp(
+        min=-float(cfg.source_boundary_prior_clip),
+        max=float(cfg.source_boundary_prior_clip),
+    )
+    ref_boundary = _masked_standardize(trace_boundary_context.float(), unit_mask)
+    agreement = _masked_cosine_similarity(source_prior, ref_boundary, unit_mask).clamp(-1.0, 1.0)
+    gate = torch.sigmoid(
+        (agreement - float(cfg.source_boundary_agreement_center)) * float(cfg.source_boundary_agreement_scale)
+    )
+    gate_floor = float(cfg.source_boundary_gate_floor)
+    gate_ceiling = float(cfg.source_boundary_gate_ceiling)
+    if gate_ceiling < gate_floor:
+        gate_floor, gate_ceiling = gate_ceiling, gate_floor
+    gate = gate_floor + (gate_ceiling - gate_floor) * gate
+    return float(cfg.source_boundary_pause_weight) * gate.unsqueeze(-1) * source_prior
 
 
 def _build_prefix_carry_targets(
@@ -171,7 +211,12 @@ def build_algorithmic_teacher_targets(
 
     pause_seed = cfg.pause_strength * _masked_standardize(trace_context[:, :, 0], unit_mask)
     pause_seed = pause_seed + cfg.boundary_strength * _masked_standardize(trace_context[:, :, 2], unit_mask)
-    pause_seed = pause_seed + cfg.source_boundary_pause_weight * source_boundary_cue.float()
+    pause_seed = pause_seed + _build_source_boundary_pause_prior(
+        source_boundary_cue=source_boundary_cue,
+        trace_boundary_context=trace_context[:, :, 2],
+        unit_mask=unit_mask,
+        cfg=cfg,
+    )
     pause_scores = torch.exp(pause_seed) * unit_mask
     pause_scores = _sparsify_scores(
         pause_scores,

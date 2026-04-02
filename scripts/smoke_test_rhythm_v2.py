@@ -21,6 +21,7 @@ from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 if __name__ == '__main__':
     hparams = {
+        'content_vocab_size': 128,
         'content_embedding_dim': 128,
         'rhythm_hidden_size': 32,
         'rhythm_trace_bins': 12,
@@ -49,6 +50,11 @@ if __name__ == '__main__':
         [1, 1, 1, 2, 2, 57, 3, 3],
         [5, 5, 6, 6, 6, 7, 57, 8],
     ], device=torch.device('cpu'))
+    prefix_last = prefix_batch.unit_mask.sum(dim=1).long() - 1
+    for b in range(prefix_batch.unit_mask.size(0)):
+        li = int(prefix_last[b].item())
+        assert int(prefix_batch.open_run_mask[b, li].item()) == 1
+        assert float(prefix_batch.sealed_mask[b, li].item()) == 0.0
     model = build_streaming_rhythm_module_from_hparams(hparams)
 
     ref_mel = torch.randn(2, 80, 64)
@@ -128,6 +134,15 @@ if __name__ == '__main__':
         ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
         state=out1.next_state,
     )
+    out_hold = model(
+        content_units=batch.content_units,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        open_run_mask=torch.ones_like(batch.open_run_mask),
+        ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
+        ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
+        state=out2.next_state,
+    )
     out_no_source_prior = model(
         content_units=batch.content_units,
         dur_anchor_src=batch.dur_anchor_src,
@@ -143,6 +158,23 @@ if __name__ == '__main__':
     assert torch.equal(out1.blank_slot_duration_exec, out1.slot_duration_exec)
     assert torch.equal(out1.blank_slot_is_blank, out1.slot_is_blank)
     assert float(out_no_source_prior.planner.source_boundary_cue.abs().max().item()) == 0.0
+    assert torch.all(out2.next_state.phase_ptr + 1e-6 >= out1.next_state.phase_ptr)
+    assert torch.all(out_hold.next_state.phase_ptr + 1e-6 >= out2.next_state.phase_ptr)
+    assert torch.equal(out_hold.next_state.commit_frontier, out2.next_state.commit_frontier)
+    frame_plan = out1.frame_plan
+    assert frame_plan is not None
+    assert frame_plan.frame_src_index.shape == frame_plan.total_mask.shape
+    assert frame_plan.blank_mask.shape == frame_plan.total_mask.shape
+    assert frame_plan.speech_mask.shape == frame_plan.total_mask.shape
+    assert frame_plan.frame_phase_features.size(-1) == 5
+    rounded_slot_frames = (torch.round(out1.slot_duration_exec.float()).clamp_min(0.0) * out1.slot_mask.float()).sum(dim=1)
+    assert torch.equal(frame_plan.total_mask.sum(dim=1).long(), rounded_slot_frames.long())
+    rounded_pause_frames = (torch.round(out1.pause_after_exec.float()).clamp_min(0.0) * batch.unit_mask.float()).sum(dim=1)
+    assert torch.equal(frame_plan.blank_mask.sum(dim=1).long(), rounded_pause_frames.long())
+    valid_blank = (frame_plan.blank_mask > 0.5) & (frame_plan.total_mask > 0.5)
+    valid_speech = (frame_plan.blank_mask <= 0.5) & (frame_plan.total_mask > 0.5)
+    assert torch.all(frame_plan.frame_src_index[valid_blank] < 0)
+    assert torch.all(frame_plan.frame_src_index[valid_speech] >= 0)
 
     guidance = build_reference_guided_targets(
         dur_anchor_src=batch.dur_anchor_src[0].cpu().numpy(),
@@ -178,6 +210,7 @@ if __name__ == '__main__':
             "rhythm_offline_execution": offline_exec,
             "rhythm_algorithmic_teacher": algo_teacher,
             "rhythm_unit_batch": batch,
+            "rhythm_state_prev": state,
             "rhythm_state_next": out1.next_state,
             "rhythm_apply_render": 1.0,
             "acoustic_target_is_retimed": False,
@@ -188,6 +221,35 @@ if __name__ == '__main__':
             "rhythm_offline_confidence_budget": offline_conf["budget"],
             "rhythm_offline_confidence_prefix": offline_conf["prefix"],
             "rhythm_offline_confidence_allocation": offline_conf["allocation"],
+            "rhythm_frame_plan": out1.frame_plan,
+            "acoustic_target_source": "online",
+            "rhythm_exec": torch.tensor(0.6),
+            "rhythm_stream_state": torch.tensor(0.2),
+            "base": torch.tensor(1.4),
+            "pitch": torch.tensor(0.3),
+            "L_exec_speech": torch.tensor(0.11),
+            "L_exec_pause": torch.tensor(0.09),
+            "L_budget": torch.tensor(0.03),
+            "L_cumplan": torch.tensor(0.05),
+            "L_prefix_state": torch.tensor(0.05),
+            "L_rhythm_exec": torch.tensor(0.2),
+            "L_stream_state": torch.tensor(0.1),
+            "L_base": torch.tensor(1.4),
+            "L_pitch": torch.tensor(0.3),
+        },
+        {
+            "rhythm_speech_exec_tgt": out1.speech_duration_exec.detach(),
+            "rhythm_pause_exec_tgt": out1.pause_after_exec.detach(),
+            "rhythm_speech_budget_tgt": out1.planner.speech_budget_win.detach(),
+            "rhythm_pause_budget_tgt": out1.planner.pause_budget_win.detach(),
+        },
+    )
+    minimal_metrics = build_rhythm_metric_dict(
+        {
+            "rhythm_execution": out1,
+            "rhythm_unit_batch": batch,
+            "rhythm_frame_plan": out1.frame_plan,
+            "acoustic_target_source": "cached",
         },
         {
             "rhythm_speech_exec_tgt": out1.speech_duration_exec.detach(),
@@ -207,8 +269,16 @@ if __name__ == '__main__':
     print('offline stream prefix ratio:', float(prefix_batch.unit_mask.sum().item() / batch.unit_mask.sum().item()))
     print('algorithmic teacher alloc kl:', float(metrics['rhythm_metric_algorithmic_teacher_alloc_kl']))
     print('offline confidence exec:', float(metrics['rhythm_metric_offline_confidence_exec_mean']))
+    print('offline confidence coverage:', float(metrics['rhythm_metric_offline_confidence_component_coverage']))
     print('slow memory shape:', tuple(ref_conditioning['slow_rhythm_memory'].shape))
     print('blank slot ratio metric:', float(metrics['rhythm_metric_blank_slot_ratio_mean']))
+    print('frame plan present:', float(metrics['rhythm_metric_frame_plan_present']))
+    print('frame plan blank/src consistency:', float(metrics['rhythm_metric_frame_plan_blank_src_consistency']))
+    print('frame plan speech/src consistency:', float(metrics['rhythm_metric_frame_plan_speech_src_consistency']))
+    print('acoustic target source id:', float(metrics['rhythm_metric_acoustic_target_source_id']))
+    print('phase nonretro rate:', float(metrics['rhythm_metric_phase_nonretro_rate']))
+    print('alias L_rhythm_exec:', float(metrics['rhythm_metric_alias_L_rhythm_exec']))
+    print('compact rhythm_exec:', float(metrics['rhythm_metric_compact_rhythm_exec']))
     print('retimed mel len:', int(retimed['rhythm_retimed_mel_len'][0]))
     print('retimed frame weight mean:', float(retimed['rhythm_retimed_frame_weight'].mean()))
     print('guidance keys:', sorted(guidance.keys()))
@@ -228,10 +298,35 @@ if __name__ == '__main__':
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr']))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1']))
     print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean']))
+    print('minimal metric source id:', float(minimal_metrics['rhythm_metric_acoustic_target_source_id']))
+    print('minimal metric frame plan present:', float(minimal_metrics['rhythm_metric_frame_plan_present']))
     assert "rhythm_blank_exec_tgt" in guidance and "rhythm_teacher_blank_exec_tgt" in teacher
+    assert "rhythm_pause_exec_tgt" in cached_bundle and "rhythm_pause_budget_tgt" in cached_bundle
+    assert "rhythm_blank_exec_tgt" in cached_bundle and "rhythm_blank_budget_tgt" in cached_bundle
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr']) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1']) < 1e-6
+    assert float(metrics['rhythm_metric_frame_plan_present']) == 1.0
+    assert float(metrics['rhythm_metric_frame_plan_blank_src_consistency']) > 0.99
+    assert float(metrics['rhythm_metric_frame_plan_speech_src_consistency']) > 0.99
+    assert float(metrics['rhythm_metric_acoustic_target_source_is_online']) == 1.0
+    assert float(metrics['rhythm_metric_acoustic_target_source_unknown']) == 0.0
+    assert float(metrics['rhythm_metric_phase_nonretro_rate']) == 1.0
+    assert float(metrics['rhythm_metric_phase_delta_min']) >= -1e-6
+    assert float(metrics['rhythm_metric_offline_confidence_component_coverage']) == 1.0
+    assert "rhythm_metric_offline_confidence_component_std" in metrics
+    assert "rhythm_metric_alias_L_rhythm_exec" in metrics
+    assert "rhythm_metric_alias_L_stream_state" in metrics
+    assert "rhythm_metric_alias_L_base" in metrics
+    assert "rhythm_metric_alias_L_pitch" in metrics
+    assert "rhythm_metric_compact_rhythm_exec" in metrics
+    assert "rhythm_metric_compact_stream_state" in metrics
+    assert "rhythm_metric_compact_base" in metrics
+    assert "rhythm_metric_compact_pitch" in metrics
+    assert abs(float(metrics["rhythm_metric_alias_L_rhythm_exec"]) - 0.2) < 1e-6
+    assert abs(float(metrics["rhythm_metric_compact_rhythm_exec"]) - 0.6) < 1e-6
+    assert float(minimal_metrics['rhythm_metric_acoustic_target_source_is_cached']) == 1.0
+    assert float(minimal_metrics['rhythm_metric_frame_plan_present']) == 1.0
     offline_corr = float(metrics['rhythm_metric_offline_online_total_corr'])
     assert np.isfinite(offline_corr)
     assert abs(offline_corr) <= 1.0 + 1e-6

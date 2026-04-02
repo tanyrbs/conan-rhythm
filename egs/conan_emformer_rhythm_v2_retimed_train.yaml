@@ -1,7 +1,8 @@
-base_config: egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml
+base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 
 # Controlled experiment: train/valid on the retimed canvas after a warmup.
 # Keep this separate from the conservative main config.
+# This is the formal stage-3 entrypoint after schedule-only warmup.
 rhythm_minimal_v1_profile: false
 rhythm_apply_train_override: true
 rhythm_apply_valid_override: true
@@ -13,13 +14,18 @@ rhythm_online_retimed_target_start_steps: 40000
 rhythm_use_retimed_pitch_target: true
 rhythm_disable_pitch_loss_when_retimed: false
 rhythm_disable_mel_adv_when_retimed: true
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
+rhythm_compact_joint_loss: true
+rhythm_joint_budget_macro_weight: 0.35
+rhythm_joint_cumplan_macro_weight: 0.65
 
 # Require offline cached rhythm targets for formal retimed experiments.
 rhythm_dataset_target_mode: cached_only
 rhythm_primary_target_surface: teacher
-rhythm_distill_surface: offline
-rhythm_enable_dual_mode_teacher: true
-rhythm_enable_learned_offline_teacher: true
+rhythm_distill_surface: none
+rhythm_enable_dual_mode_teacher: false
+rhythm_enable_learned_offline_teacher: false
 rhythm_binarize_teacher_targets: true
 rhythm_binarize_retimed_mel_targets: true
 rhythm_dataset_build_teacher_from_ref: false
@@ -29,7 +35,7 @@ rhythm_use_retimed_target_if_available: true
 rhythm_require_retimed_cache: true
 rhythm_require_cached_teacher: true
 
-# Stage-3 inherits stage-2 dual-mode KD and then opens retimed acoustic closure.
+# Stage-3 opens retimed acoustic closure directly on top of the maintained schedule-only path.
 rhythm_schedule_only_stage: false
 rhythm_optimize_module_only: false
 lambda_rhythm_exec_speech: 0.5
@@ -37,8 +43,8 @@ lambda_rhythm_exec_pause: 0.5
 lambda_rhythm_budget: 0.10
 lambda_rhythm_cumplan: 0.10
 lambda_rhythm_guidance: 0.0
-lambda_rhythm_distill: 0.25
+lambda_rhythm_distill: 0.0
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
-rhythm_distill_prefix_weight: 0.25
+rhythm_distill_prefix_weight: 0.0
 lambda_mel_adv: 0.0

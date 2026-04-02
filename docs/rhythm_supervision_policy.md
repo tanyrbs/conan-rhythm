@@ -61,6 +61,11 @@ Important distinction:
 
 Do not collapse those two claims.
 
+Maintained usage preference:
+
+- use teacher surfaces as the primary **target source** when teacher-first cached training is enabled
+- keep extra KD losses (`L_distill*`) optional, stage-specific, and off by default in the maintained chain
+
 ---
 
 ## 3. Dataset modes
@@ -122,6 +127,7 @@ Practical rule:
 - `cached_only` should reject stale or mismatched cache contracts
 - source-side cropped prefixes may be deterministically rebuilt from visible tokens
 - cached target surfaces may be prefix-adapted and retimed targets rebuilt for cropped views
+- cropped prefix adaptation should keep truncated tail units `open/unsealed` (instead of forcing all-visible units sealed)
 
 Current cache version: `4`
 
@@ -129,21 +135,38 @@ Current cache version: `4`
 
 ## 4.1 Batch/schema layering
 
-To keep the dataset sidecar from turning back into an unstructured grab-bag, read the sample/cache schema in three layers:
+To keep the dataset sidecar from turning back into an unstructured grab-bag, read the sample/cache schema in four layers:
 
 1. `runtime_minimal`
    - maintained timing contract used by the main rhythm path
    - `content_units`, `dur_anchor_src`, `ref_rhythm_stats`, `ref_rhythm_trace`
 
-2. `debug_sidecar`
-   - source phrase cues, offline prefix views, selector spans, streaming prefix counters
-   - useful for inspection and regression, but not the maintained public control surface
+2. `runtime_targets`
+   - executed speech/pause targets, light budget targets, stage-needed confidence surfaces
+   - cached teacher / retimed targets should only be exported into the batch when the active stage actually consumes them
 
-3. `cache_audit_bundle`
+3. `streaming_offline_sidecar`
+   - offline source-cache views and streaming prefix counters
+   - required for prefix-cropped train-time streaming experiments and learned offline teacher runs, but not for the runtime-minimal path
+
+4. `debug_cache_appendix`
    - cache version, hop/trace contract, confidence, retimed source metadata
+   - source phrase cues, selector spans, slow-memory cells
    - should be validated before long runs and should fail fast in `cached_only`
 
-This repo still materializes these fields into one training sample dict, but the maintained interpretation should stay layered.
+The maintained batch path should default to:
+
+- runtime-minimal
+- runtime-targets needed by the active stage
+- streaming/offline sidecars only when dual-mode / prefix sampling needs them
+
+Everything else should stay opt-in.
+
+State semantics note:
+
+- `phase_ptr` is a committed-progress state and must be monotonic
+- visible-prefix growth without new commit should not move `phase_ptr` backward
+- trace-window sampling should follow committed progress, not fluctuating visible-prefix ratios
 
 ---
 
@@ -161,13 +184,13 @@ Maintained naming preference:
 - `L_exec_speech`
 - `L_exec_pause`
 - small-weight `L_budget`
-- small-weight `L_cumplan`
+- small-weight `L_prefix_state` (`L_cumplan` remains the compatibility alias)
 
 Interpretation:
 
 - `L_exec_*` supervises executed timing directly
 - `L_budget` keeps the streaming budget honest
-- `L_cumplan` keeps cumulative prefix debt / backlog honest
+- `L_prefix_state` keeps cumulative prefix debt / backlog honest
 
 Current practical weighting in config:
 
@@ -176,17 +199,34 @@ Current practical weighting in config:
 
 `L_plan` and `L_guidance` may still exist in code for ablations / migration, but they are not the maintained mainline objective.
 
+Maintained optimizer policy:
+
+- `schedule-only`: optimize exactly the 4 timing losses above
+- `joint retimed`: optimize compact `3+1` objectives
+  - required 3: `L_base`, `L_rhythm_exec`, `L_stream_state`
+  - optional +1: `L_pitch` (only when retimed pitch targets are enabled/ready)
+- all other rhythm detail terms should be treated as logging/ablation surfaces unless a stage explicitly enables them
+
 ### Optional staged losses
 
 - `L_distill`
+- `L_distill_exec`
+- `L_distill_budget`
+- `L_distill_prefix`
 - `L_base`
 
 Policy:
 
 - `L_distill` should focus on the student-reachable executed surface
-- default distill target = speech exec + blank exec
-- prefix carry distill is optional and preferred over heavier allocation/budget distill
+- maintained distill breakdown = executed speech/pause + optional prefix carry + tiny budget term
+- default distill target = speech exec + pause exec (`blank_exec` only as cache/internal alias)
+- prefix carry distill is preferred over heavier allocation/budget distill
 - allocation/budget distill should remain off by default unless the experiment explicitly needs them
+
+Maintained default:
+
+- keep `L_distill*` disabled in the default formal chain (`schedule_only -> retimed_train`)
+- if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
 
 ---
 
@@ -194,11 +234,17 @@ Policy:
 
 Retimed acoustic training should only be considered formal when:
 
-- retimed mel targets are cached offline
-- cache source (`guidance` vs `teacher`) is explicit
+- projector execution emits the binding frame plan
+- renderer and retimed supervision read the same frame plan
+- cache source (`guidance` vs `teacher`) is explicit when cached retimed targets are used
+- train-time target selection (`cached` / `online` / `hybrid`) is explicit
 - training no longer silently falls back to source-aligned mel when retimed render is required
 
-This repository now enforces that distinction more strictly in cached-only retimed configs.
+This repository now enforces that distinction more strictly:
+
+- cached retimed mel remains the first-pass / warm-start path
+- online retimed mel/F0/UV can now be built from the current execution frame plan
+- retimed-stage mel GAN is expected to stay off unless real/fake canvases are explicitly aligned
 
 ---
 

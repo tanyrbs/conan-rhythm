@@ -136,23 +136,37 @@ class ConanDataset(FastSpeechDataset):
     )
     # Public/runtime batch contract prefers pause-* naming. Keep blank-* only as
     # cache/backward-compat aliases inside cached target validation / adaptation.
-    _RHYTHM_RUNTIME_TARGET_EXPORT_KEYS = (
+    _RHYTHM_RUNTIME_TARGET_CORE_KEYS = (
         "rhythm_speech_exec_tgt",
         "rhythm_pause_exec_tgt",
         "rhythm_speech_budget_tgt",
         "rhythm_pause_budget_tgt",
+        "rhythm_target_confidence",
+    )
+    _RHYTHM_RUNTIME_GUIDANCE_KEYS = (
         "rhythm_guidance_speech_tgt",
         "rhythm_guidance_pause_tgt",
+        "rhythm_guidance_confidence",
+    )
+    _RHYTHM_RUNTIME_TEACHER_CORE_KEYS = (
         "rhythm_teacher_speech_exec_tgt",
         "rhythm_teacher_pause_exec_tgt",
         "rhythm_teacher_speech_budget_tgt",
         "rhythm_teacher_pause_budget_tgt",
+        "rhythm_teacher_confidence",
+    )
+    _RHYTHM_RUNTIME_TEACHER_ALLOCATION_KEYS = (
         "rhythm_teacher_allocation_tgt",
+    )
+    _RHYTHM_RUNTIME_TEACHER_PREFIX_KEYS = (
         "rhythm_teacher_prefix_clock_tgt",
         "rhythm_teacher_prefix_backlog_tgt",
+    )
+    _RHYTHM_RUNTIME_RETIMED_KEYS = (
         "rhythm_retimed_mel_tgt",
         "rhythm_retimed_mel_len",
         "rhythm_retimed_frame_weight",
+        "rhythm_retimed_target_confidence",
     )
     _RHYTHM_CACHE_AUDIT_KEYS = _RHYTHM_META_KEYS
 
@@ -217,8 +231,129 @@ class ConanDataset(FastSpeechDataset):
     def _should_export_streaming_offline_sidecars(self) -> bool:
         return self._should_sample_streaming_prefix() or bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
 
+    def _should_export_runtime_retimed_targets(self) -> bool:
+        if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
+            return True
+        if not bool(self.hparams.get("rhythm_use_retimed_target_if_available", False)):
+            return False
+        if self.prefix == "train":
+            return bool(self.hparams.get("rhythm_apply_train_override", False))
+        if self.prefix in {"valid", "dev"}:
+            return bool(self.hparams.get("rhythm_apply_valid_override", False))
+        # test/infer does not need acoustic supervision targets by default.
+        return False
+
+    def _resolve_runtime_target_export_keys(self) -> tuple[str, ...]:
+        primary_surface = self._resolve_primary_target_surface()
+        distill_surface = self._resolve_distill_surface()
+        lambda_guidance = float(self.hparams.get("lambda_rhythm_guidance", 0.0))
+        lambda_distill = float(self.hparams.get("lambda_rhythm_distill", 0.0))
+        distill_budget_weight = float(self.hparams.get("rhythm_distill_budget_weight", 0.5))
+        distill_allocation_weight = float(self.hparams.get("rhythm_distill_allocation_weight", 0.5))
+        distill_prefix_weight = float(self.hparams.get("rhythm_distill_prefix_weight", 0.25))
+        require_retimed_cache = bool(self.hparams.get("rhythm_require_retimed_cache", False))
+        retimed_source = str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
+        export_retimed_targets = self._should_export_runtime_retimed_targets()
+
+        keys = list(self._RHYTHM_RUNTIME_TARGET_CORE_KEYS)
+        if lambda_guidance > 0.0:
+            keys.extend(self._RHYTHM_RUNTIME_GUIDANCE_KEYS)
+
+        need_teacher_core = (
+            primary_surface == "teacher"
+            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or (lambda_distill > 0.0 and distill_surface == "cache")
+            or ((export_retimed_targets or require_retimed_cache) and retimed_source == "teacher")
+        )
+        if need_teacher_core:
+            keys.extend(self._RHYTHM_RUNTIME_TEACHER_CORE_KEYS)
+
+        need_teacher_prefix = lambda_distill > 0.0 and distill_surface == "cache"
+        if need_teacher_prefix and distill_allocation_weight > 0.0:
+            keys.extend(self._RHYTHM_RUNTIME_TEACHER_ALLOCATION_KEYS)
+        if need_teacher_prefix and distill_prefix_weight > 0.0:
+            keys.extend(self._RHYTHM_RUNTIME_TEACHER_PREFIX_KEYS)
+
+        need_teacher_budget = (
+            primary_surface == "teacher"
+            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or (lambda_distill > 0.0 and distill_surface == "cache" and distill_budget_weight > 0.0)
+        )
+        if not need_teacher_budget:
+            keys = [key for key in keys if key not in {"rhythm_teacher_speech_budget_tgt", "rhythm_teacher_pause_budget_tgt"}]
+
+        if export_retimed_targets:
+            keys.extend(self._RHYTHM_RUNTIME_RETIMED_KEYS)
+        return tuple(dict.fromkeys(keys))
+
+    @staticmethod
+    def _build_optional_collate_spec() -> dict[str, tuple[str, float | int]]:
+        return {
+            "content_units": ("long", 0),
+            "dur_anchor_src": ("long", 0),
+            "open_run_mask": ("long", 0),
+            "sealed_mask": ("float", 0.0),
+            "sep_hint": ("long", 0),
+            "boundary_confidence": ("float", 0.0),
+            "source_boundary_cue": ("float", 0.0),
+            "phrase_group_index": ("long", 0),
+            "phrase_group_pos": ("float", 0.0),
+            "phrase_final_mask": ("float", 0.0),
+            "rhythm_offline_content_units": ("long", 0),
+            "rhythm_offline_dur_anchor_src": ("long", 0),
+            "rhythm_offline_open_run_mask": ("long", 0),
+            "rhythm_offline_sealed_mask": ("float", 0.0),
+            "rhythm_offline_sep_hint": ("long", 0),
+            "rhythm_offline_boundary_confidence": ("float", 0.0),
+            "rhythm_offline_source_boundary_cue": ("float", 0.0),
+            "rhythm_offline_phrase_group_index": ("long", 0),
+            "rhythm_offline_phrase_group_pos": ("float", 0.0),
+            "rhythm_offline_phrase_final_mask": ("float", 0.0),
+            "ref_rhythm_stats": ("float", 0.0),
+            "ref_rhythm_trace": ("float", 0.0),
+            "slow_rhythm_memory": ("float", 0.0),
+            "slow_rhythm_summary": ("float", 0.0),
+            "selector_meta_indices": ("long", 0),
+            "selector_meta_scores": ("float", 0.0),
+            "selector_meta_starts": ("long", 0),
+            "selector_meta_ends": ("long", 0),
+            "rhythm_cache_version": ("long", 0),
+            "rhythm_unit_hop_ms": ("long", 0),
+            "rhythm_trace_hop_ms": ("long", 0),
+            "rhythm_trace_bins": ("long", 0),
+            "rhythm_trace_horizon": ("float", 0.0),
+            "rhythm_slow_topk": ("long", 0),
+            "rhythm_selector_cell_size": ("long", 0),
+            "rhythm_source_phrase_threshold": ("float", 0.0),
+            "rhythm_reference_mode_id": ("long", 0),
+            "rhythm_target_confidence": ("float", 0.0),
+            "rhythm_guidance_confidence": ("float", 0.0),
+            "rhythm_teacher_confidence": ("float", 0.0),
+            "rhythm_retimed_target_source_id": ("long", 0),
+            "rhythm_retimed_target_confidence": ("float", 0.0),
+            "rhythm_speech_exec_tgt": ("float", 0.0),
+            "rhythm_pause_exec_tgt": ("float", 0.0),
+            "rhythm_speech_budget_tgt": ("float", 0.0),
+            "rhythm_pause_budget_tgt": ("float", 0.0),
+            "rhythm_guidance_speech_tgt": ("float", 0.0),
+            "rhythm_guidance_pause_tgt": ("float", 0.0),
+            "rhythm_teacher_speech_exec_tgt": ("float", 0.0),
+            "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
+            "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
+            "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
+            "rhythm_teacher_allocation_tgt": ("float", 0.0),
+            "rhythm_teacher_prefix_clock_tgt": ("float", 0.0),
+            "rhythm_teacher_prefix_backlog_tgt": ("float", 0.0),
+            "rhythm_retimed_mel_tgt": ("float", 0.0),
+            "rhythm_retimed_mel_len": ("long", 0),
+            "rhythm_retimed_frame_weight": ("float", 0.0),
+            "rhythm_stream_prefix_ratio": ("float", 0.0),
+            "rhythm_stream_visible_units": ("float", 0.0),
+            "rhythm_stream_full_units": ("float", 0.0),
+        }
+
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
-        keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._RHYTHM_RUNTIME_TARGET_EXPORT_KEYS)
+        keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._resolve_runtime_target_export_keys())
         if self._should_export_streaming_offline_sidecars():
             keys.extend(self._RHYTHM_STREAMING_OFFLINE_KEYS)
         if self._should_export_rhythm_debug_sidecars():
@@ -261,6 +396,13 @@ class ConanDataset(FastSpeechDataset):
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
         return {f"{prefix}{key}": value for key, value in cache.items()}
 
+    @staticmethod
+    def _coerce_content_sequence(content) -> list[int]:
+        if isinstance(content, str):
+            return [int(float(x)) for x in content.split()]
+        arr = np.asarray(content).reshape(-1)
+        return [int(x) for x in arr.tolist()]
+
     def _adapt_source_cache_to_visible_prefix(self, *, item, visible_tokens) -> dict:
         cache = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_CACHE_KEYS if key in item}
         if len(cache) != len(self._RHYTHM_SOURCE_CACHE_KEYS):
@@ -289,10 +431,18 @@ class ConanDataset(FastSpeechDataset):
                 f"Visible prefix in {item.get('item_name', '<unknown-item>')} exceeds cached source duration. "
                 "Re-binarize the dataset."
             )
-        if int(np.asarray(item["hubert"]).reshape(-1).shape[0]) > int(np.asarray(visible_tokens).reshape(-1).shape[0]) and len(out_sep) > 0:
+        visible_total = int(np.asarray(visible_tokens).reshape(-1).shape[0])
+        full_total = int(np.asarray(full_durations).reshape(-1).sum())
+        is_truncated_prefix = visible_total < full_total
+        if is_truncated_prefix and len(out_sep) > 0:
             out_sep[-1] = 0
         open_run_mask = np.zeros((len(out_units),), dtype=np.int64)
         sealed_mask = np.ones((len(out_units),), dtype=np.int64)
+        if is_truncated_prefix and len(out_units) > 0:
+            tail_open_units = int(self.hparams.get("rhythm_prefix_tail_open_units", 1) or 0)
+            tail_open_units = max(1, min(len(out_units), tail_open_units))
+            open_run_mask[-tail_open_units:] = 1
+            sealed_mask[-tail_open_units:] = 0
         boundary_confidence = np.asarray(
             estimate_boundary_confidence(out_durations, out_sep, open_run_mask.tolist()),
             dtype=np.float32,
@@ -867,13 +1017,31 @@ class ConanDataset(FastSpeechDataset):
         # else:
             # Already a numeric array case
         visible_len = int(sample["mel"].shape[0])
-        if isinstance(item['hubert'], str):
-            content_visible = [int(float(x)) for x in item['hubert'].split()[:visible_len]]
-        else:
-            content_visible = list(item['hubert'][:visible_len])
+        item_name = str(item.get("item_name", "<unknown-item>"))
+        full_content = self._coerce_content_sequence(item["hubert"])
+        full_content_len = len(full_content)
+        if bool(hparams.get("rhythm_enable_v2", False)) and bool(
+            hparams.get("rhythm_strict_content_mel_contract", True)
+        ):
+            tolerance = int(hparams.get("rhythm_content_mel_tolerance", 0) or 0)
+            if abs(full_content_len - visible_len) > tolerance:
+                raise RuntimeError(
+                    f"Rhythm content/mel contract violated for {item_name}: hubert_len={full_content_len}, "
+                    f"mel_len={visible_len}, tolerance={tolerance}. Re-binarize or align upstream hop settings."
+                )
+        if full_content_len < visible_len:
+            raise RuntimeError(
+                f"Rhythm content sequence shorter than mel for {item_name}: hubert_len={full_content_len}, "
+                f"mel_len={visible_len}."
+            )
+        content_visible = full_content[:visible_len]
+        if len(content_visible) != visible_len:
+            raise RuntimeError(
+                f"Visible content prefix mismatch for {item_name}: visible_tokens={len(content_visible)}, "
+                f"mel_len={visible_len}."
+            )
         sample["content"] = torch.LongTensor(content_visible)
         target_mode = self._resolve_rhythm_target_mode()
-        item_name = str(item.get("item_name", "<unknown-item>"))
         full_visible_tokens = np.asarray(content_visible, dtype=np.int64)
         stream_visible_tokens = self._select_streaming_visible_tokens(
             full_visible_tokens,
@@ -1008,70 +1176,12 @@ class ConanDataset(FastSpeechDataset):
         content= collate_1d_or_2d([s['content'] for s in samples], 0).long()
         batch['content'] = content
 
-        optional_collate = {
-            "content_units": ("long", 0),
-            "dur_anchor_src": ("long", 0),
-            "open_run_mask": ("long", 0),
-            "sealed_mask": ("float", 0.0),
-            "sep_hint": ("long", 0),
-            "boundary_confidence": ("float", 0.0),
-            "source_boundary_cue": ("float", 0.0),
-            "phrase_group_index": ("long", 0),
-            "phrase_group_pos": ("float", 0.0),
-            "phrase_final_mask": ("float", 0.0),
-            "rhythm_offline_content_units": ("long", 0),
-            "rhythm_offline_dur_anchor_src": ("long", 0),
-            "rhythm_offline_open_run_mask": ("long", 0),
-            "rhythm_offline_sealed_mask": ("float", 0.0),
-            "rhythm_offline_sep_hint": ("long", 0),
-            "rhythm_offline_boundary_confidence": ("float", 0.0),
-            "rhythm_offline_source_boundary_cue": ("float", 0.0),
-            "rhythm_offline_phrase_group_index": ("long", 0),
-            "rhythm_offline_phrase_group_pos": ("float", 0.0),
-            "rhythm_offline_phrase_final_mask": ("float", 0.0),
-            "ref_rhythm_stats": ("float", 0.0),
-            "ref_rhythm_trace": ("float", 0.0),
-            "slow_rhythm_memory": ("float", 0.0),
-            "slow_rhythm_summary": ("float", 0.0),
-            "selector_meta_indices": ("long", 0),
-            "selector_meta_scores": ("float", 0.0),
-            "selector_meta_starts": ("long", 0),
-            "selector_meta_ends": ("long", 0),
-            "rhythm_cache_version": ("long", 0),
-            "rhythm_unit_hop_ms": ("long", 0),
-            "rhythm_trace_hop_ms": ("long", 0),
-            "rhythm_trace_bins": ("long", 0),
-            "rhythm_trace_horizon": ("float", 0.0),
-            "rhythm_slow_topk": ("long", 0),
-            "rhythm_selector_cell_size": ("long", 0),
-            "rhythm_source_phrase_threshold": ("float", 0.0),
-            "rhythm_reference_mode_id": ("long", 0),
-            "rhythm_target_confidence": ("float", 0.0),
-            "rhythm_guidance_confidence": ("float", 0.0),
-            "rhythm_teacher_confidence": ("float", 0.0),
-            "rhythm_retimed_target_source_id": ("long", 0),
-            "rhythm_retimed_target_confidence": ("float", 0.0),
-            "rhythm_speech_exec_tgt": ("float", 0.0),
-            "rhythm_pause_exec_tgt": ("float", 0.0),
-            "rhythm_speech_budget_tgt": ("float", 0.0),
-            "rhythm_pause_budget_tgt": ("float", 0.0),
-            "rhythm_guidance_speech_tgt": ("float", 0.0),
-            "rhythm_guidance_pause_tgt": ("float", 0.0),
-            "rhythm_teacher_speech_exec_tgt": ("float", 0.0),
-            "rhythm_teacher_pause_exec_tgt": ("float", 0.0),
-            "rhythm_teacher_speech_budget_tgt": ("float", 0.0),
-            "rhythm_teacher_pause_budget_tgt": ("float", 0.0),
-            "rhythm_teacher_allocation_tgt": ("float", 0.0),
-            "rhythm_teacher_prefix_clock_tgt": ("float", 0.0),
-            "rhythm_teacher_prefix_backlog_tgt": ("float", 0.0),
-            "rhythm_retimed_mel_tgt": ("float", 0.0),
-            "rhythm_retimed_mel_len": ("long", 0),
-            "rhythm_retimed_frame_weight": ("float", 0.0),
-            "rhythm_stream_prefix_ratio": ("float", 0.0),
-            "rhythm_stream_visible_units": ("float", 0.0),
-            "rhythm_stream_full_units": ("float", 0.0),
-        }
-        for key, (dtype_name, pad_value) in optional_collate.items():
+        optional_collate = self._build_optional_collate_spec()
+        optional_keys = self._resolve_optional_sample_keys()
+        for key in optional_keys:
+            if key not in optional_collate:
+                continue
+            dtype_name, pad_value = optional_collate[key]
             if all(key in s for s in samples):
                 value = collate_1d_or_2d([s[key] for s in samples], pad_value)
                 if dtype_name == "long":

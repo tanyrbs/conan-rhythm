@@ -23,9 +23,6 @@ from modules.Conan.rhythm.supervision import (
 )
 from utils.commons.hparams import set_hparams
 from utils.commons.indexed_datasets import IndexedDataset
-from tasks.Conan.dataset import ConanDataset
-from tasks.Conan.Conan import ConanTask
-import torch
 
 
 CORE_RHYTHM_FIELDS = {
@@ -274,6 +271,8 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     apply_valid = bool(hp.get("rhythm_apply_valid_override", False))
     use_retimed_target = bool(hp.get("rhythm_use_retimed_target_if_available", False))
     retimed_target_mode = _normalize_retimed_target_mode(str(hp.get("rhythm_retimed_target_mode", "cached") or "cached").strip().lower())
+    retimed_target_start = int(hp.get("rhythm_retimed_target_start_steps", 0) or 0)
+    online_target_start = int(hp.get("rhythm_online_retimed_target_start_steps", retimed_target_start) or retimed_target_start)
     use_retimed_pitch_target = bool(hp.get("rhythm_use_retimed_pitch_target", False))
     disable_pitch_when_retimed = bool(hp.get("rhythm_disable_pitch_loss_when_retimed", True))
     retimed_source = str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
@@ -281,6 +280,11 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     binarize_retimed = bool(hp.get("rhythm_binarize_retimed_mel_targets", False))
     disable_mel_adv_when_retimed = bool(hp.get("rhythm_disable_mel_adv_when_retimed", True))
     lambda_mel_adv = float(hp.get("lambda_mel_adv", 0.0))
+    lambda_guidance = float(hp.get("lambda_rhythm_guidance", 0.0))
+    distill_budget_weight = float(hp.get("rhythm_distill_budget_weight", 0.5))
+    distill_allocation_weight = float(hp.get("rhythm_distill_allocation_weight", 0.5))
+    distill_prefix_weight = float(hp.get("rhythm_distill_prefix_weight", 0.25))
+    compact_joint_loss = bool(hp.get("rhythm_compact_joint_loss", True))
     pause_topk_ratio = float(hp.get("rhythm_projector_pause_topk_ratio", 0.35))
     pause_topk_ratio_train_start = float(hp.get("rhythm_projector_pause_topk_ratio_train_start", 1.0))
     pause_topk_ratio_train_end = float(hp.get("rhythm_projector_pause_topk_ratio_train_end", pause_topk_ratio))
@@ -294,9 +298,21 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     source_boundary_scale_anneal_steps = int(hp.get("rhythm_source_boundary_scale_anneal_steps", 20000) or 0)
     source_boundary_scale_warmup_steps = int(hp.get("rhythm_source_boundary_scale_warmup_steps", 0) or 0)
     teacher_source_boundary_scale = float(hp.get("rhythm_teacher_source_boundary_scale", source_boundary_scale))
+    export_debug_sidecars = bool(hp.get("rhythm_export_debug_sidecars", False))
+    export_cache_audit_to_sample = bool(hp.get("rhythm_export_cache_audit_to_sample", False))
+    public_losses = list(hp.get("rhythm_public_losses", []) or [])
+    configured_cache_version = int(hp.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
 
     if retimed_target_mode not in {"cached", "online", "hybrid"}:
         errors.append(f"Unsupported rhythm_retimed_target_mode: {retimed_target_mode}")
+    if configured_cache_version != int(RHYTHM_CACHE_VERSION):
+        errors.append(
+            f"rhythm_cache_version mismatch: configured={configured_cache_version}, maintained={int(RHYTHM_CACHE_VERSION)}."
+        )
+    if retimed_target_start < 0 or online_target_start < 0:
+        errors.append("rhythm_retimed_target_start_steps / rhythm_online_retimed_target_start_steps must be >= 0.")
+    if online_target_start < retimed_target_start:
+        warnings.append("rhythm_online_retimed_target_start_steps < rhythm_retimed_target_start_steps; online target switch may start earlier than retimed stage.")
     if enable_dual and not enable_learned_offline_teacher:
         errors.append("rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true.")
     for name, value in {
@@ -335,6 +351,15 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             "Retimed train/valid rendering must either enable rhythm_use_retimed_pitch_target "
             "or set rhythm_disable_pitch_loss_when_retimed: true."
         )
+    if (apply_train or apply_valid) and export_debug_sidecars:
+        warnings.append("rhythm_export_debug_sidecars=true on retimed train/valid path increases batch contract complexity.")
+    if export_cache_audit_to_sample:
+        warnings.append("rhythm_export_cache_audit_to_sample=true adds cache appendix fields to runtime batch; keep it off outside audits.")
+    if public_losses:
+        required_public_losses = {"L_exec_speech", "L_exec_pause", "L_budget", "L_prefix_state", "L_base"}
+        missing_public = sorted(required_public_losses.difference(set(public_losses)))
+        if missing_public:
+            warnings.append(f"rhythm_public_losses is missing maintained mainline aliases: {missing_public}.")
 
     if stage == "schedule_only":
         if target_mode != "cached_only":
@@ -353,6 +378,10 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Stage-1 schedule-only should keep distillation disabled.")
         if apply_train or apply_valid:
             errors.append("Stage-1 schedule-only should not enable train/valid retimed rendering.")
+        if export_debug_sidecars:
+            warnings.append("Stage-1 schedule-only should keep rhythm_export_debug_sidecars: false unless debugging schema.")
+        if export_cache_audit_to_sample:
+            warnings.append("Stage-1 schedule-only should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
     elif stage == "dual_mode_kd":
         if target_mode != "cached_only":
             errors.append("Formal dual-mode KD stage should use rhythm_dataset_target_mode: cached_only.")
@@ -366,8 +395,22 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal dual-mode KD stage requires rhythm_enable_dual_mode_teacher: true.")
         if not require_cached_teacher:
             errors.append("Formal dual-mode KD stage should require cached teacher surfaces.")
+        if lambda_guidance > 0.0:
+            errors.append("Formal dual-mode KD stage should keep lambda_rhythm_guidance: 0.")
+        if distill_allocation_weight > 0.0:
+            errors.append("Formal dual-mode KD stage should keep rhythm_distill_allocation_weight: 0.")
+        if distill_budget_weight > 0.15:
+            warnings.append("Formal dual-mode KD stage usually keeps rhythm_distill_budget_weight <= 0.15.")
+        if distill_prefix_weight <= 0.0:
+            warnings.append("Formal dual-mode KD stage usually keeps rhythm_distill_prefix_weight > 0.")
         if apply_train or apply_valid:
             errors.append("Dual-mode KD stage should not enable train/valid retimed rendering; that belongs to stage-3.")
+        if retimed_target_mode != "cached":
+            warnings.append("Dual-mode KD stage usually keeps rhythm_retimed_target_mode: cached (retimed closure starts in stage-3).")
+        if export_debug_sidecars:
+            warnings.append("Dual-mode KD stage should keep rhythm_export_debug_sidecars: false unless debugging schema.")
+        if export_cache_audit_to_sample:
+            warnings.append("Dual-mode KD stage should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
         if not schedule_only:
             warnings.append("Dual-mode KD no longer keeps rhythm_schedule_only_stage: true; this deviates from the maintained stage-2 path.")
         if not optimize_module_only:
@@ -377,10 +420,16 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal retimed-train stage should use rhythm_dataset_target_mode: cached_only.")
         if primary != "teacher":
             errors.append("Formal retimed-train stage should use rhythm_primary_target_surface: teacher.")
-        if distill != "offline":
-            errors.append("Formal retimed-train stage should use rhythm_distill_surface: offline.")
-        if not enable_dual:
-            errors.append("Formal retimed-train stage requires rhythm_enable_dual_mode_teacher: true.")
+        if lambda_distill > 0.0:
+            if distill != "offline":
+                errors.append("Formal retimed-train stage with KD enabled should use rhythm_distill_surface: offline.")
+            if not enable_dual:
+                errors.append("Formal retimed-train stage with KD enabled requires rhythm_enable_dual_mode_teacher: true.")
+        else:
+            if distill not in {"none", "off", "disable", "disabled", "false"}:
+                warnings.append("Formal retimed-train stage without KD usually keeps rhythm_distill_surface: none.")
+            if enable_dual:
+                warnings.append("Formal retimed-train stage without KD usually keeps rhythm_enable_dual_mode_teacher: false.")
         if not require_cached_teacher:
             errors.append("Formal retimed-train stage should require cached teacher surfaces.")
         if not require_retimed_cache:
@@ -393,21 +442,37 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal retimed-train stage should set rhythm_schedule_only_stage: false.")
         if optimize_module_only:
             errors.append("Formal retimed-train stage should set rhythm_optimize_module_only: false.")
+        if not compact_joint_loss:
+            errors.append("Formal retimed-train stage should keep rhythm_compact_joint_loss: true.")
         if retimed_source != "teacher":
             errors.append("Formal retimed-train stage should use rhythm_binarize_retimed_mel_source: teacher.")
         if not binarize_teacher:
             errors.append("Formal retimed-train stage requires rhythm_binarize_teacher_targets: true.")
         if not binarize_retimed:
             errors.append("Formal retimed-train stage requires rhythm_binarize_retimed_mel_targets: true.")
-        if lambda_mel_adv > 0.0 and not disable_mel_adv_when_retimed:
-            errors.append("Formal retimed-train stage should disable mel GAN on the retimed canvas.")
+        if lambda_guidance > 0.0:
+            errors.append("Formal retimed-train stage should keep lambda_rhythm_guidance: 0.")
+        if distill_allocation_weight > 0.0:
+            errors.append("Formal retimed-train stage should keep rhythm_distill_allocation_weight: 0.")
+        if distill_budget_weight > 0.15:
+            warnings.append("Formal retimed-train stage usually keeps rhythm_distill_budget_weight <= 0.15.")
+        if distill_prefix_weight <= 0.0 and lambda_distill > 0.0:
+            warnings.append("Formal retimed-train stage usually keeps rhythm_distill_prefix_weight > 0.")
+        if not disable_mel_adv_when_retimed:
+            errors.append("Formal retimed-train stage should keep rhythm_disable_mel_adv_when_retimed: true.")
+        if lambda_mel_adv > 0.0:
+            errors.append("Formal retimed-train stage should keep lambda_mel_adv: 0.0 on the retimed canvas.")
+        if export_debug_sidecars:
+            warnings.append("Formal retimed-train stage should keep rhythm_export_debug_sidecars: false to preserve runtime-minimal batch contract.")
+        if export_cache_audit_to_sample:
+            warnings.append("Formal retimed-train stage should keep rhythm_export_cache_audit_to_sample: false except dedicated cache audits.")
         if retimed_target_mode == "online":
             warnings.append("Formal retimed-train stage uses online-only retimed targets; cached retimed targets will not act as a warm-start fallback.")
     else:
         if profile != "minimal_v1":
             warnings.append(
                 "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
-                "(schedule_only -> dual_mode_kd -> retimed_train)."
+                "(schedule_only -> retimed_train, with dual_mode_kd as an optional branch)."
             )
     return stage, errors, warnings
 
@@ -564,6 +629,10 @@ def _validate_inspected_items(items: list[dict], hp: dict, *, split: str) -> lis
 def _run_dataset_and_model_dry_run(split: str, *, run_model: bool) -> list[str]:
     errors: list[str] = []
     try:
+        from tasks.Conan.dataset import ConanDataset
+    except Exception as exc:
+        return [f"Failed to import ConanDataset for split '{split}': {exc}"]
+    try:
         ds = ConanDataset(prefix=split, shuffle=False)
     except Exception as exc:
         return [f"Failed to build ConanDataset for split '{split}': {exc}"]
@@ -578,6 +647,8 @@ def _run_dataset_and_model_dry_run(split: str, *, run_model: bool) -> list[str]:
     if not run_model:
         return errors
     try:
+        import torch
+        from tasks.Conan.Conan import ConanTask
         task = ConanTask()
         task.build_tts_model()
         task.global_step = 0
@@ -669,7 +740,8 @@ def main():
         errors.extend(_validate_inspected_items(items, hp, split=split))
         for mismatch in mismatches:
             errors.append(mismatch)
-        errors.extend(_run_dataset_and_model_dry_run(split, run_model=args.model_dry_run))
+        if args.model_dry_run:
+            errors.extend(_run_dataset_and_model_dry_run(split, run_model=True))
 
     if warnings:
         print("[preflight] warnings:")

@@ -70,26 +70,35 @@ Mainline timing losses:
 1. `L_exec_speech`
 2. `L_exec_pause`
 3. `L_budget`
-4. `L_cumplan`
+4. `L_prefix_state` (`L_cumplan` kept as the compatibility alias)
 
-Staged / optional:
+Joint compact optimizer view (maintained):
 
-5. `L_distill`
-6. `L_base`
+5. `L_base`
+6. `L_rhythm_exec` (macro: `L_exec_speech + L_exec_pause`)
+7. `L_stream_state` (macro: budget + cumplan guardrail)
+8. `L_pitch` (optional, only when retimed pitch targets are ready)
+
+Staged / optional branch losses:
+
+9. `L_distill`
+10. `L_distill_exec`
+11. `L_distill_budget`
+12. `L_distill_prefix`
 
 Interpretation:
 
 - `L_exec_*` is the main supervision surface because projector execution is the actual timing authority
 - `L_budget` is a light streaming guardrail, not the main target
-- `L_cumplan` supervises cumulative prefix debt / backlog directly
-- `L_distill` is reserved for latency-matched teacher distillation, not naive full-context imitation
+- `L_prefix_state` supervises cumulative prefix debt / backlog directly
 - `L_base` is the outer acoustic closure once retimed decoder training is enabled
+- `L_distill*` is reserved for explicit KD branch experiments, not default maintained training
 
 Current objective priority in practice:
 
-- schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_cumplan`
-- phase-2 KD: add `L_distill`, preferably on executed speech/pause plus optional prefix carry
-- retimed acoustic stage: add light `L_base`
+- schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_prefix_state`
+- joint retimed stage: compact `3+1` view (`L_base + L_rhythm_exec + L_stream_state + optional L_pitch`)
+- phase-2 KD branch: add `L_distill`, preferably on executed speech/pause plus optional prefix carry + tiny budget
 - `L_plan` and `L_guidance` remain available only as internal ablations/debug paths
 
 ---
@@ -196,11 +205,18 @@ The most important internal semantics are:
 - emitted total frames
 - pending pause realization
 
+State contract clarification:
+
+- `phase_ptr` represents committed progress
+- it should be monotonic under streaming updates
+- visible-prefix growth without new commit should not move the phase backward
+
 At the dataset / training-batch level, keep the exported rhythm fields layered:
 
 - runtime-minimal contract
-- debug sidecars
-- cache/audit metadata
+- stage-needed runtime targets
+- streaming/offline sidecars only when needed
+- debug/cache appendix only when explicitly requested
 
 This prevents the sample schema from drifting back into a single undifferentiated sidecar blob.
 

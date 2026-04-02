@@ -77,6 +77,21 @@ def _slice_to_visible_prefix(tensor: torch.Tensor, target_units: int) -> torch.T
     return tensor[:, :target_units]
 
 
+def _as_frame_plan(output: dict[str, Any], execution) -> Any | None:
+    frame_plan = output.get("rhythm_frame_plan")
+    if frame_plan is not None:
+        return frame_plan
+    return getattr(execution, "frame_plan", None)
+
+
+def _optional_scalar(x: Any, device: torch.device) -> torch.Tensor | None:
+    if isinstance(x, torch.Tensor):
+        return _safe_mean(x.float())
+    if isinstance(x, (int, float)):
+        return torch.tensor(float(x), device=device)
+    return None
+
+
 def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
     execution = output.get("rhythm_execution")
     if execution is None:
@@ -134,6 +149,34 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         render_total_mask = output.get("rhythm_total_mask")
         denom = render_total_mask.float().sum().clamp_min(1.0) if render_total_mask is not None else float(render_blank_mask.numel())
         metrics["rhythm_metric_render_blank_ratio"] = render_blank_mask.float().sum() / denom
+    frame_plan = _as_frame_plan(output, execution)
+    if frame_plan is not None:
+        frame_total_mask = frame_plan.total_mask.float()
+        frame_blank_mask = frame_plan.blank_mask.float()
+        frame_src_index = frame_plan.frame_src_index
+        frame_total = frame_total_mask.sum().clamp_min(1.0)
+        frame_blank = (frame_blank_mask * frame_total_mask).sum()
+        frame_nonblank = ((1.0 - frame_blank_mask).clamp(0.0, 1.0) * frame_total_mask).sum()
+        blank_denom = frame_blank.clamp_min(1.0)
+        speech_denom = frame_nonblank.clamp_min(1.0)
+        blank_and_neg_src = ((frame_blank_mask > 0.5) & (frame_src_index < 0)).float() * frame_total_mask
+        speech_and_pos_src = ((frame_blank_mask <= 0.5) & (frame_src_index >= 0)).float() * frame_total_mask
+        metrics["rhythm_metric_frame_plan_present"] = execution.speech_duration_exec.new_tensor(1.0)
+        metrics["rhythm_metric_frame_plan_total_frames_mean"] = _safe_mean(frame_total_mask.sum(dim=1))
+        metrics["rhythm_metric_frame_plan_blank_ratio_mean"] = frame_blank / frame_total
+        metrics["rhythm_metric_frame_plan_speech_ratio_mean"] = frame_nonblank / frame_total
+        metrics["rhythm_metric_frame_plan_blank_src_consistency"] = blank_and_neg_src.sum() / blank_denom
+        metrics["rhythm_metric_frame_plan_speech_src_consistency"] = speech_and_pos_src.sum() / speech_denom
+        if render_blank_mask is not None:
+            mask_for_l1 = frame_total_mask
+            if render_blank_mask.shape == frame_blank_mask.shape:
+                metrics["rhythm_metric_render_vs_frame_plan_blank_l1"] = _masked_l1(
+                    render_blank_mask.float(),
+                    frame_blank_mask.float(),
+                    mask_for_l1,
+                )
+    else:
+        metrics["rhythm_metric_frame_plan_present"] = execution.speech_duration_exec.new_tensor(0.0)
     metrics["rhythm_metric_local_rate_transfer_corr"] = _masked_corr(
         execution.speech_duration_exec.float(),
         planner.trace_context[:, :, 1].float(),
@@ -168,6 +211,22 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 "rhythm_metric_clock_delta_abs_mean": _safe_mean(state_next.clock_delta.abs()),
             }
         )
+        phase_progress = getattr(state_next, "phase_anchor_progress", None)
+        phase_total = getattr(state_next, "phase_anchor_total", None)
+        if phase_progress is not None and phase_total is not None:
+            progress_ratio = phase_progress.float() / phase_total.float().clamp_min(1.0)
+            phase_ptr = state_next.phase_ptr.float()
+            metrics["rhythm_metric_phase_progress_ratio_mean"] = _safe_mean(progress_ratio)
+            metrics["rhythm_metric_phase_ptr_vs_progress_l1"] = _safe_mean((phase_ptr - progress_ratio).abs())
+            metrics["rhythm_metric_phase_ptr_below_progress_ratio"] = _safe_mean(
+                (phase_ptr + 1e-6 < progress_ratio).float()
+            )
+    state_prev = output.get("rhythm_state_prev")
+    if state_prev is not None and state_next is not None:
+        phase_delta = state_next.phase_ptr.float() - state_prev.phase_ptr.float()
+        metrics["rhythm_metric_phase_delta_mean"] = _safe_mean(phase_delta)
+        metrics["rhythm_metric_phase_delta_min"] = phase_delta.min()
+        metrics["rhythm_metric_phase_nonretro_rate"] = _safe_mean((phase_delta >= -1e-6).float())
     ref_conditioning = output.get("rhythm_ref_conditioning")
     if ref_conditioning is not None:
         selector_scores = ref_conditioning.get("selector_meta_scores")
@@ -268,18 +327,65 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             teacher_source_boundary_scale.float()
         )
     acoustic_target_source = output.get("acoustic_target_source")
-    if acoustic_target_source is not None:
-        source_to_id = {"source": 0.0, "cached": 1.0, "online": 2.0}
-        metrics["rhythm_metric_acoustic_target_source_id"] = execution.speech_duration_exec.new_tensor(
-            source_to_id.get(str(acoustic_target_source), -1.0)
-        )
+    acoustic_source_name = str(acoustic_target_source) if acoustic_target_source is not None else "unknown"
+    source_to_id = {"source": 0.0, "cached": 1.0, "online": 2.0}
+    source_id = source_to_id.get(acoustic_source_name, -1.0)
+    metrics["rhythm_metric_acoustic_target_source_id"] = execution.speech_duration_exec.new_tensor(source_id)
+    metrics["rhythm_metric_acoustic_target_source_is_source"] = execution.speech_duration_exec.new_tensor(
+        1.0 if acoustic_source_name == "source" else 0.0
+    )
+    metrics["rhythm_metric_acoustic_target_source_is_cached"] = execution.speech_duration_exec.new_tensor(
+        1.0 if acoustic_source_name == "cached" else 0.0
+    )
+    metrics["rhythm_metric_acoustic_target_source_is_online"] = execution.speech_duration_exec.new_tensor(
+        1.0 if acoustic_source_name == "online" else 0.0
+    )
+    metrics["rhythm_metric_acoustic_target_source_unknown"] = execution.speech_duration_exec.new_tensor(
+        1.0 if source_id < 0.0 else 0.0
+    )
     offline_confidence = output.get("rhythm_offline_confidence")
     if offline_confidence is not None:
         metrics["rhythm_metric_offline_confidence_mean"] = _safe_mean(offline_confidence.float())
+    offline_component_values = []
     for component in ("exec", "budget", "prefix", "allocation"):
         component_value = output.get(f"rhythm_offline_confidence_{component}")
         if component_value is not None:
-            metrics[f"rhythm_metric_offline_confidence_{component}_mean"] = _safe_mean(component_value.float())
+            component_mean = _safe_mean(component_value.float())
+            metrics[f"rhythm_metric_offline_confidence_{component}_mean"] = component_mean
+            offline_component_values.append(component_mean)
+    metrics["rhythm_metric_offline_confidence_component_coverage"] = execution.speech_duration_exec.new_tensor(
+        float(len(offline_component_values)) / 4.0
+    )
+    if len(offline_component_values) > 0:
+        component_stack = torch.stack(offline_component_values, dim=0)
+        metrics["rhythm_metric_offline_confidence_component_mean"] = component_stack.mean()
+        metrics["rhythm_metric_offline_confidence_component_std"] = component_stack.std(unbiased=False)
+        if offline_confidence is not None:
+            metrics["rhythm_metric_offline_confidence_overall_component_gap"] = (
+                _safe_mean(offline_confidence.float()) - component_stack.mean()
+            ).abs()
+
+    # Keep compact optimization heads and public aliases observable in metrics.
+    alias_keys = {
+        "L_exec_speech": "rhythm_metric_alias_L_exec_speech",
+        "L_exec_pause": "rhythm_metric_alias_L_exec_pause",
+        "L_budget": "rhythm_metric_alias_L_budget",
+        "L_cumplan": "rhythm_metric_alias_L_cumplan",
+        "L_prefix_state": "rhythm_metric_alias_L_prefix_state",
+        "L_rhythm_exec": "rhythm_metric_alias_L_rhythm_exec",
+        "L_stream_state": "rhythm_metric_alias_L_stream_state",
+        "L_base": "rhythm_metric_alias_L_base",
+        "L_pitch": "rhythm_metric_alias_L_pitch",
+        "rhythm_exec": "rhythm_metric_compact_rhythm_exec",
+        "rhythm_stream_state": "rhythm_metric_compact_stream_state",
+        "base": "rhythm_metric_compact_base",
+        "pitch": "rhythm_metric_compact_pitch",
+    }
+    device = execution.speech_duration_exec.device
+    for src_key, metric_key in alias_keys.items():
+        value = _optional_scalar(output.get(src_key), device=device)
+        if value is not None:
+            metrics[metric_key] = value
 
     if sample is not None:
         pause_target_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"

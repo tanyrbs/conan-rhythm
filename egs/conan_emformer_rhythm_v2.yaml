@@ -4,13 +4,17 @@ mel_losses: "l1:1.0"
 binarization_args:
   with_rhythm_cache: true
 
-# Rhythm V2 clean mainline
+# Rhythm V2 transitional/debug profile.
+# Formal training entrypoints should use:
+#   1) egs/conan_emformer_rhythm_v2_schedule_only.yaml
+#   2) egs/conan_emformer_rhythm_v2_retimed_train.yaml
+# This config is kept for migration checks and conservative fallback runs.
 rhythm_enable_v2: true
 rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_duration_exec, pause_after_exec, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_cumplan, L_kd, L_base]
+rhythm_public_losses: [L_exec_speech, L_exec_pause, L_budget, L_prefix_state, L_base, L_rhythm_exec, L_stream_state, L_pitch]
 content_vocab_size: 102
 
 rhythm_stats_dim: 6
@@ -60,6 +64,8 @@ rhythm_use_retimed_pitch_target: false
 rhythm_disable_pitch_loss_when_retimed: true
 rhythm_disable_mel_adv_when_retimed: true
 rhythm_resample_retimed_target_to_output: true
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
 rhythm_retimed_target_start_steps: 0
 rhythm_retimed_pause_frame_weight: 0.20
 rhythm_retimed_stretch_weight_min: 0.35
@@ -94,7 +100,12 @@ rhythm_teacher_local_rate_strength: 0.45
 rhythm_teacher_segment_bias_strength: 0.30
 rhythm_teacher_pause_strength: 1.10
 rhythm_teacher_boundary_strength: 1.50
-rhythm_teacher_source_boundary_pause_weight: 0.35
+rhythm_teacher_source_boundary_pause_weight: 0.25
+rhythm_teacher_source_boundary_prior_clip: 1.50
+rhythm_teacher_source_boundary_gate_floor: 0.05
+rhythm_teacher_source_boundary_gate_ceiling: 0.55
+rhythm_teacher_source_boundary_agreement_center: 0.15
+rhythm_teacher_source_boundary_agreement_scale: 4.0
 rhythm_teacher_pause_budget_ratio_cap: 0.80
 rhythm_teacher_speech_smooth_kernel: 3
 rhythm_teacher_pause_topk_ratio: 0.30
@@ -135,6 +146,9 @@ lambda_rhythm_distill: 0.0
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.25
+rhythm_compact_joint_loss: true
+rhythm_joint_budget_macro_weight: 0.35
+rhythm_joint_cumplan_macro_weight: 0.65
 rhythm_require_retimed_cache: false
 rhythm_require_cached_teacher: false
 rhythm_schedule_only_stage: false
