@@ -28,6 +28,7 @@ Current state:
 - preflight now also checks cached-only contract metadata, teacher/retimed surface identity, and whether `ConanDataset` filtering empties a split
 - optional `--model_dry_run` also checks dataset collation + one no-grad ConanTask forward before a long run
 - `scripts/cpu_probe_rhythm_train.py` now provides a stricter CPU-side mini-train probe (real batch collation + forward/backward + grad/param checks) before committing to a longer run
+- base config now exposes DataLoader / DDP efficiency knobs (`dl_pin_memory`, `dl_persistent_workers`, `dl_prefetch_factor`, `ddp_find_unused_parameters`, `ddp_static_graph`) instead of hard-coding them in trainer/task code
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 - projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
@@ -65,6 +66,8 @@ Current recommendation:
 - for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
 - that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
 - that config now also explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`)
+- stage-1 module-only config now also enables the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disables pitch/F0 requirements (`use_pitch_embed: false`, `binarization_args.with_f0: false`) so warm-start runs do not pay unnecessary decoder/pitch extraction cost
+- the module-only acoustic fast path is automatically gated off once train-time retimed rendering is active; formal retimed closure should still run the real decoder path instead of a fake zero-cost shortcut
 - stage-1 objective should stay minimal:
   - `L_exec_speech`
   - `L_exec_pause`
@@ -112,6 +115,10 @@ Important terminology note:
   - offline branch = non-causal planner teacher + shared projector contract
   - algorithmic teacher = explicit bootstrap / fallback surface
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is an optional stage-2 branch config
+- that branch now explicitly keeps enabled distill losses in the optimizer path (`rhythm_enable_aux_optimizer_losses: true`) and adds a light runtime teacher auxiliary supervision term (`lambda_rhythm_teacher_aux`) so the learned offline teacher is not left as an unsupervised side branch
+- when streaming prefix cropping is active, runtime teacher auxiliary supervision now prefers full-length offline cached teacher sidecars (`rhythm_offline_teacher_*`) when they exist, and otherwise slices the runtime teacher execution/state surface to the overlapping prefix instead of mixing a full-context teacher with student-prefix targets
+- dual-mode KD keeps confidence weighting detached before it is used as a loss weight, so offline confidence cannot cheat by shrinking hard-example weights
+- stage-2 module-only runs also inherit the acoustic fast path and `with_f0: false`, so KD warm-start does not pay pitch/decoder cost unless you deliberately leave the rhythm-only route
 - docs and experiments should still keep the distinction explicit: learned offline teacher is stronger than student replay, but it is still a planner teacher, not a second acoustic model
 - maintained default training chain does **not** require this stage; prefer teacher-first target surfaces before adding KD losses
 
@@ -139,6 +146,7 @@ Current repository status:
   - `rhythm_online_retimed_target_start_steps: 0`
 - `rhythm_binarize_retimed_mel_targets: true`
 - `rhythm_use_retimed_target_if_available: true`
+- stage-3 retimed joint config explicitly turns pitch/F0 back on (`use_pitch_embed: true`, `binarization_args.with_f0: true`) because this is the formal stage where retimed pitch supervision is allowed again
 
 Current bridge step already in repo:
 

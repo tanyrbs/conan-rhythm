@@ -69,6 +69,7 @@ Maintained usage preference:
 - do not keep task-side surrogate pause execution in the maintained path; if pause gradients disappear, fix the projector branch itself
 - keep schedule-only runtime teacher branch off (`rhythm_enable_learned_offline_teacher: false`); stage-1 should not pay runtime teacher complexity
 - dual-mode KD may enable the runtime learned teacher branch, but it remains an optional research/stage-2 branch rather than the default maintained chain
+- when streaming-prefix training exports a longer offline source sidecar, the runtime teacher should consume matching full-length offline cached teacher surfaces (`rhythm_offline_teacher_*`) for its own auxiliary supervision instead of reusing student-prefix-sliced teacher targets
 
 ---
 
@@ -229,6 +230,10 @@ Policy:
 - default distill target = speech exec + pause exec (`blank_exec` only as cache/internal alias)
 - prefix carry distill is preferred over heavier allocation/budget distill
 - allocation/budget distill should remain off by default unless the experiment explicitly needs them
+- when runtime learned offline teacher KD is enabled, teacher confidence weights must be detached before weighting student losses, and the runtime teacher itself should receive a light direct auxiliary supervision term instead of being left purely as a detached target producer
+- runtime teacher auxiliary supervision should prefer dedicated full-length offline teacher sidecars when available; otherwise it must slice the runtime teacher surface to the overlapping prefix before comparing against cached student-prefix targets
+- maintained stage configs now keep module-only schedule/KD runs on the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disable F0 extraction there (`use_pitch_embed: false`, `binarization_args.with_f0: false`); formal retimed joint training re-enables pitch/F0 in stage-3
+- the acoustic fast path must not stay enabled after train-time retimed rendering turns on; once stage-3 closure is active, decoder/pitch/vocoder supervision has to run on the real retimed canvas
 
 Maintained default:
 

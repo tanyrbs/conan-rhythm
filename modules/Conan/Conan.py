@@ -242,12 +242,6 @@ class Conan(FastSpeech):
         content_embed = self.content_proj(content_embed.transpose(1, 2)).transpose(1, 2)
         ret["content_embed_proj"] = content_embed  # store result
 
-        style_embed = self._resolve_style_embed(
-            spk_embed=spk_embed,
-            ref=ref,
-            ret=ret,
-        )
-
         if self.rhythm_enable_v2:
             content_embed, tgt_nonpadding, f0, uv = self.rhythm_adapter(
                 ret=ret,
@@ -268,6 +262,25 @@ class Conan(FastSpeech):
                 rhythm_offline_source_cache=kwargs.get("rhythm_offline_source_cache"),
                 speech_state_fn=self._unit_speech_state_fn,
             )
+
+        disable_acoustic_train_path = bool(kwargs.get("disable_acoustic_train_path", False))
+        if disable_acoustic_train_path and not bool(infer):
+            ret["tgt_nonpadding"] = tgt_nonpadding
+            ret["rhythm_disable_acoustic_train_path"] = 1.0
+            if target is not None:
+                ret["mel_out"] = target
+            else:
+                mel_len = int(tgt_nonpadding.squeeze(-1).sum(dim=1).max().item()) if tgt_nonpadding.numel() > 0 else int(content.size(1))
+                ret["mel_out"] = content_embed.new_zeros((content.size(0), mel_len, self.out_dims))
+            if f0 is not None:
+                ret["f0_denorm_pred"] = f0.float()
+            return ret
+
+        style_embed = self._resolve_style_embed(
+            spk_embed=spk_embed,
+            ref=ref,
+            ret=ret,
+        )
 
         # pitch input = content embedding + style embedding
         pitch_inp = content_embed + style_embed

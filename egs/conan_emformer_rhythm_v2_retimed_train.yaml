@@ -54,3 +54,8 @@ rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.0
 lambda_mel_adv: 0.0
+
+# Stage-3 re-enables pitch/F0 because joint retimed training can supervise retimed pitch targets.
+use_pitch_embed: true
+binarization_args:
+  with_f0: true

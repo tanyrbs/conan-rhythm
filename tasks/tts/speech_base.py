@@ -136,11 +136,18 @@ class SpeechBaseTask(BaseTask):
             num_replicas = dist.get_world_size()
             rank = dist.get_rank()
             batches = [x[rank::num_replicas] for x in batches if len(x) % num_replicas == 0]
-        return torch.utils.data.DataLoader(dataset,
-                                           collate_fn=dataset.collater,
-                                           batch_sampler=batches,
-                                           num_workers=num_workers,
-                                           pin_memory=False)
+        loader_kwargs = {
+            'collate_fn': dataset.collater,
+            'batch_sampler': batches,
+            'num_workers': num_workers,
+            'pin_memory': bool(hparams.get('dl_pin_memory', False)),
+        }
+        if num_workers > 0:
+            loader_kwargs['persistent_workers'] = bool(hparams.get('dl_persistent_workers', True))
+            prefetch_factor = int(hparams.get('dl_prefetch_factor', 2) or 2)
+            if prefetch_factor > 0:
+                loader_kwargs['prefetch_factor'] = prefetch_factor
+        return torch.utils.data.DataLoader(dataset, **loader_kwargs)
 
     ##########################
     # scheduler and optimizer

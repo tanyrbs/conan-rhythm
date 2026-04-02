@@ -7,6 +7,7 @@ rhythm_minimal_v1_profile: false
 rhythm_schedule_only_stage: true
 rhythm_optimize_module_only: true
 rhythm_optimize_pause_state: false
+rhythm_fastpath_disable_acoustic_when_module_only: true
 rhythm_compact_joint_loss: false
 
 # Stage-1 is the first maintained formal config in the chain.
@@ -32,3 +33,8 @@ lambda_mel_adv: 0.0
 
 # Warm-start the projector with a fixed learning rate; long warmup makes the tiny schedule losses move too slowly.
 scheduler: none
+
+# Stage-1 skips pitch/F0 extraction on the module-only fast path.
+use_pitch_embed: false
+binarization_args:
+  with_f0: false

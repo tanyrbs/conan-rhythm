@@ -13,6 +13,7 @@ import numpy as np
 import torch.optim
 import torch.utils.data
 import copy
+import inspect
 import logging
 import os
 import re
@@ -485,7 +486,15 @@ class Trainer:
     # DDP
     ####################
     def configure_ddp(self, task):
-        task = DDP(task, device_ids=[self.root_gpu], find_unused_parameters=True)
+        find_unused = bool(hparams.get('ddp_find_unused_parameters', True))
+        static_graph = bool(hparams.get('ddp_static_graph', False))
+        ddp_kwargs = {
+            'device_ids': [self.root_gpu],
+            'find_unused_parameters': find_unused,
+        }
+        if 'static_graph' in inspect.signature(DDP.__init__).parameters:
+            ddp_kwargs['static_graph'] = static_graph
+        task = DDP(task, **ddp_kwargs)
         random.seed(self.seed)
         np.random.seed(self.seed)
         return task

@@ -327,8 +327,15 @@ def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
                 x_ = x + [x[-1]] * (len(x) - len(x) // num_replicas * num_replicas)
                 batches_.append(x_[rank::num_replicas])
         batches = batches_
-    return torch.utils.data.DataLoader(dataset,
-                                       collate_fn=dataset.collater,
-                                       batch_sampler=batches,
-                                       num_workers=num_workers,
-                                       pin_memory=pin_memory)
+    loader_kwargs = {
+        'collate_fn': dataset.collater,
+        'batch_sampler': batches,
+        'num_workers': num_workers,
+        'pin_memory': bool(hparams.get('dl_pin_memory', pin_memory)),
+    }
+    if num_workers > 0:
+        loader_kwargs['persistent_workers'] = bool(hparams.get('dl_persistent_workers', True))
+        prefetch_factor = int(hparams.get('dl_prefetch_factor', 2) or 2)
+        if prefetch_factor > 0:
+            loader_kwargs['prefetch_factor'] = prefetch_factor
+    return torch.utils.data.DataLoader(dataset, **loader_kwargs)

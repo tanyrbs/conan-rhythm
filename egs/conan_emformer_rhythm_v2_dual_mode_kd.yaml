@@ -11,6 +11,7 @@ rhythm_minimal_v1_profile: false
 # does not treat this stage as pure schedule-only.
 rhythm_schedule_only_stage: false
 rhythm_optimize_module_only: true
+rhythm_fastpath_disable_acoustic_when_module_only: true
 rhythm_distill_surface: offline
 rhythm_enable_dual_mode_teacher: true
 rhythm_enable_learned_offline_teacher: true
@@ -35,3 +36,11 @@ lambda_rhythm_distill: 0.35
 rhythm_distill_budget_weight: 0.10
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.50
+
+rhythm_enable_aux_optimizer_losses: true
+lambda_rhythm_teacher_aux: 0.50
+
+# Optional KD stage can still stay rhythm-only.
+use_pitch_embed: false
+binarization_args:
+  with_f0: false

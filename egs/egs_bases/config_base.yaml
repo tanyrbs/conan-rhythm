@@ -14,6 +14,11 @@ ds_workers: 1
 test_num: 100
 endless_ds: true
 sort_by_len: true
+dl_pin_memory: true
+dl_persistent_workers: true
+dl_prefetch_factor: 2
+ddp_find_unused_parameters: true
+ddp_static_graph: false
 
 #########
 # train and eval

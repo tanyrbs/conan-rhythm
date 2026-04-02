@@ -380,13 +380,17 @@ class ConanBinarizer(VCBinarizer):
         # item['txt']=" ".join(item['txt'])
         
         # try:
-        f0_path = os.path.join(
-            os.path.dirname(wav_fn) + "_f0",
-            os.path.basename(wav_fn).replace(".wav", "_f0.npy")
-        )
-        f0 = np.load(f0_path)[:mel.shape[0]]
-        min_length = min(len(content), len(mel), len(f0))
-        item["f0"] = f0 = f0[:min_length]
+        require_f0 = bool(binarization_args.get('with_f0', hparams.get('use_pitch_embed', False)))
+        if require_f0:
+            f0_path = os.path.join(
+                os.path.dirname(wav_fn) + "_f0",
+                os.path.basename(wav_fn).replace(".wav", "_f0.npy")
+            )
+            f0 = np.load(f0_path)[:mel.shape[0]]
+            min_length = min(len(content), len(mel), len(f0))
+            item["f0"] = f0 = f0[:min_length]
+        else:
+            min_length = min(len(content), len(mel))
         item['mel'] = mel = mel[:min_length]
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
         item['hubert'] = content = content[:min_length]

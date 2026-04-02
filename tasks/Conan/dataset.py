@@ -118,6 +118,13 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_stream_visible_units",
         "rhythm_stream_full_units",
     )
+    _RHYTHM_STREAMING_OFFLINE_TEACHER_AUX_KEYS = (
+        "rhythm_offline_teacher_speech_exec_tgt",
+        "rhythm_offline_teacher_pause_exec_tgt",
+        "rhythm_offline_teacher_speech_budget_tgt",
+        "rhythm_offline_teacher_pause_budget_tgt",
+        "rhythm_offline_teacher_confidence",
+    )
     _RHYTHM_DEBUG_SIDECAR_KEYS = (
         "source_boundary_cue",
         "phrase_group_index",
@@ -350,12 +357,22 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_stream_prefix_ratio": ("float", 0.0),
             "rhythm_stream_visible_units": ("float", 0.0),
             "rhythm_stream_full_units": ("float", 0.0),
+            "rhythm_offline_teacher_speech_exec_tgt": ("float", 0.0),
+            "rhythm_offline_teacher_pause_exec_tgt": ("float", 0.0),
+            "rhythm_offline_teacher_speech_budget_tgt": ("float", 0.0),
+            "rhythm_offline_teacher_pause_budget_tgt": ("float", 0.0),
+            "rhythm_offline_teacher_confidence": ("float", 0.0),
         }
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
         keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._resolve_runtime_target_export_keys())
         if self._should_export_streaming_offline_sidecars():
             keys.extend(self._RHYTHM_STREAMING_OFFLINE_KEYS)
+            if (
+                bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
+                and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
+            ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0:
+                keys.extend(self._RHYTHM_STREAMING_OFFLINE_TEACHER_AUX_KEYS)
         if self._should_export_rhythm_debug_sidecars():
             keys.extend(self._RHYTHM_DEBUG_SIDECAR_KEYS)
         if self._should_export_rhythm_cache_audit():
@@ -395,6 +412,29 @@ class ConanDataset(FastSpeechDataset):
     @staticmethod
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
         return {f"{prefix}{key}": value for key, value in cache.items()}
+
+    @staticmethod
+    def _build_offline_teacher_aux_fields(item, *, offline_units: int) -> dict:
+        speech_key = "rhythm_teacher_speech_exec_tgt"
+        pause_key = "rhythm_teacher_pause_exec_tgt" if "rhythm_teacher_pause_exec_tgt" in item else "rhythm_teacher_blank_exec_tgt"
+        if speech_key not in item or pause_key not in item:
+            return {}
+        speech = np.asarray(item[speech_key]).reshape(-1).astype(np.float32)
+        pause = np.asarray(item[pause_key]).reshape(-1).astype(np.float32)
+        teacher_units = min(int(offline_units), int(speech.shape[0]), int(pause.shape[0]))
+        if teacher_units <= 0:
+            return {}
+        speech = speech[:teacher_units]
+        pause = pause[:teacher_units]
+        fields = {
+            "rhythm_offline_teacher_speech_exec_tgt": speech,
+            "rhythm_offline_teacher_pause_exec_tgt": pause,
+            "rhythm_offline_teacher_speech_budget_tgt": np.asarray([float(speech.sum())], dtype=np.float32),
+            "rhythm_offline_teacher_pause_budget_tgt": np.asarray([float(pause.sum())], dtype=np.float32),
+        }
+        if "rhythm_teacher_confidence" in item:
+            fields["rhythm_offline_teacher_confidence"] = np.asarray(item["rhythm_teacher_confidence"]).reshape(-1)[:1].astype(np.float32)
+        return fields
 
     @staticmethod
     def _coerce_content_sequence(content) -> list[int]:
@@ -1054,8 +1094,18 @@ class ConanDataset(FastSpeechDataset):
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):
             offline_source_cache = self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)
             rhythm_runtime_fields.update(self._prefix_source_cache(offline_source_cache, prefix="rhythm_offline_"))
-            stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
             offline_units = int(np.asarray(offline_source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+            if (
+                bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
+                and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
+            ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0:
+                rhythm_runtime_fields.update(
+                    self._build_offline_teacher_aux_fields(
+                        item,
+                        offline_units=offline_units,
+                    )
+                )
+            stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
             rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([stream_units], dtype=np.float32)
             rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([offline_units], dtype=np.float32)
             rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray(
@@ -1108,7 +1158,7 @@ class ConanDataset(FastSpeechDataset):
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence"}:
+            elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence", "rhythm_offline_teacher_confidence"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)
             elif key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
                 sample[key] = torch.tensor(value, dtype=torch.float32)

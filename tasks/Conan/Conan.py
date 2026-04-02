@@ -17,6 +17,7 @@ from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
 from utils.nn.seq_utils import weights_nonzero_speech
 from utils.metrics.ssim import ssim
+from types import SimpleNamespace
 
 
 class ConanEmbTask(AuxDecoderMIDITask):
@@ -51,7 +52,13 @@ class ConanTask(AuxDecoderMIDITask):
         self.model = Conan(0, hparams)
         if bool(hparams.get("rhythm_optimize_module_only", False)):
             rhythm_params = self._collect_rhythm_gen_params()
-            self.gen_params = rhythm_params if len(rhythm_params) > 0 else [p for p in self.model.parameters() if p.requires_grad]
+            if len(rhythm_params) > 0:
+                trainable_param_ids = {id(param) for param in rhythm_params}
+                for param in self.model.parameters():
+                    param.requires_grad = id(param) in trainable_param_ids
+                self.gen_params = [param for param in rhythm_params if param.requires_grad]
+            else:
+                self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
         else:
             self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
 
@@ -386,7 +393,7 @@ class ConanTask(AuxDecoderMIDITask):
         if distill_confidence is None:
             confidence = torch.ones((batch_size, 1), device=device)
         else:
-            confidence = distill_confidence.float().reshape(batch_size, -1)[:, :1].to(device=device)
+            confidence = distill_confidence.detach().float().reshape(batch_size, -1)[:, :1].to(device=device)
         confidence = confidence.clamp(min=floor, max=1.0)
         if abs(power - 1.0) > 1e-8:
             confidence = confidence.pow(power)
@@ -666,10 +673,21 @@ class ConanTask(AuxDecoderMIDITask):
             self._detach_loss_value(losses, key)
 
     def _compact_rhythm_optimizer_losses(self, losses, *, schedule_only_stage: bool):
-        # Keep these available for logging/ablation, but keep them out of optimizer by default.
-        if not bool(hparams.get("rhythm_enable_aux_optimizer_losses", False)):
-            for key in ("rhythm_plan", "rhythm_guidance", "rhythm_distill"):
-                self._detach_loss_value(losses, key)
+        # Keep these available for logging/ablation, but do not silently detach
+        # an objective that is explicitly enabled in config.
+        keep_plan = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
+        keep_guidance = keep_plan or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
+        keep_distill = (
+            keep_plan
+            or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
+            or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
+        )
+        if not keep_plan:
+            self._detach_loss_value(losses, "rhythm_plan")
+        if not keep_guidance:
+            self._detach_loss_value(losses, "rhythm_guidance")
+        if not keep_distill:
+            self._detach_loss_value(losses, "rhythm_distill")
         if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
             return
         exec_terms = []
@@ -815,6 +833,17 @@ class ConanTask(AuxDecoderMIDITask):
         # mix, falsetto, breathy=sample['mix'], sample['falsetto'], sample['breathy']
         # bubble,strong,weak=sample['bubble'],sample['strong'],sample['weak']
         # pharyngeal, vibrato, glissando = sample['pharyngeal'], sample['vibrato'], sample['glissando']
+        disable_acoustic_train_path = bool(
+            not infer
+            and not test
+            and not bool(apply_rhythm_render)
+            and hparams.get("rhythm_enable_v2", False)
+            and hparams.get("rhythm_optimize_module_only", False)
+            and hparams.get("rhythm_fastpath_disable_acoustic_when_module_only", True)
+        )
+        disable_source_pitch_supervision = bool(disable_source_pitch_supervision or disable_acoustic_train_path)
+        if disable_acoustic_train_path and rhythm_ref_conditioning is not None:
+            ref = None
         output = self.model(content,spk_embed=spk_embed, target=target,ref=ref,
                             f0=None if disable_source_pitch_supervision else f0,
                             uv=None if disable_source_pitch_supervision else uv,
@@ -825,7 +854,8 @@ class ConanTask(AuxDecoderMIDITask):
                             rhythm_state=kwargs.get("rhythm_state"),
                             rhythm_ref_conditioning=rhythm_ref_conditioning,
                             rhythm_source_cache=self._collect_rhythm_source_cache(sample),
-                            rhythm_offline_source_cache=self._collect_rhythm_source_cache(sample, prefix="rhythm_offline_"))
+                            rhythm_offline_source_cache=self._collect_rhythm_source_cache(sample, prefix="rhythm_offline_"),
+                            disable_acoustic_train_path=disable_acoustic_train_path)
         acoustic_target, acoustic_target_is_retimed, acoustic_weight, acoustic_target_source = self._resolve_acoustic_target_post_model(
             sample,
             output,
@@ -852,6 +882,7 @@ class ConanTask(AuxDecoderMIDITask):
         output["acoustic_target_weight"] = acoustic_weight
         output["acoustic_target_source"] = acoustic_target_source
         output["rhythm_pitch_supervision_disabled"] = float(disable_source_pitch_supervision)
+        output["disable_acoustic_train_path"] = float(disable_acoustic_train_path)
         if acoustic_target_is_retimed:
             mel_out_aligned, acoustic_target, acoustic_weight = self._align_acoustic_target_to_output(
                 output['mel_out'],
@@ -865,7 +896,7 @@ class ConanTask(AuxDecoderMIDITask):
         if not test:
             schedule_only_stage = bool(hparams.get("rhythm_schedule_only_stage", False))
             output["rhythm_schedule_only_stage"] = float(schedule_only_stage)
-            if not schedule_only_stage:
+            if not schedule_only_stage and not disable_acoustic_train_path:
                 self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
                 self.add_pitch_loss(output, sample, losses)
@@ -916,6 +947,128 @@ class ConanTask(AuxDecoderMIDITask):
             losses["fdiff"] = output["fdiff"]
             losses['uv'] = (F.binary_cross_entropy_with_logits(
                 output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding.sum() * hparams['lambda_uv']
+
+    @staticmethod
+    def _slice_runtime_teacher_execution(execution, *, teacher_units: int):
+        if execution is None:
+            return None
+        current_units = int(execution.speech_duration_exec.size(1))
+        if teacher_units >= current_units:
+            return execution
+        planner = getattr(execution, "planner", None)
+        speech_exec = execution.speech_duration_exec[:, :teacher_units]
+        blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[:, :teacher_units]
+        pause_exec = execution.pause_after_exec[:, :teacher_units]
+        speech_budget = speech_exec.float().sum(dim=1, keepdim=True)
+        pause_budget = blank_exec.float().sum(dim=1, keepdim=True)
+        zero_delta = speech_budget.new_zeros(speech_budget.shape)
+        planner_view = SimpleNamespace(
+            speech_budget_win=speech_budget,
+            pause_budget_win=pause_budget,
+            blank_budget_win=pause_budget,
+            boundary_latent=(
+                planner.boundary_latent[:, :teacher_units]
+                if planner is not None and torch.is_tensor(getattr(planner, "boundary_latent", None))
+                else getattr(planner, "boundary_latent", None)
+                if planner is not None
+                else speech_exec.new_zeros(speech_exec.shape)
+            ),
+            source_boundary_cue=(
+                planner.source_boundary_cue[:, :teacher_units]
+                if planner is not None and torch.is_tensor(getattr(planner, "source_boundary_cue", None))
+                else getattr(planner, "source_boundary_cue", None)
+                if planner is not None
+                else None
+            ),
+            feasible_speech_budget_delta=zero_delta,
+            feasible_pause_budget_delta=zero_delta,
+            feasible_total_budget_delta=zero_delta,
+        )
+        return SimpleNamespace(
+            speech_duration_exec=speech_exec,
+            blank_duration_exec=blank_exec,
+            pause_after_exec=pause_exec,
+            planner=planner_view,
+        )
+
+    def _build_runtime_teacher_supervision_targets(self, output, sample):
+        runtime_teacher = output.get("rhythm_offline_execution")
+        offline_unit_batch = output.get("rhythm_offline_unit_batch")
+        unit_batch = output.get("rhythm_unit_batch")
+        if runtime_teacher is None:
+            return None
+        if offline_unit_batch is not None and all(
+            key in sample
+            for key in (
+                "rhythm_offline_teacher_speech_exec_tgt",
+                "rhythm_offline_teacher_pause_exec_tgt",
+            )
+        ):
+            batch_for_targets = offline_unit_batch
+            speech_exec_key = "rhythm_offline_teacher_speech_exec_tgt"
+            pause_exec_key = "rhythm_offline_teacher_pause_exec_tgt"
+            speech_budget_key = "rhythm_offline_teacher_speech_budget_tgt"
+            pause_budget_key = "rhythm_offline_teacher_pause_budget_tgt"
+        else:
+            batch_for_targets = unit_batch if unit_batch is not None else offline_unit_batch
+            speech_exec_key = "rhythm_teacher_speech_exec_tgt"
+            pause_exec_key = (
+                "rhythm_teacher_pause_exec_tgt"
+                if "rhythm_teacher_pause_exec_tgt" in sample
+                else "rhythm_teacher_blank_exec_tgt"
+            )
+            speech_budget_key = "rhythm_teacher_speech_budget_tgt"
+            pause_budget_key = (
+                "rhythm_teacher_pause_budget_tgt"
+                if "rhythm_teacher_pause_budget_tgt" in sample
+                else "rhythm_teacher_blank_budget_tgt"
+            )
+        if batch_for_targets is None or not all(key in sample for key in (speech_exec_key, pause_exec_key)):
+            return None
+        teacher_units = min(
+            int(runtime_teacher.speech_duration_exec.size(1)),
+            int(batch_for_targets.dur_anchor_src.size(1)),
+            int(sample[speech_exec_key].size(1)),
+            int(sample[pause_exec_key].size(1)),
+        )
+        if teacher_units <= 0:
+            return None
+        unit_mask = batch_for_targets.unit_mask
+        if unit_mask is None:
+            unit_mask = batch_for_targets.dur_anchor_src.gt(0).float()
+        speech_exec_tgt = sample[speech_exec_key][:, :teacher_units].float()
+        pause_exec_tgt = sample[pause_exec_key][:, :teacher_units].float()
+        speech_budget_tgt = sample.get(speech_budget_key)
+        pause_budget_tgt = sample.get(pause_budget_key)
+        if speech_budget_tgt is None:
+            speech_budget_tgt = speech_exec_tgt.sum(dim=1, keepdim=True)
+        else:
+            speech_budget_tgt = speech_budget_tgt[:, :1].float()
+        if pause_budget_tgt is None:
+            pause_budget_tgt = pause_exec_tgt.sum(dim=1, keepdim=True)
+        else:
+            pause_budget_tgt = pause_budget_tgt[:, :1].float()
+        sample_confidence = sample.get(
+            "rhythm_offline_teacher_confidence",
+            sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence")),
+        )
+        if isinstance(sample_confidence, torch.Tensor):
+            sample_confidence = sample_confidence.detach()
+        teacher_execution = self._slice_runtime_teacher_execution(runtime_teacher, teacher_units=teacher_units)
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech_exec_tgt,
+            pause_exec_tgt=pause_exec_tgt,
+            speech_budget_tgt=speech_budget_tgt,
+            pause_budget_tgt=pause_budget_tgt,
+            unit_mask=unit_mask[:, :teacher_units],
+            dur_anchor_src=batch_for_targets.dur_anchor_src[:, :teacher_units],
+            plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
+            plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            sample_confidence=sample_confidence,
+            pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
+            feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+        )
+        return teacher_execution, targets
 
     def _build_rhythm_loss_targets(self, output, sample):
         if "rhythm_execution" not in output or output["rhythm_execution"] is None:
@@ -1022,6 +1175,16 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_budget_confidence = output.get("rhythm_offline_confidence_budget")
                 distill_prefix_confidence = output.get("rhythm_offline_confidence_prefix")
                 distill_allocation_confidence = output.get("rhythm_offline_confidence_allocation")
+                if distill_confidence is not None:
+                    distill_confidence = distill_confidence.detach()
+                if distill_exec_confidence is not None:
+                    distill_exec_confidence = distill_exec_confidence.detach()
+                if distill_budget_confidence is not None:
+                    distill_budget_confidence = distill_budget_confidence.detach()
+                if distill_prefix_confidence is not None:
+                    distill_prefix_confidence = distill_prefix_confidence.detach()
+                if distill_allocation_confidence is not None:
+                    distill_allocation_confidence = distill_allocation_confidence.detach()
                 if distill_confidence is None:
                     distill_confidence = distill_speech.new_ones((distill_speech.size(0), 1))
             if use_distill and distill_speech is None and distill_surface in {"auto", "algorithmic"} and algorithmic_teacher is not None:
@@ -1167,7 +1330,7 @@ class ConanTask(AuxDecoderMIDITask):
         losses["rhythm_plan"] = rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)
         losses["rhythm_distill"] = rhythm_losses["rhythm_distill"] * hparams.get("lambda_rhythm_distill", 0.0)
-        lambda_distill = hparams.get("lambda_rhythm_distill", 0.0)
+        lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0)
         losses["rhythm_distill_exec"] = (rhythm_losses["rhythm_distill_exec"] * lambda_distill).detach()
         losses["rhythm_distill_budget"] = (
             rhythm_losses["rhythm_distill_budget"]
@@ -1184,6 +1347,27 @@ class ConanTask(AuxDecoderMIDITask):
             * lambda_distill
             * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
         ).detach()
+
+        runtime_teacher = output.get("rhythm_offline_execution")
+        lambda_teacher_aux = float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)
+        if runtime_teacher is not None and lambda_teacher_aux > 0.0:
+            teacher_bundle = self._build_runtime_teacher_supervision_targets(output, sample)
+            if teacher_bundle is not None:
+                teacher_execution, teacher_targets = teacher_bundle
+                teacher_losses = build_rhythm_loss_dict(teacher_execution, teacher_targets)
+                teacher_exec = (
+                    teacher_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
+                    + teacher_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
+                )
+                teacher_state = (
+                    teacher_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
+                    + teacher_losses["rhythm_cumplan"] * self._get_rhythm_cumplan_lambda()
+                )
+                teacher_aux = teacher_exec + teacher_state
+                losses["rhythm_distill"] = losses["rhythm_distill"] + lambda_teacher_aux * teacher_aux
+                losses["rhythm_teacher_aux_exec"] = teacher_exec.detach()
+                losses["rhythm_teacher_aux_state"] = teacher_state.detach()
+                losses["rhythm_teacher_aux"] = (lambda_teacher_aux * teacher_aux).detach()
 
             
     def _training_step(self, sample, batch_idx, optimizer_idx):
@@ -1250,22 +1434,36 @@ class ConanTask(AuxDecoderMIDITask):
         outputs = tensors_to_scalars(outputs)
         if batch_idx < hparams['num_valid_plots']:
             sr = hparams["audio_sample_rate"]
-            gt_f0 = denorm_f0(sample['f0'], sample["uv"])
+            gt_f0 = (
+                denorm_f0(sample['f0'], sample["uv"])
+                if sample.get('f0') is not None and sample.get('uv') is not None
+                else None
+            )
+            pred_f0 = model_out.get("f0_denorm_pred")
             acoustic_target = model_out.get("acoustic_target_mel", sample["mels"])
             acoustic_target_is_retimed = bool(model_out.get("acoustic_target_is_retimed", False))
-            if acoustic_target_is_retimed:
+            if acoustic_target_is_retimed or gt_f0 is None:
                 wav_gt = self.vocoder.spec2wav(acoustic_target[0].cpu().numpy())
             else:
                 wav_gt = self.vocoder.spec2wav(acoustic_target[0].cpu().numpy(), f0=gt_f0[0].cpu().numpy())
             self.logger.add_audio(f'wav_gt_{batch_idx}', wav_gt, self.global_step, sr)
 
-            wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy(), f0=model_out["f0_denorm_pred"][0].cpu().numpy())
+            if pred_f0 is not None:
+                wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy(), f0=pred_f0[0].cpu().numpy())
+            else:
+                wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy())
             self.logger.add_audio(f'wav_pred_{batch_idx}', wav_pred, self.global_step, sr)
             self.plot_mel(batch_idx, acoustic_target, model_out['mel_out'][0], f'mel_{batch_idx}')
-            self.logger.add_figure(
-                f'f0_{batch_idx}',
-                f0_to_figure(None if acoustic_target_is_retimed else gt_f0[0], None, model_out["f0_denorm_pred"][0]),
-                self.global_step)
+            if gt_f0 is not None or pred_f0 is not None:
+                self.logger.add_figure(
+                    f'f0_{batch_idx}',
+                    f0_to_figure(
+                        None if acoustic_target_is_retimed or gt_f0 is None else gt_f0[0],
+                        None,
+                        pred_f0[0] if pred_f0 is not None else None,
+                    ),
+                    self.global_step,
+                )
         return outputs
     
     def test_step(self, sample, batch_idx):
@@ -1291,6 +1489,12 @@ class ConanTask(AuxDecoderMIDITask):
         wav_pred = self.vocoder.spec2wav(mel_pred.cpu().numpy())
 
         # Optional: save gt (keep consistent with original implementation)
+        gt_f0_np = (
+            denorm_f0(sample['f0'], sample['uv'])[0].cpu().numpy()
+            if sample.get('f0') is not None and sample.get('uv') is not None
+            else None
+        )
+        pred_f0_np = outputs.get('f0_denorm_pred')[0].cpu().numpy() if outputs.get('f0_denorm_pred') is not None else None
         if hparams.get('save_gt', False):
             mel_gt = sample['mels'][0].cpu().numpy()
             wav_gt = self.vocoder.spec2wav(mel_gt)
@@ -1299,7 +1503,7 @@ class ConanTask(AuxDecoderMIDITask):
                 args=[wav_gt, mel_gt,
                     base_fn.replace('[P]', '[G]'),
                     self.gen_dir, None, None,
-                    denorm_f0(sample['f0'], sample['uv'])[0].cpu().numpy(),
+                    gt_f0_np,
                     None, None]
             )
 
@@ -1308,9 +1512,8 @@ class ConanTask(AuxDecoderMIDITask):
             self.save_result,
             args=[wav_pred, mel_pred.cpu().numpy(),
                 base_fn, self.gen_dir, None, None,
-                denorm_f0(sample['f0'], sample['uv'])[0].cpu().numpy(),
-                outputs.get('f0_denorm_pred')[0].cpu().numpy()
-                if outputs.get('f0_denorm_pred') is not None else None,
+                gt_f0_np,
+                pred_f0_np,
                 None]
         )
 

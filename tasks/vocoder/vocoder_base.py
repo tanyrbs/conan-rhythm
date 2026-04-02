@@ -55,7 +55,9 @@ class VocoderBaseTask(BaseTask):
             batch_size=max_sentences,
             num_workers=dataset.num_workers,
             sampler=train_sampler,
-            pin_memory=True,
+            pin_memory=bool(hparams.get('dl_pin_memory', True)),
+            persistent_workers=bool(hparams.get('dl_persistent_workers', True)) if dataset.num_workers > 0 else False,
+            **({'prefetch_factor': int(hparams.get('dl_prefetch_factor', 2) or 2)} if dataset.num_workers > 0 and int(hparams.get('dl_prefetch_factor', 2) or 2) > 0 else {}),
         )
 
     def build_optimizer(self, model):

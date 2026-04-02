@@ -116,10 +116,11 @@ def main():
     parser.add_argument("--exp_name", type=str, default="debug_cpu_probe")
     parser.add_argument("--max_sentences", type=int, default=1)
     parser.add_argument("--max_tokens", type=int, default=3000)
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "auto"])
     args = parser.parse_args()
 
-    if args.steps <= 0 or args.steps > 40:
-        raise ValueError("--steps must be in [1, 40].")
+    if args.steps <= 0 or args.steps > 500:
+        raise ValueError("--steps must be in [1, 500].")
 
     torch.manual_seed(1234)
     set_hparams(
@@ -134,7 +135,14 @@ def main():
         ),
     )
 
-    device = torch.device("cpu")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif args.device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false in this environment.")
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     task = ConanTask()
     task.build_tts_model()
     task.model.to(device)
@@ -154,14 +162,17 @@ def main():
 
     trainable_param_count = sum(p.numel() for p in task.gen_params if p.requires_grad)
     all_trainable_param_count = sum(p.numel() for p in task.model.parameters() if p.requires_grad)
+    trainable_tensor_count = sum(1 for p in task.gen_params if p.requires_grad)
     tracked_params = _pick_tracked_params(task.model)
     tracked_initial = {name: param.detach().cpu().clone() for name, param in tracked_params}
     param_norm_start = _global_param_norm(task.gen_params)
 
     print(f"[cpu-probe] config={args.config}")
+    print(f"[cpu-probe] device={device}")
     print(f"[cpu-probe] split={args.split} dataset_len={len(dataset)} steps={args.steps}")
     print(f"[cpu-probe] trainable_gen_params={trainable_param_count:,}")
     print(f"[cpu-probe] trainable_model_params={all_trainable_param_count:,}")
+    print(f"[cpu-probe] trainable_gen_tensors={trainable_tensor_count}")
     print("[cpu-probe] tracked_params:")
     for name, _ in tracked_params:
         print(f"  - {name}")
@@ -205,15 +216,29 @@ def main():
         scalar_losses["grad_norm_before_clip"] = grad_norm_before_clip
         scalar_losses.update(grad_stats)
         history.append(scalar_losses)
+        detail_parts = []
+        if "L_rhythm_exec" in scalar_losses and abs(scalar_losses["L_rhythm_exec"]) > 0.0:
+            detail_parts.append(f"exec={scalar_losses['L_rhythm_exec']:.4f}")
+        else:
+            if "L_exec_speech" in scalar_losses:
+                detail_parts.append(f"exec_s={scalar_losses['L_exec_speech']:.4f}")
+            if "L_exec_pause" in scalar_losses:
+                detail_parts.append(f"exec_p={scalar_losses['L_exec_pause']:.4f}")
+        if "L_stream_state" in scalar_losses and abs(scalar_losses["L_stream_state"]) > 0.0:
+            detail_parts.append(f"state={scalar_losses['L_stream_state']:.4f}")
+        else:
+            if "L_budget" in scalar_losses:
+                detail_parts.append(f"budget={scalar_losses['L_budget']:.4f}")
+            if "L_cumplan" in scalar_losses:
+                detail_parts.append(f"cumplan={scalar_losses['L_cumplan']:.4f}")
         print(
             "[cpu-probe] "
             f"step={step:02d} total={scalar_losses['total_loss']:.4f} "
             f"base={scalar_losses.get('L_base', 0.0):.4f} "
-            f"exec={scalar_losses.get('L_rhythm_exec', 0.0):.4f} "
-            f"state={scalar_losses.get('L_stream_state', 0.0):.4f} "
             f"pitch={scalar_losses.get('L_pitch', 0.0):.4f} "
+            + " ".join(detail_parts) + " "
             f"grad_norm={grad_norm_before_clip:.4f} "
-            f"grad_params={grad_stats['params_with_grad']} "
+            f"grad_params={grad_stats['params_with_grad']}/{trainable_tensor_count} "
             f"grad_abs_max={grad_stats['grad_abs_max']:.4e}"
         )
 
@@ -233,7 +258,18 @@ def main():
         }
 
     print("[cpu-probe] summary:")
-    for key in ("total_loss", "L_base", "L_rhythm_exec", "L_stream_state", "L_pitch", "grad_norm_before_clip"):
+    for key in (
+        "total_loss",
+        "L_base",
+        "L_rhythm_exec",
+        "L_stream_state",
+        "L_pitch",
+        "L_exec_speech",
+        "L_exec_pause",
+        "L_budget",
+        "L_cumplan",
+        "grad_norm_before_clip",
+    ):
         summary = summarize(key)
         if summary is None:
             continue
