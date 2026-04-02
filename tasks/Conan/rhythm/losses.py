@@ -29,6 +29,10 @@ class RhythmLossTargets:
     distill_prefix_clock_tgt: Optional[torch.Tensor] = None
     distill_prefix_backlog_tgt: Optional[torch.Tensor] = None
     distill_confidence: Optional[torch.Tensor] = None
+    distill_exec_confidence: Optional[torch.Tensor] = None
+    distill_budget_confidence: Optional[torch.Tensor] = None
+    distill_prefix_confidence: Optional[torch.Tensor] = None
+    distill_allocation_confidence: Optional[torch.Tensor] = None
     distill_budget_weight: float = 1.0
     distill_allocation_weight: float = 1.0
     distill_prefix_weight: float = 1.0
@@ -56,6 +60,13 @@ def _reduce_batch_loss(loss: torch.Tensor, batch_weight: Optional[torch.Tensor])
         return loss.mean()
     batch_weight = _prepare_batch_weight(batch_weight, loss)
     return (loss * batch_weight).sum() / batch_weight.sum().clamp_min(1e-6)
+
+
+def _resolve_component_batch_weight(
+    component_weight: Optional[torch.Tensor],
+    fallback_weight: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    return component_weight if component_weight is not None else fallback_weight
 
 
 def _masked_huber(
@@ -224,16 +235,32 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     else:
         l_guidance = execution.speech_duration_exec.new_tensor(0.0)
     if targets.distill_speech_tgt is not None and targets.distill_pause_tgt is not None:
+        distill_exec_weight = _resolve_component_batch_weight(
+            targets.distill_exec_confidence,
+            targets.distill_confidence,
+        )
+        distill_budget_weight = _resolve_component_batch_weight(
+            targets.distill_budget_confidence,
+            targets.distill_confidence,
+        )
+        distill_prefix_weight = _resolve_component_batch_weight(
+            targets.distill_prefix_confidence,
+            targets.distill_confidence,
+        )
+        distill_allocation_weight = _resolve_component_batch_weight(
+            targets.distill_allocation_confidence,
+            targets.distill_confidence,
+        )
         l_distill = _masked_log_huber(
             execution.speech_duration_exec,
             targets.distill_speech_tgt.float(),
             unit_mask,
-            batch_weight=targets.distill_confidence,
+            batch_weight=distill_exec_weight,
         ) + _masked_log_huber(
             blank_exec,
             targets.distill_pause_tgt.float(),
             unit_mask,
-            batch_weight=targets.distill_confidence,
+            batch_weight=distill_exec_weight,
         )
         if (
             float(targets.distill_budget_weight) > 0.0
@@ -243,11 +270,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             budget_distill = _batch_l1(
                 torch.log1p(execution.planner.speech_budget_win.float().clamp_min(0.0)),
                 torch.log1p(targets.distill_speech_budget_tgt.float().clamp_min(0.0)),
-                batch_weight=targets.distill_confidence,
+                batch_weight=distill_budget_weight,
             ) + _batch_l1(
                 torch.log1p(execution.planner.pause_budget_win.float().clamp_min(0.0)),
                 torch.log1p(targets.distill_pause_budget_tgt.float().clamp_min(0.0)),
-                batch_weight=targets.distill_confidence,
+                batch_weight=distill_budget_weight,
             )
             l_distill = l_distill + float(targets.distill_budget_weight) * budget_distill
         if targets.distill_prefix_clock_tgt is not None or targets.distill_prefix_backlog_tgt is not None:
@@ -258,7 +285,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                     _normalize_prefix_carry(targets.distill_prefix_clock_tgt.float(), targets.dur_anchor_src.float(), unit_mask),
                     unit_mask,
                     beta=0.25,
-                    batch_weight=targets.distill_confidence,
+                    batch_weight=distill_prefix_weight,
                 )
             if targets.distill_prefix_backlog_tgt is not None:
                 prefix_loss = prefix_loss + _masked_huber(
@@ -266,7 +293,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                     _normalize_prefix_carry(targets.distill_prefix_backlog_tgt.float(), targets.dur_anchor_src.float(), unit_mask),
                     unit_mask,
                     beta=0.25,
-                    batch_weight=targets.distill_confidence,
+                    batch_weight=distill_prefix_weight,
                 )
             l_distill = l_distill + float(targets.distill_prefix_weight) * prefix_loss
         if float(targets.distill_allocation_weight) > 0.0 and targets.distill_allocation_tgt is not None:
@@ -274,7 +301,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                 execution.speech_duration_exec + blank_exec,
                 targets.distill_allocation_tgt.float(),
                 unit_mask,
-                batch_weight=targets.distill_confidence,
+                batch_weight=distill_allocation_weight,
             )
     else:
         l_distill = execution.speech_duration_exec.new_tensor(0.0)

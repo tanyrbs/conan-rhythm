@@ -30,6 +30,12 @@ rhythm_boundary_feature_scale: 0.35
 rhythm_boundary_source_cue_weight: 0.20
 rhythm_pause_boundary_latent_weight: 0.25
 rhythm_pause_source_boundary_weight: 0.10
+rhythm_source_boundary_scale: 0.60
+rhythm_source_boundary_scale_train_start: 1.00
+rhythm_source_boundary_scale_train_end: 0.60
+rhythm_source_boundary_scale_warmup_steps: 0
+rhythm_source_boundary_scale_anneal_steps: 20000
+rhythm_teacher_source_boundary_scale: 0.45
 rhythm_separator_aware: true
 rhythm_tail_open_units: 1
 rhythm_apply_mode: infer

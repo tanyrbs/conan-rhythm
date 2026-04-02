@@ -92,6 +92,12 @@ class StreamingRhythmModule(nn.Module):
     def init_state(self, batch_size: int, device: torch.device) -> StreamingRhythmState:
         return self.projector.init_state(batch_size=batch_size, device=device)
 
+    @staticmethod
+    def _scale_source_boundary_cue(source_boundary_cue: torch.Tensor, scale: float | None) -> torch.Tensor:
+        if scale is None:
+            return source_boundary_cue
+        return source_boundary_cue * float(scale)
+
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.reference_descriptor(ref_mel)
 
@@ -163,6 +169,7 @@ class StreamingRhythmModule(nn.Module):
         projector_reuse_prefix: bool = True,
         projector_force_full_commit: bool = False,
         projector_pause_topk_ratio_override: float | None = None,
+        source_boundary_scale_override: float | None = None,
     ):
         ref_conditioning = self.build_reference_conditioning(
             ref_conditioning=ref_conditioning,
@@ -183,6 +190,10 @@ class StreamingRhythmModule(nn.Module):
             open_run_mask=open_run_mask,
             sealed_mask=sealed_mask,
             boundary_confidence=boundary_confidence,
+        )
+        source_boundary_cue = self._scale_source_boundary_cue(
+            source_boundary_cue,
+            source_boundary_scale_override,
         )
         visible_sizes = unit_mask.float().sum(dim=1).long().clamp_min(1)
         trace_context = self.sample_trace_window(
@@ -232,6 +243,7 @@ class StreamingRhythmModule(nn.Module):
         open_run_mask: torch.Tensor | None = None,
         sealed_mask: torch.Tensor | None = None,
         boundary_confidence: torch.Tensor | None = None,
+        source_boundary_scale_override: float | None = None,
     ) -> RhythmTeacherTargets:
         del content_units
         ref_conditioning = self.build_reference_conditioning(
@@ -249,6 +261,10 @@ class StreamingRhythmModule(nn.Module):
             open_run_mask=open_run_mask,
             sealed_mask=sealed_mask,
             boundary_confidence=boundary_confidence,
+        )
+        source_boundary_cue = self._scale_source_boundary_cue(
+            source_boundary_cue,
+            source_boundary_scale_override,
         )
         return self.teacher(
             dur_anchor_src=dur_anchor_src,
@@ -281,6 +297,8 @@ class StreamingRhythmModule(nn.Module):
         offline_sep_hint: torch.Tensor | None = None,
         offline_boundary_confidence: torch.Tensor | None = None,
         projector_pause_topk_ratio_override: float | None = None,
+        source_boundary_scale_override: float | None = None,
+        teacher_source_boundary_scale_override: float | None = None,
     ) -> dict[str, object]:
         streaming_execution = self.forward(
             content_units=content_units,
@@ -296,6 +314,7 @@ class StreamingRhythmModule(nn.Module):
             boundary_confidence=boundary_confidence,
             state=state,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            source_boundary_scale_override=source_boundary_scale_override,
         )
         offline_content_units = content_units if offline_content_units is None else offline_content_units
         offline_dur_anchor_src = dur_anchor_src if offline_dur_anchor_src is None else offline_dur_anchor_src
@@ -321,6 +340,7 @@ class StreamingRhythmModule(nn.Module):
             sep_hint=offline_sep_hint,
             boundary_confidence=offline_boundary_confidence,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            source_boundary_scale_override=teacher_source_boundary_scale_override,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=offline_content_units,
@@ -334,6 +354,7 @@ class StreamingRhythmModule(nn.Module):
             sealed_mask=torch.ones_like(offline_sealed_mask).float(),
             sep_hint=offline_sep_hint,
             boundary_confidence=offline_boundary_confidence,
+            source_boundary_scale_override=teacher_source_boundary_scale_override,
         )
         return {
             "streaming_execution": streaming_execution,
@@ -357,7 +378,8 @@ class StreamingRhythmModule(nn.Module):
         sep_hint: torch.Tensor | None = None,
         boundary_confidence: torch.Tensor | None = None,
         projector_pause_topk_ratio_override: float | None = None,
-    ) -> tuple[object, torch.Tensor]:
+        source_boundary_scale_override: float | None = None,
+    ) -> tuple[object, dict[str, torch.Tensor]]:
         ref_conditioning = self.build_reference_conditioning(
             ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
@@ -374,6 +396,10 @@ class StreamingRhythmModule(nn.Module):
             open_run_mask=open_run_mask,
             sealed_mask=sealed_mask,
             boundary_confidence=boundary_confidence,
+        )
+        source_boundary_cue = self._scale_source_boundary_cue(
+            source_boundary_cue,
+            source_boundary_scale_override,
         )
         visible_sizes = unit_mask.float().sum(dim=1).long().clamp_min(1)
         trace_context = self.sample_trace_window(

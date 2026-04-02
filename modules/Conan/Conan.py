@@ -179,6 +179,33 @@ class Conan(FastSpeech):
         progress = min(max((int(global_steps) - warmup_steps) / float(anneal_steps), 0.0), 1.0)
         return float(start_ratio + (end_ratio - start_ratio) * progress)
 
+    def _resolve_rhythm_source_boundary_scale(self, *, infer: bool, global_steps: int, teacher: bool = False) -> float | None:
+        if not self.rhythm_enable_v2:
+            return None
+        if teacher:
+            final_scale = float(
+                self.hparams.get(
+                    "rhythm_teacher_source_boundary_scale",
+                    self.hparams.get("rhythm_source_boundary_scale", 1.0),
+                )
+            )
+            return max(0.0, final_scale)
+        final_scale = float(self.hparams.get("rhythm_source_boundary_scale", 1.0))
+        if infer:
+            return max(0.0, final_scale)
+        start_scale = float(self.hparams.get("rhythm_source_boundary_scale_train_start", 1.0))
+        end_scale = float(self.hparams.get("rhythm_source_boundary_scale_train_end", final_scale))
+        warmup_steps = int(self.hparams.get("rhythm_source_boundary_scale_warmup_steps", 0) or 0)
+        anneal_steps = int(self.hparams.get("rhythm_source_boundary_scale_anneal_steps", 20000) or 0)
+        start_scale = max(0.0, start_scale)
+        end_scale = max(0.0, end_scale)
+        if anneal_steps <= 0:
+            return end_scale
+        if global_steps <= warmup_steps:
+            return start_scale
+        progress = min(max((int(global_steps) - warmup_steps) / float(anneal_steps), 0.0), 1.0)
+        return float(start_scale + (end_scale - start_scale) * progress)
+
     def forward(
         self,
         content,
@@ -239,6 +266,37 @@ class Conan(FastSpeech):
                 infer=bool(infer),
                 global_steps=int(global_steps),
             )
+            source_boundary_scale_override = self._resolve_rhythm_source_boundary_scale(
+                infer=bool(infer),
+                global_steps=int(global_steps),
+                teacher=False,
+            )
+            teacher_source_boundary_scale_override = self._resolve_rhythm_source_boundary_scale(
+                infer=bool(infer),
+                global_steps=int(global_steps),
+                teacher=True,
+            )
+            if projector_pause_topk_ratio_override is not None:
+                ret["rhythm_projector_pause_topk_ratio"] = torch.full(
+                    (content.size(0), 1),
+                    float(projector_pause_topk_ratio_override),
+                    dtype=content_embed.dtype,
+                    device=content.device,
+                )
+            if source_boundary_scale_override is not None:
+                ret["rhythm_source_boundary_scale"] = torch.full(
+                    (content.size(0), 1),
+                    float(source_boundary_scale_override),
+                    dtype=content_embed.dtype,
+                    device=content.device,
+                )
+            if teacher_source_boundary_scale_override is not None:
+                ret["rhythm_teacher_source_boundary_scale"] = torch.full(
+                    (content.size(0), 1),
+                    float(teacher_source_boundary_scale_override),
+                    dtype=content_embed.dtype,
+                    device=content.device,
+                )
             rhythm_bundle = run_rhythm_frontend(
                 rhythm_enable_v2=self.rhythm_enable_v2,
                 rhythm_unit_frontend=self.rhythm_unit_frontend,
@@ -255,6 +313,8 @@ class Conan(FastSpeech):
                 enable_learned_offline_teacher=bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True)),
                 enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
                 projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+                source_boundary_scale_override=source_boundary_scale_override,
+                teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
             )
             content_embed, tgt_nonpadding = attach_rhythm_outputs(
                 ret=ret,

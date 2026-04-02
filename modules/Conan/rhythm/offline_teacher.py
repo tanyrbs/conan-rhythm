@@ -44,11 +44,18 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             pause_source_boundary_weight=pause_source_boundary_weight,
             causal=False,
         )
-        self.confidence_head = nn.Sequential(
+        self.confidence_trunk = nn.Sequential(
             nn.Linear(hidden_size + stats_dim + trace_dim, hidden_size),
             nn.SiLU(),
-            nn.Linear(hidden_size, 1),
-            nn.Sigmoid(),
+        )
+        self.confidence_heads = nn.ModuleDict(
+            {
+                "overall": nn.Linear(hidden_size, 1),
+                "exec": nn.Linear(hidden_size, 1),
+                "budget": nn.Linear(hidden_size, 1),
+                "prefix": nn.Linear(hidden_size, 1),
+                "allocation": nn.Linear(hidden_size, 1),
+            }
         )
 
     def forward(
@@ -60,7 +67,7 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         ref_conditioning: dict[str, torch.Tensor],
         trace_context: torch.Tensor,
         source_boundary_cue: torch.Tensor | None = None,
-    ) -> tuple[RhythmPlannerOutputs, torch.Tensor]:
+    ) -> tuple[RhythmPlannerOutputs, dict[str, torch.Tensor]]:
         if source_boundary_cue is None:
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
         batch_size = unit_states.size(0)
@@ -98,7 +105,11 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         )
         pooled_hidden = masked_mean(budget_outputs["hidden"], unit_mask, dim=1)
         pooled_trace = masked_mean(trace_context, unit_mask, dim=1)
-        confidence = self.confidence_head(
+        confidence_hidden = self.confidence_trunk(
             torch.cat([pooled_hidden, ref_conditioning["ref_rhythm_stats"], pooled_trace], dim=-1)
-        ).clamp(0.05, 1.0)
+        )
+        confidence = {
+            name: torch.sigmoid(head(confidence_hidden)).clamp(0.05, 1.0)
+            for name, head in self.confidence_heads.items()
+        }
         return planner, confidence

@@ -57,6 +57,8 @@ def run_rhythm_frontend(
     enable_learned_offline_teacher: bool = True,
     enable_algorithmic_teacher: bool = False,
     projector_pause_topk_ratio_override: float | None = None,
+    source_boundary_scale_override: float | None = None,
+    teacher_source_boundary_scale_override: float | None = None,
 ):
     if not rhythm_enable_v2 or ref is None:
         return None
@@ -107,6 +109,8 @@ def run_rhythm_frontend(
             ref_conditioning=rhythm_ref_conditioning,
             state=rhythm_state,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            source_boundary_scale_override=source_boundary_scale_override,
+            teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
             offline_content_units=offline_unit_batch.content_units if offline_unit_batch is not None else None,
             offline_dur_anchor_src=offline_unit_batch.dur_anchor_src if offline_unit_batch is not None else None,
             offline_unit_mask=offline_unit_batch.unit_mask if offline_unit_batch is not None else None,
@@ -131,6 +135,7 @@ def run_rhythm_frontend(
             ref_conditioning=rhythm_ref_conditioning,
             state=rhythm_state,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            source_boundary_scale_override=source_boundary_scale_override,
         )
         offline_execution = None
         offline_confidence = None
@@ -145,6 +150,7 @@ def run_rhythm_frontend(
                 sep_hint=unit_batch.sep_hint,
                 boundary_confidence=unit_batch.boundary_confidence,
                 ref_conditioning=rhythm_ref_conditioning,
+                source_boundary_scale_override=teacher_source_boundary_scale_override,
             )
     return {
         "unit_batch": unit_batch,
@@ -206,7 +212,16 @@ def attach_rhythm_outputs(
     if rhythm_bundle.get("offline_execution") is not None:
         ret["rhythm_offline_execution"] = rhythm_bundle["offline_execution"]
     if rhythm_bundle.get("offline_confidence") is not None:
-        ret["rhythm_offline_confidence"] = rhythm_bundle["offline_confidence"]
+        offline_confidence = rhythm_bundle["offline_confidence"]
+        if isinstance(offline_confidence, dict):
+            for name, value in offline_confidence.items():
+                if value is None:
+                    continue
+                ret[f"rhythm_offline_confidence_{name}"] = value
+            if offline_confidence.get("overall") is not None:
+                ret["rhythm_offline_confidence"] = offline_confidence["overall"]
+        else:
+            ret["rhythm_offline_confidence"] = offline_confidence
     if rhythm_bundle.get("offline_unit_batch") is not None:
         ret["rhythm_offline_unit_batch"] = rhythm_bundle["offline_unit_batch"]
     if rhythm_bundle.get("algorithmic_teacher") is not None:

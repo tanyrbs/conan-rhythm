@@ -91,10 +91,28 @@ class ConanTask(AuxDecoderMIDITask):
             warnings.append("Dual-mode teacher is enabled but lambda_rhythm_distill == 0.")
         distill_conf_floor = float(hparams.get("rhythm_distill_confidence_floor", 0.05))
         distill_conf_power = float(hparams.get("rhythm_distill_confidence_power", 1.0))
+        source_boundary_scale = float(hparams.get("rhythm_source_boundary_scale", 1.0))
+        source_boundary_scale_train_start = float(hparams.get("rhythm_source_boundary_scale_train_start", 1.0))
+        source_boundary_scale_train_end = float(hparams.get("rhythm_source_boundary_scale_train_end", source_boundary_scale))
+        source_boundary_scale_anneal_steps = int(hparams.get("rhythm_source_boundary_scale_anneal_steps", 20000) or 0)
+        source_boundary_scale_warmup_steps = int(hparams.get("rhythm_source_boundary_scale_warmup_steps", 0) or 0)
+        teacher_source_boundary_scale = float(
+            hparams.get("rhythm_teacher_source_boundary_scale", source_boundary_scale)
+        )
         if not (0.0 < distill_conf_floor <= 1.0):
             errors.append("rhythm_distill_confidence_floor must be in (0, 1].")
         if distill_conf_power <= 0.0:
             errors.append("rhythm_distill_confidence_power must be > 0.")
+        if source_boundary_scale < 0.0 or source_boundary_scale_train_start < 0.0 or source_boundary_scale_train_end < 0.0:
+            errors.append("rhythm_source_boundary_scale* must be >= 0.")
+        if teacher_source_boundary_scale < 0.0:
+            errors.append("rhythm_teacher_source_boundary_scale must be >= 0.")
+        if source_boundary_scale_anneal_steps < 0 or source_boundary_scale_warmup_steps < 0:
+            errors.append("rhythm_source_boundary_scale warmup/anneal steps must be >= 0.")
+        if source_boundary_scale_train_start < source_boundary_scale_train_end:
+            warnings.append("Source-boundary prior is configured weak->strong over training; maintained path usually anneals strong->soft.")
+        if source_boundary_scale > 1.0 or teacher_source_boundary_scale > 1.0:
+            warnings.append("Source-boundary prior scale > 1.0 increases source phrasing lock-in risk.")
         if schedule_only and bool(hparams.get("rhythm_apply_train_override", False)):
             errors.append("rhythm_schedule_only_stage should not enable train-time retimed rendering.")
         if bool(hparams.get("rhythm_apply_train_override", False)) and not bool(
@@ -352,6 +370,22 @@ class ConanTask(AuxDecoderMIDITask):
         if abs(power - 1.0) > 1e-8:
             confidence = confidence.pow(power)
         return confidence
+
+    @staticmethod
+    def _normalize_component_distill_confidence(
+        component_confidence,
+        *,
+        fallback_confidence: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+    ):
+        if component_confidence is None:
+            return fallback_confidence
+        return ConanTask._normalize_distill_confidence(
+            component_confidence,
+            batch_size=batch_size,
+            device=device,
+        )
 
     @staticmethod
     def _resolve_retimed_target_mode() -> str:
@@ -815,6 +849,10 @@ class ConanTask(AuxDecoderMIDITask):
             distill_prefix_clock = None
             distill_prefix_backlog = None
             distill_confidence = None
+            distill_exec_confidence = None
+            distill_budget_confidence = None
+            distill_prefix_confidence = None
+            distill_allocation_confidence = None
 
             if use_distill and distill_surface in {"auto", "cache"}:
                 distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
@@ -852,6 +890,10 @@ class ConanTask(AuxDecoderMIDITask):
                     distill_prefix_clock = None
                     distill_prefix_backlog = None
                 distill_confidence = output.get("rhythm_offline_confidence")
+                distill_exec_confidence = output.get("rhythm_offline_confidence_exec")
+                distill_budget_confidence = output.get("rhythm_offline_confidence_budget")
+                distill_prefix_confidence = output.get("rhythm_offline_confidence_prefix")
+                distill_allocation_confidence = output.get("rhythm_offline_confidence_allocation")
                 if distill_confidence is None:
                     distill_confidence = distill_speech.new_ones((distill_speech.size(0), 1))
             if use_distill and distill_speech is None and distill_surface in {"auto", "algorithmic"} and algorithmic_teacher is not None:
@@ -895,6 +937,30 @@ class ConanTask(AuxDecoderMIDITask):
                     batch_size=unit_batch.dur_anchor_src.size(0),
                     device=unit_batch.dur_anchor_src.device,
                 )
+                distill_exec_confidence = self._normalize_component_distill_confidence(
+                    distill_exec_confidence,
+                    fallback_confidence=distill_confidence,
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                )
+                distill_budget_confidence = self._normalize_component_distill_confidence(
+                    distill_budget_confidence,
+                    fallback_confidence=distill_confidence,
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                )
+                distill_prefix_confidence = self._normalize_component_distill_confidence(
+                    distill_prefix_confidence,
+                    fallback_confidence=distill_confidence,
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                )
+                distill_allocation_confidence = self._normalize_component_distill_confidence(
+                    distill_allocation_confidence,
+                    fallback_confidence=distill_confidence,
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                )
             return RhythmLossTargets(
                 speech_exec_tgt=sample[target_speech_key],
                 pause_exec_tgt=sample[target_pause_key],
@@ -916,6 +982,10 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_prefix_clock_tgt=distill_prefix_clock,
                 distill_prefix_backlog_tgt=distill_prefix_backlog,
                 distill_confidence=distill_confidence,
+                distill_exec_confidence=distill_exec_confidence,
+                distill_budget_confidence=distill_budget_confidence,
+                distill_prefix_confidence=distill_prefix_confidence,
+                distill_allocation_confidence=distill_allocation_confidence,
                 distill_budget_weight=distill_budget_weight,
                 distill_allocation_weight=distill_allocation_weight,
                 distill_prefix_weight=distill_prefix_weight,

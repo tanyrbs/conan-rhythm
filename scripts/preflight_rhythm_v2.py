@@ -288,6 +288,12 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     pause_topk_ratio_warmup_steps = int(hp.get("rhythm_projector_pause_topk_ratio_warmup_steps", 0) or 0)
     distill_conf_floor = float(hp.get("rhythm_distill_confidence_floor", 0.05))
     distill_conf_power = float(hp.get("rhythm_distill_confidence_power", 1.0))
+    source_boundary_scale = float(hp.get("rhythm_source_boundary_scale", 1.0))
+    source_boundary_scale_train_start = float(hp.get("rhythm_source_boundary_scale_train_start", 1.0))
+    source_boundary_scale_train_end = float(hp.get("rhythm_source_boundary_scale_train_end", source_boundary_scale))
+    source_boundary_scale_anneal_steps = int(hp.get("rhythm_source_boundary_scale_anneal_steps", 20000) or 0)
+    source_boundary_scale_warmup_steps = int(hp.get("rhythm_source_boundary_scale_warmup_steps", 0) or 0)
+    teacher_source_boundary_scale = float(hp.get("rhythm_teacher_source_boundary_scale", source_boundary_scale))
 
     if retimed_target_mode not in {"cached", "online", "hybrid"}:
         errors.append(f"Unsupported rhythm_retimed_target_mode: {retimed_target_mode}")
@@ -310,6 +316,20 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         errors.append("rhythm_distill_confidence_floor must be in (0, 1].")
     if distill_conf_power <= 0.0:
         errors.append("rhythm_distill_confidence_power must be > 0.")
+    for name, value in {
+        "rhythm_source_boundary_scale": source_boundary_scale,
+        "rhythm_source_boundary_scale_train_start": source_boundary_scale_train_start,
+        "rhythm_source_boundary_scale_train_end": source_boundary_scale_train_end,
+        "rhythm_teacher_source_boundary_scale": teacher_source_boundary_scale,
+    }.items():
+        if value < 0.0:
+            errors.append(f"{name} must be >= 0.")
+    if source_boundary_scale_anneal_steps < 0:
+        errors.append("rhythm_source_boundary_scale_anneal_steps must be >= 0.")
+    if source_boundary_scale_warmup_steps < 0:
+        errors.append("rhythm_source_boundary_scale_warmup_steps must be >= 0.")
+    if source_boundary_scale_train_start < source_boundary_scale_train_end:
+        warnings.append("source-boundary prior anneal is configured weak->strong; maintained path usually uses strong->soft.")
     if (apply_train or apply_valid) and not use_retimed_pitch_target and not disable_pitch_when_retimed:
         errors.append(
             "Retimed train/valid rendering must either enable rhythm_use_retimed_pitch_target "

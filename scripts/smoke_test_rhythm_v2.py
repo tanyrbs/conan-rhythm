@@ -35,6 +35,10 @@ if __name__ == '__main__':
         'rhythm_projector_max_speech_expand': 3.0,
         'rhythm_projector_tail_hold_units': 2,
         'rhythm_projector_boundary_commit_threshold': 0.45,
+        'rhythm_source_boundary_scale': 0.60,
+        'rhythm_source_boundary_scale_train_start': 1.0,
+        'rhythm_source_boundary_scale_train_end': 0.60,
+        'rhythm_teacher_source_boundary_scale': 0.45,
     }
     frontend = RhythmUnitFrontend(silent_token=57, separator_aware=True)
     batch = frontend.from_token_lists([
@@ -76,9 +80,11 @@ if __name__ == '__main__':
         offline_boundary_confidence=batch.boundary_confidence,
     )
     offline_exec = dual["offline_execution"]
+    offline_conf = dual["offline_confidence"]
     algo_teacher = dual["algorithmic_teacher"]
     assert offline_exec.commit_frontier.tolist() == batch.unit_mask.sum(dim=1).long().tolist()
     assert dual["streaming_execution"].speech_duration_exec.size(1) < offline_exec.speech_duration_exec.size(1)
+    assert isinstance(offline_conf, dict) and {"overall", "exec", "budget", "prefix", "allocation"} <= set(offline_conf.keys())
     assert algo_teacher.allocation_tgt.shape == batch.unit_mask.shape
     assert algo_teacher.prefix_clock_tgt.shape == batch.unit_mask.shape
 
@@ -122,10 +128,21 @@ if __name__ == '__main__':
         ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
         state=out1.next_state,
     )
+    out_no_source_prior = model(
+        content_units=batch.content_units,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        open_run_mask=batch.open_run_mask,
+        ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
+        ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
+        state=model.init_state(batch_size=2, device=torch.device('cpu')),
+        source_boundary_scale_override=0.0,
+    )
     assert out1.slot_duration_exec.shape[1] == batch.content_units.shape[1] * 2
     assert out1.slot_is_blank[:, 1::2].sum().item() > 0
     assert torch.equal(out1.blank_slot_duration_exec, out1.slot_duration_exec)
     assert torch.equal(out1.blank_slot_is_blank, out1.slot_is_blank)
+    assert float(out_no_source_prior.planner.source_boundary_cue.abs().max().item()) == 0.0
 
     guidance = build_reference_guided_targets(
         dur_anchor_src=batch.dur_anchor_src[0].cpu().numpy(),
@@ -164,6 +181,13 @@ if __name__ == '__main__':
             "rhythm_state_next": out1.next_state,
             "rhythm_apply_render": 1.0,
             "acoustic_target_is_retimed": False,
+            "rhythm_source_boundary_scale": torch.full((2, 1), 0.6),
+            "rhythm_teacher_source_boundary_scale": torch.full((2, 1), 0.45),
+            "rhythm_offline_confidence": offline_conf["overall"],
+            "rhythm_offline_confidence_exec": offline_conf["exec"],
+            "rhythm_offline_confidence_budget": offline_conf["budget"],
+            "rhythm_offline_confidence_prefix": offline_conf["prefix"],
+            "rhythm_offline_confidence_allocation": offline_conf["allocation"],
         },
         {
             "rhythm_speech_exec_tgt": out1.speech_duration_exec.detach(),
@@ -178,9 +202,11 @@ if __name__ == '__main__':
     print('commit_frontier step2:', out2.commit_frontier.tolist())
     print('phase_ptr step2:', out2.next_state.phase_ptr.tolist())
     print('source_boundary_cue max:', float(out1.planner.source_boundary_cue.max().item()))
+    print('source boundary scale metric:', float(metrics['rhythm_metric_source_boundary_scale_mean']))
     print('offline total corr metric:', float(metrics['rhythm_metric_offline_online_total_corr']))
     print('offline stream prefix ratio:', float(prefix_batch.unit_mask.sum().item() / batch.unit_mask.sum().item()))
     print('algorithmic teacher alloc kl:', float(metrics['rhythm_metric_algorithmic_teacher_alloc_kl']))
+    print('offline confidence exec:', float(metrics['rhythm_metric_offline_confidence_exec_mean']))
     print('slow memory shape:', tuple(ref_conditioning['slow_rhythm_memory'].shape))
     print('blank slot ratio metric:', float(metrics['rhythm_metric_blank_slot_ratio_mean']))
     print('retimed mel len:', int(retimed['rhythm_retimed_mel_len'][0]))

@@ -253,6 +253,33 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     acoustic_target_weight = output.get("acoustic_target_weight")
     if acoustic_target_weight is not None:
         metrics["rhythm_metric_retimed_weight_mean"] = _safe_mean(acoustic_target_weight.float())
+    pause_topk_ratio = output.get("rhythm_projector_pause_topk_ratio")
+    if pause_topk_ratio is not None:
+        metrics["rhythm_metric_pause_topk_ratio_mean"] = _safe_mean(pause_topk_ratio.float())
+        metrics["rhythm_metric_pause_topk_sparsity_mean"] = execution.speech_duration_exec.new_tensor(1.0) - _safe_mean(
+            pause_topk_ratio.float()
+        )
+    source_boundary_scale = output.get("rhythm_source_boundary_scale")
+    if source_boundary_scale is not None:
+        metrics["rhythm_metric_source_boundary_scale_mean"] = _safe_mean(source_boundary_scale.float())
+    teacher_source_boundary_scale = output.get("rhythm_teacher_source_boundary_scale")
+    if teacher_source_boundary_scale is not None:
+        metrics["rhythm_metric_teacher_source_boundary_scale_mean"] = _safe_mean(
+            teacher_source_boundary_scale.float()
+        )
+    acoustic_target_source = output.get("acoustic_target_source")
+    if acoustic_target_source is not None:
+        source_to_id = {"source": 0.0, "cached": 1.0, "online": 2.0}
+        metrics["rhythm_metric_acoustic_target_source_id"] = execution.speech_duration_exec.new_tensor(
+            source_to_id.get(str(acoustic_target_source), -1.0)
+        )
+    offline_confidence = output.get("rhythm_offline_confidence")
+    if offline_confidence is not None:
+        metrics["rhythm_metric_offline_confidence_mean"] = _safe_mean(offline_confidence.float())
+    for component in ("exec", "budget", "prefix", "allocation"):
+        component_value = output.get(f"rhythm_offline_confidence_{component}")
+        if component_value is not None:
+            metrics[f"rhythm_metric_offline_confidence_{component}_mean"] = _safe_mean(component_value.float())
 
     if sample is not None:
         pause_target_key = "rhythm_pause_exec_tgt" if "rhythm_pause_exec_tgt" in sample else "rhythm_blank_exec_tgt"
@@ -391,10 +418,21 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
             "stream_final_mel_len": 0.0,
             "stream_mean_chunk_mel_delta": 0.0,
             "stream_mean_commit_delta": 0.0,
+            "stream_final_committed_mel_len": 0.0,
+            "stream_mean_committed_mel_delta": 0.0,
+            "stream_mean_prefix_exec_delta": 0.0,
+            "stream_max_prefix_exec_delta": 0.0,
+            "stream_no_rollback_violations": 0.0,
+            "stream_commit_monotonic_violations": 0.0,
+            "stream_committed_mel_rollback_violations": 0.0,
             "stream_mean_backlog": 0.0,
             "stream_max_backlog": 0.0,
+            "stream_mean_backlog_delta_abs": 0.0,
+            "stream_max_backlog_delta_abs": 0.0,
             "stream_mean_clock_abs": 0.0,
             "stream_max_clock_abs": 0.0,
+            "stream_mean_clock_step_delta_abs": 0.0,
+            "stream_max_clock_step_delta_abs": 0.0,
             "stream_mean_blank_ratio": 0.0,
         }
     mel_deltas = [mel_lengths[0]]
@@ -406,6 +444,9 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         1 for idx in range(1, len(commit_values)) if commit_values[idx] < commit_values[idx - 1]
     )
     committed_lengths = list(getattr(stream_result, "committed_mel_lengths", []))
+    committed_mel_rollback_violations = sum(
+        1 for idx in range(1, len(committed_lengths)) if committed_lengths[idx] < committed_lengths[idx - 1]
+    ) if len(committed_lengths) > 1 else 0
     committed_deltas = []
     if len(committed_lengths) > 0:
         committed_deltas.append(float(committed_lengths[0]))
@@ -414,6 +455,16 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
             for idx in range(1, len(committed_lengths))
         )
     prefix_exec_deltas = list(getattr(stream_result, "prefix_exec_deltas", []))
+    rollback_threshold = 1e-4
+    prefix_rollback_violations = sum(1 for value in prefix_exec_deltas if float(value) > rollback_threshold)
+    backlog_step_deltas = [
+        abs(float(backlog_history[idx] - backlog_history[idx - 1]))
+        for idx in range(1, len(backlog_history))
+    ]
+    clock_step_deltas = [
+        abs(float(clock_history[idx] - clock_history[idx - 1]))
+        for idx in range(1, len(clock_history))
+    ]
     return {
         "stream_num_chunks": float(len(mel_lengths)),
         "stream_final_mel_len": float(mel_lengths[-1]),
@@ -423,10 +474,16 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         "stream_mean_committed_mel_delta": float(sum(committed_deltas) / max(len(committed_deltas), 1)) if len(committed_deltas) > 0 else 0.0,
         "stream_mean_prefix_exec_delta": float(sum(prefix_exec_deltas) / max(len(prefix_exec_deltas), 1)) if len(prefix_exec_deltas) > 0 else 0.0,
         "stream_max_prefix_exec_delta": float(max(prefix_exec_deltas)) if len(prefix_exec_deltas) > 0 else 0.0,
+        "stream_no_rollback_violations": float(prefix_rollback_violations),
         "stream_commit_monotonic_violations": float(commit_monotonic_violations),
+        "stream_committed_mel_rollback_violations": float(committed_mel_rollback_violations),
         "stream_mean_backlog": float(sum(backlog_history) / max(len(backlog_history), 1)) if len(backlog_history) > 0 else 0.0,
         "stream_max_backlog": float(max(backlog_history)) if len(backlog_history) > 0 else 0.0,
+        "stream_mean_backlog_delta_abs": float(sum(backlog_step_deltas) / max(len(backlog_step_deltas), 1)) if len(backlog_step_deltas) > 0 else 0.0,
+        "stream_max_backlog_delta_abs": float(max(backlog_step_deltas)) if len(backlog_step_deltas) > 0 else 0.0,
         "stream_mean_clock_abs": float(sum(abs(x) for x in clock_history) / max(len(clock_history), 1)) if len(clock_history) > 0 else 0.0,
         "stream_max_clock_abs": float(max(abs(x) for x in clock_history)) if len(clock_history) > 0 else 0.0,
+        "stream_mean_clock_step_delta_abs": float(sum(clock_step_deltas) / max(len(clock_step_deltas), 1)) if len(clock_step_deltas) > 0 else 0.0,
+        "stream_max_clock_step_delta_abs": float(max(clock_step_deltas)) if len(clock_step_deltas) > 0 else 0.0,
         "stream_mean_blank_ratio": float(sum(blank_ratio_history) / max(len(blank_ratio_history), 1)) if len(blank_ratio_history) > 0 else 0.0,
     }
