@@ -21,14 +21,8 @@ from modules.Conan.flow.flow import FlowMel
 from modules.commons.conv import ConvBlocks
 from modules.commons.conv import TextConvEncoder, ConvBlocks, CausalConvBlocks, CausalFM
 from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
-from modules.Conan.rhythm.bridge import (
-    attach_rhythm_outputs,
-    build_content_nonpadding,
-    run_rhythm_frontend,
-)
-from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
-from modules.Conan.rhythm.supervision import build_online_retimed_bundle
-from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
+from modules.Conan.rhythm.bridge import build_content_nonpadding
+from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
 from modules.commons.transformer import SinusoidalPositionalEmbedding
 
 Flow_DECODERS = {
@@ -81,21 +75,13 @@ class Conan(FastSpeech):
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
         self.rhythm_minimal_style_only = bool(hparams.get("rhythm_minimal_style_only", False))
         if self.rhythm_enable_v2:
-            self.rhythm_unit_frontend = RhythmUnitFrontend(
-                silent_token=hparams.get("silent_token", 57),
-                separator_aware=bool(hparams.get("rhythm_separator_aware", True)),
-                tail_open_units=int(hparams.get("rhythm_tail_open_units", 1)),
-            )
-            self.rhythm_module = build_streaming_rhythm_module_from_hparams(hparams)
-            self.rhythm_pause_state = nn.Parameter(torch.zeros(hidden_size))
-            self.rhythm_render_phase_mlp = nn.Sequential(
-                nn.Linear(6, hidden_size),
-                nn.SiLU(),
-                nn.Linear(hidden_size, hidden_size),
-            )
-            self.rhythm_render_phase_gain = nn.Parameter(
-                torch.tensor(float(hparams.get("rhythm_renderer_phase_init_gain", 0.10)))
-            )
+            self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
+            # Compatibility aliases for existing training/inference code paths.
+            self.rhythm_unit_frontend = self.rhythm_adapter.unit_frontend
+            self.rhythm_module = self.rhythm_adapter.module
+            self.rhythm_pause_state = self.rhythm_adapter.pause_state
+            self.rhythm_render_phase_mlp = self.rhythm_adapter.render_phase_mlp
+            self.rhythm_render_phase_gain = self.rhythm_adapter.render_phase_gain
 
         if hparams["style"] and not self.rhythm_minimal_style_only:
             self.padding_idx = 0
@@ -144,6 +130,19 @@ class Conan(FastSpeech):
         unit_embed = self.content_embedding(unit_ids)
         unit_embed = self.content_proj(unit_embed.transpose(1, 2)).transpose(1, 2)
         return unit_embed
+
+    def _resolve_style_embed(self, *, spk_embed, ref, ret):
+        if spk_embed is not None:
+            ret["style_embed"] = style_embed = spk_embed
+            return style_embed
+        if ref is None:
+            raise ValueError(
+                "When spk_embed is None, need target tensor to extract speaker embedding."
+            )
+        ret["style_embed"] = style_embed = self.encode_spk_embed(
+            ref.transpose(1, 2)
+        ).transpose(1, 2)
+        return style_embed
 
     def _rhythm_render_frame_state_post(
         self,
@@ -243,116 +242,32 @@ class Conan(FastSpeech):
         content_embed = self.content_proj(content_embed.transpose(1, 2)).transpose(1, 2)
         ret["content_embed_proj"] = content_embed  # store result
 
-        # handle speaker embedding spk_embed
-        if spk_embed is not None:
-            # if spk_embed is directly provided
-            # ret["style_embed"] = style_embed = self.forward_style_embed(spk_embed, None)
-            ret["style_embed"] = style_embed = spk_embed
-        else:
-            # if spk_embed is not provided, extract from target mel spectrogram
-            if ref is None:
-                raise ValueError(
-                    "When spk_embed is None, need target tensor to extract speaker embedding."
-                )
-            # encode_spk_embed may contain non-causal operations (like global encoder), but final output is static vector after avg_pool
-            ret["style_embed"] = style_embed = self.encode_spk_embed(
-                ref.transpose(1, 2)
-            ).transpose(1, 2)
+        style_embed = self._resolve_style_embed(
+            spk_embed=spk_embed,
+            ref=ref,
+            ret=ret,
+        )
 
-        if self.rhythm_enable_v2 and ref is not None:
-            rhythm_source_cache = kwargs.get("rhythm_source_cache")
-            rhythm_offline_source_cache = kwargs.get("rhythm_offline_source_cache")
-            projector_pause_topk_ratio_override = self._resolve_rhythm_pause_topk_ratio(
-                infer=bool(infer),
-                global_steps=int(global_steps),
-            )
-            source_boundary_scale_override = self._resolve_rhythm_source_boundary_scale(
-                infer=bool(infer),
-                global_steps=int(global_steps),
-                teacher=False,
-            )
-            teacher_source_boundary_scale_override = self._resolve_rhythm_source_boundary_scale(
-                infer=bool(infer),
-                global_steps=int(global_steps),
-                teacher=True,
-            )
-            if projector_pause_topk_ratio_override is not None:
-                ret["rhythm_projector_pause_topk_ratio"] = torch.full(
-                    (content.size(0), 1),
-                    float(projector_pause_topk_ratio_override),
-                    dtype=content_embed.dtype,
-                    device=content.device,
-                )
-            if source_boundary_scale_override is not None:
-                ret["rhythm_source_boundary_scale"] = torch.full(
-                    (content.size(0), 1),
-                    float(source_boundary_scale_override),
-                    dtype=content_embed.dtype,
-                    device=content.device,
-                )
-            if teacher_source_boundary_scale_override is not None:
-                ret["rhythm_teacher_source_boundary_scale"] = torch.full(
-                    (content.size(0), 1),
-                    float(teacher_source_boundary_scale_override),
-                    dtype=content_embed.dtype,
-                    device=content.device,
-                )
-            rhythm_bundle = run_rhythm_frontend(
-                rhythm_enable_v2=self.rhythm_enable_v2,
-                rhythm_unit_frontend=self.rhythm_unit_frontend,
-                rhythm_module=self.rhythm_module,
+        if self.rhythm_enable_v2:
+            content_embed, tgt_nonpadding, f0, uv = self.rhythm_adapter(
+                ret=ret,
                 content=content,
                 ref=ref,
-                infer=infer,
+                target=target,
+                f0=f0,
+                uv=uv,
+                infer=bool(infer),
+                global_steps=int(global_steps),
+                content_embed=content_embed,
+                tgt_nonpadding=tgt_nonpadding,
                 content_lengths=content_lengths,
                 rhythm_state=rhythm_state,
                 rhythm_ref_conditioning=rhythm_ref_conditioning,
-                rhythm_source_cache=rhythm_source_cache,
-                rhythm_offline_source_cache=rhythm_offline_source_cache,
-                enable_dual_mode_teacher=bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)),
-                enable_learned_offline_teacher=bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True)),
-                enable_algorithmic_teacher=bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)),
-                projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
-                source_boundary_scale_override=source_boundary_scale_override,
-                teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
-            )
-            content_embed, tgt_nonpadding = attach_rhythm_outputs(
-                ret=ret,
-                rhythm_bundle=rhythm_bundle,
-                content_embed=content_embed,
-                tgt_nonpadding=tgt_nonpadding,
-                hparams=self.hparams,
-                infer=infer,
                 rhythm_apply_override=rhythm_apply_override,
+                rhythm_source_cache=kwargs.get("rhythm_source_cache"),
+                rhythm_offline_source_cache=kwargs.get("rhythm_offline_source_cache"),
                 speech_state_fn=self._unit_speech_state_fn,
-                pause_state=self.rhythm_pause_state,
-                frame_state_post_fn=self._rhythm_render_frame_state_post,
             )
-            if bool(ret.get("rhythm_apply_render", 0.0)) and target is not None:
-                frame_plan = ret.get("rhythm_frame_plan")
-                if frame_plan is not None:
-                    online_bundle = build_online_retimed_bundle(
-                        mel=target,
-                        frame_plan=frame_plan,
-                        f0=f0 if f0 is not None and uv is not None else None,
-                        uv=uv if f0 is not None and uv is not None else None,
-                        pause_frame_weight=float(self.hparams.get("rhythm_retimed_pause_frame_weight", 0.20)),
-                        stretch_weight_min=float(self.hparams.get("rhythm_retimed_stretch_weight_min", 0.35)),
-                    )
-                    ret["rhythm_online_retimed_mel_tgt"] = online_bundle["mel_tgt"]
-                    ret["rhythm_online_retimed_frame_weight"] = online_bundle["frame_weight"]
-                    ret["rhythm_online_retimed_mel_len"] = online_bundle["mel_len"]
-                    if "f0_tgt" in online_bundle:
-                        ret["retimed_f0_tgt"] = online_bundle["f0_tgt"]
-                    if "uv_tgt" in online_bundle:
-                        ret["retimed_uv_tgt"] = online_bundle["uv_tgt"]
-                    if (
-                        bool(self.hparams.get("rhythm_use_retimed_pitch_target", False))
-                        and "retimed_f0_tgt" in ret
-                        and "retimed_uv_tgt" in ret
-                    ):
-                        f0 = ret["retimed_f0_tgt"]
-                        uv = ret["retimed_uv_tgt"]
 
         # pitch input = content embedding + style embedding
         pitch_inp = content_embed + style_embed

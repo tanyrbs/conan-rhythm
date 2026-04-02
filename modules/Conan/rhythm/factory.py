@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .module import StreamingRhythmModule
+from .offline_teacher import OfflineTeacherConfig
 from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
 
@@ -16,6 +17,57 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
         pause_train_soft=bool(hparams.get('rhythm_projector_pause_train_soft', True)),
         pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
+    )
+
+
+def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
+    # Explicit runtime override always wins for experiments/debug.
+    explicit_runtime = hparams.get('rhythm_runtime_enable_learned_offline_teacher', None)
+    if explicit_runtime is not None:
+        return bool(explicit_runtime)
+
+    # Dual-mode branch requires the learned offline teacher runtime path.
+    if bool(hparams.get('rhythm_enable_dual_mode_teacher', False)):
+        return True
+
+    # Maintained defaults: do not keep runtime teacher alive in schedule-only / non-KD paths.
+    schedule_only = bool(hparams.get('rhythm_schedule_only_stage', False))
+    if schedule_only:
+        return False
+
+    legacy_enable = bool(hparams.get('rhythm_enable_learned_offline_teacher', False))
+    if not legacy_enable:
+        return False
+
+    lambda_distill = float(hparams.get('lambda_rhythm_distill', 0.0) or 0.0)
+    distill_surface = str(hparams.get('rhythm_distill_surface', 'none') or 'none').strip().lower()
+    offline_distill_surface = distill_surface in {'offline', 'full_context', 'shared_offline'}
+    return lambda_distill > 0.0 and offline_distill_surface
+
+
+def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
+    phrase_kernels = hparams.get('rhythm_offline_teacher_phrase_kernels', (3, 7))
+    if isinstance(phrase_kernels, int):
+        phrase_kernels = (int(phrase_kernels),)
+    return OfflineTeacherConfig(
+        num_blocks=int(hparams.get('rhythm_offline_teacher_num_blocks', 6)),
+        kernel_size=int(hparams.get('rhythm_offline_teacher_kernel_size', 5)),
+        dilations=tuple(int(x) for x in hparams.get('rhythm_offline_teacher_dilations', (1, 2, 4, 8, 2, 1))),
+        phrase_kernel_sizes=tuple(int(x) for x in phrase_kernels),
+        global_gate_scale=float(hparams.get('rhythm_offline_teacher_global_gate_scale', 0.12)),
+        pause_trace_weight=float(hparams.get('rhythm_offline_teacher_pause_trace_weight', 0.30)),
+        boundary_trace_weight=float(hparams.get('rhythm_offline_teacher_boundary_trace_weight', 0.30)),
+        confidence_agreement_weight=float(hparams.get('rhythm_offline_teacher_confidence_agreement_weight', 0.25)),
+        confidence_floor=float(hparams.get('rhythm_offline_teacher_confidence_floor', 0.05)),
+        confidence_ceiling=float(hparams.get('rhythm_offline_teacher_confidence_ceiling', 1.0)),
+        max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
+        max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
+        pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
+        boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
+        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.20)),
+        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
+        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
+        min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
     )
 
 
@@ -44,6 +96,8 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         projector_config=build_projector_config_from_hparams(hparams),
+        enable_learned_offline_teacher=_resolve_runtime_offline_teacher_enable(hparams),
+        offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),
         teacher_config=AlgorithmicTeacherConfig(
             rate_scale_min=float(hparams.get('rhythm_teacher_rate_scale_min', 0.55)),
             rate_scale_max=float(hparams.get('rhythm_teacher_rate_scale_max', 1.95)),

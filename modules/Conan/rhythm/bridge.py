@@ -60,7 +60,9 @@ def run_rhythm_frontend(
     source_boundary_scale_override: float | None = None,
     teacher_source_boundary_scale_override: float | None = None,
 ):
-    if not rhythm_enable_v2 or ref is None:
+    if not rhythm_enable_v2:
+        return None
+    if ref is None and rhythm_ref_conditioning is None:
         return None
     if rhythm_source_cache is not None:
         unit_batch = rhythm_unit_frontend.from_precomputed(

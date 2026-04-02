@@ -120,6 +120,26 @@ def _normalize_retimed_target_mode(mode: str) -> str:
     return aliases.get(mode, mode)
 
 
+def _resolve_runtime_offline_teacher_enable(hp: dict) -> bool:
+    """Mirror factory runtime-teacher resolution to catch config/runtime mismatches in preflight."""
+    explicit_runtime = hp.get("rhythm_runtime_enable_learned_offline_teacher", None)
+    if explicit_runtime is not None:
+        return bool(explicit_runtime)
+
+    if bool(hp.get("rhythm_enable_dual_mode_teacher", False)):
+        return True
+
+    if bool(hp.get("rhythm_schedule_only_stage", False)):
+        return False
+
+    if not bool(hp.get("rhythm_enable_learned_offline_teacher", False)):
+        return False
+
+    lambda_distill = float(hp.get("lambda_rhythm_distill", 0.0) or 0.0)
+    distill_surface = str(hp.get("rhythm_distill_surface", "none") or "none").strip().lower()
+    return lambda_distill > 0.0 and distill_surface in {"offline", "full_context", "shared_offline"}
+
+
 def _extract_scalar(value):
     arr = np.asarray(value)
     if arr.size <= 0:
@@ -264,6 +284,8 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
     require_retimed_cache = bool(hp.get("rhythm_require_retimed_cache", False))
     enable_dual = bool(hp.get("rhythm_enable_dual_mode_teacher", False))
     enable_learned_offline_teacher = bool(hp.get("rhythm_enable_learned_offline_teacher", True))
+    explicit_runtime_teacher_enable = hp.get("rhythm_runtime_enable_learned_offline_teacher", None)
+    runtime_offline_teacher_enable = _resolve_runtime_offline_teacher_enable(hp)
     schedule_only = bool(hp.get("rhythm_schedule_only_stage", False))
     optimize_module_only = bool(hp.get("rhythm_optimize_module_only", False))
     lambda_distill = float(hp.get("lambda_rhythm_distill", 0.0))
@@ -315,6 +337,16 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         warnings.append("rhythm_online_retimed_target_start_steps < rhythm_retimed_target_start_steps; online target switch may start earlier than retimed stage.")
     if enable_dual and not enable_learned_offline_teacher:
         errors.append("rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true.")
+    if enable_dual and not runtime_offline_teacher_enable:
+        errors.append(
+            "rhythm_enable_dual_mode_teacher requires runtime learned offline teacher branch to be enabled "
+            "(check rhythm_runtime_enable_learned_offline_teacher / factory resolution)."
+        )
+    if explicit_runtime_teacher_enable is True and not enable_learned_offline_teacher and lambda_distill <= 0.0:
+        warnings.append(
+            "rhythm_runtime_enable_learned_offline_teacher=true while rhythm_enable_learned_offline_teacher=false "
+            "and no distillation is active; this adds runtime overhead without a maintained stage objective."
+        )
     for name, value in {
         "rhythm_projector_pause_topk_ratio": pause_topk_ratio,
         "rhythm_projector_pause_topk_ratio_train_start": pause_topk_ratio_train_start,
@@ -374,6 +406,16 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal schedule-only stage should keep rhythm_optimize_module_only: true.")
         if enable_dual:
             errors.append("Stage-1 schedule-only should not enable rhythm_enable_dual_mode_teacher.")
+        if enable_learned_offline_teacher:
+            errors.append(
+                "Stage-1 schedule-only should set rhythm_enable_learned_offline_teacher: false "
+                "to avoid unnecessary runtime teacher branch allocation."
+            )
+        if runtime_offline_teacher_enable:
+            errors.append(
+                "Stage-1 schedule-only should keep runtime offline teacher disabled "
+                "(rhythm_runtime_enable_learned_offline_teacher should resolve to false)."
+            )
         if lambda_distill > 0.0 or distill != "none":
             errors.append("Stage-1 schedule-only should keep distillation disabled.")
         if apply_train or apply_valid:
@@ -393,6 +435,13 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal dual-mode KD stage should keep lambda_rhythm_distill > 0.")
         if not enable_dual:
             errors.append("Formal dual-mode KD stage requires rhythm_enable_dual_mode_teacher: true.")
+        if not enable_learned_offline_teacher:
+            errors.append("Formal dual-mode KD stage requires rhythm_enable_learned_offline_teacher: true.")
+        if not runtime_offline_teacher_enable:
+            errors.append(
+                "Formal dual-mode KD stage requires runtime offline teacher branch enabled "
+                "(rhythm_runtime_enable_learned_offline_teacher resolves false)."
+            )
         if not require_cached_teacher:
             errors.append("Formal dual-mode KD stage should require cached teacher surfaces.")
         if lambda_guidance > 0.0:
@@ -411,8 +460,6 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             warnings.append("Dual-mode KD stage should keep rhythm_export_debug_sidecars: false unless debugging schema.")
         if export_cache_audit_to_sample:
             warnings.append("Dual-mode KD stage should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
-        if not schedule_only:
-            warnings.append("Dual-mode KD no longer keeps rhythm_schedule_only_stage: true; this deviates from the maintained stage-2 path.")
         if not optimize_module_only:
             warnings.append("Dual-mode KD no longer keeps rhythm_optimize_module_only: true; this deviates from the maintained stage-2 path.")
     elif stage == "retimed_train":
@@ -425,11 +472,30 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
                 errors.append("Formal retimed-train stage with KD enabled should use rhythm_distill_surface: offline.")
             if not enable_dual:
                 errors.append("Formal retimed-train stage with KD enabled requires rhythm_enable_dual_mode_teacher: true.")
+            if not enable_learned_offline_teacher:
+                errors.append(
+                    "Formal retimed-train stage with KD enabled requires rhythm_enable_learned_offline_teacher: true."
+                )
+            if not runtime_offline_teacher_enable:
+                errors.append(
+                    "Formal retimed-train stage with KD enabled requires runtime offline teacher branch enabled "
+                    "(rhythm_runtime_enable_learned_offline_teacher resolves false)."
+                )
         else:
             if distill not in {"none", "off", "disable", "disabled", "false"}:
                 warnings.append("Formal retimed-train stage without KD usually keeps rhythm_distill_surface: none.")
             if enable_dual:
                 warnings.append("Formal retimed-train stage without KD usually keeps rhythm_enable_dual_mode_teacher: false.")
+            if enable_learned_offline_teacher:
+                warnings.append(
+                    "Formal retimed-train stage without KD usually keeps rhythm_enable_learned_offline_teacher: false "
+                    "to reduce unused runtime overhead."
+                )
+            if runtime_offline_teacher_enable:
+                warnings.append(
+                    "Formal retimed-train stage without KD usually keeps runtime offline teacher disabled "
+                    "to reduce unnecessary branch overhead."
+                )
         if not require_cached_teacher:
             errors.append("Formal retimed-train stage should require cached teacher surfaces.")
         if not require_retimed_cache:
@@ -438,6 +504,11 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             errors.append("Formal retimed-train stage requires rhythm_use_retimed_target_if_available: true.")
         if not apply_train or not apply_valid:
             errors.append("Formal retimed-train stage should enable both train/valid retimed rendering.")
+        if retimed_target_start > 0:
+            errors.append(
+                "Formal retimed-train stage should set rhythm_retimed_target_start_steps: 0 "
+                "for immediate train/infer closure on the retimed canvas."
+            )
         if schedule_only:
             errors.append("Formal retimed-train stage should set rhythm_schedule_only_stage: false.")
         if optimize_module_only:
@@ -473,6 +544,15 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
             warnings.append(
                 "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
                 "(schedule_only -> retimed_train, with dual_mode_kd as an optional branch)."
+            )
+        if (
+            not enable_dual
+            and lambda_distill <= 0.0
+            and (enable_learned_offline_teacher or runtime_offline_teacher_enable)
+        ):
+            warnings.append(
+                "learned offline teacher is enabled but neither dual-mode KD nor distillation is active; "
+                "consider disabling rhythm_enable_learned_offline_teacher / runtime teacher branch for this run."
             )
     return stage, errors, warnings
 
@@ -626,7 +706,7 @@ def _validate_inspected_items(items: list[dict], hp: dict, *, split: str) -> lis
     return errors
 
 
-def _run_dataset_and_model_dry_run(split: str, *, run_model: bool) -> list[str]:
+def _run_dataset_and_model_dry_run(split: str, *, run_model: bool, hp: dict) -> list[str]:
     errors: list[str] = []
     try:
         from tasks.Conan.dataset import ConanDataset
@@ -658,6 +738,44 @@ def _run_dataset_and_model_dry_run(split: str, *, run_model: bool) -> list[str]:
             errors.append(f"Model dry-run for split '{split}' did not produce mel_out.")
         if "rhythm_execution" not in output:
             errors.append(f"Model dry-run for split '{split}' did not produce rhythm_execution.")
+        runtime_teacher_enabled = _resolve_runtime_offline_teacher_enable(hp)
+        dual_mode_enabled = bool(hp.get("rhythm_enable_dual_mode_teacher", False))
+        offline_execution = output.get("rhythm_offline_execution")
+        if not dual_mode_enabled and offline_execution is not None:
+            errors.append(
+                f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution while "
+                "rhythm_enable_dual_mode_teacher is false."
+            )
+        if dual_mode_enabled and offline_execution is None:
+            errors.append(
+                f"Model dry-run for split '{split}' expected rhythm_offline_execution in dual-mode stage but found none."
+            )
+        if not runtime_teacher_enabled and offline_execution is not None:
+            errors.append(
+                f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution while "
+                "runtime offline teacher branch resolves disabled."
+            )
+        if bool(hp.get("rhythm_schedule_only_stage", False)) and offline_execution is not None:
+            errors.append(
+                f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution in schedule-only stage."
+            )
+        apply_split = bool(hp.get("rhythm_apply_train_override", False)) if split == "train" else bool(hp.get("rhythm_apply_valid_override", False))
+        retimed_start = int(hp.get("rhythm_retimed_target_start_steps", 0) or 0)
+        if apply_split and retimed_start <= 0:
+            if not bool(output.get("acoustic_target_is_retimed", False)):
+                errors.append(
+                    f"Model dry-run for split '{split}' expected retimed acoustic target but got source-aligned target."
+                )
+            acoustic_target_source = str(output.get("acoustic_target_source", "") or "").strip().lower()
+            if not acoustic_target_source:
+                errors.append(
+                    f"Model dry-run for split '{split}' expected acoustic_target_source when retimed stage is active."
+                )
+            elif acoustic_target_source in {"source", "source_aligned"}:
+                errors.append(
+                    f"Model dry-run for split '{split}' got acoustic_target_source={acoustic_target_source}, "
+                    "but retimed stage expects cached/online/hybrid retimed target routing."
+                )
         print(f"[preflight] model_dry_run split={split} mel_out={tuple(output['mel_out'].shape)} "
               f"units={tuple(output['speech_duration_exec'].shape) if 'speech_duration_exec' in output else 'n/a'} "
               f"loss_keys={sorted(losses.keys())[:8]}")
@@ -741,7 +859,7 @@ def main():
         for mismatch in mismatches:
             errors.append(mismatch)
         if args.model_dry_run:
-            errors.extend(_run_dataset_and_model_dry_run(split, run_model=True))
+            errors.extend(_run_dataset_and_model_dry_run(split, run_model=True, hp=hp))
 
     if warnings:
         print("[preflight] warnings:")

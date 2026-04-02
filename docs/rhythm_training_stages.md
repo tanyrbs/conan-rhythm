@@ -1,4 +1,4 @@
-# Rhythm Training Stages (2026-04-01)
+# Rhythm Training Stages (2026-04-02)
 
 See also:
 
@@ -18,6 +18,7 @@ Current state:
 
 - mostly completed
 - `scripts/smoke_test_rhythm_v2.py` now covers descriptor export and stateful scheduler reuse
+- Conan rhythm runtime is now split behind `modules/Conan/rhythm/runtime_adapter.py`, so `modules/Conan/Conan.py` keeps the acoustic path and delegates rhythm runtime orchestration
 - scheduler now also consumes a cheap internal source-boundary cue
 - unit frontend now exports `sealed_mask + boundary_confidence`
 - a stateful run-length unitizer helper is now available for incremental debugging
@@ -28,6 +29,8 @@ Current state:
 - optional `--model_dry_run` also checks dataset collation + one no-grad ConanTask forward before a long run
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
+- projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
+- latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `dual_mode_kd`, and one-step `retimed_train`
 
 ---
 
@@ -59,6 +62,7 @@ Current recommendation:
 - keep `prefer_cache` only as a migration / debug stage while refreshing caches
 - for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
 - that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
+- that config now also explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`)
 - stage-1 objective should stay minimal:
   - `L_exec_speech`
   - `L_exec_pause`
@@ -100,6 +104,7 @@ Optional ablation-only field:
 Important terminology note:
 
 - the repository now has a learned **non-causal offline planner teacher**
+- that teacher is now a stronger standalone planner branch with its own full-context temporal trunk, phrase pooling, global refine path, and confidence heads
 - dual-mode schedule KD now means:
   - streaming branch = causal student scheduler + shared projector contract
   - offline branch = non-causal planner teacher + shared projector contract
@@ -119,15 +124,19 @@ Goal:
 
 Current repository status:
 
-- `rhythm_apply_train_override: false`
-- `rhythm_apply_valid_override: false`
-- `rhythm_apply_test_override: true`
+- the default transitional main config still keeps:
+  - `rhythm_apply_train_override: false`
+  - `rhythm_apply_valid_override: false`
+  - `rhythm_apply_test_override: true`
+- the formal stage-3 config `egs/conan_emformer_rhythm_v2_retimed_train.yaml` now explicitly sets:
+  - `rhythm_apply_train_override: true`
+  - `rhythm_apply_valid_override: true`
+  - `rhythm_train_render_start_steps: 0`
+  - `rhythm_valid_render_start_steps: 0`
+  - `rhythm_retimed_target_start_steps: 0`
+  - `rhythm_online_retimed_target_start_steps: 0`
 - `rhythm_binarize_retimed_mel_targets: true`
 - `rhythm_use_retimed_target_if_available: true`
-
-This is intentional.
-The project is still keeping train/valid on the source-aligned canvas until retimed target supervision is available.
-Otherwise acoustic reconstruction would be shape-inconsistent with ground-truth mel.
 
 Current bridge step already in repo:
 
@@ -139,16 +148,19 @@ Current bridge step already in repo:
 - cached-only retimed training now fails fast if retimed cache is required but missing or mismatched
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
 - online retimed bundle can now also build F0/UV targets from the same frame plan; if that path is disabled or unavailable, source-aligned pitch supervision is automatically gated off
+- pause-boundary emphasis and projector feasible-debt regularization are now absorbed into maintained `L_exec_pause` / `L_budget`, rather than creating new optimizer loss names
 - mel GAN should stay disabled on the retimed canvas unless real/fake targets are explicitly aligned to the same acoustic canvas
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
 - rhythm cache contract is now versioned at `rhythm_cache_version: 4`
+- one-step schedule-only / retimed-joint checks are now passing after the projector-side pause differentiability fix; this is enough for train-ready status, but not yet evidence of long-run stability
+- smoke preflight is now confirmed on `--splits train`; the bundled smoke cache still does not include a populated `valid` split, so full train+valid preflight remains a real-data check
 - config now also exposes staged rollout knobs:
 - `rhythm_train_render_start_steps`
 - `rhythm_valid_render_start_steps`
 - `rhythm_retimed_target_start_steps`
 - a staged experiment config is now provided at `egs/conan_emformer_rhythm_v2_retimed_train.yaml`
-- that stage may inherit the dual-mode KD scaffold for convenience, but it is the first formal joint stage and does not require KD to be enabled
+- this is the maintained formal joint-training entry and does not require KD / learned offline runtime teacher to be enabled
 - a stricter cached-only warm-start config is now provided at `egs/conan_emformer_rhythm_v2_cached_only.yaml`
 
 Recommended future config direction after retimed targets exist:
@@ -180,9 +192,10 @@ Need stronger evaluation around:
 
 ## Practical status summary
 
-As of 2026-04-01:
+As of 2026-04-02:
 
 - the rhythm branch is **ready for warm-start / structural training**
+- the branch is also **train-ready for short validation runs** across `schedule_only`, optional `dual_mode_kd`, and `retimed_train`
 - it is **not yet ready to claim final strong-rhythm performance**
 
 The two biggest remaining milestones are:

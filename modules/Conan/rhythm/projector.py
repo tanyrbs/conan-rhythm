@@ -22,6 +22,86 @@ class ProjectorConfig:
     pause_soft_temperature: float = 0.12
 
 
+def _project_pause_impl(
+    *,
+    pause_weight_unit: torch.Tensor,
+    boundary_latent: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_budget_win: torch.Tensor,
+    previous_pause_exec: torch.Tensor | None,
+    commit_frontier: torch.Tensor,
+    reuse_prefix: bool,
+    soft_pause_selection: bool,
+    topk_ratio: float,
+    pause_min_boundary_weight: float,
+    pause_boundary_bias_weight: float,
+    temperature: float,
+) -> torch.Tensor:
+    scores = pause_weight_unit.float().clamp_min(0.0)
+    boundary_bias = pause_boundary_bias_weight * (
+        pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
+    )
+    scores = (scores + boundary_bias) * unit_mask
+    total_units = scores.size(1)
+    sparse_rows = []
+    for batch_idx in range(scores.size(0)):
+        visible = int(unit_mask[batch_idx].sum().item())
+        if visible <= 0:
+            sparse_rows.append(scores.new_zeros((1, total_units)))
+            continue
+        topk = max(1, int(round(visible * topk_ratio)))
+        row_scores = scores[batch_idx, :visible]
+        keep_k = min(topk, visible)
+        if keep_k >= visible:
+            selected = row_scores
+        else:
+            values, indices = torch.topk(row_scores, k=keep_k, dim=0)
+            if soft_pause_selection:
+                threshold = values[-1].detach()
+                gate = torch.sigmoid((row_scores - threshold) / temperature)
+                selected = row_scores * gate
+            else:
+                selector = torch.zeros_like(row_scores)
+                selector.scatter_(0, indices, 1.0)
+                selected = row_scores * selector
+        if visible < total_units:
+            selected = torch.cat([selected, selected.new_zeros((total_units - visible,))], dim=0)
+        sparse_rows.append(selected.unsqueeze(0))
+    sparse_scores = torch.cat(sparse_rows, dim=0) * unit_mask
+
+    pause_rows = []
+    for batch_idx in range(sparse_scores.size(0)):
+        mask_row = unit_mask[batch_idx : batch_idx + 1]
+        budget_row = pause_budget_win[batch_idx].reshape(1, 1)
+        frontier = int(commit_frontier[batch_idx].item())
+        prefix_row = sparse_scores.new_zeros((1, total_units))
+        if reuse_prefix and previous_pause_exec is not None and batch_idx < previous_pause_exec.size(0) and frontier > 0:
+            valid_frontier = min(frontier, int(previous_pause_exec.size(1)), total_units)
+            prefix = previous_pause_exec[batch_idx : batch_idx + 1, :valid_frontier].float() * mask_row[:, :valid_frontier]
+            if valid_frontier < total_units:
+                prefix_row = torch.cat([prefix, prefix.new_zeros((1, total_units - valid_frontier))], dim=1)
+            else:
+                prefix_row = prefix
+        else:
+            valid_frontier = 0
+        tail_mask = mask_row.clone()
+        if valid_frontier > 0:
+            tail_mask = torch.cat(
+                [tail_mask.new_zeros((1, valid_frontier)), tail_mask[:, valid_frontier:]],
+                dim=1,
+            )
+        if float(tail_mask.sum().item()) <= 0:
+            pause_rows.append(prefix_row)
+            continue
+        remaining_budget = (budget_row - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
+        fallback = tail_mask / tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        tail_candidate = sparse_scores[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask
+        total = (tail_candidate * tail_mask + fallback * 1e-6).sum(dim=1, keepdim=True).clamp_min(1e-6)
+        tail_values = (tail_candidate + fallback * 1e-6) * (remaining_budget / total)
+        pause_rows.append(prefix_row + tail_values * tail_mask)
+    return torch.cat(pause_rows, dim=0) * unit_mask
+
+
 class StreamingRhythmProjector(nn.Module):
     def __init__(self, config: ProjectorConfig | None = None) -> None:
         super().__init__()
@@ -118,8 +198,8 @@ class StreamingRhythmProjector(nn.Module):
             tail_mask = mask_row.clone()
             if valid_frontier > 0:
                 tail_mask[:valid_frontier] = 0.0
-            remaining_budget = budget_row.squeeze(0) - speech[batch_idx].sum()
-            if tail_mask.sum() > 0 and float(remaining_budget.item()) > 0:
+            remaining_budget = (budget_row.squeeze(0) - speech[batch_idx].sum()).clamp_min(0.0)
+            if tail_mask.sum() > 0:
                 tail_values = self._renormalize_to_budget(
                     candidate[batch_idx : batch_idx + 1],
                     tail_mask.unsqueeze(0),
@@ -140,64 +220,23 @@ class StreamingRhythmProjector(nn.Module):
         soft_pause_selection: bool,
         pause_topk_ratio_override: float | None = None,
     ) -> torch.Tensor:
-        scores = pause_weight_unit.float().clamp_min(0.0)
-        boundary_bias = self.config.pause_boundary_bias_weight * (
-            self.config.pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
-        )
-        scores = (scores + boundary_bias) * unit_mask
-        sparse_scores = scores.new_zeros(scores.shape)
         topk_ratio = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
         topk_ratio = float(max(0.0, min(1.0, topk_ratio)))
         temperature = float(max(1e-4, self.config.pause_soft_temperature))
-        for batch_idx in range(scores.size(0)):
-            visible = int(unit_mask[batch_idx].sum().item())
-            if visible <= 0:
-                continue
-            topk = max(1, int(round(visible * topk_ratio)))
-            row_scores = scores[batch_idx, :visible]
-            keep_k = min(topk, visible)
-            if keep_k >= visible:
-                sparse_scores[batch_idx, :visible] = row_scores
-                continue
-            values, indices = torch.topk(row_scores, k=keep_k, dim=0)
-            if soft_pause_selection:
-                threshold = values[-1].detach()
-                gate = torch.sigmoid((row_scores - threshold) / temperature)
-                sparse_scores[batch_idx, :visible] = row_scores * gate
-            else:
-                sparse_scores[batch_idx, indices] = values
-
-        pause = sparse_scores.new_zeros(sparse_scores.shape)
-        previous = state.previous_pause_exec
-        for batch_idx in range(sparse_scores.size(0)):
-            mask_row = unit_mask[batch_idx]
-            budget_row = pause_budget_win[batch_idx]
-            frontier = int(state.commit_frontier[batch_idx].item())
-            if reuse_prefix and previous is not None and batch_idx < previous.size(0) and frontier > 0:
-                valid_frontier = min(frontier, int(previous.size(1)), int(sparse_scores.size(1)))
-                prefix = previous[batch_idx, :valid_frontier].float() * mask_row[:valid_frontier]
-                pause[batch_idx, :valid_frontier] = prefix
-            else:
-                valid_frontier = 0
-            tail_mask = mask_row.clone()
-            if valid_frontier > 0:
-                tail_mask[:valid_frontier] = 0.0
-            if float(tail_mask.sum().item()) <= 0:
-                continue
-            remaining_budget = (budget_row - pause[batch_idx].sum()).clamp_min(0.0)
-            if float(remaining_budget.item()) <= 0:
-                continue
-            tail_mask_row = tail_mask.unsqueeze(0)
-            fallback = tail_mask_row / tail_mask_row.sum(dim=1, keepdim=True).clamp_min(1.0)
-            tail_candidate = sparse_scores[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask_row
-            # Keep pause allocation differentiable wrt pause scores / pause budget.
-            tail_values = self._renormalize_to_budget(
-                tail_candidate + fallback * 1e-6,
-                tail_mask_row,
-                remaining_budget.view(1, 1),
-            )[0]
-            pause[batch_idx] = pause[batch_idx] + tail_values * tail_mask
-        return pause * unit_mask
+        return _project_pause_impl(
+            pause_weight_unit=pause_weight_unit,
+            boundary_latent=boundary_latent,
+            unit_mask=unit_mask,
+            pause_budget_win=pause_budget_win,
+            previous_pause_exec=state.previous_pause_exec,
+            commit_frontier=state.commit_frontier,
+            reuse_prefix=reuse_prefix,
+            soft_pause_selection=soft_pause_selection,
+            topk_ratio=topk_ratio,
+            pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
+            pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
+            temperature=temperature,
+        )
 
     def _compute_commit_frontier(
         self,

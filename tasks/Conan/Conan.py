@@ -215,6 +215,15 @@ class ConanTask(AuxDecoderMIDITask):
             return float(hparams.get("lambda_rhythm_cumplan", 0.15))
         return float(hparams.get("lambda_rhythm_carry", 0.15))
 
+    @staticmethod
+    def _resolve_rhythm_pause_boundary_weight() -> float:
+        # Backward compatible alias:
+        # `rhythm_pause_exec_boundary_boost` (newer) falls back to
+        # `rhythm_pause_boundary_weight` (older).
+        if "rhythm_pause_exec_boundary_boost" in hparams:
+            return float(hparams.get("rhythm_pause_exec_boundary_boost", 0.75))
+        return float(hparams.get("rhythm_pause_boundary_weight", 0.35))
+
     def build_disc_model(self):
         disc_win_num = hparams['disc_win_num']
         h = hparams['mel_disc_hidden_size']
@@ -1108,6 +1117,8 @@ class ConanTask(AuxDecoderMIDITask):
                 distill_budget_weight=distill_budget_weight,
                 distill_allocation_weight=distill_allocation_weight,
                 distill_prefix_weight=distill_prefix_weight,
+                pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
+                feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
             )
         if not hparams.get("rhythm_train_identity_fallback", False):
             return None
@@ -1132,16 +1143,26 @@ class ConanTask(AuxDecoderMIDITask):
             distill_budget_weight=distill_budget_weight,
             distill_allocation_weight=distill_allocation_weight,
             distill_prefix_weight=distill_prefix_weight,
+            pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
+            feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
         )
 
     def add_rhythm_loss(self, output, sample, losses):
         targets = self._build_rhythm_loss_targets(output, sample)
         if targets is None:
             return
-        rhythm_losses = build_rhythm_loss_dict(output["rhythm_execution"], targets)
+        rhythm_execution = output["rhythm_execution"]
+        if rhythm_execution is not None and "rhythm_pause_exec_surrogate_used" not in output:
+            output["rhythm_pause_exec_surrogate_used"] = 0.0
+        rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
         losses["rhythm_exec_speech"] = rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
         losses["rhythm_exec_pause"] = rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
         losses["rhythm_budget"] = rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
+        losses["rhythm_feasible_debt"] = (
+            rhythm_losses["rhythm_feasible_debt"]
+            * hparams.get("lambda_rhythm_budget", 0.25)
+            * float(hparams.get("rhythm_feasible_debt_weight", 0.05))
+        ).detach()
         losses["rhythm_cumplan"] = rhythm_losses["rhythm_cumplan"] * self._get_rhythm_cumplan_lambda()
         losses["rhythm_plan"] = rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0)
         losses["rhythm_guidance"] = rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0)

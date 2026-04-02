@@ -6,7 +6,7 @@
 
 This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise Online Network for Zero-Shot Adaptive Voice Conversion**".
 
-> **Current repository note (2026-04-01)**  
+> **Current repository note (2026-04-02)**  
 > This branch now contains a cleaner **Rhythm V2 / Minimal Strong-Rhythm** path for streaming rhythm transfer.
 >
 > Core idea:
@@ -24,6 +24,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `modules/Conan/rhythm/reference_descriptor.py`
 > - `modules/Conan/rhythm/scheduler.py`
 > - `modules/Conan/rhythm/projector.py`
+> - `modules/Conan/rhythm/offline_teacher.py`
+> - `modules/Conan/rhythm/runtime_adapter.py`
 > - `modules/Conan/rhythm/module.py`
 > - `tasks/Conan/rhythm/`
 > - `docs/rhythm_module_vision.md`
@@ -39,6 +41,7 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
 > - trace sampling uses a fixed progress horizon with anchor-progress phase updates
 > - `phase_ptr` is maintained as **committed-progress state** (monotonic, no rollback on visible-prefix growth), not as a naive visible-prefix ratio
+> - projector execution now keeps zero-budget speech/pause branches differentiable during training, so the pause path no longer silently drops out when the min-speech floor temporarily absorbs the full window budget
 > - scheduler now consumes a cheap source-boundary sidecar derived from `sep_hint + source duration shape`, but this sidecar is kept as a soft prior instead of a public control head
 > - the unit frontend now exports `sealed_mask + boundary_confidence` and includes a stateful run-length unitizer helper
 > - projector now also emits a shared frame plan, so renderer and online/hybrid retimed supervision consume the same frame map
@@ -52,23 +55,31 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - runtime/batch targets now prefer `rhythm_pause_*`; `rhythm_blank_*` remains a cache/internal compatibility alias
 > - an optional `rhythm_plan` proxy remains available for ablations, but the mainline now keeps it disabled by default
 > - dual-mode teacher/student is now wired with a learned non-causal offline planner teacher plus the older algorithmic bootstrap targets
+> - the learned offline teacher is now a stronger standalone planner teacher with its own full-context trunk / phrase pooling / global refine path, while still distilling only onto the shared execution surface
+> - Conan runtime rhythm wiring is now split through `ConanRhythmAdapter`, so the main Conan model no longer owns the full rhythm runtime path directly
 > - formal schedule-only warm-start now defaults to cached-only + cached teacher surfaces
+> - maintained `schedule_only` now explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`), so stage-1 keeps a pure student execution path
+> - pause execution weighting and projector feasibility debt are now folded into existing maintained losses (`L_exec_pause`, `L_budget`) instead of becoming extra optimizer loss names
 > - stage-2 dual-mode KD config now has its own entry (`egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`)
 > - streaming metrics now track carry / backlog / blank-slot usage in addition to no-rollback deltas
 > - `scripts/smoke_test_rhythm_v2.py` now covers descriptor + stateful scheduler reuse
+> - current train-ready checks that now pass locally: `py_compile`, `scripts/smoke_test_rhythm_v2.py`, train-only `scripts/preflight_rhythm_v2.py --model_dry_run` for `schedule_only` / `dual_mode_kd` / `retimed_train`, one-step `schedule_only`, one-step `dual_mode_kd`, one-step `retimed_train`
 >
 > Still missing before claiming a full strong-rhythm training closure:
 >
 > - stronger proof that the learned offline teacher improves real training runs beyond the current bootstrap level
 > - stronger proof that the new `retimed_train` stage closes train/infer mismatch robustly on real runs
 > - stronger joint closure between retimed render, retimed acoustic targets, and pitch supervision on real runs
+> - multi-step / long-run confirmation that pause allocation stays healthy after the projector-side differentiability fix, without needing any task-side surrogate fallback
 > - stronger rhythm evaluation focused on pause placement / local-rate transfer / no-rollback stability
+> - end-to-end streaming inference regression after the latest reference-conditioning / decoder-cache-interface quick wins (runtime adapter split is covered structurally, but not yet by full inference benchmarks)
 >
 > Current staging note:
 >
 > - the default main config still keeps train/valid decoder reconstruction on the source-aligned canvas
 > - test/inference already uses the retimed rhythm execution path
-> - train-time retimed rendering should still be staged in, but the task now supports cached / online / hybrid retimed acoustic targets on the same frame plan
+> - formal joint closure should now use `egs/conan_emformer_rhythm_v2_retimed_train.yaml`, which enables train/valid retimed rendering and retimed target selection from step 0
+> - the task now supports cached / online / hybrid retimed acoustic targets on the same frame plan
 > - the binarizer still caches a first-pass `rhythm_retimed_mel_tgt`, while train-time online retimed targets now come from the current execution frame plan
 > - `egs/conan_emformer_rhythm_v2.yaml` now defaults to `rhythm_minimal_style_only: true`, i.e. keep global timbre embedding but disable the heavier local style/prosody adaptor path entirely
 > - the rhythm route also overrides `mel_losses: "l1:1.0"` and now treats the mainline objective as executed speech/pause supervision + light budget + cumulative-plan guardrail + light `L_base`
@@ -87,8 +98,11 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is now the formal cached-only stage-1 schedule config
 > - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` remains an optional stage-2 KD branch, not the default maintained training path
 > - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config and the formal joint-training entry
+> - maintained stage-1 -> stage-3 chain is now explicit: `schedule_only` (no runtime learned teacher) -> `retimed_train` (formal joint entry)
+> - optional branch order is now explicit: `schedule_only` -> `dual_mode_kd` -> `retimed_train`
 > - cached-only experiments now validate a stricter rhythm cache contract (`rhythm_cache_version: 4`)
 > - current cached targets are self-conditioned surfaces, so cache-based rhythm conditioning defaults to `rhythm_cached_reference_policy: self`
+> - the bundled smoke cache is train-only for preflight purposes; use `--splits train` there, and use real train+valid caches for formal runs
 >
 > Current streaming mode note:
 >

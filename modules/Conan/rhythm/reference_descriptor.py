@@ -27,16 +27,30 @@ class RefRhythmDescriptor(nn.Module):
         smooth_kernel: int = 5,
         slow_topk: int = 6,
         selector_cell_size: int = 3,
+        maintained_stats_trace_only: bool = True,
+        emit_reference_sidecar: bool | None = None,
     ) -> None:
         super().__init__()
+        self.maintained_stats_trace_only = bool(maintained_stats_trace_only)
+        # Maintained path defaults to the smallest stable contract: stats + trace.
+        # Sidecars remain available, but are opt-in unless explicitly overridden.
+        self.emit_reference_sidecar = (
+            (not self.maintained_stats_trace_only)
+            if emit_reference_sidecar is None
+            else bool(emit_reference_sidecar)
+        )
         self.encoder = ReferenceRhythmEncoder(
             trace_bins=trace_bins,
             trace_horizon=trace_horizon,
             smooth_kernel=smooth_kernel,
         )
-        self.selector = ReferenceSelector(
-            slow_topk=slow_topk,
-            cell_size=selector_cell_size,
+        self.selector = (
+            ReferenceSelector(
+                slow_topk=slow_topk,
+                cell_size=selector_cell_size,
+            )
+            if self.emit_reference_sidecar
+            else None
         )
 
     @staticmethod
@@ -76,12 +90,24 @@ class RefRhythmDescriptor(nn.Module):
         ref_rhythm_stats: torch.Tensor,
         ref_rhythm_trace: torch.Tensor,
         selector: ReferenceSelector | None = None,
+        *,
+        include_sidecar: bool = False,
     ) -> dict[str, torch.Tensor]:
         RefRhythmDescriptor._validate_cached_contract(ref_rhythm_stats, ref_rhythm_trace)
         global_rate = torch.reciprocal(ref_rhythm_stats[:, 2:3].clamp_min(1.0))
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
         boundary_trace = ref_rhythm_trace[:, :, 2:3]
+        out = {
+            "ref_rhythm_stats": ref_rhythm_stats,
+            "ref_rhythm_trace": ref_rhythm_trace,
+            "global_rate": global_rate,
+            "pause_ratio": pause_ratio,
+            "local_rate_trace": local_rate_trace,
+            "boundary_trace": boundary_trace,
+        }
+        if not include_sidecar:
+            return out
         if selector is None:
             slow_memory = ref_rhythm_trace
             slow_indices = torch.arange(ref_rhythm_trace.size(1), device=ref_rhythm_trace.device)[None, :].expand(ref_rhythm_trace.size(0), -1)
@@ -102,20 +128,17 @@ class RefRhythmDescriptor(nn.Module):
         if selector is None:
             slow_starts = slow_indices
             slow_ends = slow_indices
-        return {
-            "ref_rhythm_stats": ref_rhythm_stats,
-            "ref_rhythm_trace": ref_rhythm_trace,
-            "global_rate": global_rate,
-            "pause_ratio": pause_ratio,
-            "local_rate_trace": local_rate_trace,
-            "boundary_trace": boundary_trace,
-            "slow_rhythm_memory": slow_memory,
-            "slow_rhythm_summary": slow_summary,
-            "selector_meta_indices": slow_indices,
-            "selector_meta_scores": slow_scores,
-            "selector_meta_starts": slow_starts,
-            "selector_meta_ends": slow_ends,
-        }
+        out.update(
+            {
+                "slow_rhythm_memory": slow_memory,
+                "slow_rhythm_summary": slow_summary,
+                "selector_meta_indices": slow_indices,
+                "selector_meta_scores": slow_scores,
+                "selector_meta_starts": slow_starts,
+                "selector_meta_ends": slow_ends,
+            }
+        )
+        return out
 
     def forward(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         encoded = self.encoder(ref_mel)
@@ -123,6 +146,7 @@ class RefRhythmDescriptor(nn.Module):
             encoded["ref_rhythm_stats"],
             encoded["ref_rhythm_trace"],
             selector=self.selector,
+            include_sidecar=self.emit_reference_sidecar,
         )
 
     def sample_trace_window(

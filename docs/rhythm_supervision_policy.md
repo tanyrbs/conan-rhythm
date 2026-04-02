@@ -1,4 +1,4 @@
-# Rhythm Supervision Policy (2026-04-01)
+# Rhythm Supervision Policy (2026-04-02)
 
 ## 1. Purpose
 
@@ -56,8 +56,9 @@ Optional cached ablation fields may still exist:
 
 Important distinction:
 
-- current repo has a stronger **offline teacher surface**
-- current repo does **not** yet have a true standalone full-context teacher model
+- current repo now has a stronger **standalone full-context offline planner teacher**
+- that teacher still shares the public projector/execution contract with the student
+- it is still **not** a second acoustic model, and maintained KD should stay on the shared execution surface rather than hidden-state imitation
 
 Do not collapse those two claims.
 
@@ -65,6 +66,9 @@ Maintained usage preference:
 
 - use teacher surfaces as the primary **target source** when teacher-first cached training is enabled
 - keep extra KD losses (`L_distill*`) optional, stage-specific, and off by default in the maintained chain
+- do not keep task-side surrogate pause execution in the maintained path; if pause gradients disappear, fix the projector branch itself
+- keep schedule-only runtime teacher branch off (`rhythm_enable_learned_offline_teacher: false`); stage-1 should not pay runtime teacher complexity
+- dual-mode KD may enable the runtime learned teacher branch, but it remains an optional research/stage-2 branch rather than the default maintained chain
 
 ---
 
@@ -206,6 +210,9 @@ Maintained optimizer policy:
   - required 3: `L_base`, `L_rhythm_exec`, `L_stream_state`
   - optional +1: `L_pitch` (only when retimed pitch targets are enabled/ready)
 - all other rhythm detail terms should be treated as logging/ablation surfaces unless a stage explicitly enables them
+- pause-boundary emphasis must stay absorbed inside `L_exec_pause`
+- projector feasibility debt must stay absorbed inside `L_budget`
+- do not grow either of those into standalone optimizer losses on the maintained path
 
 ### Optional staged losses
 
@@ -227,6 +234,13 @@ Maintained default:
 
 - keep `L_distill*` disabled in the default formal chain (`schedule_only -> retimed_train`)
 - if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
+
+Maintained chain note:
+
+- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is the stage-1 formal entry (runtime learned teacher disabled)
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the optional stage-2 branch (runtime offline teacher enabled, distillation kept on shared execution/prefix surfaces)
+- `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stage-3 formal joint entry
+- the formal stage-3 config now enables retimed train/valid closure from step 0; the older delayed-start behavior remains only on transitional configs
 
 ---
 

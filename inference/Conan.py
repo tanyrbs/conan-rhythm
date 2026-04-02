@@ -92,10 +92,18 @@ class StreamingVoiceConversion:
         pos = 0
         state = None  # Emformer state for streaming
         rhythm_state = None
+        # Reserved for future decoder-side incremental cache / limited-window decode.
+        decoder_cache = None
         rhythm_ref_conditioning = None
-        if getattr(self.model, "rhythm_enable_v2", False):
-            with torch.no_grad():
-                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(ref_mel.unsqueeze(0))
+        ref_mel_batch = ref_mel.unsqueeze(0)
+        with torch.no_grad():
+            # Speaker/style embedding is utterance-static, compute once per request.
+            spk_embed = self.model.encode_spk_embed(ref_mel_batch.transpose(1, 2)).transpose(1, 2)
+            if getattr(self.model, "rhythm_enable_v2", False):
+                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(ref_mel_batch)
+        require_runtime_ref = bool(self.hparams.get("style", False)) and not bool(
+            getattr(self.model, "rhythm_minimal_style_only", False)
+        )
         
 
         while pos < total_frames:
@@ -137,9 +145,9 @@ class StreamingVoiceConversion:
             with torch.no_grad():
                 out = self.model(
                     content=all_codes,
-                    spk_embed=None,
+                    spk_embed=spk_embed,
                     target=None,
-                    ref=ref_mel.unsqueeze(0),
+                    ref=ref_mel_batch if require_runtime_ref else None,
                     f0=None,
                     uv=None,
                     infer=True,
@@ -147,9 +155,11 @@ class StreamingVoiceConversion:
                     content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
                     rhythm_state=rhythm_state,
                     rhythm_ref_conditioning=rhythm_ref_conditioning,
+                    decoder_cache=decoder_cache,
                 )
                 rhythm_state = out.get("rhythm_state_next", rhythm_state)
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
+                decoder_cache = out.get("decoder_cache", decoder_cache)
                 mel_out = out["mel_out"][0]
             mel_new, prev_committed_len = extract_incremental_committed_mel(
                 out,

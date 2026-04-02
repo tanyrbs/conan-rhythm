@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from .contracts import RhythmTeacherTargets, StreamingRhythmState
-from .offline_teacher import OfflineRhythmTeacherPlanner
+from .offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
 from .projector import ProjectorConfig, StreamingRhythmProjector
 from .reference_descriptor import RefRhythmDescriptor
 from .scheduler import MonotonicRhythmScheduler
@@ -47,6 +47,8 @@ class StreamingRhythmModule(nn.Module):
         pause_source_boundary_weight: float = 0.20,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
+        offline_teacher_config: OfflineTeacherConfig | None = None,
+        enable_learned_offline_teacher: bool = False,
     ) -> None:
         super().__init__()
         self.unit_embedding = nn.Embedding(num_units, hidden_size)
@@ -69,17 +71,26 @@ class StreamingRhythmModule(nn.Module):
             pause_boundary_latent_weight=pause_boundary_latent_weight,
             pause_source_boundary_weight=pause_source_boundary_weight,
         )
-        self.offline_teacher = OfflineRhythmTeacherPlanner(
-            hidden_size=hidden_size,
-            stats_dim=stats_dim,
-            trace_dim=trace_dim,
-            max_total_logratio=max_total_logratio,
-            max_unit_logratio=max_unit_logratio,
-            pause_share_max=pause_share_max,
-            boundary_feature_scale=boundary_feature_scale,
-            boundary_source_cue_weight=boundary_source_cue_weight,
-            pause_boundary_latent_weight=pause_boundary_latent_weight,
-            pause_source_boundary_weight=pause_source_boundary_weight,
+        self.enable_learned_offline_teacher = bool(enable_learned_offline_teacher)
+        if offline_teacher_config is None:
+            offline_teacher_config = OfflineTeacherConfig(
+                max_total_logratio=max_total_logratio,
+                max_unit_logratio=max_unit_logratio,
+                pause_share_max=pause_share_max,
+                boundary_feature_scale=boundary_feature_scale,
+                boundary_source_cue_weight=boundary_source_cue_weight,
+                pause_boundary_latent_weight=pause_boundary_latent_weight,
+                pause_source_boundary_weight=pause_source_boundary_weight,
+            )
+        self.offline_teacher = (
+            OfflineRhythmTeacherPlanner(
+                hidden_size=hidden_size,
+                stats_dim=stats_dim,
+                trace_dim=trace_dim,
+                config=offline_teacher_config,
+            )
+            if self.enable_learned_offline_teacher
+            else None
         )
         self.projector = StreamingRhythmProjector(projector_config)
         self.teacher = AlgorithmicRhythmTeacher(teacher_config)
@@ -300,6 +311,11 @@ class StreamingRhythmModule(nn.Module):
         source_boundary_scale_override: float | None = None,
         teacher_source_boundary_scale_override: float | None = None,
     ) -> dict[str, object]:
+        if self.offline_teacher is None:
+            raise RuntimeError(
+                "forward_dual requires learned offline teacher runtime branch, but it is disabled. "
+                "Enable `rhythm_enable_dual_mode_teacher` or `rhythm_runtime_enable_learned_offline_teacher`."
+            )
         streaming_execution = self.forward(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
@@ -380,6 +396,11 @@ class StreamingRhythmModule(nn.Module):
         projector_pause_topk_ratio_override: float | None = None,
         source_boundary_scale_override: float | None = None,
     ) -> tuple[object, dict[str, torch.Tensor]]:
+        if self.offline_teacher is None:
+            raise RuntimeError(
+                "forward_teacher requires learned offline teacher runtime branch, but it is disabled. "
+                "Enable `rhythm_runtime_enable_learned_offline_teacher` (or dual-mode teacher)."
+            )
         ref_conditioning = self.build_reference_conditioning(
             ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,

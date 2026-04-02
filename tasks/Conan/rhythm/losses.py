@@ -36,6 +36,8 @@ class RhythmLossTargets:
     distill_budget_weight: float = 1.0
     distill_allocation_weight: float = 1.0
     distill_prefix_weight: float = 1.0
+    pause_boundary_weight: float = 0.35
+    feasible_debt_weight: float = 0.05
 
     @property
     def blank_exec_tgt(self) -> torch.Tensor:
@@ -151,6 +153,55 @@ def _normalize_prefix_carry(prefix: torch.Tensor, dur_anchor_src: torch.Tensor, 
     return prefix.float() / prefix_budget
 
 
+def _resolve_pause_exec_mask(
+    execution,
+    unit_mask: torch.Tensor,
+    *,
+    boundary_weight: float,
+) -> torch.Tensor:
+    """Keep pause supervision on executed surface, but upweight boundary-like units."""
+    unit_mask = unit_mask.float()
+    if boundary_weight <= 0.0 or execution is None or getattr(execution, "planner", None) is None:
+        return unit_mask
+    planner = execution.planner
+    boundary_hint = getattr(planner, "source_boundary_cue", None)
+    if boundary_hint is None:
+        # Fallback to planner boundary latent without adding extra supervision branch.
+        boundary_hint = getattr(planner, "boundary_latent", None)
+        if boundary_hint is not None:
+            boundary_hint = boundary_hint.detach()
+    if boundary_hint is None:
+        return unit_mask
+    boundary_hint = boundary_hint.float().clamp_min(0.0) * unit_mask
+    boundary_scale = boundary_hint.amax(dim=1, keepdim=True).clamp_min(1e-6)
+    boundary_norm = boundary_hint / boundary_scale
+    return unit_mask * (1.0 + float(boundary_weight) * boundary_norm)
+
+
+def _compute_feasible_debt_penalty(
+    execution,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if execution is None or getattr(execution, "planner", None) is None:
+        ref = execution.speech_duration_exec if execution is not None else torch.zeros(1)
+        return ref.new_tensor(0.0)
+    planner = execution.planner
+    feasible_total = getattr(planner, "feasible_total_budget_delta", None)
+    if feasible_total is None:
+        feasible_speech = getattr(planner, "feasible_speech_budget_delta", None)
+        feasible_pause = getattr(planner, "feasible_pause_budget_delta", None)
+        if feasible_speech is not None and feasible_pause is not None:
+            feasible_total = feasible_speech + feasible_pause
+        else:
+            return execution.speech_duration_exec.new_tensor(0.0)
+    feasible_total = feasible_total.float().clamp_min(0.0)
+    debt = torch.log1p(feasible_total)
+    if debt.dim() > 1:
+        debt = debt.reshape(debt.size(0), -1).mean(dim=1)
+    return _reduce_batch_loss(debt, batch_weight)
+
+
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
     unit_mask = targets.unit_mask.float()
     blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)
@@ -172,10 +223,15 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         unit_mask,
         batch_weight=targets.sample_confidence,
     )
+    pause_mask = _resolve_pause_exec_mask(
+        execution,
+        unit_mask,
+        boundary_weight=float(targets.pause_boundary_weight),
+    )
     l_exec_pause = _masked_log_huber(
         blank_exec,
         targets.pause_exec_tgt.float(),
-        unit_mask,
+        pause_mask,
         batch_weight=targets.sample_confidence,
     )
     l_budget = (
@@ -190,6 +246,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             batch_weight=targets.sample_confidence,
         )
     )
+    l_feasible_debt = _compute_feasible_debt_penalty(
+        execution,
+        batch_weight=targets.sample_confidence,
+    )
+    l_budget = l_budget + float(targets.feasible_debt_weight) * l_feasible_debt
     l_carry = _masked_huber(
         _normalize_prefix_carry(pred_prefix_clock, targets.dur_anchor_src.float(), unit_mask),
         _normalize_prefix_carry(target_prefix_clock, targets.dur_anchor_src.float(), unit_mask),
@@ -315,6 +376,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_budget': l_budget,
+        'rhythm_feasible_debt': l_feasible_debt,
         'rhythm_carry': l_carry,
         'rhythm_cumplan': l_carry,
         'rhythm_plan_local': l_plan_local,

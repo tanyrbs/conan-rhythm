@@ -7,12 +7,27 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 #   schedule_only -> retimed_train
 # when you want the strict compact-mainline path first.
 rhythm_minimal_v1_profile: false
-rhythm_schedule_only_stage: true
+# Dual-mode KD emits runtime offline execution; keep this false so preflight
+# does not treat this stage as pure schedule-only.
+rhythm_schedule_only_stage: false
 rhythm_optimize_module_only: true
 rhythm_distill_surface: offline
 rhythm_enable_dual_mode_teacher: true
 rhythm_enable_learned_offline_teacher: true
 rhythm_enable_algorithmic_teacher: false
+# Stronger learned offline teacher: richer non-causal planner trunk.
+rhythm_offline_teacher_num_blocks: 6
+rhythm_offline_teacher_kernel_size: 5
+rhythm_offline_teacher_dilations: [1, 2, 4, 8, 2, 1]
+rhythm_offline_teacher_phrase_kernels: [3, 7]
+rhythm_offline_teacher_global_gate_scale: 0.12
+rhythm_offline_teacher_pause_trace_weight: 0.30
+rhythm_offline_teacher_boundary_trace_weight: 0.30
+rhythm_offline_teacher_confidence_agreement_weight: 0.25
+# Keep loss count unchanged: strengthen pause placement + feasible-state regularization
+# inside existing maintained losses.
+rhythm_pause_boundary_weight: 0.75
+rhythm_feasible_debt_weight: 0.05
 rhythm_retimed_target_mode: cached
 rhythm_export_debug_sidecars: false
 rhythm_export_cache_audit_to_sample: false

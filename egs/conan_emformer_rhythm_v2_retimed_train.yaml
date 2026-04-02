@@ -1,16 +1,17 @@
 base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 
-# Controlled experiment: train/valid on the retimed canvas after a warmup.
-# Keep this separate from the conservative main config.
+# Controlled experiment: train/valid on the retimed canvas as the formal joint stage.
+# Keep this separate from the conservative transitional main config.
 # This is the formal stage-3 entrypoint after schedule-only warmup.
 rhythm_minimal_v1_profile: false
 rhythm_apply_train_override: true
 rhythm_apply_valid_override: true
-rhythm_train_render_start_steps: 20000
-rhythm_valid_render_start_steps: 20000
-rhythm_retimed_target_start_steps: 20000
+# Formal stage-3 should close train/infer immediately on the retimed canvas.
+rhythm_train_render_start_steps: 0
+rhythm_valid_render_start_steps: 0
+rhythm_retimed_target_start_steps: 0
 rhythm_retimed_target_mode: hybrid
-rhythm_online_retimed_target_start_steps: 40000
+rhythm_online_retimed_target_start_steps: 0
 rhythm_use_retimed_pitch_target: true
 rhythm_disable_pitch_loss_when_retimed: false
 rhythm_disable_mel_adv_when_retimed: true
@@ -25,6 +26,8 @@ rhythm_dataset_target_mode: cached_only
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none
 rhythm_enable_dual_mode_teacher: false
+# Maintained joint entry keeps runtime learned teacher branch off by default;
+# teacher signal comes from cached surfaces unless an explicit KD branch is used.
 rhythm_enable_learned_offline_teacher: false
 rhythm_binarize_teacher_targets: true
 rhythm_binarize_retimed_mel_targets: true
@@ -44,6 +47,9 @@ lambda_rhythm_budget: 0.10
 lambda_rhythm_cumplan: 0.10
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
+rhythm_pause_exec_boundary_boost: 0.75
+rhythm_pause_boundary_weight: 0.35
+rhythm_feasible_debt_weight: 0.05
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.0
