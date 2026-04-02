@@ -21,12 +21,15 @@ rhythm_content_mel_tolerance: 0
 rhythm_enable_algorithmic_teacher: false
 rhythm_enable_dual_mode_teacher: false
 rhythm_enable_learned_offline_teacher: false
+rhythm_runtime_enable_learned_offline_teacher: false
+rhythm_teacher_target_source: learned_offline
 rhythm_distill_surface: none
 lambda_rhythm_budget: 0.05
 lambda_rhythm_cumplan: 0.12
 lambda_rhythm_plan: 0.0
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
+lambda_rhythm_teacher_aux: 0.0
 rhythm_pause_exec_boundary_boost: 0.75
 rhythm_pause_boundary_weight: 0.35
 rhythm_feasible_debt_weight: 0.05

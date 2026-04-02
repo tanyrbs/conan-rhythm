@@ -32,10 +32,10 @@ Current state:
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 - projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
-- strict maintained stage configs now set `rhythm_strict_mainline: true`, so schedule-only / retimed-train paths hard-reject runtime teacher, guidance loss, distill loss, and algorithmic-teacher branches
+- strict maintained stage configs now set `rhythm_strict_mainline: true`, so schedule-only / teacher-student-KD / retimed-train paths hard-reject runtime teacher, guidance loss, and algorithmic-teacher branches; only cache-backed KD remains allowed on the maintained stage-2 config
 - strict mainline also keeps projector on a thinner contract by default (`pause_selection_mode=simple`, `use_boundary_commit_guard=false`, `build_render_plan=false`)
 - slot schedule / frame plan are now lazily materialized only when render / retimed closure actually needs them; strict non-render paths keep these fields absent
-- latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `dual_mode_kd`, and one-step `retimed_train`
+- latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `teacher_student_kd`, and one-step `retimed_train`
 - latest local CPU probe also passed on the smoke bundle for `retimed_train` over 20 updates, with finite losses, finite clipped gradients, and non-zero parameter deltas on the content / rhythm-scheduler / decoder / pitch path
 
 ---
@@ -118,10 +118,11 @@ Important terminology note:
   - streaming branch = causal student scheduler + shared projector contract
   - offline branch = non-causal planner teacher + shared projector contract
   - algorithmic teacher = explicit bootstrap / fallback surface
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is an optional stage-2 branch config
-- that branch now explicitly keeps enabled distill losses in the optimizer path (`rhythm_enable_aux_optimizer_losses: true`) and adds a light runtime teacher auxiliary supervision term (`lambda_rhythm_teacher_aux`) so the learned offline teacher is not left as an unsupervised side branch
-- when streaming prefix cropping is active, runtime teacher auxiliary supervision now prefers full-length offline cached teacher sidecars (`rhythm_offline_teacher_*`) when they exist, and otherwise slices the runtime teacher execution/state surface to the overlapping prefix instead of mixing a full-context teacher with student-prefix targets
-- dual-mode KD keeps confidence weighting detached before it is used as a loss weight, so offline confidence cannot cheat by shrinking hard-example weights
+- `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is the maintained stage-2 cache-only KD config
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as a legacy runtime-teacher branch config
+- maintained stage-2 now distills purely from cached offline teacher surfaces; it does not keep a live runtime teacher branch in the training loop
+- the runtime-teacher auxiliary supervision path (`lambda_rhythm_teacher_aux`) and detached confidence weighting stay only on the legacy `dual_mode_kd` research branch
+- when streaming prefix cropping is active on that legacy branch, runtime teacher auxiliary supervision prefers full-length offline cached teacher sidecars (`rhythm_offline_teacher_*`) when they exist, and otherwise slices the runtime teacher execution/state surface to the overlapping prefix instead of mixing a full-context teacher with student-prefix targets
 - stage-2 module-only runs also inherit the acoustic fast path and `with_f0: false`, so KD warm-start does not pay pitch/decoder cost unless you deliberately leave the rhythm-only route
 - docs and experiments should still keep the distinction explicit: learned offline teacher is stronger than student replay, but it is still a planner teacher, not a second acoustic model
 - maintained default training chain does **not** require this stage; prefer teacher-first target surfaces before adding KD losses
@@ -167,8 +168,8 @@ Current bridge step already in repo:
 - mel GAN should stay disabled on the retimed canvas unless real/fake targets are explicitly aligned to the same acoustic canvas
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
-- rhythm cache contract is now versioned at `rhythm_cache_version: 4`
-- one-step schedule-only / retimed-joint checks are now passing after the projector-side pause differentiability fix; this is enough for train-ready status, but not yet evidence of long-run stability
+- rhythm cache contract is now versioned at `rhythm_cache_version: 5`
+- one-step schedule-only / teacher-student-KD / retimed-joint checks are now passing after the projector-side pause differentiability fix; this is enough for train-ready status, but not yet evidence of long-run stability
 - smoke preflight is now confirmed on `--splits train`; the bundled smoke cache still does not include a populated `valid` split, so full train+valid preflight remains a real-data check
 - config now also exposes staged rollout knobs:
 - `rhythm_train_render_start_steps`
@@ -210,7 +211,7 @@ Need stronger evaluation around:
 As of 2026-04-02:
 
 - the rhythm branch is **ready for warm-start / structural training**
-- the branch is also **train-ready for short validation runs** across `schedule_only`, optional `dual_mode_kd`, and `retimed_train`
+- the branch is also **train-ready for short validation runs** across `schedule_only`, `teacher_student_kd`, and `retimed_train`
 - it is **not yet ready to claim final strong-rhythm performance**
 
 The two biggest remaining milestones are:
@@ -227,7 +228,7 @@ Right now the repository should focus on:
 3. cached-only reproducibility
 4. retimed train/infer closure
 5. streaming regression hardening
-6. optional dual-mode schedule KD branch experiments (not default maintained path)
+6. legacy dual-mode schedule KD branch experiments only when explicitly needed (not default maintained path)
 
 ## Future expansion
 

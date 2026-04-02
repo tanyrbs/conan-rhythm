@@ -236,21 +236,22 @@ Policy:
 - default distill target = speech exec + pause exec (`blank_exec` only as cache/internal alias)
 - prefix carry distill is preferred over heavier allocation/budget distill
 - allocation/budget distill should remain off by default unless the experiment explicitly needs them
-- when runtime learned offline teacher KD is enabled, teacher confidence weights must be detached before weighting student losses, and the runtime teacher itself should receive a light direct auxiliary supervision term instead of being left purely as a detached target producer
-- runtime teacher auxiliary supervision should prefer dedicated full-length offline teacher sidecars when available; otherwise it must slice the runtime teacher surface to the overlapping prefix before comparing against cached student-prefix targets
+- when the legacy runtime learned offline teacher KD branch is enabled, teacher confidence weights must be detached before weighting student losses, and the runtime teacher itself should receive a light direct auxiliary supervision term instead of being left purely as a detached target producer
+- that legacy runtime teacher auxiliary supervision should prefer dedicated full-length offline teacher sidecars when available; otherwise it must slice the runtime teacher surface to the overlapping prefix before comparing against cached student-prefix targets
 - maintained stage configs now keep module-only schedule/KD runs on the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disable F0 extraction there (`use_pitch_embed: false`, `binarization_args.with_f0: false`); formal retimed joint training re-enables pitch/F0 in stage-3
 - the acoustic fast path must not stay enabled after train-time retimed rendering turns on; once stage-3 closure is active, decoder/pitch/vocoder supervision has to run on the real retimed canvas
 
 Maintained default:
 
-- keep `L_distill*` disabled in the default formal chain (`schedule_only -> retimed_train`)
+- keep `L_distill*` disabled in the default stage-1 warm start; when enabled in the maintained chain, use the explicit cache-only step (`schedule_only -> teacher_student_kd -> retimed_train`)
 - if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
 - strict-mainline fast path now builds rhythm loss targets directly from the primary cached surface when guidance/distill are both disabled, instead of routing through runtime teacher / algorithmic teacher branches
 
 Maintained chain note:
 
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is the stage-1 formal entry (runtime learned teacher disabled)
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is the optional stage-2 branch (runtime offline teacher enabled, distillation kept on shared execution/prefix surfaces)
+- `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, distillation kept on cached execution/prefix surfaces)
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as an optional legacy runtime-teacher branch
 - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stage-3 formal joint entry
 - the formal stage-3 config now enables retimed train/valid closure from step 0; the older delayed-start behavior remains only on transitional configs
 

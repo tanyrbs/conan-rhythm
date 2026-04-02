@@ -39,8 +39,8 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - explicit reference rhythm stats/trace is connected
 > - the maintained descriptor is an explicit baseline descriptor, not a final expressive prosody encoder
 > - projector already freezes committed prefix, lifts planner budgets into a prefix-feasible region, and uses sparser pause allocation
-> - maintained strict-mainline configs now make the formal path explicit in code (`rhythm_strict_mainline: true` for `minimal_v1` / `schedule_only` / `retimed_train`, `false` for optional `dual_mode_kd`)
-> - strict mainline hard-rejects runtime teacher / algorithmic teacher / guidance / distill objectives instead of relying on convention
+> - maintained strict-mainline configs now make the formal path explicit in code (`rhythm_strict_mainline: true` for `minimal_v1` / `schedule_only` / `teacher_student_kd` / `retimed_train`, `false` for optional `dual_mode_kd`)
+> - strict mainline hard-rejects runtime teacher / algorithmic teacher / guidance objectives, and only allows distill when it is explicit cache-backed teacher->student KD
 > - strict mainline also keeps projector thinner by default: simple pause allocation, no boundary commit guard, and no eager slot/frame-plan materialization
 > - trace sampling uses a fixed progress horizon with anchor-progress phase updates
 > - `phase_ptr` is maintained as **committed-progress state** (monotonic, no rollback on visible-prefix growth), not as a naive visible-prefix ratio
@@ -64,10 +64,10 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - formal schedule-only warm-start now defaults to cached-only + cached teacher surfaces
 > - maintained `schedule_only` now explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`), so stage-1 keeps a pure student execution path
 > - pause execution weighting and projector feasibility debt are now folded into existing maintained losses (`L_exec_pause`, `L_budget`) instead of becoming extra optimizer loss names
-> - stage-2 dual-mode KD config now has its own entry (`egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`)
+> - formal cache-only teacher->student KD now has its own maintained entry (`egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml`), while `dual_mode_kd` is kept as a legacy research branch
 > - streaming metrics now track carry / backlog / blank-slot usage in addition to no-rollback deltas
 > - `scripts/smoke_test_rhythm_v2.py` now covers descriptor + stateful scheduler reuse
-> - current train-ready checks that now pass locally: `py_compile`, `scripts/smoke_test_rhythm_v2.py`, train-only `scripts/preflight_rhythm_v2.py --model_dry_run` for `schedule_only` / `dual_mode_kd` / `retimed_train`, one-step `schedule_only`, one-step `dual_mode_kd`, one-step `retimed_train`
+> - current train-ready checks that now pass locally: `py_compile`, `scripts/smoke_test_rhythm_v2.py`, train-only `scripts/preflight_rhythm_v2.py --model_dry_run` for `schedule_only` / `teacher_student_kd` / `retimed_train`, one-step `schedule_only`, one-step `teacher_student_kd`, one-step `retimed_train`
 > - a new CPU mini-train probe is now available at `scripts/cpu_probe_rhythm_train.py`; the current local smoke run passed for `retimed_train` over 20 CPU updates with finite losses/gradients and observable parameter updates
 >
 > Still missing before claiming a full strong-rhythm training closure:
@@ -101,11 +101,11 @@ This is the official implementation of our ASRU 2025 paper "**Conan: A Chunkwise
 > - `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is the maintained formal base config
 > - `egs/conan_emformer_rhythm_v2_cached_only.yaml` is kept as a legacy alias to that base
 > - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is now the formal cached-only stage-1 schedule config
-> - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` remains an optional stage-2 KD branch, not the default maintained training path
+> - `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is now the maintained stage-2 KD config; `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` remains a legacy runtime-teacher research branch
 > - `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stricter cached-only retimed-train config and the formal joint-training entry
-> - maintained stage-1 -> stage-3 chain is now explicit: `schedule_only` (no runtime learned teacher) -> `retimed_train` (formal joint entry)
-> - optional branch order is now explicit: `schedule_only` -> `dual_mode_kd` -> `retimed_train`
-> - cached-only experiments now validate a stricter rhythm cache contract (`rhythm_cache_version: 4`)
+> - maintained chain is now explicit: `schedule_only` -> `teacher_student_kd` -> `retimed_train`
+> - `dual_mode_kd` remains an optional legacy branch outside the maintained chain
+> - cached-only experiments now validate a stricter rhythm cache contract (`rhythm_cache_version: 5`)
 > - current cached targets are self-conditioned surfaces, so cache-based rhythm conditioning defaults to `rhythm_cached_reference_policy: self`
 > - the bundled smoke cache is train-only for preflight purposes; use `--splits train` there, and use real train+valid caches for formal runs
 >
@@ -278,6 +278,7 @@ For formal Rhythm V2 experiments:
 - use the cached-only config for binarization
 - prefer the maintained `minimal_v1` base when starting a new formal training chain
 - keep `rhythm_binarize_teacher_targets: true`
+- set `rhythm_teacher_target_source: learned_offline` and provide precomputed offline teacher bundles when building formal teacher-backed caches
 - treat teacher surfaces as the preferred **target source**; do not assume KD is required in the default training chain
 - re-binarize whenever `rhythm_cache_version` changes
 - treat `prefer_cache` only as a migration/debug mode
@@ -289,7 +290,8 @@ Update the configuration files in `egs/` directory to match your dataset:
 - `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`: maintained formal base config
 - `egs/conan_emformer_rhythm_v2_cached_only.yaml`: legacy alias to the maintained formal base
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml`: formal stage-1 schedule warm-start
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: optional stage-2 dual-mode schedule KD branch
+- `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml`: maintained stage-2 cache-only teacher->student KD
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: legacy stage-2 runtime dual-mode KD branch
 - `egs/conan_emformer_rhythm_v2_retimed_train.yaml`: retimed acoustic training stage
 - `egs/conan_emformer.yaml`: legacy / baseline main training configuration
 - `egs/emformer.yaml`: Emformer training configuration
@@ -364,11 +366,12 @@ What this probe checks:
 Recommended formal path:
 
 1. `schedule_only`
-2. `retimed_train`
+2. `teacher_student_kd`
+3. `retimed_train`
 
 Optional branch:
 
-- insert `dual_mode_kd` between stage-1 and stage-2 when explicitly running KD experiments
+- use `dual_mode_kd` only when explicitly running legacy runtime-teacher experiments
 
 Transitional warm-start:
 ```bash
@@ -394,7 +397,15 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
     --reset
 ```
 
-Formal stage-2 dual-mode schedule KD:
+Formal stage-2 cache-only teacher->student KD:
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
+    --config egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml \
+    --exp_name conan_rhythm_v2_teacher_kd \
+    --reset
+```
+
+Legacy stage-2 dual-mode schedule KD:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
     --config egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml \
@@ -451,6 +462,7 @@ Conan/
 │   ├── conan_emformer_rhythm_v2.yaml
 │   ├── conan_emformer_rhythm_v2_cached_only.yaml
 │   ├── conan_emformer_rhythm_v2_schedule_only.yaml
+│   ├── conan_emformer_rhythm_v2_teacher_student_kd.yaml
 │   ├── conan_emformer_rhythm_v2_dual_mode_kd.yaml
 │   ├── emformer.yaml         # Emformer config
 │   └── ...

@@ -13,6 +13,9 @@ rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none
 rhythm_require_cached_teacher: true
 rhythm_enable_learned_offline_teacher: false
+rhythm_runtime_enable_learned_offline_teacher: false
+rhythm_teacher_target_source: learned_offline
+lambda_rhythm_teacher_aux: 0.0
 
 # Keep preprocessing/cache generation teacher-ready, but do not rebuild guidance/teacher targets at runtime.
 rhythm_binarize_teacher_targets: true

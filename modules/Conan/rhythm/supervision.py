@@ -13,12 +13,16 @@ from .source_boundary import build_source_boundary_cue
 from .teacher import AlgorithmicTeacherConfig, build_algorithmic_teacher_targets
 from .unit_frontend import RhythmUnitFrontend
 
-RHYTHM_CACHE_VERSION = 4
+RHYTHM_CACHE_VERSION = 5
 RHYTHM_UNIT_HOP_MS = 20
 RHYTHM_TRACE_HOP_MS = 80
 RHYTHM_REFERENCE_MODE_STATIC_REF_FULL = 0
 RHYTHM_GUIDANCE_SURFACE_NAME = "ref_guidance_v2"
-RHYTHM_TEACHER_SURFACE_NAME = "offline_teacher_surface_v1"
+RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME = "offline_teacher_surface_v1"
+RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME = "offline_teacher_surface_learned_offline_v1"
+RHYTHM_TEACHER_SURFACE_NAME = RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME
+RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC = 0
+RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE = 1
 RHYTHM_RETIMED_SOURCE_GUIDANCE = 0
 RHYTHM_RETIMED_SOURCE_TEACHER = 1
 
@@ -29,6 +33,43 @@ _BLANK_ALIAS_KEYS = {
     "rhythm_teacher_pause_exec_tgt": "rhythm_teacher_blank_exec_tgt",
     "rhythm_teacher_pause_budget_tgt": "rhythm_teacher_blank_budget_tgt",
 }
+
+
+def normalize_teacher_target_source(value) -> str:
+    source = str(value or "algorithmic").strip().lower()
+    aliases = {
+        "algo": "algorithmic",
+        "heuristic": "algorithmic",
+        "legacy": "algorithmic",
+        "rule": "algorithmic",
+        "rules": "algorithmic",
+        "teacher": "learned_offline",
+        "offline": "learned_offline",
+        "offline_teacher": "learned_offline",
+        "learned": "learned_offline",
+        "learned-offline": "learned_offline",
+        "cache": "learned_offline",
+        "cached": "learned_offline",
+        "cached_teacher": "learned_offline",
+    }
+    normalized = aliases.get(source, source)
+    if normalized not in {"algorithmic", "learned_offline"}:
+        raise ValueError(f"Unsupported rhythm_teacher_target_source: {value}")
+    return normalized
+
+
+def resolve_teacher_surface_name(teacher_target_source) -> str:
+    normalized = normalize_teacher_target_source(teacher_target_source)
+    if normalized == "learned_offline":
+        return RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
+    return RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME
+
+
+def resolve_teacher_target_source_id(teacher_target_source) -> int:
+    normalized = normalize_teacher_target_source(teacher_target_source)
+    if normalized == "learned_offline":
+        return RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE
+    return RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC
 
 
 def _as_token_list(content_tokens) -> list[int]:
@@ -251,6 +292,8 @@ def _build_cache_metadata(
     retimed_target_source: str | None = None,
     retimed_target_confidence: float | None = None,
     teacher_confidence: float | None = None,
+    teacher_target_source: str | None = None,
+    teacher_surface_name: str | None = None,
 ) -> dict[str, np.ndarray]:
     meta = {
         "rhythm_cache_version": np.asarray([RHYTHM_CACHE_VERSION], dtype=np.int64),
@@ -266,13 +309,23 @@ def _build_cache_metadata(
         "rhythm_guidance_confidence": np.asarray([float(guidance_confidence)], dtype=np.float32),
         "rhythm_guidance_surface_name": np.asarray([RHYTHM_GUIDANCE_SURFACE_NAME], dtype=np.str_),
     }
+    if teacher_target_source is not None or teacher_surface_name is not None or teacher_confidence is not None:
+        teacher_source = normalize_teacher_target_source(teacher_target_source or "algorithmic")
+        teacher_surface = str(teacher_surface_name or resolve_teacher_surface_name(teacher_source))
+        meta["rhythm_teacher_target_source_id"] = np.asarray(
+            [resolve_teacher_target_source_id(teacher_source)], dtype=np.int64
+        )
+        meta["rhythm_teacher_surface_name"] = np.asarray([teacher_surface], dtype=np.str_)
     if teacher_confidence is not None:
         meta["rhythm_teacher_confidence"] = np.asarray([float(teacher_confidence)], dtype=np.float32)
-        meta["rhythm_teacher_surface_name"] = np.asarray([RHYTHM_TEACHER_SURFACE_NAME], dtype=np.str_)
     if retimed_target_source is not None:
         target_source = str(retimed_target_source).strip().lower()
         source_id = RHYTHM_RETIMED_SOURCE_TEACHER if target_source == "teacher" else RHYTHM_RETIMED_SOURCE_GUIDANCE
-        source_name = RHYTHM_TEACHER_SURFACE_NAME if source_id == RHYTHM_RETIMED_SOURCE_TEACHER else RHYTHM_GUIDANCE_SURFACE_NAME
+        source_name = (
+            str(teacher_surface_name or resolve_teacher_surface_name(teacher_target_source or "algorithmic"))
+            if source_id == RHYTHM_RETIMED_SOURCE_TEACHER
+            else RHYTHM_GUIDANCE_SURFACE_NAME
+        )
         meta["rhythm_retimed_target_source_id"] = np.asarray([source_id], dtype=np.int64)
         meta["rhythm_retimed_target_surface_name"] = np.asarray([source_name], dtype=np.str_)
         if retimed_target_confidence is not None:
@@ -321,6 +374,96 @@ def with_blank_aliases(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         if blank_key in out and pause_key not in out:
             out[pause_key] = np.asarray(out[blank_key]).copy()
     return out
+
+
+def _sum_exec_budget(exec_value) -> np.ndarray:
+    return np.asarray([float(np.asarray(exec_value, dtype=np.float32).sum())], dtype=np.float32)
+
+
+def _build_prefix_targets_from_exec_numpy(
+    speech_exec,
+    pause_exec,
+    dur_anchor_src,
+) -> tuple[np.ndarray, np.ndarray]:
+    speech_exec = np.asarray(speech_exec, dtype=np.float32).reshape(-1)
+    pause_exec = np.asarray(pause_exec, dtype=np.float32).reshape(-1)
+    dur_anchor_src = np.asarray(dur_anchor_src, dtype=np.float32).reshape(-1)
+    visible = min(len(speech_exec), len(pause_exec), len(dur_anchor_src))
+    speech_exec = speech_exec[:visible]
+    pause_exec = pause_exec[:visible]
+    dur_anchor_src = dur_anchor_src[:visible]
+    unit_mask = (dur_anchor_src > 0).astype(np.float32)
+    prefix_clock = np.cumsum(((speech_exec + pause_exec) - dur_anchor_src) * unit_mask, axis=0).astype(np.float32)
+    prefix_backlog = np.maximum(prefix_clock, 0.0).astype(np.float32) * unit_mask
+    return prefix_clock.astype(np.float32), prefix_backlog.astype(np.float32)
+
+
+def _complete_learned_teacher_bundle(
+    teacher_bundle_override: dict,
+    *,
+    source_cache: dict[str, np.ndarray],
+    guidance_bundle: dict[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
+    bundle = with_blank_aliases(dict(teacher_bundle_override or {}))
+    if "rhythm_teacher_speech_exec_tgt" not in bundle:
+        raise ValueError("learned_offline teacher bundle is missing rhythm_teacher_speech_exec_tgt.")
+    if "rhythm_teacher_pause_exec_tgt" not in bundle:
+        raise ValueError("learned_offline teacher bundle is missing rhythm_teacher_pause_exec_tgt.")
+    expected_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+    speech_exec = np.asarray(bundle["rhythm_teacher_speech_exec_tgt"], dtype=np.float32).reshape(-1)
+    pause_exec = np.asarray(bundle["rhythm_teacher_pause_exec_tgt"], dtype=np.float32).reshape(-1)
+    if speech_exec.shape[0] != expected_units or pause_exec.shape[0] != expected_units:
+        raise ValueError(
+            "learned_offline teacher bundle unit mismatch: "
+            f"speech={speech_exec.shape[0]}, pause={pause_exec.shape[0]}, expected={expected_units}."
+        )
+    bundle["rhythm_teacher_speech_exec_tgt"] = speech_exec.astype(np.float32)
+    bundle["rhythm_teacher_pause_exec_tgt"] = pause_exec.astype(np.float32)
+    if "rhythm_teacher_speech_budget_tgt" not in bundle:
+        bundle["rhythm_teacher_speech_budget_tgt"] = _sum_exec_budget(bundle["rhythm_teacher_speech_exec_tgt"])
+    if "rhythm_teacher_pause_budget_tgt" not in bundle:
+        bundle["rhythm_teacher_pause_budget_tgt"] = _sum_exec_budget(bundle["rhythm_teacher_pause_exec_tgt"])
+    unit_mask = (np.asarray(source_cache["dur_anchor_src"]).reshape(-1) > 0).astype(np.float32)
+    for key in (
+        "rhythm_teacher_allocation_tgt",
+        "rhythm_teacher_prefix_clock_tgt",
+        "rhythm_teacher_prefix_backlog_tgt",
+    ):
+        if key in bundle and np.asarray(bundle[key]).reshape(-1).shape[0] != expected_units:
+            raise ValueError(
+                f"learned_offline teacher bundle field {key} has length "
+                f"{np.asarray(bundle[key]).reshape(-1).shape[0]}, expected={expected_units}."
+            )
+    if "rhythm_teacher_allocation_tgt" not in bundle:
+        allocation = np.zeros_like(unit_mask, dtype=np.float32)
+        allocation[:] = (speech_exec + pause_exec) * unit_mask
+        bundle["rhythm_teacher_allocation_tgt"] = allocation.astype(np.float32)
+    if (
+        "rhythm_teacher_prefix_clock_tgt" not in bundle
+        or "rhythm_teacher_prefix_backlog_tgt" not in bundle
+    ):
+        prefix_clock, prefix_backlog = _build_prefix_targets_from_exec_numpy(
+            bundle["rhythm_teacher_speech_exec_tgt"],
+            bundle["rhythm_teacher_pause_exec_tgt"],
+            source_cache["dur_anchor_src"],
+        )
+        if "rhythm_teacher_prefix_clock_tgt" not in bundle:
+            bundle["rhythm_teacher_prefix_clock_tgt"] = prefix_clock
+        if "rhythm_teacher_prefix_backlog_tgt" not in bundle:
+            bundle["rhythm_teacher_prefix_backlog_tgt"] = prefix_backlog
+    if "rhythm_teacher_confidence" not in bundle:
+        fallback_confidence = 1.0
+        if guidance_bundle is not None:
+            fallback_confidence = float(
+                np.asarray(
+                    guidance_bundle.get(
+                        "rhythm_guidance_confidence",
+                        guidance_bundle.get("rhythm_target_confidence", [1.0]),
+                    )
+                ).reshape(-1)[0]
+            )
+        bundle["rhythm_teacher_confidence"] = np.asarray([fallback_confidence], dtype=np.float32)
+    return with_blank_aliases(bundle)
 
 
 def _resample_segment(segment: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -624,6 +767,8 @@ def build_item_rhythm_bundle(
     retimed_mel_target_source: str = "guidance",
     retimed_pause_frame_weight: float = 0.20,
     retimed_stretch_weight_min: float = 0.35,
+    teacher_target_source: str = "algorithmic",
+    teacher_bundle_override: dict | None = None,
     teacher_kwargs: dict | None = None,
 ) -> dict[str, np.ndarray]:
     source = build_source_rhythm_cache(
@@ -643,7 +788,11 @@ def build_item_rhythm_bundle(
     )
     bundle = {**source, **conditioning}
     guided = None
-    if include_self_targets or include_teacher_targets:
+    teacher_surface_name = None
+    teacher_confidence = None
+    target_source = str(retimed_mel_target_source or "guidance").strip().lower()
+    need_teacher_surface = bool(include_teacher_targets or (include_retimed_mel_target and target_source == "teacher"))
+    if include_self_targets or need_teacher_surface:
         guided = build_reference_guided_targets(
             dur_anchor_src=source["dur_anchor_src"],
             unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
@@ -652,22 +801,38 @@ def build_item_rhythm_bundle(
         )
     if include_self_targets and guided is not None:
         bundle.update(with_blank_aliases(guided))
-    if include_teacher_targets:
-        teacher_kwargs = dict(teacher_kwargs or {})
-        bundle.update(
-            build_reference_teacher_targets(
-                dur_anchor_src=source["dur_anchor_src"],
-                unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
-                source_boundary_cue=source.get("source_boundary_cue", source.get("boundary_confidence")),
-                ref_rhythm_stats=conditioning["ref_rhythm_stats"],
-                ref_rhythm_trace=conditioning["ref_rhythm_trace"],
-                **teacher_kwargs,
+    if need_teacher_surface:
+        teacher_source = normalize_teacher_target_source(teacher_target_source)
+        teacher_surface_name = resolve_teacher_surface_name(teacher_source)
+        if teacher_source == "algorithmic":
+            teacher_kwargs = dict(teacher_kwargs or {})
+            bundle.update(
+                build_reference_teacher_targets(
+                    dur_anchor_src=source["dur_anchor_src"],
+                    unit_mask=(np.asarray(source["dur_anchor_src"]) > 0).astype(np.float32),
+                    source_boundary_cue=source.get("source_boundary_cue", source.get("boundary_confidence")),
+                    ref_rhythm_stats=conditioning["ref_rhythm_stats"],
+                    ref_rhythm_trace=conditioning["ref_rhythm_trace"],
+                    **teacher_kwargs,
+                )
             )
-        )
+        else:
+            if teacher_bundle_override is None:
+                raise ValueError(
+                    "teacher_target_source=learned_offline requires teacher_bundle_override "
+                    "when building a cache bundle."
+                )
+            bundle.update(
+                _complete_learned_teacher_bundle(
+                    teacher_bundle_override,
+                    source_cache=source,
+                    guidance_bundle=guided,
+                )
+            )
+        teacher_confidence = bundle.get("rhythm_teacher_confidence")
     retimed_target_confidence = None
     retimed_target_source = None
     if include_retimed_mel_target:
-        target_source = str(retimed_mel_target_source or "guidance").strip().lower()
         if target_source == "teacher" and "rhythm_teacher_speech_exec_tgt" in bundle:
             speech_key = "rhythm_teacher_speech_exec_tgt"
             pause_key = "rhythm_teacher_pause_exec_tgt"
@@ -692,7 +857,6 @@ def build_item_rhythm_bundle(
             )
     target_confidence = float(np.asarray(bundle.get("rhythm_target_confidence", [1.0])).reshape(-1)[0])
     guidance_confidence = float(np.asarray(bundle.get("rhythm_guidance_confidence", [target_confidence])).reshape(-1)[0])
-    teacher_confidence = bundle.get("rhythm_teacher_confidence")
     if retimed_target_confidence is not None:
         retimed_target_confidence = float(np.asarray(retimed_target_confidence).reshape(-1)[0])
     if teacher_confidence is not None:
@@ -709,6 +873,8 @@ def build_item_rhythm_bundle(
             retimed_target_source=retimed_target_source,
             retimed_target_confidence=retimed_target_confidence,
             teacher_confidence=teacher_confidence,
+            teacher_target_source=teacher_target_source if need_teacher_surface else None,
+            teacher_surface_name=teacher_surface_name,
         )
     )
     return with_blank_aliases(bundle)

@@ -15,7 +15,7 @@ from utils.audio.align import get_mel2ph, mel2token_to_dur
 from utils.text.text_encoder import build_token_encoder
 import json
 from utils.audio.pitch.utils import f0_to_coarse
-from modules.Conan.rhythm.supervision import build_item_rhythm_bundle
+from modules.Conan.rhythm.supervision import build_item_rhythm_bundle, normalize_teacher_target_source
 np.seterr(divide='ignore', invalid='ignore')
 
 
@@ -31,6 +31,54 @@ def _rhythm_teacher_kwargs_from_hparams():
         'speech_smooth_kernel': int(hparams.get('rhythm_teacher_speech_smooth_kernel', 3)),
         'pause_topk_ratio': float(hparams.get('rhythm_teacher_pause_topk_ratio', 0.30)),
     }
+
+
+def _resolve_rhythm_teacher_target_source() -> str:
+    return normalize_teacher_target_source(hparams.get('rhythm_teacher_target_source', 'algorithmic'))
+
+
+def _resolve_teacher_bundle_override(item: dict) -> dict | None:
+    teacher_source = _resolve_rhythm_teacher_target_source()
+    if teacher_source != 'learned_offline':
+        return None
+    teacher_path = item.get('rhythm_teacher_npz_fn') or item.get('teacher_npz_fn')
+    candidate_paths = []
+    if teacher_path:
+        teacher_path = str(teacher_path)
+        if os.path.isabs(teacher_path):
+            candidate_paths.append(teacher_path)
+        else:
+            candidate_paths.append(os.path.join(hparams.get('processed_data_dir', ''), teacher_path))
+            teacher_target_dir = hparams.get('rhythm_teacher_target_dir', '')
+            if teacher_target_dir:
+                candidate_paths.append(os.path.join(teacher_target_dir, teacher_path))
+    teacher_target_dir = str(hparams.get('rhythm_teacher_target_dir', '') or '').strip()
+    item_name = str(item.get('item_name', '') or '')
+    if teacher_target_dir and item_name:
+        candidate_paths.extend([
+            os.path.join(teacher_target_dir, f'{item_name}.npz'),
+            os.path.join(teacher_target_dir, f'{item_name}.teacher.npz'),
+        ])
+    seen = set()
+    dedup_paths = []
+    for path in candidate_paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        dedup_paths.append(path)
+    for path in dedup_paths:
+        if not os.path.exists(path):
+            continue
+        payload = np.load(path, allow_pickle=False)
+        try:
+            return {key: payload[key] for key in payload.files}
+        finally:
+            payload.close()
+    searched = ', '.join(dedup_paths) if dedup_paths else '<none>'
+    raise BinarizationError(
+        f"Missing learned_offline teacher targets for item '{item_name}'. "
+        f"Set rhythm_teacher_target_dir or rhythm_teacher_npz_fn. searched={searched}"
+    )
 
 
 class BinarizationError(Exception):
@@ -396,6 +444,8 @@ class ConanBinarizer(VCBinarizer):
         item['hubert'] = content = content[:min_length]
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+            need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
+            teacher_bundle_override = _resolve_teacher_bundle_override(item) if need_teacher_bundle else None
             item.update(
                 build_item_rhythm_bundle(
                     content_tokens=item['hubert'],
@@ -416,6 +466,8 @@ class ConanBinarizer(VCBinarizer):
                     retimed_pause_frame_weight=float(hparams.get('rhythm_retimed_pause_frame_weight', 0.20)),
                     retimed_stretch_weight_min=float(hparams.get('rhythm_retimed_stretch_weight_min', 0.35)),
                     teacher_kwargs=_rhythm_teacher_kwargs_from_hparams(),
+                    teacher_target_source=_resolve_rhythm_teacher_target_source(),
+                    teacher_bundle_override=teacher_bundle_override,
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')
@@ -486,6 +538,8 @@ class EmformerBinarizer(VCBinarizer):
         item['hubert'] = content = content[:min_length]
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+            need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
+            teacher_bundle_override = _resolve_teacher_bundle_override(item) if need_teacher_bundle else None
             item.update(
                 build_item_rhythm_bundle(
                     content_tokens=item['hubert'],
@@ -506,6 +560,8 @@ class EmformerBinarizer(VCBinarizer):
                     retimed_pause_frame_weight=float(hparams.get('rhythm_retimed_pause_frame_weight', 0.20)),
                     retimed_stretch_weight_min=float(hparams.get('rhythm_retimed_stretch_weight_min', 0.35)),
                     teacher_kwargs=_rhythm_teacher_kwargs_from_hparams(),
+                    teacher_target_source=_resolve_rhythm_teacher_target_source(),
+                    teacher_bundle_override=teacher_bundle_override,
                 )
             )
         # print(f'f0_length: {f0.shape}, mel_length: {mel.shape},wav_length: {wav.shape}, content_length: {content.shape}, item_name: {item_name}')

@@ -50,27 +50,12 @@ def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
     if explicit_runtime is not None:
         return bool(explicit_runtime)
 
-    # Maintained strict mainline keeps runtime teacher branches off.
-    if _use_strict_mainline(hparams):
-        return False
-
-    # Dual-mode branch requires the learned offline teacher runtime path.
-    if bool(hparams.get('rhythm_enable_dual_mode_teacher', False)):
-        return True
-
-    # Maintained defaults: do not keep runtime teacher alive in schedule-only / non-KD paths.
-    schedule_only = bool(hparams.get('rhythm_schedule_only_stage', False))
-    if schedule_only:
-        return False
-
-    legacy_enable = bool(hparams.get('rhythm_enable_learned_offline_teacher', False))
-    if not legacy_enable:
-        return False
-
-    lambda_distill = float(hparams.get('lambda_rhythm_distill', 0.0) or 0.0)
-    distill_surface = str(hparams.get('rhythm_distill_surface', 'none') or 'none').strip().lower()
-    offline_distill_surface = distill_surface in {'offline', 'full_context', 'shared_offline'}
-    return lambda_distill > 0.0 and offline_distill_surface
+    # Maintained route keeps the offline teacher fully offline: it is a cache / target producer,
+    # not a default runtime branch. The only implicit runtime activation left is the explicit
+    # dual-mode research path; every other case must opt in via the override above.
+    return bool(hparams.get('rhythm_enable_dual_mode_teacher', False)) and bool(
+        hparams.get('rhythm_enable_learned_offline_teacher', False)
+    )
 
 
 def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:

@@ -18,6 +18,9 @@ from modules.Conan.rhythm.supervision import (
     build_reference_teacher_targets,
     build_retimed_mel_target,
     build_source_rhythm_cache,
+    normalize_teacher_target_source,
+    resolve_teacher_surface_name,
+    resolve_teacher_target_source_id,
     with_blank_aliases,
 )
 from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
@@ -89,6 +92,7 @@ class ConanDataset(FastSpeechDataset):
         "rhythm_target_confidence",
         "rhythm_guidance_confidence",
         "rhythm_teacher_confidence",
+        "rhythm_teacher_target_source_id",
         "rhythm_retimed_target_source_id",
         "rhythm_retimed_target_confidence",
     )
@@ -107,16 +111,18 @@ class ConanDataset(FastSpeechDataset):
         "ref_rhythm_stats",
         "ref_rhythm_trace",
     )
-    _RHYTHM_STREAMING_OFFLINE_KEYS = (
+    _RHYTHM_STREAMING_PREFIX_META_KEYS = (
+        "rhythm_stream_prefix_ratio",
+        "rhythm_stream_visible_units",
+        "rhythm_stream_full_units",
+    )
+    _RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS = (
         "rhythm_offline_content_units",
         "rhythm_offline_dur_anchor_src",
         "rhythm_offline_open_run_mask",
         "rhythm_offline_sealed_mask",
         "rhythm_offline_sep_hint",
         "rhythm_offline_boundary_confidence",
-        "rhythm_stream_prefix_ratio",
-        "rhythm_stream_visible_units",
-        "rhythm_stream_full_units",
     )
     _RHYTHM_STREAMING_OFFLINE_TEACHER_AUX_KEYS = (
         "rhythm_offline_teacher_speech_exec_tgt",
@@ -223,6 +229,15 @@ class ConanDataset(FastSpeechDataset):
         }
         return aliases.get(mode, mode)
 
+    def _resolve_teacher_target_source(self) -> str:
+        return normalize_teacher_target_source(self.hparams.get("rhythm_teacher_target_source", "algorithmic"))
+
+    def _resolve_expected_teacher_surface_name(self) -> str:
+        return resolve_teacher_surface_name(self._resolve_teacher_target_source())
+
+    def _resolve_expected_teacher_target_source_id(self) -> int:
+        return resolve_teacher_target_source_id(self._resolve_teacher_target_source())
+
     def _should_sample_streaming_prefix(self) -> bool:
         return (
             self.prefix == "train"
@@ -236,7 +251,18 @@ class ConanDataset(FastSpeechDataset):
         return bool(self.hparams.get("rhythm_export_cache_audit_to_sample", False))
 
     def _should_export_streaming_offline_sidecars(self) -> bool:
-        return self._should_sample_streaming_prefix() or bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
+        return bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)) or float(
+            self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0
+        ) > 0.0
+
+    def _should_export_offline_teacher_aux(self) -> bool:
+        return (
+            bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
+            and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
+        ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
+
+    def _should_export_streaming_prefix_meta(self) -> bool:
+        return self._should_sample_streaming_prefix()
 
     def _should_export_runtime_retimed_targets(self) -> bool:
         if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
@@ -336,6 +362,7 @@ class ConanDataset(FastSpeechDataset):
             "rhythm_target_confidence": ("float", 0.0),
             "rhythm_guidance_confidence": ("float", 0.0),
             "rhythm_teacher_confidence": ("float", 0.0),
+            "rhythm_teacher_target_source_id": ("long", 0),
             "rhythm_retimed_target_source_id": ("long", 0),
             "rhythm_retimed_target_confidence": ("float", 0.0),
             "rhythm_speech_exec_tgt": ("float", 0.0),
@@ -366,12 +393,11 @@ class ConanDataset(FastSpeechDataset):
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
         keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._resolve_runtime_target_export_keys())
+        if self._should_export_streaming_prefix_meta():
+            keys.extend(self._RHYTHM_STREAMING_PREFIX_META_KEYS)
         if self._should_export_streaming_offline_sidecars():
-            keys.extend(self._RHYTHM_STREAMING_OFFLINE_KEYS)
-            if (
-                bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
-                and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
-            ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0:
+            keys.extend(self._RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS)
+            if self._should_export_offline_teacher_aux():
                 keys.extend(self._RHYTHM_STREAMING_OFFLINE_TEACHER_AUX_KEYS)
         if self._should_export_rhythm_debug_sidecars():
             keys.extend(self._RHYTHM_DEBUG_SIDECAR_KEYS)
@@ -633,6 +659,7 @@ class ConanDataset(FastSpeechDataset):
                 "rhythm_teacher_prefix_clock_tgt",
                 "rhythm_teacher_prefix_backlog_tgt",
                 "rhythm_teacher_confidence",
+                "rhythm_teacher_target_source_id",
                 "rhythm_teacher_surface_name",
             ])
         if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
@@ -664,7 +691,7 @@ class ConanDataset(FastSpeechDataset):
                 f"Rhythm cached_only requires rhythm_retimed_target_surface_name in {item_name}. Re-binarize the dataset."
             )
         found_surface = str(self._extract_scalar(item["rhythm_retimed_target_surface_name"]))
-        expected_surface = RHYTHM_TEACHER_SURFACE_NAME if expected_source_id == RHYTHM_RETIMED_SOURCE_TEACHER else RHYTHM_GUIDANCE_SURFACE_NAME
+        expected_surface = self._resolve_expected_teacher_surface_name() if expected_source_id == RHYTHM_RETIMED_SOURCE_TEACHER else RHYTHM_GUIDANCE_SURFACE_NAME
         if found_surface != expected_surface:
             raise RuntimeError(
                 f"Rhythm retimed surface mismatch in {item_name}: "
@@ -970,6 +997,7 @@ class ConanDataset(FastSpeechDataset):
         targets = {}
         primary_surface = self._resolve_primary_target_surface()
         distill_surface = self._resolve_distill_surface()
+        teacher_target_source = self._resolve_teacher_target_source()
         need_guidance = primary_surface == "guidance" or float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0
         need_teacher = (
             primary_surface == "teacher"
@@ -983,7 +1011,14 @@ class ConanDataset(FastSpeechDataset):
         if self.hparams.get("rhythm_dataset_build_guidance_from_ref", True) or need_guidance:
             targets.update(build_reference_guided_targets(**shared_kwargs))
         if self.hparams.get("rhythm_dataset_build_teacher_from_ref", False) or need_teacher:
-            targets.update(build_reference_teacher_targets(**teacher_kwargs))
+            if teacher_target_source != "algorithmic":
+                if need_teacher:
+                    raise RuntimeError(
+                        "Rhythm runtime teacher synthesis only supports rhythm_teacher_target_source=algorithmic. "
+                        "Use cached_only with precomputed learned_offline teacher surfaces."
+                    )
+            else:
+                targets.update(build_reference_teacher_targets(**teacher_kwargs))
         return targets
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, sample):
@@ -1001,10 +1036,19 @@ class ConanDataset(FastSpeechDataset):
             )
             if "rhythm_teacher_surface_name" in item:
                 teacher_name = str(self._extract_scalar(item["rhythm_teacher_surface_name"]))
-                if teacher_name != RHYTHM_TEACHER_SURFACE_NAME:
+                expected_teacher_name = self._resolve_expected_teacher_surface_name()
+                if teacher_name != expected_teacher_name:
                     raise RuntimeError(
                         f"Rhythm teacher surface mismatch in {item_name}: "
-                        f"found={teacher_name}, expected={RHYTHM_TEACHER_SURFACE_NAME}. Re-binarize the dataset."
+                        f"found={teacher_name}, expected={expected_teacher_name}. Re-binarize the dataset."
+                    )
+            if "rhythm_teacher_target_source_id" in item:
+                found_source_id = int(self._extract_scalar(item["rhythm_teacher_target_source_id"]))
+                expected_source_id = self._resolve_expected_teacher_target_source_id()
+                if found_source_id != expected_source_id:
+                    raise RuntimeError(
+                        f"Rhythm teacher target source mismatch in {item_name}: "
+                        f"found={found_source_id}, expected={expected_source_id}. Re-binarize the dataset."
                     )
             if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
                 self._validate_retimed_cache_contract(item, item_name=item_name)
@@ -1091,32 +1135,29 @@ class ConanDataset(FastSpeechDataset):
         optional_rhythm_keys = self._resolve_optional_sample_keys()
         rhythm_runtime_fields = {}
         source_cache = self._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
+        stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+        offline_units = stream_units
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):
-            offline_source_cache = self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)
-            rhythm_runtime_fields.update(self._prefix_source_cache(offline_source_cache, prefix="rhythm_offline_"))
-            offline_units = int(np.asarray(offline_source_cache["dur_anchor_src"]).reshape(-1).shape[0])
-            if (
-                bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
-                and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
-            ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0:
-                rhythm_runtime_fields.update(
-                    self._build_offline_teacher_aux_fields(
-                        item,
-                        offline_units=offline_units,
+            if self._should_export_streaming_offline_sidecars():
+                offline_source_cache = self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)
+                rhythm_runtime_fields.update(self._prefix_source_cache(offline_source_cache, prefix="rhythm_offline_"))
+                offline_units = int(np.asarray(offline_source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+                if self._should_export_offline_teacher_aux():
+                    rhythm_runtime_fields.update(
+                        self._build_offline_teacher_aux_fields(
+                            item,
+                            offline_units=offline_units,
+                        )
                     )
-                )
-            stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
+            else:
+                offline_units = int(np.asarray(self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)["dur_anchor_src"]).reshape(-1).shape[0])
+        if self._should_export_streaming_prefix_meta():
             rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([stream_units], dtype=np.float32)
             rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([offline_units], dtype=np.float32)
             rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray(
                 [float(stream_units) / float(max(offline_units, 1))],
                 dtype=np.float32,
             )
-        else:
-            units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
-            rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([units], dtype=np.float32)
-            rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([units], dtype=np.float32)
-            rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray([1.0], dtype=np.float32)
         rhythm_ref_item = item if self._should_use_self_rhythm_reference(item, target_mode=target_mode) else ref_item
         ref_conditioning = self._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
         rhythm_runtime_fields.update(source_cache)
@@ -1179,6 +1220,7 @@ class ConanDataset(FastSpeechDataset):
                 "rhythm_slow_topk",
                 "rhythm_selector_cell_size",
                 "rhythm_reference_mode_id",
+                "rhythm_teacher_target_source_id",
                 "rhythm_retimed_target_source_id",
             }:
                 sample[key] = torch.tensor(value, dtype=torch.long)

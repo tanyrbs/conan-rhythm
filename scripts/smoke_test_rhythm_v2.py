@@ -13,7 +13,10 @@ from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
     RHYTHM_RETIMED_SOURCE_TEACHER,
-    RHYTHM_TEACHER_SURFACE_NAME,
+    RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME,
+    RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME,
+    RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC,
+    RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE,
     build_item_rhythm_bundle,
     build_reference_guided_targets,
     build_reference_teacher_targets,
@@ -98,6 +101,25 @@ if __name__ == '__main__':
     assert strict_model.projector.config.pause_selection_mode == 'simple'
     assert strict_model.projector.config.use_boundary_commit_guard is False
     assert strict_model.projector.config.build_render_plan is False
+
+    cache_kd_hparams = dict(strict_hparams)
+    cache_kd_hparams.update({
+        'lambda_rhythm_distill': 0.35,
+        'rhythm_distill_surface': 'cache',
+        'rhythm_require_cached_teacher': True,
+        'rhythm_teacher_target_source': 'learned_offline',
+    })
+    cache_kd_model = build_streaming_rhythm_module_from_hparams(cache_kd_hparams)
+    assert bool(getattr(cache_kd_model, 'enable_learned_offline_teacher', True)) is False
+
+    teacher_flag_only_hparams = dict(schedule_hparams)
+    teacher_flag_only_hparams.pop('rhythm_runtime_enable_learned_offline_teacher', None)
+    teacher_flag_only_hparams.update({
+        'rhythm_enable_learned_offline_teacher': True,
+        'rhythm_enable_dual_mode_teacher': False,
+    })
+    teacher_flag_only_model = build_streaming_rhythm_module_from_hparams(teacher_flag_only_hparams)
+    assert bool(getattr(teacher_flag_only_model, 'enable_learned_offline_teacher', True)) is False
 
     ref_mel = torch.randn(2, 80, 64)
     ref_conditioning = model.encode_reference(ref_mel)
@@ -284,6 +306,22 @@ if __name__ == '__main__':
         include_retimed_mel_target=True,
         retimed_mel_target_source="teacher",
     )
+    learned_teacher_override = {
+        "rhythm_teacher_speech_exec_tgt": np.asarray(cached_bundle["rhythm_teacher_speech_exec_tgt"], dtype=np.float32) * 1.05,
+        "rhythm_teacher_pause_exec_tgt": np.asarray(cached_bundle["rhythm_teacher_pause_exec_tgt"], dtype=np.float32) * 0.95,
+        "rhythm_teacher_confidence": np.asarray([0.83], dtype=np.float32),
+    }
+    learned_bundle = build_item_rhythm_bundle(
+        content_tokens=[1, 1, 1, 2, 2, 57, 3, 3],
+        mel=np.random.randn(16, 80).astype(np.float32),
+        trace_horizon=0.40,
+        include_self_targets=True,
+        include_teacher_targets=False,
+        include_retimed_mel_target=True,
+        retimed_mel_target_source="teacher",
+        teacher_target_source="learned_offline",
+        teacher_bundle_override=learned_teacher_override,
+    )
     metrics = build_rhythm_metric_dict(
         {
             "rhythm_execution": out1,
@@ -369,6 +407,7 @@ if __name__ == '__main__':
     print('trace horizon:', float(cached_bundle['rhythm_trace_horizon'][0]))
     print('guidance surface name:', _scalar_str(cached_bundle['rhythm_guidance_surface_name']))
     print('teacher surface name:', _scalar_str(cached_bundle['rhythm_teacher_surface_name']))
+    print('teacher target source id:', int(cached_bundle['rhythm_teacher_target_source_id'][0]))
     print('retimed target surface:', _scalar_str(cached_bundle['rhythm_retimed_target_surface_name']))
     print('target confidence:', float(cached_bundle['rhythm_target_confidence'][0]))
     print('teacher confidence:', float(cached_bundle['rhythm_teacher_confidence'][0]))
@@ -381,6 +420,9 @@ if __name__ == '__main__':
     print('phrase groups:', cached_bundle['phrase_group_index'].tolist())
     print('retimed source id:', int(cached_bundle['rhythm_retimed_target_source_id'][0]))
     print('retimed confidence:', float(cached_bundle['rhythm_retimed_target_confidence'][0]))
+    print('learned teacher surface name:', _scalar_str(learned_bundle['rhythm_teacher_surface_name']))
+    print('learned teacher target source id:', int(learned_bundle['rhythm_teacher_target_source_id'][0]))
+    print('learned retimed target surface:', _scalar_str(learned_bundle['rhythm_retimed_target_surface_name']))
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr'].detach()))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1'].detach()))
     print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean'].detach()))
@@ -391,9 +433,18 @@ if __name__ == '__main__':
     assert "rhythm_blank_exec_tgt" in cached_bundle and "rhythm_blank_budget_tgt" in cached_bundle
     assert int(cached_bundle["rhythm_cache_version"][0]) == int(RHYTHM_CACHE_VERSION)
     assert _scalar_str(cached_bundle["rhythm_guidance_surface_name"]) == RHYTHM_GUIDANCE_SURFACE_NAME
-    assert _scalar_str(cached_bundle["rhythm_teacher_surface_name"]) == RHYTHM_TEACHER_SURFACE_NAME
+    assert _scalar_str(cached_bundle["rhythm_teacher_surface_name"]) == RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME
+    assert int(cached_bundle["rhythm_teacher_target_source_id"][0]) == int(RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC)
     assert int(cached_bundle["rhythm_retimed_target_source_id"][0]) == int(RHYTHM_RETIMED_SOURCE_TEACHER)
-    assert _scalar_str(cached_bundle["rhythm_retimed_target_surface_name"]) == RHYTHM_TEACHER_SURFACE_NAME
+    assert _scalar_str(cached_bundle["rhythm_retimed_target_surface_name"]) == RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME
+    assert _scalar_str(learned_bundle["rhythm_teacher_surface_name"]) == RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
+    assert int(learned_bundle["rhythm_teacher_target_source_id"][0]) == int(RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE)
+    assert int(learned_bundle["rhythm_retimed_target_source_id"][0]) == int(RHYTHM_RETIMED_SOURCE_TEACHER)
+    assert _scalar_str(learned_bundle["rhythm_retimed_target_surface_name"]) == RHYTHM_TEACHER_SURFACE_LEARNED_OFFLINE_NAME
+    assert "rhythm_teacher_prefix_clock_tgt" in learned_bundle
+    assert "rhythm_teacher_prefix_backlog_tgt" in learned_bundle
+    assert learned_bundle["rhythm_teacher_prefix_clock_tgt"].shape == learned_bundle["dur_anchor_src"].shape
+    assert learned_bundle["rhythm_teacher_prefix_backlog_tgt"].shape == learned_bundle["dur_anchor_src"].shape
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr'].detach()) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1'].detach()) < 1e-6
