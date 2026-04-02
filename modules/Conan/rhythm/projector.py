@@ -182,15 +182,21 @@ class StreamingRhythmProjector(nn.Module):
             tail_mask = mask_row.clone()
             if valid_frontier > 0:
                 tail_mask[:valid_frontier] = 0.0
-            remaining_budget = budget_row - pause[batch_idx].sum()
-            tail_scores = sparse_scores[batch_idx] * tail_mask
-            score_total = tail_scores.sum()
-            if tail_mask.sum() > 0 and float(remaining_budget.item()) > 0:
-                if float(score_total.item()) > 0:
-                    pause[batch_idx] = pause[batch_idx] + tail_scores * (remaining_budget / score_total.clamp_min(1e-6))
-                else:
-                    fallback = tail_mask / tail_mask.sum().clamp_min(1.0)
-                    pause[batch_idx] = pause[batch_idx] + fallback * remaining_budget
+            if float(tail_mask.sum().item()) <= 0:
+                continue
+            remaining_budget = (budget_row - pause[batch_idx].sum()).clamp_min(0.0)
+            if float(remaining_budget.item()) <= 0:
+                continue
+            tail_mask_row = tail_mask.unsqueeze(0)
+            fallback = tail_mask_row / tail_mask_row.sum(dim=1, keepdim=True).clamp_min(1.0)
+            tail_candidate = sparse_scores[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask_row
+            # Keep pause allocation differentiable wrt pause scores / pause budget.
+            tail_values = self._renormalize_to_budget(
+                tail_candidate + fallback * 1e-6,
+                tail_mask_row,
+                remaining_budget.view(1, 1),
+            )[0]
+            pause[batch_idx] = pause[batch_idx] + tail_values * tail_mask
         return pause * unit_mask
 
     def _compute_commit_frontier(

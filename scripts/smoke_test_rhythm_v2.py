@@ -161,6 +161,7 @@ if __name__ == '__main__':
     assert torch.all(out2.next_state.phase_ptr + 1e-6 >= out1.next_state.phase_ptr)
     assert torch.all(out_hold.next_state.phase_ptr + 1e-6 >= out2.next_state.phase_ptr)
     assert torch.equal(out_hold.next_state.commit_frontier, out2.next_state.commit_frontier)
+    assert out1.pause_after_exec.requires_grad
     frame_plan = out1.frame_plan
     assert frame_plan is not None
     assert frame_plan.frame_src_index.shape == frame_plan.total_mask.shape
