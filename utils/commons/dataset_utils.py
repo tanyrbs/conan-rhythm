@@ -278,9 +278,21 @@ class BaseConcatDataset(ConcatDataset):
 def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
                      required_batch_size_multiple=-1, endless=False, apply_batch_by_size=True, pin_memory=False, use_ddp=False):
     import torch.distributed as dist
+
+    def _shard_batch_for_ddp(batch, *, num_replicas, rank):
+        batch = list(batch)
+        if num_replicas <= 1 or len(batch) <= 0:
+            return batch
+        remainder = len(batch) % num_replicas
+        if remainder != 0:
+            pad = num_replicas - remainder
+            batch = batch + [batch[-1]] * pad
+        return batch[rank::num_replicas]
+
     devices_cnt = torch.cuda.device_count()
     if devices_cnt == 0:
         devices_cnt = 1
+    use_ddp = bool(use_ddp and dist.is_available() and dist.is_initialized())
     if not use_ddp:
         devices_cnt = 1
     if required_batch_size_multiple == -1:
@@ -317,16 +329,8 @@ def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
     if use_ddp:
         num_replicas = dist.get_world_size()
         rank = dist.get_rank()
-        # batches = [x[rank::num_replicas] for x in batches if len(x) % num_replicas == 0]
-        # ensure that every sample in the dataset is covered
-        batches_ = []
-        for x in batches:
-            if len(x) % num_replicas == 0:
-                batches_.append(x[rank::num_replicas])
-            else:
-                x_ = x + [x[-1]] * (len(x) - len(x) // num_replicas * num_replicas)
-                batches_.append(x_[rank::num_replicas])
-        batches = batches_
+        # Keep every sample reachable under DDP, including short tail batches.
+        batches = [_shard_batch_for_ddp(x, num_replicas=num_replicas, rank=rank) for x in batches if len(x) > 0]
     loader_kwargs = {
         'collate_fn': dataset.collater,
         'batch_sampler': batches,

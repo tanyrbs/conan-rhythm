@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -39,6 +40,22 @@ def _tensor_scalar_to_float(value, np, torch, default=1.0):
     return float(arr.reshape(-1)[0])
 
 
+def _sample_scalar_to_float(value, sample_idx: int, np, torch, default=1.0):
+    if isinstance(value, torch.Tensor) and value.dim() > 0:
+        value = value[sample_idx]
+    elif isinstance(value, np.ndarray) and value.ndim > 0:
+        value = value[sample_idx]
+    elif isinstance(value, (list, tuple)) and len(value) > sample_idx:
+        value = value[sample_idx]
+    return _tensor_scalar_to_float(value, np, torch, default=default)
+
+
+def _resolve_asset_path(output_dir: Path, *, split: str, item_name: str, flat_output: bool) -> Path:
+    if flat_output:
+        return output_dir / f"{item_name}.teacher.npz"
+    return output_dir / split / f"{item_name}.teacher.npz"
+
+
 def _resolve_ckpt_path_and_step(ckpt_arg: str):
     import torch
     from utils.commons.ckpt_utils import get_last_checkpoint
@@ -62,13 +79,24 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export learned-offline teacher targets to *.teacher.npz bundles.")
     parser.add_argument("--config", required=True, help="Teacher-offline config.")
     parser.add_argument("--ckpt", required=True, help="Checkpoint file or checkpoint directory.")
-    parser.add_argument("--output_dir", required=True, help="Directory to write {item_name}.teacher.npz files.")
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        help="Directory to write teacher target bundles. By default assets are written to output_dir/{split}/.",
+    )
     parser.add_argument("--binary_data_dir", default=None)
     parser.add_argument("--processed_data_dir", default=None)
     parser.add_argument("--exp_name", default="export_rhythm_teacher_targets")
     parser.add_argument("--splits", nargs="+", default=["train", "valid"])
     parser.add_argument("--max_items", type=int, default=-1)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--flat_output",
+        action="store_true",
+        help="Write assets directly under output_dir/ instead of per-split subdirectories."
+             " Flat output is less safe when item_name collisions exist across splits.",
+    )
+    parser.add_argument("--amp", action="store_true", help="Enable CUDA autocast during export inference.")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--max_sentences", type=int, default=1)
@@ -82,13 +110,13 @@ def main() -> None:
 
     import numpy as np
     import torch
-    from torch.utils.data import DataLoader
     from tqdm import tqdm
 
     from modules.Conan.rhythm.supervision import build_learned_offline_teacher_export_bundle
     from tasks.Conan.Conan import ConanTask
     from tasks.Conan.dataset import ConanDataset
     from utils.commons.ckpt_utils import load_ckpt
+    from utils.commons.dataset_utils import build_dataloader
     from utils.commons.hparams import set_hparams
 
     if args.device == "auto":
@@ -140,34 +168,43 @@ def main() -> None:
     task.model.eval()
     task.global_step = ckpt_step
 
-    manifest: dict[str, dict[str, str | int | float]] = {}
+    manifest_items: list[dict[str, str | int | float]] = []
+    seen_asset_paths: dict[str, dict[str, str]] = {}
     total_written = 0
     total_skipped = 0
+    amp_enabled = bool(args.amp and device.type == "cuda")
 
     print(f"[export-rhythm-teacher] config={args.config}")
     print(f"[export-rhythm-teacher] ckpt={ckpt_path}")
     print(f"[export-rhythm-teacher] global_step={ckpt_step}")
     print(f"[export-rhythm-teacher] device={device}")
     print(f"[export-rhythm-teacher] output_dir={output_dir}")
+    print(f"[export-rhythm-teacher] flat_output={args.flat_output}")
+    print(f"[export-rhythm-teacher] amp={amp_enabled}")
 
     for split in args.splits:
         dataset = ConanDataset(split, shuffle=False)
-        loader = DataLoader(
+        loader = build_dataloader(
             dataset,
-            batch_size=1,
             shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=dataset.collater,
+            max_tokens=args.max_tokens,
+            max_sentences=args.max_sentences,
+            apply_batch_by_size=True,
+            pin_memory=device.type == "cuda",
+            use_ddp=False,
         )
         split_written = 0
         split_skipped = 0
+        split_processed = 0
         for batch_idx, batch in enumerate(tqdm(loader, desc=f"export:{split}")):
-            if args.max_items > 0 and batch_idx >= args.max_items:
+            if args.max_items > 0 and split_processed >= args.max_items:
                 break
             item_names = batch["item_name"]
             batch = _move_to_device(batch, device, torch)
+            inference_ctx = torch.autocast(device_type="cuda", enabled=True) if amp_enabled else nullcontext()
             with torch.no_grad():
-                _, output = task.run_model(batch, infer=False, test=False)
+                with inference_ctx:
+                    _, output = task.run_model(batch, infer=False, test=False)
             execution = output.get("rhythm_execution")
             unit_batch = output.get("rhythm_unit_batch")
             if execution is None or unit_batch is None:
@@ -176,18 +213,39 @@ def main() -> None:
                 raise RuntimeError("Teacher target export expected teacher_offline runtime with rhythm_teacher_as_main=true.")
             if output.get("rhythm_offline_execution") is not None:
                 raise RuntimeError("Teacher target export should not emit separate rhythm_offline_execution in teacher_as_main mode.")
-            for sample_idx, item_name in enumerate(item_names):
-                asset_path = output_dir / f"{item_name}.teacher.npz"
+            remaining = args.max_items - split_processed if args.max_items > 0 else len(item_names)
+            item_count = min(len(item_names), remaining)
+            for sample_idx, item_name in enumerate(item_names[:item_count]):
+                asset_path = _resolve_asset_path(
+                    output_dir,
+                    split=split,
+                    item_name=item_name,
+                    flat_output=args.flat_output,
+                )
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                path_key = str(asset_path)
+                prev_seen = seen_asset_paths.get(path_key)
+                if prev_seen is not None:
+                    raise RuntimeError(
+                        "Duplicate teacher export target detected for "
+                        f"item='{item_name}' split='{split}' at {asset_path}. "
+                        f"Previous writer: item='{prev_seen['item_name']}' split='{prev_seen['split']}'. "
+                        "Use the default per-split layout or make item_name globally unique before export."
+                    )
+                seen_asset_paths[path_key] = {"item_name": item_name, "split": split}
                 if asset_path.exists() and not args.overwrite:
                     split_skipped += 1
-                    manifest[item_name] = {
+                    manifest_items.append({
+                        "item_name": item_name,
                         "path": str(asset_path),
                         "split": split,
                         "status": "skipped_exists",
-                    }
+                    })
+                    split_processed += 1
                     continue
-                confidence = _tensor_scalar_to_float(
+                confidence = _sample_scalar_to_float(
                     output.get("rhythm_offline_confidence"),
+                    sample_idx,
                     np,
                     torch,
                     default=1.0,
@@ -227,12 +285,14 @@ def main() -> None:
                     **component_conf,
                 )
                 split_written += 1
-                manifest[item_name] = {
+                manifest_items.append({
+                    "item_name": item_name,
                     "path": str(asset_path),
                     "split": split,
                     "status": "written",
                     "confidence": confidence,
-                }
+                })
+                split_processed += 1
         total_written += split_written
         total_skipped += split_skipped
         print(
@@ -250,7 +310,7 @@ def main() -> None:
                 "splits": args.splits,
                 "written": total_written,
                 "skipped": total_skipped,
-                "items": manifest,
+                "items": manifest_items,
             },
             f,
             ensure_ascii=False,

@@ -286,7 +286,7 @@ For formal Rhythm V2 experiments:
 - train/export the offline planner teacher first when you want `learned_offline` teacher assets
 - keep `rhythm_binarize_teacher_targets: true`
 - set `rhythm_teacher_target_source: learned_offline` and provide precomputed offline teacher bundles when building formal teacher-backed caches
-- use `scripts/export_rhythm_teacher_targets.py` to write `{item_name}.teacher.npz` assets into `rhythm_teacher_target_dir` (`scripts/export_offline_teacher_assets.py` remains a compatibility wrapper)
+- use `scripts/export_rhythm_teacher_targets.py` to write `{split}/{item_name}.teacher.npz` assets into `rhythm_teacher_target_dir` by default (`--flat_output` keeps the old flat layout; `scripts/export_offline_teacher_assets.py` remains a compatibility wrapper)
 - treat teacher surfaces as the preferred **target source**; do not assume KD is required in the default training chain
 - re-binarize whenever `rhythm_cache_version` changes
 - treat `prefer_cache` only as a migration/debug mode

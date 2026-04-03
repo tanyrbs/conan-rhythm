@@ -4,7 +4,6 @@ import traceback
 import numpy as np
 import pandas as pd
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 import torch.optim
 import torch.utils.data
@@ -96,58 +95,19 @@ class SpeechBaseTask(BaseTask):
 
     def build_dataloader(self, dataset, shuffle, max_tokens=None, max_sentences=None,
                          required_batch_size_multiple=-1, endless=False, batch_by_size=True):
-        devices_cnt = torch.cuda.device_count()
-        if devices_cnt == 0:
-            devices_cnt = 1
-        if required_batch_size_multiple == -1:
-            required_batch_size_multiple = devices_cnt
-
-        def shuffle_batches(batches):
-            np.random.shuffle(batches)
-            return batches
-
-        if max_tokens is not None:
-            max_tokens *= devices_cnt
-        if max_sentences is not None:
-            max_sentences *= devices_cnt
-        indices = dataset.ordered_indices()
-        if batch_by_size:
-            batch_sampler = utils.commons.dataset_utils.batch_by_size(
-                indices, dataset.num_tokens, max_tokens=max_tokens, max_sentences=max_sentences,
-                required_batch_size_multiple=required_batch_size_multiple,
-            )
-        else:
-            batch_sampler = []
-            for i in range(0, len(indices), max_sentences):
-                batch_sampler.append(indices[i:i + max_sentences])
-
-        if shuffle:
-            batches = shuffle_batches(list(batch_sampler))
-            if endless:
-                batches = [b for _ in range(1000) for b in shuffle_batches(list(batch_sampler))]
-        else:
-            batches = batch_sampler
-            if endless:
-                batches = [b for _ in range(1000) for b in batches]
-        num_workers = dataset.num_workers
         trainer = getattr(self, "trainer", None)
         use_ddp = bool(getattr(trainer, "use_ddp", False)) if trainer is not None else False
-        if use_ddp and dist.is_available() and dist.is_initialized():
-            num_replicas = dist.get_world_size()
-            rank = dist.get_rank()
-            batches = [x[rank::num_replicas] for x in batches if len(x) % num_replicas == 0]
-        loader_kwargs = {
-            'collate_fn': dataset.collater,
-            'batch_sampler': batches,
-            'num_workers': num_workers,
-            'pin_memory': bool(hparams.get('dl_pin_memory', False)),
-        }
-        if num_workers > 0:
-            loader_kwargs['persistent_workers'] = bool(hparams.get('dl_persistent_workers', True))
-            prefetch_factor = int(hparams.get('dl_prefetch_factor', 2) or 2)
-            if prefetch_factor > 0:
-                loader_kwargs['prefetch_factor'] = prefetch_factor
-        return torch.utils.data.DataLoader(dataset, **loader_kwargs)
+        return utils.commons.dataset_utils.build_dataloader(
+            dataset,
+            shuffle=shuffle,
+            max_tokens=max_tokens,
+            max_sentences=max_sentences,
+            required_batch_size_multiple=required_batch_size_multiple,
+            endless=endless,
+            apply_batch_by_size=batch_by_size,
+            pin_memory=bool(hparams.get('dl_pin_memory', False)),
+            use_ddp=use_ddp,
+        )
 
     ##########################
     # scheduler and optimizer

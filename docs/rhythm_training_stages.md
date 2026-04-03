@@ -54,7 +54,7 @@ Current recommendation:
 - use `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
 - keep this stage rhythm-only (`rhythm_teacher_only_stage: true`, no acoustic path)
 - bootstrap the teacher from cached guidance/self targets, not from teacher KD
-- export `{item_name}.teacher.npz` with `scripts/export_rhythm_teacher_targets.py` (`export_offline_teacher_assets.py` remains a wrapper)
+- export `{split}/{item_name}.teacher.npz` with `scripts/export_rhythm_teacher_targets.py` by default (`--flat_output` keeps the old flat layout; `export_offline_teacher_assets.py` remains a wrapper)
 - point later student-stage binarization at that export directory via `rhythm_teacher_target_dir`
 
 Important contract:

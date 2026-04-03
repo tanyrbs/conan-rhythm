@@ -36,7 +36,7 @@ def _resolve_rhythm_teacher_target_source() -> str:
     return normalize_teacher_target_source(hparams.get('rhythm_teacher_target_source', 'algorithmic'))
 
 
-def _resolve_teacher_bundle_override(item: dict) -> dict | None:
+def _resolve_teacher_bundle_override(item: dict, *, prefix: str | None = None) -> dict | None:
     teacher_source = _resolve_rhythm_teacher_target_source()
     if teacher_source != 'learned_offline':
         return None
@@ -50,10 +50,17 @@ def _resolve_teacher_bundle_override(item: dict) -> dict | None:
             candidate_paths.append(os.path.join(hparams.get('processed_data_dir', ''), teacher_path))
             teacher_target_dir = hparams.get('rhythm_teacher_target_dir', '')
             if teacher_target_dir:
+                if prefix:
+                    candidate_paths.append(os.path.join(teacher_target_dir, prefix, teacher_path))
                 candidate_paths.append(os.path.join(teacher_target_dir, teacher_path))
     teacher_target_dir = str(hparams.get('rhythm_teacher_target_dir', '') or '').strip()
     item_name = str(item.get('item_name', '') or '')
     if teacher_target_dir and item_name:
+        if prefix:
+            candidate_paths.extend([
+                os.path.join(teacher_target_dir, prefix, f'{item_name}.npz'),
+                os.path.join(teacher_target_dir, prefix, f'{item_name}.teacher.npz'),
+            ])
         candidate_paths.extend([
             os.path.join(teacher_target_dir, f'{item_name}.npz'),
             os.path.join(teacher_target_dir, f'{item_name}.teacher.npz'),
@@ -171,7 +178,7 @@ class BaseBinarizer:
     #     print(f"| {prefix} total duration: {total_sec:.3f}s")
 
     @classmethod
-    def process_item(cls, item, binarization_args):
+    def process_item(cls, item, binarization_args, prefix=None):
         item['ph_len'] = len(item['ph_token'])
         item_name = item['item_name']
         wav_fn = item['wav_fn']
@@ -372,7 +379,8 @@ class VCBinarizer(BaseBinarizer):
         total_sec = 0.0
         meta_data = list(self.meta_data(prefix))
         process_item = partial(self.process_item,
-                            binarization_args=self.binarization_args)
+                            binarization_args=self.binarization_args,
+                            prefix=prefix)
 
         args = [{'item': it} for it in meta_data]
 
@@ -415,7 +423,7 @@ class ConanBinarizer(VCBinarizer):
     # ph_encoder = build_token_encoder(os.path.join(hparams["processed_data_dir"], "phone_set.json"))
     spker_map = json.load(open(os.path.join(hparams["processed_data_dir"], "spker_set.json")))
     @classmethod
-    def process_item(cls, item, binarization_args):
+    def process_item(cls, item, binarization_args, prefix=None):
         item_name = item['item_name']
         wav_fn = item['wav_fn']
         wav, mel = cls.process_audio(wav_fn, item, binarization_args)
@@ -445,7 +453,7 @@ class ConanBinarizer(VCBinarizer):
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
-            teacher_bundle_override = _resolve_teacher_bundle_override(item) if need_teacher_bundle else None
+            teacher_bundle_override = _resolve_teacher_bundle_override(item, prefix=prefix) if need_teacher_bundle else None
             item.update(
                 build_item_rhythm_bundle(
                     content_tokens=item['hubert'],
@@ -520,7 +528,7 @@ class EmformerBinarizer(VCBinarizer):
     # ph_encoder = build_token_encoder(os.path.join(hparams["processed_data_dir"], "phone_set.json"))
     spker_map = json.load(open(os.path.join(hparams["processed_data_dir"], "spker_set.json")))
     @classmethod
-    def process_item(cls, item, binarization_args):
+    def process_item(cls, item, binarization_args, prefix=None):
         item_name = item['item_name']
         wav_fn = item['wav_fn']
         wav, mel = cls.process_audio(wav_fn, item, binarization_args)
@@ -539,7 +547,7 @@ class EmformerBinarizer(VCBinarizer):
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
-            teacher_bundle_override = _resolve_teacher_bundle_override(item) if need_teacher_bundle else None
+            teacher_bundle_override = _resolve_teacher_bundle_override(item, prefix=prefix) if need_teacher_bundle else None
             item.update(
                 build_item_rhythm_bundle(
                     content_tokens=item['hubert'],

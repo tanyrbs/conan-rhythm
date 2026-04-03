@@ -1,6 +1,7 @@
 import random
 import shutil
 import traceback
+from contextlib import nullcontext
 from datetime import datetime
 
 try:
@@ -319,6 +320,8 @@ class Trainer:
         all_progress_bar_metrics = []
         all_log_metrics = []
         task_ref = self.get_task_ref()
+        amp_enabled = bool(self.amp and self.on_gpu)
+        should_step = (self.global_step + 1) % self.accumulate_grad_batches == 0
         for opt_idx, optimizer in enumerate(self.optimizers):
             if optimizer is None:
                 continue
@@ -332,28 +335,32 @@ class Trainer:
                         param.requires_grad = True
 
             # forward pass
-            autocast_kwargs = {"enabled": self.amp}
+            autocast_kwargs = {"enabled": amp_enabled}
             if _TORCH_AMP_NEW_API:
-                autocast_kwargs["device_type"] = 'cuda'
-            with autocast(**autocast_kwargs):
-                if self.on_gpu:
-                    batch = move_to_cuda(copy.copy(batch), self.root_gpu)
-                args = [batch, batch_idx, opt_idx]
-                if self.use_ddp:
-                    output = self.task(*args)
-                else:
-                    output = task_ref.training_step(*args)
-                loss = output['loss']
-                if loss is None:
-                    continue
-                progress_bar_metrics = output['progress_bar']
-                log_metrics = output['tb_log']
-                # accumulate loss
-                loss = loss / self.accumulate_grad_batches
+                autocast_kwargs["device_type"] = 'cuda' if self.on_gpu else 'cpu'
+            ddp_sync_context = nullcontext()
+            if self.use_ddp and hasattr(self.task, 'no_sync') and not should_step:
+                ddp_sync_context = self.task.no_sync()
+            with ddp_sync_context:
+                with autocast(**autocast_kwargs):
+                    if self.on_gpu:
+                        batch = move_to_cuda(copy.copy(batch), self.root_gpu)
+                    args = [batch, batch_idx, opt_idx]
+                    if self.use_ddp:
+                        output = self.task(*args)
+                    else:
+                        output = task_ref.training_step(*args)
+                    loss = output['loss']
+                    if loss is None:
+                        continue
+                    progress_bar_metrics = output['progress_bar']
+                    log_metrics = output['tb_log']
+                    # accumulate loss
+                    loss = loss / self.accumulate_grad_batches
 
             # backward pass
             if loss.requires_grad:
-                if self.amp:
+                if amp_enabled:
                     self.amp_scalar.scale(loss).backward()
                 else:
                     loss.backward()
@@ -376,9 +383,11 @@ class Trainer:
                     exit(0)
 
             # gradient update with accumulated gradients
-            if (self.global_step + 1) % self.accumulate_grad_batches == 0:
+            if should_step:
+                if amp_enabled:
+                    self.amp_scalar.unscale_(optimizer)
                 task_ref.on_before_optimization(opt_idx)
-                if self.amp:
+                if amp_enabled:
                     self.amp_scalar.step(optimizer)
                     self.amp_scalar.update()
                 else:
