@@ -1,10 +1,12 @@
 import os
+import random
 import sys
 import traceback
 import types
 from functools import wraps
 from itertools import chain
 import numpy as np
+import torch
 import torch.utils.data
 from torch.utils.data import ConcatDataset
 from utils.commons.hparams import hparams
@@ -148,6 +150,50 @@ def batch_by_size(
     return batches
 
 
+def pad_batch_to_world_size(batch, num_replicas):
+    batch = list(batch)
+    if num_replicas <= 1 or len(batch) == 0:
+        return batch
+    pad_count = (-len(batch)) % num_replicas
+    if pad_count > 0:
+        batch = batch + [batch[-1]] * pad_count
+    return batch
+
+
+def shard_batches_for_ddp(batches, num_replicas, rank, pad_to_divisible=True):
+    if num_replicas <= 1:
+        return list(batches)
+    sharded = []
+    for batch in batches:
+        batch = list(batch)
+        if len(batch) <= 0:
+            continue
+        if pad_to_divisible:
+            batch = pad_batch_to_world_size(batch, num_replicas)
+        rank_batch = batch[rank::num_replicas]
+        if len(rank_batch) > 0:
+            sharded.append(rank_batch)
+    return sharded
+
+
+def _seed_dataloader_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def _build_dataloader_generator(dataset, *, shuffle: bool, rank: int):
+    base_seed = int(hparams.get('seed', 1234))
+    prefix = getattr(dataset, 'prefix', None)
+    if prefix is None and hasattr(dataset, 'datasets'):
+        prefix = "|".join(str(getattr(ds, 'prefix', '')) for ds in getattr(dataset, 'datasets', []))
+    prefix = str(prefix or '')
+    prefix_offset = sum(ord(ch) for ch in prefix)
+    generator = torch.Generator()
+    generator.manual_seed(base_seed + prefix_offset + (17 if shuffle else 0) + rank * 100003)
+    return generator
+
+
 def unpack_dict_to_list(samples):
     samples_ = []
     bsz = samples.get('outputs').size(0)
@@ -276,23 +322,17 @@ class BaseConcatDataset(ConcatDataset):
         return self.datasets[0].num_workers
 
 def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
-                     required_batch_size_multiple=-1, endless=False, apply_batch_by_size=True, pin_memory=False, use_ddp=False):
+                     required_batch_size_multiple=-1, endless=False, apply_batch_by_size=True, pin_memory=None, use_ddp=False):
     import torch.distributed as dist
-
-    def _shard_batch_for_ddp(batch, *, num_replicas, rank):
-        batch = list(batch)
-        if num_replicas <= 1 or len(batch) <= 0:
-            return batch
-        remainder = len(batch) % num_replicas
-        if remainder != 0:
-            pad = num_replicas - remainder
-            batch = batch + [batch[-1]] * pad
-        return batch[rank::num_replicas]
 
     devices_cnt = torch.cuda.device_count()
     if devices_cnt == 0:
         devices_cnt = 1
     use_ddp = bool(use_ddp and dist.is_available() and dist.is_initialized())
+    rank = 0
+    if use_ddp:
+        devices_cnt = dist.get_world_size()
+        rank = dist.get_rank()
     if not use_ddp:
         devices_cnt = 1
     if required_batch_size_multiple == -1:
@@ -328,14 +368,23 @@ def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
     num_workers = dataset.num_workers
     if use_ddp:
         num_replicas = dist.get_world_size()
-        rank = dist.get_rank()
         # Keep every sample reachable under DDP, including short tail batches.
-        batches = [_shard_batch_for_ddp(x, num_replicas=num_replicas, rank=rank) for x in batches if len(x) > 0]
+        batches = shard_batches_for_ddp(
+            (x for x in batches if len(x) > 0),
+            num_replicas=num_replicas,
+            rank=rank,
+            pad_to_divisible=bool(shuffle),
+        )
+    resolved_pin_memory = hparams.get('dl_pin_memory', pin_memory)
+    if resolved_pin_memory is None:
+        resolved_pin_memory = torch.cuda.is_available()
     loader_kwargs = {
         'collate_fn': dataset.collater,
         'batch_sampler': batches,
         'num_workers': num_workers,
-        'pin_memory': bool(hparams.get('dl_pin_memory', pin_memory)),
+        'pin_memory': bool(resolved_pin_memory),
+        'worker_init_fn': _seed_dataloader_worker,
+        'generator': _build_dataloader_generator(dataset, shuffle=bool(shuffle), rank=rank),
     }
     if num_workers > 0:
         loader_kwargs['persistent_workers'] = bool(hparams.get('dl_persistent_workers', True))

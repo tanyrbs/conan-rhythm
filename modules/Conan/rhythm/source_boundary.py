@@ -12,6 +12,35 @@ def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return ((x - mean) / var.clamp_min(1e-6).sqrt()) * mask
 
 
+def build_deterministic_boundary_score(
+    *,
+    source_boundary_cue: torch.Tensor | None,
+    boundary_trace: torch.Tensor | None,
+    unit_mask: torch.Tensor,
+    source_weight: float = 0.35,
+    trace_weight: float = 0.35,
+) -> torch.Tensor:
+    """Observed boundary score used as a compatibility alias for boundary_latent.
+
+    This is intentionally non-learned:
+    - source_boundary_cue keeps cache/source-side boundary evidence
+    - boundary_trace keeps reference-side boundary tendency
+    """
+
+    unit_mask = unit_mask.float()
+    score = unit_mask.new_zeros(unit_mask.shape)
+    total_weight = 0.0
+    if source_boundary_cue is not None:
+        score = score + float(source_weight) * source_boundary_cue.float().clamp(0.0, 1.0)
+        total_weight += float(source_weight)
+    if boundary_trace is not None:
+        score = score + float(trace_weight) * boundary_trace.float().clamp(0.0, 1.0)
+        total_weight += float(trace_weight)
+    if total_weight <= 0.0:
+        return score
+    return (score / total_weight).clamp(0.0, 1.0) * unit_mask
+
+
 def build_source_boundary_cue(
     *,
     dur_anchor_src: torch.Tensor,

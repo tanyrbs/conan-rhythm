@@ -172,6 +172,66 @@ class StreamingRhythmProjector(nn.Module):
         total = (values * mask).sum(dim=1, keepdim=True).clamp_min(1e-6)
         return values * (budget / total)
 
+    @staticmethod
+    def _project_row_to_bounded_sum(
+        *,
+        desired: torch.Tensor,
+        lower: torch.Tensor,
+        upper: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project a single active row onto a bounded simplex.
+
+        This preserves per-unit lower/upper bounds while matching the requested
+        total mass whenever the target is feasible. It is used on the tail only,
+        so committed prefixes remain frozen.
+        """
+
+        desired = desired.float().reshape(-1)
+        lower = lower.float().reshape(-1)
+        upper = torch.maximum(upper.float().reshape(-1), lower)
+        if desired.numel() <= 0:
+            return desired
+
+        target_value = target.float().reshape(-1)[:1]
+        lower_total = lower.sum().reshape(1)
+        upper_total = upper.sum().reshape(1)
+        clipped_target = torch.minimum(torch.maximum(target_value, lower_total), upper_total)
+
+        if float((upper - lower).sum().item()) <= 1e-6 or float((clipped_target - lower_total).item()) <= 1e-6:
+            return lower
+
+        residual = (desired - lower).clamp_min(0.0)
+        capacity = (upper - lower).clamp_min(0.0)
+        alloc = torch.zeros_like(capacity)
+        remaining = (clipped_target - lower_total).clamp_min(0.0)
+        active = capacity > 1e-6
+        max_iters = int(capacity.numel()) + 2
+
+        for _ in range(max_iters):
+            if float(remaining.item()) <= 1e-6 or not bool(active.any().item()):
+                break
+            active_score = residual * active.float()
+            if float(active_score.sum().item()) <= 1e-6:
+                active_score = capacity * active.float()
+            denom = active_score.sum().clamp_min(1e-6)
+            proposal = remaining * (active_score / denom)
+            new_alloc = torch.minimum(alloc + proposal, capacity)
+            gained = new_alloc - alloc
+            alloc = new_alloc
+            remaining = (remaining - gained.sum()).clamp_min(0.0)
+            active = (capacity - alloc) > 1e-6
+
+        if float(remaining.item()) > 1e-6:
+            slack = (capacity - alloc).clamp_min(0.0)
+            if float(slack.sum().item()) > 1e-6:
+                alloc = torch.minimum(
+                    alloc + remaining * (slack / slack.sum().clamp_min(1e-6)),
+                    capacity,
+                )
+
+        return lower + alloc
+
     def _lift_budgets_to_feasible_region(
         self,
         *,
@@ -267,24 +327,34 @@ class StreamingRhythmProjector(nn.Module):
             if float(tail_mask.sum().item()) <= 0:
                 speech_rows.append(prefix_row)
                 continue
-            tail_values = scaled[batch_idx : batch_idx + 1].clamp_min(0.0) * tail_mask
-            minimum = tail_mask * float(self.config.min_speech_frames)
-            tail_values = torch.maximum(tail_values, minimum)
+
+            tail_active = tail_mask.squeeze(0) > 0
+            desired_tail = scaled[batch_idx].float().clamp_min(0.0)[tail_active]
+            lower_tail = desired_tail.new_full(
+                desired_tail.shape,
+                float(self.config.min_speech_frames),
+            )
             max_expand = float(self.config.max_speech_expand)
             if max_expand > 0.0:
-                max_values = (dur_anchor_src[batch_idx : batch_idx + 1].float().clamp_min(0.0) * max_expand) * tail_mask
-                tail_values = torch.minimum(tail_values, torch.maximum(max_values, minimum))
-            total = (tail_values * tail_mask).sum(dim=1, keepdim=True)
-            if float(total.item()) <= 0.0:
-                fallback = minimum
-                total = fallback.sum(dim=1, keepdim=True).clamp_min(1e-6)
-                tail_values = fallback * (remaining_budget / total)
+                upper_tail = torch.maximum(
+                    dur_anchor_src[batch_idx].float().clamp_min(0.0)[tail_active] * max_expand,
+                    lower_tail,
+                )
             else:
-                tail_values = self._renormalize_to_budget(tail_values * tail_mask, tail_mask, remaining_budget)
-            speech_rows.append(prefix_row + tail_values * tail_mask)
+                upper_tail = lower_tail.new_full(
+                    lower_tail.shape,
+                    float(remaining_budget.item()) + float(self.config.min_speech_frames),
+                )
+            projected_tail = self._project_row_to_bounded_sum(
+                desired=desired_tail,
+                lower=lower_tail,
+                upper=upper_tail,
+                target=remaining_budget.squeeze(0),
+            )
+            tail_row = scaled.new_zeros((scaled.size(1),), dtype=torch.float32)
+            tail_row[tail_active] = projected_tail
+            speech_rows.append(prefix_row + tail_row.unsqueeze(0))
         speech = torch.cat(speech_rows, dim=0)
-        speech = torch.maximum(speech, unit_mask * float(self.config.min_speech_frames))
-        speech = self._renormalize_to_budget(speech * unit_mask, unit_mask, speech_budget_win)
         return speech * unit_mask
 
     def _project_pause(

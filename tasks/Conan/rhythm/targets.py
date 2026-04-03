@@ -418,6 +418,16 @@ def scale_rhythm_loss_terms(
             * lambda_distill
             * float(hparams.get("rhythm_distill_prefix_weight", 0.25))
         ).detach(),
+        "rhythm_distill_speech_shape": (
+            rhythm_losses["rhythm_distill_speech_shape"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+        ).detach(),
+        "rhythm_distill_pause_shape": (
+            rhythm_losses["rhythm_distill_pause_shape"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+        ).detach(),
         "rhythm_distill_allocation": (
             rhythm_losses["rhythm_distill_allocation"]
             * lambda_distill

@@ -43,6 +43,7 @@ class StreamingRhythmModule(nn.Module):
         pause_share_max: float = 0.45,
         boundary_feature_scale: float = 0.35,
         boundary_source_cue_weight: float = 0.35,
+        boundary_trace_weight: float = 0.35,
         pause_boundary_latent_weight: float = 0.35,
         pause_source_boundary_weight: float = 0.20,
         projector_config: ProjectorConfig | None = None,
@@ -68,6 +69,7 @@ class StreamingRhythmModule(nn.Module):
             pause_share_max=pause_share_max,
             boundary_feature_scale=boundary_feature_scale,
             boundary_source_cue_weight=boundary_source_cue_weight,
+            boundary_trace_weight=boundary_trace_weight,
             pause_boundary_latent_weight=pause_boundary_latent_weight,
             pause_source_boundary_weight=pause_source_boundary_weight,
         )
@@ -79,6 +81,7 @@ class StreamingRhythmModule(nn.Module):
                 pause_share_max=pause_share_max,
                 boundary_feature_scale=boundary_feature_scale,
                 boundary_source_cue_weight=boundary_source_cue_weight,
+                boundary_trace_weight=boundary_trace_weight,
                 pause_boundary_latent_weight=pause_boundary_latent_weight,
                 pause_source_boundary_weight=pause_source_boundary_weight,
             )

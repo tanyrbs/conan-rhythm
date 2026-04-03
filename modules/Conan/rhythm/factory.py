@@ -65,7 +65,12 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
         phrase_kernel_sizes=tuple(int(x) for x in phrase_kernels),
         global_gate_scale=float(hparams.get('rhythm_offline_teacher_global_gate_scale', 0.12)),
         pause_trace_weight=float(hparams.get('rhythm_offline_teacher_pause_trace_weight', 0.30)),
-        boundary_trace_weight=float(hparams.get('rhythm_offline_teacher_boundary_trace_weight', 0.30)),
+        boundary_trace_weight=float(
+            hparams.get(
+                'rhythm_offline_teacher_boundary_trace_weight',
+                hparams.get('rhythm_boundary_trace_weight', 0.30),
+            )
+        ),
         confidence_agreement_weight=float(hparams.get('rhythm_offline_teacher_confidence_agreement_weight', 0.25)),
         confidence_floor=float(hparams.get('rhythm_offline_teacher_confidence_floor', 0.05)),
         confidence_ceiling=float(hparams.get('rhythm_offline_teacher_confidence_ceiling', 1.0)),
@@ -102,6 +107,12 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.20)),
+        boundary_trace_weight=float(
+            hparams.get(
+                'rhythm_boundary_trace_weight',
+                hparams.get('rhythm_boundary_source_cue_weight', 0.20),
+            )
+        ),
         pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         projector_config=build_projector_config_from_hparams(hparams),

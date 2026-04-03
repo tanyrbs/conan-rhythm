@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from .controller import ResidualTemporalBlock, masked_mean, masked_softmax
 from .contracts import RhythmPlannerOutputs
+from .source_boundary import _masked_standardize, build_deterministic_boundary_score
 
 
 @dataclass
@@ -101,15 +102,6 @@ def _masked_avg_pool1d(x: torch.Tensor, mask: torch.Tensor, kernel_size: int) ->
     pooled = pooled_x / pooled_m.clamp_min(1e-6)
     return pooled.transpose(1, 2)
 
-
-def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    mask = mask.float()
-    total = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-    mean = (x * mask).sum(dim=1, keepdim=True) / total
-    var = (((x - mean) ** 2) * mask).sum(dim=1, keepdim=True) / total
-    return ((x - mean) / var.clamp_min(1e-6).sqrt()) * mask
-
-
 def _masked_cosine_similarity(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     x_masked = x * mask
@@ -201,7 +193,10 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         self.anchor_gate_head = nn.Linear(hidden_size, 1)
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
+        # Compatibility-only parameter surface. Kept for older checkpoints, unused in forward.
         self.boundary_head = nn.Linear(hidden_size, 1)
+        for param in self.boundary_head.parameters():
+            param.requires_grad = False
         self.confidence_trunk = nn.Sequential(
             nn.Linear(hidden_size + stats_dim + trace_dim + 5, hidden_size),
             nn.SiLU(),
@@ -362,16 +357,17 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_prior = (
-            self.boundary_source_cue_weight * source_boundary_cue.float()
-            + self.boundary_trace_weight * trace_context[:, :, 2].float()
+        boundary_latent = build_deterministic_boundary_score(
+            source_boundary_cue=source_boundary_cue,
+            boundary_trace=trace_context[:, :, 2] if trace_context.size(-1) > 2 else None,
+            unit_mask=unit_mask,
+            source_weight=self.boundary_source_cue_weight,
+            trace_weight=self.boundary_trace_weight,
         )
-        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1) + boundary_prior) * unit_mask
         pause_logits = self.pause_head(x).squeeze(-1)
         pause_logits = pause_logits + self.pause_boundary_latent_weight * boundary_latent
         pause_logits = pause_logits + self.pause_source_boundary_weight * source_boundary_cue.float()
         pause_logits = pause_logits + self.pause_trace_weight * trace_context[:, :, 0].float()
-        pause_logits = pause_logits + self.boundary_trace_weight * trace_context[:, :, 2].float()
         pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
 
         planner = RhythmPlannerOutputs(

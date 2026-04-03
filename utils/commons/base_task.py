@@ -158,12 +158,13 @@ class BaseTask(nn.Module):
         :return: loss_output: dict
         """
         all_losses_meter = {'total_loss': AvgrageMeter()}
+        total_nsamples = 0
         for output in outputs:
-            if len(output) == 0 or output is None:
+            if output is None or len(output) == 0:
                 continue
             if isinstance(output, dict):
                 assert 'losses' in output, 'Key "losses" should exist in validation output.'
-                n = output.pop('nsamples', 1)
+                n = int(output.get('nsamples', 1) or 1)
                 losses = tensors_to_scalars(output['losses'])
                 total_loss = output.get('total_loss', sum(losses.values()))
             else:
@@ -171,6 +172,7 @@ class BaseTask(nn.Module):
                 n = 1
                 total_loss, losses = output
                 losses = tensors_to_scalars(losses)
+            total_nsamples += n
             if isinstance(total_loss, torch.Tensor):
                 total_loss = total_loss.item()
             for k, v in losses.items():
@@ -178,11 +180,13 @@ class BaseTask(nn.Module):
                     all_losses_meter[k] = AvgrageMeter()
                 all_losses_meter[k].update(v, n)
             all_losses_meter['total_loss'].update(total_loss, n)
-        loss_output = {k: round(v.avg, 4) for k, v in all_losses_meter.items()}
-        print(f"| Validation results@{self.global_step}: {loss_output}")
+        metric_values = {k: float(v.avg) for k, v in all_losses_meter.items()}
+        display_values = {k: round(v, 4) for k, v in metric_values.items()}
+        print(f"| Validation results@{self.global_step}: {display_values}")
         return {
-            'tb_log': {f'val/{k}': v for k, v in loss_output.items()},
-            'val_loss': loss_output['total_loss']
+            'tb_log': {f'val/{k}': v for k, v in metric_values.items()},
+            'val_loss': metric_values['total_loss'],
+            '__eval_nsamples': int(total_nsamples),
         }
 
     ######################
@@ -205,6 +209,10 @@ class BaseTask(nn.Module):
         os.environ['MASTER_PORT'] = str(random.randint(15000, 30000))
         random.seed(hparams['seed'])
         np.random.seed(hparams['seed'])
+        os.environ['PYTHONHASHSEED'] = str(hparams['seed'])
+        torch.manual_seed(hparams['seed'])
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(hparams['seed'])
         work_dir = hparams['work_dir']
         trainer = Trainer(
             work_dir=work_dir,

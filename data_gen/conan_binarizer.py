@@ -36,6 +36,24 @@ def _resolve_rhythm_teacher_target_source() -> str:
     return normalize_teacher_target_source(hparams.get('rhythm_teacher_target_source', 'algorithmic'))
 
 
+def _parse_hubert_tokens(raw_tokens, *, item_name: str) -> list[int]:
+    if isinstance(raw_tokens, str):
+        pieces = [piece for piece in raw_tokens.strip().split() if piece]
+    else:
+        pieces = np.asarray(raw_tokens).reshape(-1).tolist()
+    tokens = []
+    for piece in pieces:
+        try:
+            tokens.append(int(float(piece)))
+        except (TypeError, ValueError) as exc:
+            raise BinarizationError(
+                f"Invalid HuBERT token {piece!r} in item '{item_name}'."
+            ) from exc
+    if len(tokens) == 0:
+        raise BinarizationError(f"Empty HuBERT token sequence for item '{item_name}'.")
+    return tokens
+
+
 def _resolve_teacher_bundle_override(item: dict, *, prefix: str | None = None) -> dict | None:
     teacher_source = _resolve_rhythm_teacher_target_source()
     if teacher_source != 'learned_offline':
@@ -300,8 +318,33 @@ class BaseBinarizer:
         return TokenTextEncoder(None, vocab_list=word_set, replace_oov='<UNK>')
 
 class VCBinarizer(BaseBinarizer):
+    _spker_map_cache = None
+    _spker_map_cache_path = None
+
     def __init__(self, processed_data_dir=None):
-        super().__init__()
+        super().__init__(processed_data_dir=processed_data_dir)
+
+    @classmethod
+    def _get_spker_map(cls, processed_data_dir=None):
+        processed_data_dir = processed_data_dir or hparams['processed_data_dir']
+        spker_path = os.path.join(processed_data_dir, 'spker_set.json')
+        if cls._spker_map_cache is None or cls._spker_map_cache_path != spker_path:
+            if not os.path.exists(spker_path):
+                raise BinarizationError(f"Speaker map not found: {spker_path}")
+            with open(spker_path) as f:
+                cls._spker_map_cache = json.load(f)
+            cls._spker_map_cache_path = spker_path
+        return cls._spker_map_cache
+
+    @classmethod
+    def _resolve_spk_id(cls, item_name: str, processed_data_dir=None) -> int:
+        speaker_key = str(item_name).split('_', 1)[0]
+        spker_map = cls._get_spker_map(processed_data_dir=processed_data_dir)
+        if speaker_key not in spker_map:
+            raise BinarizationError(
+                f"Speaker '{speaker_key}' from item '{item_name}' is missing in spker_set.json."
+            )
+        return int(spker_map[speaker_key])
 
     def split_train_test_set(self, item_names):
         item_names = deepcopy(item_names)
@@ -380,12 +423,16 @@ class VCBinarizer(BaseBinarizer):
         meta_data = list(self.meta_data(prefix))
         process_item = partial(self.process_item,
                             binarization_args=self.binarization_args,
-                            prefix=prefix)
+                            prefix=prefix,
+                            processed_data_dir=self.processed_data_dir)
 
         args = [{'item': it} for it in meta_data]
 
         if self.binarization_args['with_spk_embed']:
-            voice_encoder = VoiceEncoder().cuda()
+            logging.warning(
+                "with_spk_embed=True, but inline speaker embedding extraction is disabled in "
+                "data_gen/conan_binarizer.py. Precompute spk_embed separately if the downstream model uses it."
+            )
 
         for item_id, item in multiprocess_run_tqdm(
                 process_item, args, desc=f'Processing {prefix}'):
@@ -421,18 +468,17 @@ class VCBinarizer(BaseBinarizer):
     
 class ConanBinarizer(VCBinarizer):
     # ph_encoder = build_token_encoder(os.path.join(hparams["processed_data_dir"], "phone_set.json"))
-    spker_map = json.load(open(os.path.join(hparams["processed_data_dir"], "spker_set.json")))
     @classmethod
-    def process_item(cls, item, binarization_args, prefix=None):
+    def process_item(cls, item, binarization_args, prefix=None, processed_data_dir=None):
         item_name = item['item_name']
         wav_fn = item['wav_fn']
         wav, mel = cls.process_audio(wav_fn, item, binarization_args)
         mel=item['mel']
         wav=item['wav']
-        content=[float(x) for x in item['hubert'].split()]
+        content = _parse_hubert_tokens(item.get('hubert'), item_name=item_name)
         
         # item["ph_token"] = cls.ph_encoder.encode(' '.join(item["ph"]))
-        item["spk_id"] = cls.spker_map[item["item_name"].split("_", 1)[0]]
+        item["spk_id"] = cls._resolve_spk_id(item["item_name"], processed_data_dir=processed_data_dir)
         # item['txt']=" ".join(item['txt'])
         
         # try:
@@ -442,14 +488,18 @@ class ConanBinarizer(VCBinarizer):
                 os.path.dirname(wav_fn) + "_f0",
                 os.path.basename(wav_fn).replace(".wav", "_f0.npy")
             )
-            f0 = np.load(f0_path)[:mel.shape[0]]
+            if not os.path.exists(f0_path):
+                raise BinarizationError(f"Missing f0 file for {item_name}: {f0_path}")
+            f0 = np.load(f0_path).reshape(-1)[:mel.shape[0]]
             min_length = min(len(content), len(mel), len(f0))
             item["f0"] = f0 = f0[:min_length]
         else:
             min_length = min(len(content), len(mel))
+        if min_length <= 0:
+            raise BinarizationError(f"Empty aligned sample after trimming: {item_name}")
         item['mel'] = mel = mel[:min_length]
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
-        item['hubert'] = content = content[:min_length]
+        item['hubert'] = content = np.asarray(content[:min_length], dtype=np.int32)
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
@@ -526,24 +576,25 @@ class ConanBinarizer(VCBinarizer):
 class EmformerBinarizer(VCBinarizer):
     # difference between EmformerBinarizer and ConanBinarizer: No f0 information needed
     # ph_encoder = build_token_encoder(os.path.join(hparams["processed_data_dir"], "phone_set.json"))
-    spker_map = json.load(open(os.path.join(hparams["processed_data_dir"], "spker_set.json")))
     @classmethod
-    def process_item(cls, item, binarization_args, prefix=None):
+    def process_item(cls, item, binarization_args, prefix=None, processed_data_dir=None):
         item_name = item['item_name']
         wav_fn = item['wav_fn']
         wav, mel = cls.process_audio(wav_fn, item, binarization_args)
         mel=item['mel']
         wav=item['wav']
-        content=[float(x) for x in item['hubert'].split()]
+        content = _parse_hubert_tokens(item.get('hubert'), item_name=item_name)
         
         # item["ph_token"] = cls.ph_encoder.encode(' '.join(item["ph"]))
-        item["spk_id"] = cls.spker_map[item["item_name"].split("_", 1)[0]]
+        item["spk_id"] = cls._resolve_spk_id(item["item_name"], processed_data_dir=processed_data_dir)
         # item['txt']=" ".join(item['txt'])
         
         min_length = min(len(content), len(mel))
+        if min_length <= 0:
+            raise BinarizationError(f"Empty aligned sample after trimming: {item_name}")
         item['mel'] = mel = mel[:min_length]
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
-        item['hubert'] = content = content[:min_length]
+        item['hubert'] = content = np.asarray(content[:min_length], dtype=np.int32)
         item['len'] = min_length
         if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'

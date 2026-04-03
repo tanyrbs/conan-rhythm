@@ -42,6 +42,7 @@ from modules.Conan.rhythm.supervision import (
 )
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from modules.Conan.rhythm.unitizer import StreamingRunLengthUnitizer
+from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
@@ -334,6 +335,59 @@ if __name__ == '__main__':
         state=model.init_state(batch_size=2, device=torch.device('cpu')),
         source_boundary_scale_override=0.0,
     )
+    scheduler_state = model.init_state(batch_size=2, device=torch.device('cpu'))
+    unit_states = model.unit_embedding(batch.content_units)
+    scheduler_inputs = dict(
+        unit_states=unit_states,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        ref_conditioning={
+            'ref_rhythm_stats': ref_conditioning['ref_rhythm_stats'],
+            'slow_rhythm_summary': ref_conditioning.get('slow_rhythm_summary'),
+        },
+        trace_context=out1.planner.trace_context.detach(),
+        state=scheduler_state,
+        source_boundary_cue=out1.planner.source_boundary_cue.detach(),
+    )
+    scheduler_base = model.scheduler(**scheduler_inputs)
+    budget_probe_weight = model.scheduler.window_budget.pool_mlp[0].weight.detach().clone()
+    with torch.no_grad():
+        model.scheduler.window_budget.pool_mlp[0].weight.add_(0.5)
+    scheduler_shifted = model.scheduler(**scheduler_inputs)
+    with torch.no_grad():
+        model.scheduler.window_budget.pool_mlp[0].weight.copy_(budget_probe_weight)
+    assert torch.allclose(
+        scheduler_base.dur_logratio_unit,
+        scheduler_shifted.dur_logratio_unit,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        scheduler_base.pause_weight_unit,
+        scheduler_shifted.pause_weight_unit,
+        atol=1e-6,
+    )
+    redistribution_inputs = dict(
+        hidden=unit_states,
+        trace_context=out1.planner.trace_context.detach(),
+        unit_mask=batch.unit_mask,
+        slow_rhythm_summary=ref_conditioning.get('slow_rhythm_summary'),
+        source_boundary_cue=out1.planner.source_boundary_cue.detach(),
+    )
+    redistribution_base = model.scheduler.unit_redistribution(**redistribution_inputs)
+    boundary_probe_weight = model.scheduler.unit_redistribution.boundary_head.weight.detach().clone()
+    boundary_probe_bias = model.scheduler.unit_redistribution.boundary_head.bias.detach().clone()
+    with torch.no_grad():
+        model.scheduler.unit_redistribution.boundary_head.weight.normal_(mean=3.0, std=0.5)
+        model.scheduler.unit_redistribution.boundary_head.bias.fill_(4.0)
+    redistribution_shifted = model.scheduler.unit_redistribution(**redistribution_inputs)
+    with torch.no_grad():
+        model.scheduler.unit_redistribution.boundary_head.weight.copy_(boundary_probe_weight)
+        model.scheduler.unit_redistribution.boundary_head.bias.copy_(boundary_probe_bias)
+    assert torch.allclose(
+        redistribution_base['boundary_latent'],
+        redistribution_shifted['boundary_latent'],
+        atol=1e-6,
+    )
     assert out1.slot_duration_exec.shape[1] == batch.content_units.shape[1] * 2
     assert out1.slot_is_blank[:, 1::2].sum().item() > 0
     assert torch.equal(out1.blank_slot_duration_exec, out1.slot_duration_exec)
@@ -372,6 +426,27 @@ if __name__ == '__main__':
     valid_speech = (frame_plan.blank_mask <= 0.5) & (frame_plan.total_mask > 0.5)
     assert torch.all(frame_plan.frame_src_index[valid_blank] < 0)
     assert torch.all(frame_plan.frame_src_index[valid_speech] >= 0)
+    distill_speech_tgt = torch.flip(out1.speech_duration_exec.detach(), dims=[1]) * batch.unit_mask.float()
+    distill_pause_tgt = torch.zeros_like(out1.pause_after_exec.detach())
+    loss_dict = build_rhythm_loss_dict(
+        out1,
+        RhythmLossTargets(
+            speech_exec_tgt=out1.speech_duration_exec.detach(),
+            pause_exec_tgt=out1.pause_after_exec.detach(),
+            speech_budget_tgt=out1.planner.speech_budget_win.detach(),
+            pause_budget_tgt=out1.planner.pause_budget_win.detach(),
+            unit_mask=batch.unit_mask.detach(),
+            dur_anchor_src=batch.dur_anchor_src.detach(),
+            distill_speech_tgt=distill_speech_tgt,
+            distill_pause_tgt=distill_pause_tgt,
+            distill_allocation_weight=1.0,
+        ),
+    )
+    assert "rhythm_distill_speech_shape" in loss_dict
+    assert "rhythm_distill_pause_shape" in loss_dict
+    assert torch.isfinite(loss_dict["rhythm_distill_speech_shape"])
+    assert torch.isfinite(loss_dict["rhythm_distill_pause_shape"])
+    assert abs(float(loss_dict["rhythm_distill_pause_shape"].detach())) < 1e-6
 
     guidance = build_reference_guided_targets(
         dur_anchor_src=batch.dur_anchor_src[0].cpu().numpy(),

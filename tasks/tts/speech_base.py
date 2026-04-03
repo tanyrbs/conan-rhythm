@@ -56,7 +56,8 @@ class SpeechBaseTask(BaseTask):
     @data_loader
     def train_dataloader(self):
         print("Train Dataloader")
-        print(hparams)
+        if bool(hparams.get('print_train_hparams', False)):
+            print(hparams)
         
         if hparams['train_sets'] != '':
             train_sets = hparams['train_sets'].split("|")
@@ -105,7 +106,7 @@ class SpeechBaseTask(BaseTask):
             required_batch_size_multiple=required_batch_size_multiple,
             endless=endless,
             apply_batch_by_size=batch_by_size,
-            pin_memory=bool(hparams.get('dl_pin_memory', False)),
+            pin_memory=hparams.get('dl_pin_memory', None),
             use_ddp=use_ddp,
         )
 

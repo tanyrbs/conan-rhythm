@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 def _move_to_device(obj, device, torch):
     if isinstance(obj, torch.Tensor):
-        return obj.to(device)
+        return obj.to(device, non_blocking=(getattr(device, "type", "cpu") == "cuda"))
     if isinstance(obj, dict):
         return {k: _move_to_device(v, device, torch) for k, v in obj.items()}
     if isinstance(obj, list):

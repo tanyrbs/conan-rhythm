@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from modules.Conan.diff.net import CausalConv1d
+from .source_boundary import build_deterministic_boundary_score
 
 
 def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: int = 1, keepdim: bool = False) -> torch.Tensor:
@@ -189,6 +190,7 @@ class UnitRedistributionHead(nn.Module):
         max_unit_logratio: float = 0.6,
         boundary_feature_scale: float = 0.35,
         boundary_source_cue_weight: float = 0.35,
+        boundary_trace_weight: float = 0.35,
         pause_boundary_latent_weight: float = 0.35,
         pause_source_boundary_weight: float = 0.20,
         causal: bool = True,
@@ -197,6 +199,7 @@ class UnitRedistributionHead(nn.Module):
         self.max_unit_logratio = float(max_unit_logratio)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.boundary_source_cue_weight = float(boundary_source_cue_weight)
+        self.boundary_trace_weight = float(boundary_trace_weight)
         self.pause_boundary_latent_weight = float(pause_boundary_latent_weight)
         self.pause_source_boundary_weight = float(pause_source_boundary_weight)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
@@ -209,7 +212,10 @@ class UnitRedistributionHead(nn.Module):
         ])
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
+        # Compatibility-only parameter surface. Kept for older checkpoints, unused in forward.
         self.boundary_head = nn.Linear(hidden_size, 1)
+        for param in self.boundary_head.parameters():
+            param.requires_grad = False
 
     def forward(
         self,
@@ -240,7 +246,13 @@ class UnitRedistributionHead(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_latent = torch.sigmoid(self.boundary_head(x).squeeze(-1)) * unit_mask
+        boundary_latent = build_deterministic_boundary_score(
+            source_boundary_cue=source_boundary_cue,
+            boundary_trace=trace_context[:, :, 2] if trace_context.size(-1) > 2 else None,
+            unit_mask=unit_mask,
+            source_weight=self.boundary_source_cue_weight,
+            trace_weight=self.boundary_trace_weight,
+        )
         pause_logits = self.pause_head(x).squeeze(-1)
         pause_logits = pause_logits + self.pause_boundary_latent_weight * boundary_latent
         pause_logits = pause_logits + self.pause_source_boundary_weight * source_boundary_cue.float()

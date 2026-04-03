@@ -53,6 +53,11 @@ class RhythmPlannerOutputs:
     def blank_budget_win(self) -> torch.Tensor:
         return self.pause_budget_win
 
+    @property
+    def boundary_score_unit(self) -> torch.Tensor:
+        # boundary_latent is kept as a compatibility alias for older call sites/checkpoints.
+        return self.boundary_latent
+
 
 @dataclass
 class RhythmExecution:

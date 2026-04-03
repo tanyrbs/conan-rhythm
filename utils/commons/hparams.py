@@ -1,10 +1,21 @@
 import argparse
+import ast
 import os
 import yaml
 
 from utils.os_utils import remove_file
 
 global_print_hparams = True
+
+
+def _parse_new_hparam_value(raw_value: str):
+    value = raw_value.strip("\'\" ")
+    if value.startswith("[") and value.endswith("]") and "," not in value and " " in value:
+        value = value.replace(" ", ",")
+    try:
+        return ast.literal_eval(value)
+    except Exception:
+        return value
 hparams = {}
 
 
@@ -85,6 +96,11 @@ def set_hparams(config='', exp_name='', hparams_str='', print_hparams=True, glob
     if args.config != '':
         hparams_.update(load_config(args.config))
     if not args.reset:
+        if args.config != '' and len(saved_hparams) > 0:
+            print(
+                f"| WARNING: Reusing saved config from {ckpt_config_path}; it overrides the newly provided config. "
+                "Pass --reset if you want the current config file to take effect."
+            )
         hparams_.update(saved_hparams)
     hparams_['work_dir'] = args_work_dir
 
@@ -98,7 +114,9 @@ def set_hparams(config='', exp_name='', hparams_str='', print_hparams=True, glob
             for k_ in k.split(".")[:-1]:
                 config_node = config_node[k_]
             k = k.split(".")[-1]
-            if v in ['True', 'False'] or type(config_node[k]) in [bool, list, dict]:
+            if k not in config_node:
+                config_node[k] = _parse_new_hparam_value(v)
+            elif v in ['True', 'False'] or type(config_node[k]) in [bool, list, dict]:
                 if type(config_node[k]) == list:
                     v = v.replace(" ", ",")
                 config_node[k] = eval(v)

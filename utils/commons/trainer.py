@@ -1,14 +1,13 @@
 import random
 import shutil
 import traceback
-from contextlib import nullcontext
 from datetime import datetime
 
 try:
-    from torch.amp import GradScaler, autocast
+    from torch.amp import GradScaler
     _TORCH_AMP_NEW_API = True
 except ImportError:  # pragma: no cover
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.cuda.amp import GradScaler
     _TORCH_AMP_NEW_API = False
 import numpy as np
 import torch.optim
@@ -22,12 +21,11 @@ import sys
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import tqdm
 
 from utils.commons.ckpt_utils import get_last_checkpoint, get_all_ckpts
 from utils.commons.ddp_utils import DDP
 from utils.commons.hparams import hparams
-from utils.commons.tensor_utils import move_to_cuda
+from utils.commons.trainer_loop import TrainerLoopMixin
 from utils.os_utils import remove_file
 
 
@@ -49,7 +47,7 @@ class Tee(object):
         self.file.flush()
 
 
-class Trainer:
+class Trainer(TrainerLoopMixin):
     def __init__(
             self,
             work_dir,
@@ -76,6 +74,11 @@ class Trainer:
         self.work_dir = work_dir
         self.accumulate_grad_batches = accumulate_grad_batches
         self.max_updates = max_updates
+        if self.accumulate_grad_batches > 1:
+            logging.warning(
+                "Trainer global_step/max_updates/val_check_interval are micro-batch based while "
+                "accumulate_grad_batches > 1. Plan schedules and checkpoint cadence accordingly."
+            )
         self.num_sanity_val_steps = num_sanity_val_steps
         self.print_nan_grads = print_nan_grads
         self.default_save_path = default_save_path
@@ -98,13 +101,18 @@ class Trainer:
         self.save_best = save_best
         self.monitor_op = np.less if monitor_mode == 'min' else np.greater
         self.best_val_results = np.Inf if monitor_mode == 'min' else -np.Inf
-        self.mode = 'min'
+        self.mode = monitor_mode
 
-        # allow int, string and gpu list
-        self.all_gpu_ids = [
-            int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x != '']
+        visible_env = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        visible_tokens = [x.strip() for x in visible_env.split(",") if x.strip() != ""]
+        if len(visible_tokens) > 0:
+            self.all_gpu_ids = list(range(len(visible_tokens)))
+        elif torch.cuda.is_available():
+            self.all_gpu_ids = list(range(torch.cuda.device_count()))
+        else:
+            self.all_gpu_ids = []
         self.num_gpus = len(self.all_gpu_ids)
-        self.on_gpu = self.num_gpus > 0
+        self.on_gpu = self.num_gpus > 0 and torch.cuda.is_available()
         self.root_gpu = 0
         logging.info(f'GPU available: {torch.cuda.is_available()}, GPU used: {self.all_gpu_ids}')
         self.use_ddp = self.num_gpus > 1
@@ -114,7 +122,8 @@ class Trainer:
         self.val_check_interval = val_check_interval
         self.tb_log_interval = tb_log_interval
         self.amp = amp
-        scaler_enabled = bool(self.amp and torch.cuda.is_available())
+        self.autocast_enabled = bool(self.amp and self.on_gpu and torch.cuda.is_available())
+        scaler_enabled = self.autocast_enabled
         if _TORCH_AMP_NEW_API:
             self.amp_scalar = GradScaler(device='cuda', enabled=scaler_enabled)
         else:  # pragma: no cover
@@ -125,7 +134,7 @@ class Trainer:
         self.fit(task_cls)
 
     def fit(self, task_cls):
-        if len(self.all_gpu_ids) > 1:
+        if self.use_ddp:
             mp.spawn(self.ddp_run, nprocs=self.num_gpus, args=(task_cls, copy.deepcopy(hparams)))
         else:
             self.task = task_cls()
@@ -203,202 +212,25 @@ class Trainer:
     # valid and test
     ####################
     def run_evaluation(self, test=False):
-        eval_results = self.evaluate(self.task, test, tqdm_desc='Valid' if not test else 'test',
-                                     max_batches=hparams['eval_max_batches'])
-        if eval_results is not None and 'tb_log' in eval_results:
-            tb_log_output = eval_results['tb_log']
-            self.log_metrics_to_tb(tb_log_output)
-        if self.proc_rank == 0 and not test:
-            self.save_checkpoint(epoch=self.current_epoch, logs=eval_results)
+        return TrainerLoopMixin.run_evaluation(self, test=test)
 
     def evaluate(self, task, test=False, tqdm_desc='Valid', max_batches=None):
-        if max_batches == -1:
-            max_batches = None
-        # enable eval mode
-        task.zero_grad()
-        task.eval()
-        torch.set_grad_enabled(False)
-
-        task_ref = self.get_task_ref()
-        if test:
-            ret = task_ref.test_start()
-            if ret == 'EXIT':
-                return
-        else:
-            task_ref.validation_start()
-        outputs = []
-        dataloader = task_ref.test_dataloader() if test else task_ref.val_dataloader()
-        pbar = tqdm.tqdm(dataloader, desc=tqdm_desc, total=max_batches, dynamic_ncols=True, unit='step',
-                         disable=self.root_gpu > 0)
-        # give model a chance to do something with the outputs (and method defined)
-        for batch_idx, batch in enumerate(pbar):
-            if batch is None:  # pragma: no cover
-                continue
-            # stop short when on fast_dev_run (sets max_batch=1)
-            if max_batches is not None and batch_idx >= max_batches:
-                break
-
-            # make dataloader_idx arg in validation_step optional
-            if self.on_gpu:
-                batch = move_to_cuda(batch, self.root_gpu)
-            args = [batch, batch_idx]
-            if self.use_ddp:
-                output = task(*args)
-            else:
-                if test:
-                    output = task_ref.test_step(*args)
-                else:
-                    output = task_ref.validation_step(*args)
-            # track outputs for collation
-            outputs.append(output)
-        # give model a chance to do something with the outputs (and method defined)
-        if test:
-            eval_results = task_ref.test_end(outputs)
-        else:
-            eval_results = task_ref.validation_end(outputs)
-        # enable train mode again
-        task.train()
-        torch.set_grad_enabled(True)
-        return eval_results
+        return TrainerLoopMixin.evaluate(
+            self,
+            task,
+            test=test,
+            tqdm_desc=tqdm_desc,
+            max_batches=max_batches,
+        )
 
     ####################
     # train
     ####################
     def train(self):
-        task_ref = self.get_task_ref()
-        task_ref.on_train_start()
-        if self.num_sanity_val_steps > 0:
-            # run tiny validation (if validation defined) to make sure program won't crash during val
-            self.evaluate(self.task, False, 'Sanity Val', max_batches=self.num_sanity_val_steps)
-        # clear cache before training
-        if self.on_gpu:
-            torch.cuda.empty_cache()
-        dataloader = task_ref.train_dataloader()
-        epoch = self.current_epoch
-        # run all epochs
-        while True:
-            # set seed for distributed sampler (enables shuffling for each epoch)
-            if self.use_ddp and hasattr(dataloader.sampler, 'set_epoch'):
-                dataloader.sampler.set_epoch(epoch)
-            # update training progress in trainer and model
-            task_ref.current_epoch = epoch
-            self.current_epoch = epoch
-            # total batches includes multiple val checks
-            self.batch_loss_value = 0  # accumulated grads
-            # before epoch hook
-            task_ref.on_epoch_start()
-
-            # run epoch
-            train_pbar = tqdm.tqdm(dataloader, initial=self.global_step, total=float('inf'),
-                                   dynamic_ncols=True, unit='step', disable=self.root_gpu > 0)
-            for batch_idx, batch in enumerate(train_pbar):
-                if self.global_step % self.val_check_interval == 0 and not self.fisrt_epoch:
-                    self.run_evaluation()
-                pbar_metrics, tb_metrics = self.run_training_batch(batch_idx, batch)
-                train_pbar.set_postfix(**pbar_metrics)
-                self.fisrt_epoch = False
-                # when metrics should be logged
-                if (self.global_step + 1) % self.tb_log_interval == 0:
-                    # logs user requested information to logger
-                    self.log_metrics_to_tb(tb_metrics)
-
-                self.global_step += 1
-                task_ref.global_step = self.global_step
-                if self.global_step > self.max_updates:
-                    print("| Training end..")
-                    break
-            # epoch end hook
-            task_ref.on_epoch_end()
-            epoch += 1
-            if self.global_step > self.max_updates:
-                break
-        task_ref.on_train_end()
+        return TrainerLoopMixin.train(self)
 
     def run_training_batch(self, batch_idx, batch):
-        if batch is None:
-            return {}
-        all_progress_bar_metrics = []
-        all_log_metrics = []
-        task_ref = self.get_task_ref()
-        amp_enabled = bool(self.amp and self.on_gpu)
-        should_step = (self.global_step + 1) % self.accumulate_grad_batches == 0
-        for opt_idx, optimizer in enumerate(self.optimizers):
-            if optimizer is None:
-                continue
-            # make sure only the gradients of the current optimizer's paramaters are calculated
-            # in the training step to prevent dangling gradients in multiple-optimizer setup.
-            if len(self.optimizers) > 1:
-                for param in task_ref.parameters():
-                    param.requires_grad = False
-                for group in optimizer.param_groups:
-                    for param in group['params']:
-                        param.requires_grad = True
-
-            # forward pass
-            autocast_kwargs = {"enabled": amp_enabled}
-            if _TORCH_AMP_NEW_API:
-                autocast_kwargs["device_type"] = 'cuda' if self.on_gpu else 'cpu'
-            ddp_sync_context = nullcontext()
-            if self.use_ddp and hasattr(self.task, 'no_sync') and not should_step:
-                ddp_sync_context = self.task.no_sync()
-            with ddp_sync_context:
-                with autocast(**autocast_kwargs):
-                    if self.on_gpu:
-                        batch = move_to_cuda(copy.copy(batch), self.root_gpu)
-                    args = [batch, batch_idx, opt_idx]
-                    if self.use_ddp:
-                        output = self.task(*args)
-                    else:
-                        output = task_ref.training_step(*args)
-                    loss = output['loss']
-                    if loss is None:
-                        continue
-                    progress_bar_metrics = output['progress_bar']
-                    log_metrics = output['tb_log']
-                    # accumulate loss
-                    loss = loss / self.accumulate_grad_batches
-
-            # backward pass
-            if loss.requires_grad:
-                if amp_enabled:
-                    self.amp_scalar.scale(loss).backward()
-                else:
-                    loss.backward()
-
-            # track progress bar metrics
-            all_log_metrics.append(log_metrics)
-            all_progress_bar_metrics.append(progress_bar_metrics)
-
-            if loss is None:
-                continue
-
-            # nan grads
-            if self.print_nan_grads:
-                has_nan_grad = False
-                for name, param in task_ref.named_parameters():
-                    if (param.grad is not None) and torch.isnan(param.grad.float()).any():
-                        print("| NaN params: ", name, param, param.grad)
-                        has_nan_grad = True
-                if has_nan_grad:
-                    exit(0)
-
-            # gradient update with accumulated gradients
-            if should_step:
-                if amp_enabled:
-                    self.amp_scalar.unscale_(optimizer)
-                task_ref.on_before_optimization(opt_idx)
-                if amp_enabled:
-                    self.amp_scalar.step(optimizer)
-                    self.amp_scalar.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-                task_ref.on_after_optimization(self.current_epoch, batch_idx, optimizer, opt_idx)
-
-        # collapse all metrics into one dict
-        all_progress_bar_metrics = {k: v for d in all_progress_bar_metrics for k, v in d.items()}
-        all_log_metrics = {k: v for d in all_log_metrics for k, v in d.items()}
-        return all_progress_bar_metrics, all_log_metrics
+        return TrainerLoopMixin.run_training_batch(self, batch_idx, batch)
 
     ####################
     # load and save checkpoint
@@ -451,7 +283,7 @@ class Trainer:
         return did_restore
 
     def save_checkpoint(self, epoch, logs=None):
-        monitor_op = np.less
+        monitor_op = self.monitor_op
         ckpt_path = f'{self.work_dir}/model_ckpt_steps_{self.global_step}.ckpt'
         logging.info(f'Epoch {epoch:05d}@{self.global_step}: saving model to {ckpt_path}')
         self._atomic_save(ckpt_path)

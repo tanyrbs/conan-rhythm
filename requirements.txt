@@ -20,7 +20,7 @@ Resemblyzer==0.1.4
 scikit_learn==1.5.2
 scipy
 six==1.16.0
-tensorflow
+# tensorflow  # optional, unused in this repository; install separately only if a downstream tool requires it
 tensorboard
 textgrid==1.6.1
 tqdm==4.66.5

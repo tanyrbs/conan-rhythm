@@ -9,6 +9,7 @@ from .unitizer import (
     StreamingRunLengthUnitizer,
     StreamingUnitizerRowState,
     StreamingUnitizerState,
+    _estimate_boundary_confidence_tensor,
     build_compressed_sequence,
 )
 
@@ -211,6 +212,29 @@ class RhythmUnitFrontend:
         )
         return batch
 
+    @staticmethod
+    def _rebuild_boundary_confidence_from_cache(
+        *,
+        dur_anchor_src: torch.Tensor,
+        unit_mask: torch.Tensor,
+        open_run_mask: torch.Tensor,
+        sep_hint: torch.Tensor,
+    ) -> torch.Tensor:
+        rebuilt_rows = []
+        total_units = int(dur_anchor_src.size(1))
+        for batch_idx in range(dur_anchor_src.size(0)):
+            visible = int(unit_mask[batch_idx].sum().item())
+            row = dur_anchor_src.new_zeros((total_units,), dtype=torch.float32)
+            if visible > 0:
+                rebuilt = _estimate_boundary_confidence_tensor(
+                    dur_anchor_src[batch_idx, :visible],
+                    sep_hint[batch_idx, :visible],
+                    open_run_mask[batch_idx, :visible],
+                ).to(device=dur_anchor_src.device, dtype=torch.float32)
+                row[:visible] = rebuilt
+            rebuilt_rows.append(row)
+        return torch.stack(rebuilt_rows, dim=0) * unit_mask.float()
+
     def from_precomputed(
         self,
         *,
@@ -237,7 +261,12 @@ class RhythmUnitFrontend:
         else:
             sealed_mask = sealed_mask.float() * unit_mask.float()
         if boundary_confidence is None:
-            boundary_confidence = sep_hint.float() * unit_mask.float()
+            boundary_confidence = self._rebuild_boundary_confidence_from_cache(
+                dur_anchor_src=dur_anchor_src,
+                unit_mask=unit_mask,
+                open_run_mask=open_run_mask.long(),
+                sep_hint=sep_hint.long(),
+            )
         else:
             boundary_confidence = boundary_confidence.float() * unit_mask.float()
         return RhythmUnitBatch(
