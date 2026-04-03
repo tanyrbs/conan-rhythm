@@ -128,6 +128,8 @@ def build_rhythm_ref_conditioning(sample, *, explicit=None):
     for extra_key in (
         "slow_rhythm_memory",
         "slow_rhythm_summary",
+        "planner_slow_rhythm_memory",
+        "planner_slow_rhythm_summary",
         "selector_meta_indices",
         "selector_meta_scores",
         "selector_meta_starts",

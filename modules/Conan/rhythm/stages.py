@@ -32,6 +32,7 @@ _STAGE_ALIASES = {
     "legacy_schedule_only": "legacy_schedule_only",
     "dual_mode_kd": "legacy_dual_mode_kd",
     "legacy_dual_mode_kd": "legacy_dual_mode_kd",
+    "cached_only": "minimal_v1",
     "minimal_v1": "minimal_v1",
     "transitional": "transitional",
 }
@@ -80,6 +81,8 @@ def detect_rhythm_stage(hparams, *, config_name: str | None = None) -> str:
         return "legacy_schedule_only"
     if "dual_mode_kd" in config_name:
         return "legacy_dual_mode_kd"
+    if "cached_only" in config_name:
+        return "minimal_v1"
     if "minimal_v1" in config_name:
         return "minimal_v1"
 

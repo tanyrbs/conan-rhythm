@@ -206,7 +206,7 @@ Current bridge step already in repo:
 - `rhythm_retimed_target_start_steps`
 - the maintained stage-3 config is now provided at `egs/conan_emformer_rhythm_v2_student_retimed.yaml` (`retimed_train.yaml` remains a compatibility alias)
 - this is the maintained formal joint-training entry and does not require KD / learned offline runtime teacher to be enabled
-- a stricter cached-only warm-start config is now provided at `egs/conan_emformer_rhythm_v2_cached_only.yaml`
+- `egs/conan_emformer_rhythm_v2_cached_only.yaml` is kept only as a compatibility alias to `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`; it is not a stricter maintained base
 
 Recommended future config direction after retimed targets exist:
 

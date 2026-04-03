@@ -39,6 +39,8 @@ class StreamingRhythmModule(nn.Module):
         slow_topk: int = 6,
         selector_cell_size: int = 3,
         trace_smooth_kernel: int = 5,
+        maintained_stats_trace_only: bool = True,
+        emit_reference_sidecar: bool | None = None,
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
@@ -76,6 +78,8 @@ class StreamingRhythmModule(nn.Module):
             slow_topk=slow_topk,
             selector_cell_size=selector_cell_size,
             smooth_kernel=trace_smooth_kernel,
+            maintained_stats_trace_only=maintained_stats_trace_only,
+            emit_reference_sidecar=emit_reference_sidecar,
         )
         self.scheduler = MonotonicRhythmScheduler(
             hidden_size=hidden_size,
@@ -219,6 +223,7 @@ class StreamingRhythmModule(nn.Module):
                 ref_conditioning["ref_rhythm_stats"],
                 ref_conditioning["ref_rhythm_trace"],
                 selector=self.reference_descriptor.selector,
+                include_sidecar=self.reference_descriptor.emit_reference_sidecar,
             )
             enriched.update({k: v for k, v in ref_conditioning.items() if v is not None})
             if "slow_rhythm_summary" not in enriched and "slow_rhythm_memory" in enriched:
@@ -237,6 +242,7 @@ class StreamingRhythmModule(nn.Module):
                 ref_rhythm_stats,
                 ref_rhythm_trace,
                 selector=self.reference_descriptor.selector,
+                include_sidecar=self.reference_descriptor.emit_reference_sidecar,
             )
         if ref_mel is None:
             raise ValueError('Need either (ref_rhythm_stats, ref_rhythm_trace) or ref_mel.')

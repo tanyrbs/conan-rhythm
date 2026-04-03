@@ -20,6 +20,7 @@ rhythm_distill_surface: offline
 rhythm_teacher_target_source: learned_offline
 rhythm_enable_dual_mode_teacher: true
 rhythm_enable_learned_offline_teacher: true
+rhythm_runtime_enable_learned_offline_teacher: true
 rhythm_enable_algorithmic_teacher: false
 # Stronger learned offline teacher: richer non-causal planner trunk.
 rhythm_offline_teacher_num_blocks: 6

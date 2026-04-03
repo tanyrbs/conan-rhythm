@@ -479,11 +479,15 @@ def scale_rhythm_loss_terms(
     cumplan_lambda: float,
 ) -> dict[str, torch.Tensor]:
     lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0)
+    lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
+    plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
     prefix_state = rhythm_losses.get(
         "rhythm_prefix_state",
         rhythm_losses.get("rhythm_cumplan", rhythm_losses["rhythm_carry"]),
     )
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
+    scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
     return {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0),
@@ -515,12 +519,27 @@ def scale_rhythm_loss_terms(
             * hparams.get("lambda_rhythm_budget", 0.25)
             * float(hparams.get("rhythm_feasible_debt_weight", 0.05))
         ).detach(),
+        "rhythm_prefix_clock": (
+            rhythm_losses.get("rhythm_prefix_clock", rhythm_losses["rhythm_prefix_state"])
+            * float(cumplan_lambda)
+        ).detach(),
+        "rhythm_prefix_backlog": (
+            rhythm_losses.get("rhythm_prefix_backlog", rhythm_losses["rhythm_prefix_state"])
+            * float(cumplan_lambda)
+        ).detach(),
         "rhythm_prefix_state": scaled_prefix_state,
         "rhythm_cumplan": scaled_prefix_state.detach(),
         "rhythm_carry": scaled_prefix_state.detach(),
-        "rhythm_plan": rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0),
+        "rhythm_plan": rhythm_losses["rhythm_plan"] * lambda_plan,
+        "rhythm_plan_local": (
+            rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight
+        ).detach(),
+        "rhythm_plan_cum": (
+            rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight
+        ).detach(),
         "rhythm_guidance": rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0),
-        "rhythm_distill": rhythm_losses["rhythm_distill"] * lambda_distill,
+        "rhythm_distill": scaled_distill,
+        "rhythm_distill_student": scaled_distill.detach(),
         "rhythm_distill_exec": (rhythm_losses["rhythm_distill_exec"] * lambda_distill).detach(),
         "rhythm_distill_budget": (
             rhythm_losses["rhythm_distill_budget"]

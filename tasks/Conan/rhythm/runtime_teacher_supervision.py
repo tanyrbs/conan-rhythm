@@ -39,6 +39,8 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
         pause_budget_win=pause_budget,
         raw_speech_budget_win=speech_budget,
         raw_pause_budget_win=pause_budget,
+        effective_speech_budget_win=speech_budget,
+        effective_pause_budget_win=pause_budget,
         blank_budget_win=pause_budget,
         boundary_score_unit=boundary_score,
         boundary_latent=boundary_score,

@@ -163,8 +163,6 @@ class StreamingRhythmProjector(nn.Module):
             previous_speech_exec=None,
             previous_pause_exec=None,
             phase_anchor=torch.stack([zeros.clone(), zeros.clone()], dim=-1),
-            speech_budget_debt=zeros.clone(),
-            pause_budget_debt=zeros.clone(),
         )
 
     @staticmethod
@@ -412,8 +410,6 @@ class StreamingRhythmProjector(nn.Module):
         commit_frontier: torch.Tensor,
         speech_duration_exec: torch.Tensor,
         pause_after_exec: torch.Tensor,
-        speech_budget_debt: torch.Tensor | None = None,
-        pause_budget_debt: torch.Tensor | None = None,
     ) -> StreamingRhythmState:
         batch_size = dur_anchor_src.size(0)
         next_phase = state.phase_ptr.clone()
@@ -422,24 +418,6 @@ class StreamingRhythmProjector(nn.Module):
             state.phase_anchor.clone()
             if state.phase_anchor is not None
             else torch.zeros(next_phase.size(0), 2, device=next_phase.device, dtype=next_phase.dtype)
-        )
-        next_speech_budget_debt = (
-            speech_budget_debt.detach().clone()
-            if speech_budget_debt is not None
-            else (
-                state.speech_budget_debt.clone()
-                if state.speech_budget_debt is not None
-                else torch.zeros_like(next_phase)
-            )
-        )
-        next_pause_budget_debt = (
-            pause_budget_debt.detach().clone()
-            if pause_budget_debt is not None
-            else (
-                state.pause_budget_debt.clone()
-                if state.pause_budget_debt is not None
-                else torch.zeros_like(next_phase)
-            )
         )
         for batch_idx in range(batch_size):
             prev = int(state.commit_frontier[batch_idx].item())
@@ -474,8 +452,6 @@ class StreamingRhythmProjector(nn.Module):
             previous_speech_exec=speech_duration_exec.detach(),
             previous_pause_exec=pause_after_exec.detach(),
             phase_anchor=next_phase_anchor,
-            speech_budget_debt=next_speech_budget_debt,
-            pause_budget_debt=next_pause_budget_debt,
         )
 
     def forward(
@@ -580,8 +556,6 @@ class StreamingRhythmProjector(nn.Module):
             commit_frontier=commit_frontier,
             speech_duration_exec=speech_duration_exec,
             pause_after_exec=pause_after_exec,
-            speech_budget_debt=feasible_speech_budget_delta,
-            pause_budget_debt=feasible_pause_budget_delta,
         )
         return RhythmExecution(
             speech_duration_exec=speech_duration_exec,

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.losses import _budget_surface_loss, _compute_budget_supervision
+from tasks.Conan.rhythm.losses import _batch_kl_div, _budget_surface_loss, _compute_budget_supervision
 
 
 class BudgetSurfaceTests(unittest.TestCase):
@@ -67,8 +67,17 @@ class BudgetSurfaceTests(unittest.TestCase):
         self.assertGreater(float(raw_surface.item()), 0.0)
         self.assertGreater(float(exec_surface.item()), 0.0)
         self.assertGreater(float(total_surface.item()), 0.0)
+        self.assertLess(float(exec_surface.item()), float(raw_surface.item()))
         self.assertTrue(torch.allclose(pause_share_surface, torch.tensor(0.0)))
         self.assertTrue(torch.allclose(total_loss, total_surface + pause_share_surface))
+
+    def test_masked_kl_stays_finite_with_zeroed_tail(self) -> None:
+        pred = torch.tensor([[2.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+        tgt = torch.tensor([[2.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+        mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+        loss = _batch_kl_div(pred, tgt, mask)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.allclose(loss, torch.tensor(0.0)))
 
 
 if __name__ == "__main__":

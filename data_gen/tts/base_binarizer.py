@@ -26,6 +26,18 @@ class BinarizationError(Exception):
 
 
 class BaseBinarizer:
+    @staticmethod
+    def _abort_empty_split(builder, *, data_dir: str, prefix: str, reason: str) -> None:
+        try:
+            builder.out_file.close()
+        except Exception:
+            pass
+        for suffix in (".data", ".idx", "_lengths.npy", "_ph_lengths.npy"):
+            path = f"{data_dir}/{prefix}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+        raise RuntimeError(f"Binarization produced no valid items for split '{prefix}': {reason}")
+
     def __init__(self, processed_data_dir=None):
         if processed_data_dir is None:
             processed_data_dir = hparams['processed_data_dir']
@@ -106,6 +118,13 @@ class BaseBinarizer:
                     init_ctx_func=lambda wid: {'voice_encoder': VoiceEncoder().cuda()}, num_workers=4,
                     desc='Extracting spk embed'):
                 items[item_id]['spk_embed'] = spk_embed
+        if len(items) <= 0:
+            self._abort_empty_split(
+                builder,
+                data_dir=data_dir,
+                prefix=prefix,
+                reason="all items failed during item processing",
+            )
 
         for item in items:
             if not self.binarization_args['with_wav'] and 'wav' in item:
@@ -116,6 +135,13 @@ class BaseBinarizer:
             if 'ph_len' in item:
                 ph_lengths.append(item['ph_len'])
             total_sec += item['sec']
+        if len(mel_lengths) <= 0:
+            self._abort_empty_split(
+                builder,
+                data_dir=data_dir,
+                prefix=prefix,
+                reason="no valid lengths were collected",
+            )
         builder.finalize()
         np.save(f'{data_dir}/{prefix}_lengths.npy', mel_lengths)
         if len(ph_lengths) > 0:
@@ -223,4 +249,7 @@ class BaseBinarizer:
 
     @property
     def num_workers(self):
-        return int(os.getenv('N_PROC', hparams.get('N_PROC', os.cpu_count())))
+        workers = int(os.getenv('N_PROC', hparams.get('N_PROC', os.cpu_count())))
+        if os.name == 'nt':
+            return max(0, min(1, workers))
+        return workers

@@ -226,6 +226,12 @@ def _compute_budget_supervision(
     exec_weight: float,
     batch_weight: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return weighted budget-view contributions plus compact surface splits.
+
+    `rhythm_budget_raw_surface` / `rhythm_budget_exec_surface` should match the
+    actual optimizer contribution of each budget view, not the unweighted
+    diagnostic loss. This keeps the logged surfaces additive with `L_budget`.
+    """
     raw_speech, raw_pause, exec_speech, exec_pause = _resolve_budget_views(execution)
     raw_loss, raw_total_loss, raw_pause_share_loss = _budget_surface_loss(
         raw_speech,
@@ -241,12 +247,14 @@ def _compute_budget_supervision(
         pause_budget_tgt,
         batch_weight=batch_weight,
     )
+    raw_contrib = float(raw_weight) * raw_loss
+    exec_contrib = float(exec_weight) * exec_loss
     total_surface = float(raw_weight) * raw_total_loss + float(exec_weight) * exec_total_loss
     pause_share_surface = (
         float(raw_weight) * raw_pause_share_loss + float(exec_weight) * exec_pause_share_loss
     )
-    total_loss = total_surface + pause_share_surface
-    return total_loss, raw_loss, exec_loss, total_surface, pause_share_surface
+    total_loss = raw_contrib + exec_contrib
+    return total_loss, raw_contrib, exec_contrib, total_surface, pause_share_surface
 
 
 def _batch_kl_div(
@@ -257,7 +265,13 @@ def _batch_kl_div(
 ) -> torch.Tensor:
     pred = _masked_probability_distribution(pred, mask)
     tgt = _masked_probability_distribution(tgt, mask)
-    loss = (tgt * (torch.log(tgt) - torch.log(pred))).sum(dim=1)
+    support = mask.float()
+    while support.dim() < pred.dim():
+        support = support.unsqueeze(-1)
+    pred = pred.clamp_min(1e-6)
+    tgt = tgt.clamp_min(1e-6)
+    reduce_dims = tuple(range(1, pred.dim()))
+    loss = (tgt * (torch.log(tgt) - torch.log(pred)) * support).sum(dim=reduce_dims)
     return _reduce_batch_loss(loss, batch_weight)
 
 
@@ -397,40 +411,46 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         dur_anchor_src=targets.dur_anchor_src.float(),
         unit_mask=unit_mask,
     )
-    l_carry = _masked_huber(
+    l_prefix_clock = _masked_huber(
         pred_prefix_clock_norm,
         target_prefix_clock_norm,
         unit_mask,
         beta=0.25,
         batch_weight=targets.sample_confidence,
-    ) + _masked_huber(
+    )
+    l_prefix_backlog = _masked_huber(
         pred_prefix_backlog_norm,
         target_prefix_backlog_norm,
         unit_mask,
         beta=0.25,
         batch_weight=targets.sample_confidence,
     )
-    exec_total = (execution.speech_duration_exec + blank_exec).float()
-    target_total = (targets.speech_exec_tgt + targets.pause_exec_tgt).float()
-    plan_shape_weight = _merge_batch_weight(
-        targets.sample_confidence,
-        _positive_mass_gate(target_total, unit_mask),
-        exec_total,
-    )
-    l_plan_local = _batch_kl_div(
-        exec_total,
-        target_total,
-        unit_mask,
-        batch_weight=plan_shape_weight,
-    )
-    l_plan_cum = _masked_huber(
-        _masked_cumulative_fraction(exec_total, unit_mask),
-        _masked_cumulative_fraction(target_total, unit_mask),
-        unit_mask,
-        beta=0.10,
-        batch_weight=plan_shape_weight,
-    )
-    l_plan = float(targets.plan_local_weight) * l_plan_local + float(targets.plan_cum_weight) * l_plan_cum
+    l_carry = l_prefix_clock + l_prefix_backlog
+    l_plan_local = execution.speech_duration_exec.new_tensor(0.0)
+    l_plan_cum = execution.speech_duration_exec.new_tensor(0.0)
+    l_plan = execution.speech_duration_exec.new_tensor(0.0)
+    if float(targets.plan_local_weight) > 0.0 or float(targets.plan_cum_weight) > 0.0:
+        exec_total = (execution.speech_duration_exec + blank_exec).float()
+        target_total = (targets.speech_exec_tgt + targets.pause_exec_tgt).float()
+        plan_shape_weight = _merge_batch_weight(
+            targets.sample_confidence,
+            _positive_mass_gate(target_total, unit_mask),
+            exec_total,
+        )
+        l_plan_local = _batch_kl_div(
+            exec_total,
+            target_total,
+            unit_mask,
+            batch_weight=plan_shape_weight,
+        )
+        l_plan_cum = _masked_huber(
+            _masked_cumulative_fraction(exec_total, unit_mask),
+            _masked_cumulative_fraction(target_total, unit_mask),
+            unit_mask,
+            beta=0.10,
+            batch_weight=plan_shape_weight,
+        )
+        l_plan = float(targets.plan_local_weight) * l_plan_local + float(targets.plan_cum_weight) * l_plan_cum
     if targets.guidance_speech_tgt is not None and targets.guidance_pause_tgt is not None:
         l_guidance = _masked_log_huber(
             execution.speech_duration_exec,
@@ -472,7 +492,10 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             targets.distill_allocation_confidence,
             targets.distill_confidence,
         )
-        distill_shape_weight = distill_exec_weight
+        distill_shape_weight = _resolve_component_batch_weight(
+            targets.distill_shape_confidence,
+            distill_exec_weight,
+        )
         l_distill_exec = _masked_log_huber(
             execution.speech_duration_exec,
             targets.distill_speech_tgt.float(),
@@ -583,6 +606,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_budget_total_surface': l_budget_total_surface,
         'rhythm_budget_pause_share_surface': l_budget_pause_share_surface,
         'rhythm_feasible_debt': l_feasible_debt,
+        'rhythm_prefix_clock': l_prefix_clock,
+        'rhythm_prefix_backlog': l_prefix_backlog,
         'rhythm_prefix_state': l_carry,
         'rhythm_carry': l_carry.detach(),
         'rhythm_cumplan': l_carry.detach(),

@@ -115,9 +115,11 @@ def normalize_retimed_target_mode(value) -> str:
 
 
 def resolve_pause_boundary_weight(hparams: Mapping[str, Any]) -> float:
+    if "rhythm_pause_boundary_weight" in hparams:
+        return float(hparams.get("rhythm_pause_boundary_weight", 0.35))
     if "rhythm_pause_exec_boundary_boost" in hparams:
         return float(hparams.get("rhythm_pause_exec_boundary_boost", 0.75))
-    return float(hparams.get("rhythm_pause_boundary_weight", 0.35))
+    return 0.35
 
 
 def resolve_prefix_state_lambda(hparams: Mapping[str, Any]) -> float:

@@ -47,19 +47,20 @@ def _compact_pitch_optimizer_losses(losses, *, hparams, schedule_only_stage: boo
 
 
 def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bool):
-    keep_plan = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
-    keep_guidance = keep_plan or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
-    keep_distill = (
-        keep_plan
-        or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
-        or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
-    )
+    lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    keep_aux = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
+    keep_plan = keep_aux or lambda_plan > 0.0
+    keep_guidance = keep_aux or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
+    keep_distill = keep_aux or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
+    keep_teacher_aux = keep_aux or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
     if not keep_plan:
         _detach_loss_value(losses, "rhythm_plan")
     if not keep_guidance:
         _detach_loss_value(losses, "rhythm_guidance")
     if not keep_distill:
         _detach_loss_value(losses, "rhythm_distill")
+    if not keep_teacher_aux:
+        _detach_loss_value(losses, "rhythm_teacher_aux_loss")
     if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
         return
     exec_terms = []
@@ -126,7 +127,39 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     prefix_state = losses.get("rhythm_prefix_state", losses.get("rhythm_cumplan", losses.get("rhythm_carry")))
     losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero
     losses["L_prefix_state"] = losses["L_cumplan"]
+    losses["L_plan"] = losses.get("rhythm_plan", zero).detach() if isinstance(losses.get("rhythm_plan"), torch.Tensor) else zero
+    losses["L_plan_local"] = (
+        losses.get("rhythm_plan_local", zero).detach()
+        if isinstance(losses.get("rhythm_plan_local"), torch.Tensor)
+        else zero
+    )
+    losses["L_plan_cum"] = (
+        losses.get("rhythm_plan_cum", zero).detach()
+        if isinstance(losses.get("rhythm_plan_cum"), torch.Tensor)
+        else zero
+    )
+    losses["L_guidance"] = (
+        losses.get("rhythm_guidance", zero).detach()
+        if isinstance(losses.get("rhythm_guidance"), torch.Tensor)
+        else zero
+    )
+    losses["L_prefix_clock"] = (
+        losses.get("rhythm_prefix_clock", zero).detach()
+        if isinstance(losses.get("rhythm_prefix_clock"), torch.Tensor)
+        else zero
+    )
+    losses["L_prefix_backlog"] = (
+        losses.get("rhythm_prefix_backlog", zero).detach()
+        if isinstance(losses.get("rhythm_prefix_backlog"), torch.Tensor)
+        else zero
+    )
     losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
+    kd_student = losses.get("rhythm_distill_student", losses.get("rhythm_distill"))
+    losses["L_kd_student"] = kd_student.detach() if isinstance(kd_student, torch.Tensor) else zero
+    teacher_aux = losses.get("rhythm_teacher_aux")
+    if not isinstance(teacher_aux, torch.Tensor):
+        teacher_aux = losses.get("rhythm_teacher_aux_loss", zero)
+    losses["L_teacher_aux"] = teacher_aux.detach() if isinstance(teacher_aux, torch.Tensor) else zero
     rhythm_exec = losses.get("rhythm_exec")
     losses["L_rhythm_exec"] = rhythm_exec.detach() if isinstance(rhythm_exec, torch.Tensor) else zero
     stream_state = losses.get("rhythm_stream_state")

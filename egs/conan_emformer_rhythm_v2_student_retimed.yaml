@@ -42,7 +42,6 @@ lambda_rhythm_cumplan: 0.10
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
 lambda_rhythm_teacher_aux: 0.0
-rhythm_pause_exec_boundary_boost: 0.75
 rhythm_pause_boundary_weight: 0.35
 rhythm_feasible_debt_weight: 0.05
 rhythm_distill_budget_weight: 0.0

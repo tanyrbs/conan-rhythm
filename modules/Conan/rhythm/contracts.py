@@ -26,8 +26,6 @@ class StreamingRhythmState:
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
     phase_anchor: Optional[torch.Tensor] = None
-    speech_budget_debt: Optional[torch.Tensor] = None
-    pause_budget_debt: Optional[torch.Tensor] = None
 
     @property
     def backlog(self) -> torch.Tensor:

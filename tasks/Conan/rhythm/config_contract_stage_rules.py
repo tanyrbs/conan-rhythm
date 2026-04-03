@@ -9,15 +9,27 @@ from modules.Conan.rhythm.policy import (
     expected_cache_contract as build_expected_cache_contract,
     normalize_distill_surface,
     resolve_cumplan_lambda,
+    resolve_pause_boundary_weight,
 )
 from modules.Conan.rhythm.surface_metadata import RHYTHM_CACHE_VERSION
-from modules.Conan.rhythm.stages import resolve_runtime_dual_mode_teacher_enable
+from modules.Conan.rhythm.stages import normalize_rhythm_stage, resolve_runtime_dual_mode_teacher_enable
 
 from .config_contract_core import RhythmContractValidationResult
 
 
 def detect_rhythm_profile(hparams: Mapping[str, Any], config_path: str | None = None) -> str:
-    is_minimal_flag = bool(hparams.get("rhythm_minimal_v1_profile", False)) or "minimal_v1" in str(config_path or "").lower()
+    explicit_stage = hparams.get("rhythm_stage", None)
+    stage_is_minimal = False
+    if explicit_stage not in {None, ""}:
+        stage_is_minimal = normalize_rhythm_stage(explicit_stage) == "minimal_v1"
+    if stage_is_minimal:
+        return "minimal_v1"
+    config_name = str(config_path or "").lower()
+    is_minimal_flag = (
+        bool(hparams.get("rhythm_minimal_v1_profile", False))
+        or "minimal_v1" in config_name
+        or "cached_only" in config_name
+    )
     if (
         is_minimal_flag
         and not bool(hparams.get("rhythm_enable_dual_mode_teacher", False))
@@ -136,11 +148,14 @@ def validate_stage_contract(
     disable_mel_adv_when_retimed = bool(hparams.get("rhythm_disable_mel_adv_when_retimed", True))
     lambda_mel_adv = float(hparams.get("lambda_mel_adv", 0.0))
     lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
+    lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
     distill_allocation_weight = float(hparams.get("rhythm_distill_allocation_weight", 0.5))
     distill_prefix_weight = float(hparams.get("rhythm_distill_prefix_weight", 0.25))
     distill_speech_shape_weight = float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
     distill_pause_shape_weight = float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
+    plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
+    plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
     compact_joint_loss = bool(hparams.get("rhythm_compact_joint_loss", True))
     lambda_budget = float(hparams.get("lambda_rhythm_budget", 0.0))
     budget_raw_weight = float(hparams.get("rhythm_budget_raw_weight", 1.0))
@@ -158,6 +173,9 @@ def validate_stage_contract(
     source_boundary_scale_anneal_steps = int(hparams.get("rhythm_source_boundary_scale_anneal_steps", 20000) or 0)
     source_boundary_scale_warmup_steps = int(hparams.get("rhythm_source_boundary_scale_warmup_steps", 0) or 0)
     teacher_source_boundary_scale = float(hparams.get("rhythm_teacher_source_boundary_scale", source_boundary_scale))
+    pause_boundary_weight = float(resolve_pause_boundary_weight(hparams))
+    has_legacy_pause_boundary_weight = "rhythm_pause_exec_boundary_boost" in hparams
+    has_public_pause_boundary_weight = "rhythm_pause_boundary_weight" in hparams
     export_cache_audit_to_sample = bool(hparams.get("rhythm_export_cache_audit_to_sample", False))
     public_losses = list(hparams.get("rhythm_public_losses", []) or [])
     configured_cache_version = int(hparams.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
@@ -169,12 +187,36 @@ def validate_stage_contract(
     for name, value in {
         "rhythm_budget_raw_weight": budget_raw_weight,
         "rhythm_budget_exec_weight": budget_exec_weight,
+        "rhythm_plan_local_weight": plan_local_weight,
+        "rhythm_plan_cum_weight": plan_cum_weight,
+        "rhythm_pause_boundary_weight": pause_boundary_weight,
     }.items():
         if value < 0.0:
             errors.append(f"{name} must be >= 0.")
     if lambda_budget > 0.0 and (budget_raw_weight + budget_exec_weight) <= 0.0:
         errors.append(
             "lambda_rhythm_budget > 0 requires rhythm_budget_raw_weight + rhythm_budget_exec_weight > 0."
+        )
+    if lambda_plan > 0.0 and (plan_local_weight + plan_cum_weight) <= 0.0:
+        errors.append(
+            "lambda_rhythm_plan > 0 requires rhythm_plan_local_weight + rhythm_plan_cum_weight > 0."
+        )
+    if has_legacy_pause_boundary_weight and has_public_pause_boundary_weight:
+        legacy_pause_boundary = float(hparams.get("rhythm_pause_exec_boundary_boost", 0.75))
+        public_pause_boundary = float(hparams.get("rhythm_pause_boundary_weight", 0.35))
+        if abs(legacy_pause_boundary - public_pause_boundary) > 1e-8:
+            errors.append(
+                "rhythm_pause_exec_boundary_boost and rhythm_pause_boundary_weight are both set but disagree; "
+                "remove the legacy key."
+            )
+        else:
+            warnings.append(
+                "Both rhythm_pause_exec_boundary_boost and rhythm_pause_boundary_weight are set; "
+                "prefer rhythm_pause_boundary_weight and remove the legacy key."
+            )
+    elif has_legacy_pause_boundary_weight:
+        warnings.append(
+            "rhythm_pause_exec_boundary_boost is a legacy alias; prefer rhythm_pause_boundary_weight."
         )
     if retimed_target_mode not in {"cached", "online", "hybrid"}:
         errors.append(f"Unsupported rhythm_retimed_target_mode: {retimed_target_mode}")
@@ -218,6 +260,19 @@ def validate_stage_contract(
             "rhythm_distill_allocation_weight > 0 while shape distillation is also enabled; "
             "this double-constrains the same mass split and is not part of the maintained mainline."
         )
+    if lambda_plan > 0.0:
+        warnings.append(
+            "lambda_rhythm_plan > 0 re-enables the optional planner proxy loss; maintained mainline keeps it at 0."
+        )
+        if primary == "teacher":
+            warnings.append(
+                "lambda_rhythm_plan > 0 with rhythm_primary_target_surface: teacher duplicates teacher timing-shape supervision; "
+                "keep it for ablations only."
+            )
+        if lambda_distill > 0.0 and distill_allocation_weight > 0.0:
+            warnings.append(
+                "lambda_rhythm_plan > 0 together with distill allocation reintroduces duplicate total-allocation supervision."
+            )
     for name, value in {
         "rhythm_source_boundary_scale": source_boundary_scale,
         "rhythm_source_boundary_scale_train_start": source_boundary_scale_train_start,
@@ -269,6 +324,8 @@ def validate_stage_contract(
             errors.append("rhythm_strict_mainline requires rhythm_runtime_enable_learned_offline_teacher: false.")
         if lambda_teacher_aux > 0.0:
             errors.append("rhythm_strict_mainline requires lambda_rhythm_teacher_aux: 0.")
+        if lambda_plan > 0.0:
+            errors.append("rhythm_strict_mainline requires lambda_rhythm_plan: 0.")
         if teacher_as_main:
             errors.append("rhythm_strict_mainline requires rhythm_teacher_as_main: false.")
     if stage == "transitional":
@@ -291,6 +348,10 @@ def validate_stage_contract(
         warnings.append("Primary rhythm target surface is teacher but rhythm_binarize_teacher_targets is false.")
     if retimed_source == "teacher" and not binarize_teacher:
         errors.append("Teacher retimed targets require rhythm_binarize_teacher_targets: true.")
+    if stage in {"teacher_offline", "student_kd", "student_retimed"} and lambda_plan > 0.0:
+        warnings.append(
+            f"{stage} usually keeps lambda_rhythm_plan: 0; treat rhythm_plan as an ablation/debug term rather than the maintained objective."
+        )
 
     if stage == "teacher_offline":
         if strict_mainline:
@@ -378,6 +439,11 @@ def validate_stage_contract(
             warnings.append("student_kd usually keeps rhythm_distill_prefix_weight > 0.")
         if distill_allocation_weight > 0.0 and (distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0):
             warnings.append("student_kd maintained path should not enable allocation distill together with shape distill.")
+        if primary == "teacher" and distill == "cache" and lambda_distill > 0.0 and not strict_mainline:
+            warnings.append(
+                "student_kd reuses cached teacher surfaces for both primary supervision and distillation; "
+                "lambda_rhythm_distill therefore acts partly as extra teacher reweighting, not a fully independent KD branch."
+            )
         if lambda_teacher_aux > 0.0:
             errors.append("student_kd should keep lambda_rhythm_teacher_aux: 0.")
         if apply_train or apply_valid:
@@ -496,4 +562,3 @@ __all__ = [
     "validate_profile_contract",
     "validate_stage_contract",
 ]
-

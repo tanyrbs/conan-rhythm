@@ -33,7 +33,7 @@ def override_config(old_config: dict, new_config: dict):
             old_config[k] = v
 
 
-def set_hparams(config='', exp_name='', hparams_str='', print_hparams=True, global_hparams=True):
+def set_hparams(config='', exp_name='', hparams_str='', print_hparams=True, global_hparams=True, reset=False):
     if config == '' and exp_name == '':
         parser = argparse.ArgumentParser(description='')
         parser.add_argument('--config', type=str, default='',
@@ -50,7 +50,7 @@ def set_hparams(config='', exp_name='', hparams_str='', print_hparams=True, glob
         print("| Unknown hparams: ", unknown)
     else:
         args = Args(config=config, exp_name=exp_name, hparams=hparams_str,
-                    infer=False, validate=False, reset=False, debug=False, remove=False)
+                    infer=False, validate=False, reset=reset, debug=False, remove=False)
     global hparams
     assert args.config != '' or args.exp_name != ''
     if args.config != '':

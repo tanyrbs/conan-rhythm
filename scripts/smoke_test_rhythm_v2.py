@@ -500,8 +500,12 @@ if __name__ == '__main__':
     )
     assert "rhythm_distill_speech_shape" in loss_dict
     assert "rhythm_distill_pause_shape" in loss_dict
+    assert torch.isfinite(loss_dict["rhythm_plan_local"])
+    assert torch.isfinite(loss_dict["rhythm_plan"])
     assert torch.isfinite(loss_dict["rhythm_distill_speech_shape"])
     assert torch.isfinite(loss_dict["rhythm_distill_pause_shape"])
+    assert torch.isfinite(loss_dict["rhythm_distill_allocation"])
+    assert torch.isfinite(loss_dict["rhythm_total"])
     assert abs(float(loss_dict["rhythm_distill_pause_shape"].detach())) < 1e-6
 
     guidance = build_reference_guided_targets(

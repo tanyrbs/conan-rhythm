@@ -291,6 +291,13 @@ def attach_rhythm_outputs(
             ret[key] = ref_conditioning[key]
     ret["speech_budget_win"] = execution.planner.speech_budget_win
     ret["pause_budget_win"] = execution.planner.pause_budget_win
+    ret["raw_speech_budget_win"] = execution.planner.raw_speech_budget_win
+    ret["raw_pause_budget_win"] = execution.planner.raw_pause_budget_win
+    ret["effective_speech_budget_win"] = execution.planner.effective_speech_budget_win
+    ret["effective_pause_budget_win"] = execution.planner.effective_pause_budget_win
+    ret["feasible_speech_budget_delta"] = execution.planner.feasible_speech_budget_delta
+    ret["feasible_pause_budget_delta"] = execution.planner.feasible_pause_budget_delta
+    ret["feasible_total_budget_delta"] = execution.planner.feasible_total_budget_delta
     ret["dur_logratio_unit"] = execution.planner.dur_logratio_unit
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
     ret["dur_shape_unit"] = execution.planner.dur_shape_unit

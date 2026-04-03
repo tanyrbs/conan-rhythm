@@ -88,6 +88,12 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
 
 def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule:
     num_units = resolve_content_vocab_size(hparams)
+    emit_reference_sidecar = hparams.get(
+        'rhythm_emit_reference_sidecar',
+        hparams.get('rhythm_reference_emit_sidecar', None),
+    )
+    if emit_reference_sidecar is not None:
+        emit_reference_sidecar = bool(emit_reference_sidecar)
     return StreamingRhythmModule(
         num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
@@ -100,6 +106,8 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         slow_topk=int(hparams.get('rhythm_slow_topk', 6)),
         selector_cell_size=int(hparams.get('rhythm_selector_cell_size', 3)),
         trace_smooth_kernel=int(hparams.get('rhythm_trace_smooth_kernel', 5)),
+        maintained_stats_trace_only=bool(hparams.get('rhythm_maintained_stats_trace_only', True)),
+        emit_reference_sidecar=emit_reference_sidecar,
         max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),

@@ -296,7 +296,10 @@ class BaseBinarizer:
 
     @property
     def num_workers(self):
-        return int(os.getenv('N_PROC', hparams.get('N_PROC', os.cpu_count())))
+        workers = int(os.getenv('N_PROC', hparams.get('N_PROC', os.cpu_count())))
+        if os.name == 'nt':
+            return max(0, min(1, workers))
+        return workers
     
     def _word_encoder(self):
         fn = f"{hparams['binary_data_dir']}/word_set.json"
@@ -320,6 +323,18 @@ class BaseBinarizer:
 class VCBinarizer(BaseBinarizer):
     _spker_map_cache = None
     _spker_map_cache_path = None
+
+    @staticmethod
+    def _abort_empty_split(builder, *, data_dir: str, prefix: str, reason: str) -> None:
+        try:
+            builder.out_file.close()
+        except Exception:
+            pass
+        for suffix in (".data", ".idx", "_lengths.npy", "_spk_ids.npy"):
+            path = f"{data_dir}/{prefix}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+        raise RuntimeError(f"Binarization produced no valid items for split '{prefix}': {reason}")
 
     def __init__(self, processed_data_dir=None):
         super().__init__(processed_data_dir=processed_data_dir)
@@ -445,6 +460,13 @@ class VCBinarizer(BaseBinarizer):
             spk_ids.append(item['spk_id'])  # 👈 collect spk_id in consistent order
             total_sec += item['sec']
 
+        if len(lengths) <= 0:
+            self._abort_empty_split(
+                builder,
+                data_dir=data_dir,
+                prefix=prefix,
+                reason="all items failed during item processing",
+            )
 
         builder.finalize()
         np.save(f'{data_dir}/{prefix}_lengths.npy', np.array(lengths,  np.int32))

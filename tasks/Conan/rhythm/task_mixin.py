@@ -20,6 +20,7 @@ from tasks.Conan.rhythm.distill_confidence import (
 from tasks.Conan.rhythm.runtime_teacher_supervision import (
     build_runtime_teacher_supervision_targets as build_runtime_teacher_supervision_targets_helper,
 )
+from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
 from tasks.Conan.rhythm.runtime_modes import (
     build_rhythm_ref_conditioning,
     collect_planner_runtime_outputs,
@@ -253,6 +254,7 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _build_rhythm_target_build_config() -> RhythmTargetBuildConfig:
+        plan_local_weight, plan_cum_weight = RhythmConanTaskMixin._resolve_rhythm_plan_weights()
         return RhythmTargetBuildConfig(
             primary_target_surface=RhythmConanTaskMixin._resolve_rhythm_primary_target_surface(),
             distill_surface=RhythmConanTaskMixin._resolve_rhythm_distill_surface(),
@@ -263,12 +265,22 @@ class RhythmConanTaskMixin:
             distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
             distill_speech_shape_weight=float(hparams.get("rhythm_distill_speech_shape_weight", 0.0)),
             distill_pause_shape_weight=float(hparams.get("rhythm_distill_pause_shape_weight", 0.0)),
-            plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
-            plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            plan_local_weight=plan_local_weight,
+            plan_cum_weight=plan_cum_weight,
             pause_boundary_weight=RhythmConanTaskMixin._resolve_rhythm_pause_boundary_weight(),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+        )
+
+    @staticmethod
+    def _resolve_rhythm_plan_weights() -> tuple[float, float]:
+        lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+        if lambda_plan <= 0.0:
+            return 0.0, 0.0
+        return (
+            float(hparams.get("rhythm_plan_local_weight", 0.5)),
+            float(hparams.get("rhythm_plan_cum_weight", 1.0)),
         )
 
     @staticmethod
@@ -660,11 +672,12 @@ class RhythmConanTaskMixin:
                 output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv']
 
     def _build_runtime_teacher_supervision_targets(self, output, sample):
+        plan_local_weight, plan_cum_weight = self._resolve_rhythm_plan_weights()
         return build_runtime_teacher_supervision_targets_helper(
             output=output,
             sample=sample,
-            plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
-            plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            plan_local_weight=plan_local_weight,
+            plan_cum_weight=plan_cum_weight,
             pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
@@ -735,19 +748,14 @@ class RhythmConanTaskMixin:
             if teacher_bundle is not None:
                 teacher_execution, teacher_targets = teacher_bundle
                 teacher_losses = build_rhythm_loss_dict(teacher_execution, teacher_targets)
-                teacher_exec = (
-                    teacher_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
-                    + teacher_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
+                losses.update(
+                    build_runtime_teacher_aux_loss_dict(
+                        teacher_losses=teacher_losses,
+                        hparams=hparams,
+                        prefix_state_lambda=self._get_rhythm_prefix_state_lambda(),
+                        lambda_teacher_aux=lambda_teacher_aux,
+                    )
                 )
-                teacher_state = (
-                    teacher_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
-                    + teacher_losses["rhythm_prefix_state"] * self._get_rhythm_prefix_state_lambda()
-                )
-                teacher_aux = teacher_exec + teacher_state
-                losses["rhythm_distill"] = losses["rhythm_distill"] + lambda_teacher_aux * teacher_aux
-                losses["rhythm_teacher_aux_exec"] = teacher_exec.detach()
-                losses["rhythm_teacher_aux_state"] = teacher_state.detach()
-                losses["rhythm_teacher_aux"] = (lambda_teacher_aux * teacher_aux).detach()
 
     def _training_step(self, sample, batch_idx, optimizer_idx):
         loss_output = {}

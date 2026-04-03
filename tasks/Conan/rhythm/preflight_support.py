@@ -34,6 +34,22 @@ def _open_dataset(path_prefix: str):
     return IndexedDataset(path_prefix)
 
 
+def _inspect_indexed_split_files(path_prefix: str) -> list[str]:
+    issues: list[str] = []
+    idx_path = f"{path_prefix}.idx"
+    data_path = f"{path_prefix}.data"
+    lengths_path = f"{path_prefix}_lengths.npy"
+    if not os.path.exists(idx_path) or not os.path.exists(data_path):
+        return issues
+    if os.path.getsize(data_path) <= 0:
+        issues.append(f"Indexed dataset data file is empty at {data_path}.")
+    if os.path.getsize(idx_path) <= 0:
+        issues.append(f"Indexed dataset index file is empty at {idx_path}.")
+    if not os.path.exists(lengths_path):
+        issues.append(f"Missing lengths file for split at {lengths_path}.")
+    return issues
+
+
 def _collect_presence(ds: IndexedDataset, limit: int) -> tuple[list[dict], Counter, list[str]]:
     items: list[dict] = []
     counts: Counter[str] = Counter()
@@ -181,6 +197,7 @@ def main():
         hparams_str=hparams_str,
         global_hparams=True,
         print_hparams=False,
+        reset=True,
     )
 
     evaluation = collect_config_contract_evaluation(
@@ -216,6 +233,7 @@ def main():
 
     for split in args.splits:
         split_path = os.path.join(binary_dir, split)
+        errors.extend(_inspect_indexed_split_files(split_path))
         ds = _open_dataset(split_path)
         if ds is None:
             errors.append(f"Missing indexed dataset for split '{split}' at {split_path}.data/.idx")

@@ -13,6 +13,31 @@ def _safe_mean(x: torch.Tensor) -> torch.Tensor:
     return x.float().mean()
 
 
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    values = values.float()
+    if values.dim() <= 1:
+        return _safe_mean(values)
+    mask = mask.float()
+    while mask.dim() < values.dim():
+        mask = mask.unsqueeze(-1)
+    reduce_dims = tuple(range(1, values.dim()))
+    masked_sum = (values * mask).sum(dim=reduce_dims)
+    masked_denom = mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return (masked_sum / masked_denom).mean()
+
+
+def _masked_distribution(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    values = values.float().clamp_min(0.0)
+    mask = mask.float()
+    while mask.dim() < values.dim():
+        mask = mask.unsqueeze(-1)
+    reduce_dims = tuple(range(1, values.dim()))
+    masked_values = values * mask
+    total = masked_values.sum(dim=reduce_dims, keepdim=True)
+    uniform = mask / mask.sum(dim=reduce_dims, keepdim=True).clamp_min(1.0)
+    return torch.where(total > 1e-6, masked_values / total.clamp_min(1e-6), uniform)
+
+
 def _masked_l1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     while mask.dim() < pred.dim():
@@ -102,6 +127,17 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     raw_pause_budget = getattr(planner, "raw_pause_budget_win", planner.pause_budget_win).float().squeeze(-1)
     effective_speech_budget = getattr(planner, "effective_speech_budget_win", planner.speech_budget_win).float().squeeze(-1)
     effective_pause_budget = getattr(planner, "effective_pause_budget_win", planner.pause_budget_win).float().squeeze(-1)
+    raw_total_budget = (raw_speech_budget + raw_pause_budget).clamp_min(1e-6)
+    effective_total_budget = (effective_speech_budget + effective_pause_budget).clamp_min(1e-6)
+    raw_exec_gap = (effective_speech_budget - raw_speech_budget).abs() + (
+        effective_pause_budget - raw_pause_budget
+    ).abs()
+    feasible_total_budget_delta = getattr(planner, "feasible_total_budget_delta", None)
+    if feasible_total_budget_delta is None:
+        feasible_total_budget_delta = raw_total_budget.new_zeros(raw_total_budget.shape)
+    else:
+        feasible_total_budget_delta = feasible_total_budget_delta.float().reshape(feasible_total_budget_delta.size(0), -1)
+        feasible_total_budget_delta = feasible_total_budget_delta.mean(dim=1).clamp_min(0.0)
     commit_ratio = execution.commit_frontier.float() / visible_units
     pred_prefix_clock, pred_prefix_backlog = build_prefix_state_from_exec_torch(
         speech_exec=execution.speech_duration_exec,
@@ -115,6 +151,15 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     ).clamp_min(1.0)
     final_indices = (visible_units.long() - 1).clamp_min(0).unsqueeze(1)
     final_prefix_clock = pred_prefix_clock.gather(1, final_indices).squeeze(1)
+    pause_shape_distribution = _masked_distribution(planner.pause_shape_unit.float(), unit_mask)
+    pause_shape_entropy = -(
+        pause_shape_distribution.clamp_min(1e-6) * pause_shape_distribution.clamp_min(1e-6).log()
+    ).sum(dim=1)
+    pause_shape_entropy_norm = torch.where(
+        visible_units > 1.0,
+        pause_shape_entropy / visible_units.float().log().clamp_min(1e-6),
+        torch.zeros_like(visible_units),
+    )
 
     metrics = {
         "rhythm_metric_speech_budget_mean": _safe_mean(effective_speech_budget),
@@ -123,14 +168,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_raw_pause_budget_mean": _safe_mean(raw_pause_budget),
         "rhythm_metric_effective_speech_budget_mean": _safe_mean(effective_speech_budget),
         "rhythm_metric_effective_pause_budget_mean": _safe_mean(effective_pause_budget),
-        "rhythm_metric_dur_shape_abs_mean": _safe_mean(planner.dur_shape_unit.abs()),
-        "rhythm_metric_pause_shape_entropy": _safe_mean(
-            -(
-                planner.pause_shape_unit.float().clamp_min(1e-6)
-                * planner.pause_shape_unit.float().clamp_min(1e-6).log()
-            ).sum(dim=1)
+        "rhythm_metric_budget_raw_exec_gap_mean": _safe_mean(raw_exec_gap),
+        "rhythm_metric_budget_raw_exec_gap_ratio_mean": _safe_mean(
+            raw_exec_gap / raw_total_budget.clamp_min(1.0)
         ),
-        "rhythm_metric_boundary_score_mean": _safe_mean(planner.boundary_score_unit.float()),
+        "rhythm_metric_budget_repair_ratio_mean": _safe_mean(
+            feasible_total_budget_delta / anchor_total.clamp_min(1.0)
+        ),
+        "rhythm_metric_budget_repair_active_rate": _safe_mean(
+            (feasible_total_budget_delta > 1e-6).float()
+        ),
+        "rhythm_metric_dur_shape_abs_mean": _masked_mean(planner.dur_shape_unit.abs(), unit_mask),
+        "rhythm_metric_pause_shape_entropy": _safe_mean(pause_shape_entropy),
+        "rhythm_metric_pause_shape_entropy_norm": _safe_mean(pause_shape_entropy_norm),
+        "rhythm_metric_boundary_score_mean": _masked_mean(planner.boundary_score_unit.float(), unit_mask),
         "rhythm_metric_speech_total_mean": _safe_mean(speech_total),
         "rhythm_metric_pause_total_mean": _safe_mean(pause_total),
         "rhythm_metric_pause_share_mean": _safe_mean(pause_total / total_exec),
@@ -139,10 +190,10 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_expand_ratio_mean": _safe_mean(speech_total / anchor_total.clamp_min(1.0)),
         "rhythm_metric_commit_ratio_mean": _safe_mean(commit_ratio),
         "rhythm_metric_budget_violation_mean": _safe_mean(
-            ((speech_total + pause_total) - (effective_speech_budget + effective_pause_budget)).abs()
+            ((speech_total + pause_total) - effective_total_budget).abs()
         ),
-        "rhythm_metric_prefix_clock_abs_mean": _safe_mean(pred_prefix_clock.abs()),
-        "rhythm_metric_prefix_backlog_mean": _safe_mean(pred_prefix_backlog),
+        "rhythm_metric_prefix_clock_abs_mean": _masked_mean(pred_prefix_clock.abs(), unit_mask),
+        "rhythm_metric_prefix_backlog_mean": _masked_mean(pred_prefix_backlog, unit_mask),
         "rhythm_metric_prefix_backlog_max": pred_prefix_backlog.max(),
         "rhythm_metric_deadline_final_abs_mean": _safe_mean(final_prefix_clock.abs()),
     }
@@ -196,7 +247,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     )
     source_boundary_cue = output.get("source_boundary_cue")
     if source_boundary_cue is not None:
-        metrics["rhythm_metric_source_boundary_mean"] = _safe_mean(source_boundary_cue.float())
+        metrics["rhythm_metric_source_boundary_mean"] = _masked_mean(source_boundary_cue.float(), unit_mask)
         metrics["rhythm_metric_source_boundary_pause_corr"] = _masked_corr(
             blank_exec.float(),
             source_boundary_cue.float(),
@@ -372,6 +423,13 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "L_budget": "rhythm_metric_alias_L_budget",
         "L_cumplan": "rhythm_metric_alias_L_cumplan",
         "L_prefix_state": "rhythm_metric_alias_L_prefix_state",
+        "L_plan": "rhythm_metric_alias_L_plan",
+        "L_plan_local": "rhythm_metric_alias_L_plan_local",
+        "L_plan_cum": "rhythm_metric_alias_L_plan_cum",
+        "L_guidance": "rhythm_metric_alias_L_guidance",
+        "L_kd": "rhythm_metric_alias_L_kd",
+        "L_kd_student": "rhythm_metric_alias_L_kd_student",
+        "L_teacher_aux": "rhythm_metric_alias_L_teacher_aux",
         "L_rhythm_exec": "rhythm_metric_alias_L_rhythm_exec",
         "L_stream_state": "rhythm_metric_alias_L_stream_state",
         "L_base": "rhythm_metric_alias_L_base",
