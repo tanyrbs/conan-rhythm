@@ -6,6 +6,8 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
+
 
 @dataclass
 class RhythmLossTargets:
@@ -184,9 +186,7 @@ def _resolve_pause_exec_mask(
     planner = execution.planner
     boundary_hint = getattr(planner, "source_boundary_cue", None)
     if boundary_hint is None:
-        boundary_hint = getattr(planner, "boundary_score_unit", None)
-        if boundary_hint is None:
-            boundary_hint = getattr(planner, "boundary_latent", None)
+        boundary_hint = resolve_boundary_score_unit(planner)
         if boundary_hint is not None:
             boundary_hint = boundary_hint.detach()
     if boundary_hint is None:
@@ -337,7 +337,10 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             targets.distill_allocation_confidence,
             targets.distill_confidence,
         )
-        distill_shape_weight = distill_allocation_weight
+        distill_shape_weight = _resolve_component_batch_weight(
+            targets.distill_allocation_confidence,
+            targets.distill_confidence,
+        )
         l_distill_exec = _masked_log_huber(
             execution.speech_duration_exec,
             targets.distill_speech_tgt.float(),
@@ -385,57 +388,40 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                 )
             l_distill = l_distill + float(targets.distill_prefix_weight) * l_distill_prefix
         if float(targets.distill_allocation_weight) > 0.0:
+            allocation_target = targets.distill_allocation_tgt
+            if allocation_target is None:
+                allocation_target = targets.distill_speech_tgt.float() + targets.distill_pause_tgt.float()
+            l_distill_allocation = _batch_kl_div(
+                execution.speech_duration_exec + blank_exec,
+                allocation_target.float(),
+                unit_mask,
+                batch_weight=distill_allocation_weight,
+            )
+            l_distill = l_distill + float(targets.distill_allocation_weight) * l_distill_allocation
+        if float(targets.distill_speech_shape_weight) > 0.0:
             speech_shape_weight = _merge_batch_weight(
-                distill_allocation_weight,
+                distill_shape_weight,
                 _positive_mass_gate(targets.distill_speech_tgt.float(), unit_mask),
                 execution.speech_duration_exec,
             )
-            pause_shape_weight = _merge_batch_weight(
-                distill_allocation_weight,
-                _positive_mass_gate(targets.distill_pause_tgt.float(), unit_mask),
-                blank_exec,
-            )
-            if speech_shape_weight is not None:
-                l_distill_speech_shape = _batch_kl_div(
-                    execution.speech_duration_exec,
-                    targets.distill_speech_tgt.float(),
-                    unit_mask,
-                    batch_weight=speech_shape_weight,
-                )
-            if pause_shape_weight is not None:
-                l_distill_pause_shape = _batch_kl_div(
-                    blank_exec,
-                    targets.distill_pause_tgt.float(),
-                    unit_mask,
-                    batch_weight=pause_shape_weight,
-                )
-            l_distill_allocation = l_distill_speech_shape + l_distill_pause_shape
-            if (
-                targets.distill_allocation_tgt is not None
-                and speech_shape_weight is None
-                and pause_shape_weight is None
-            ):
-                l_distill_allocation = _batch_kl_div(
-                    execution.speech_duration_exec + blank_exec,
-                    targets.distill_allocation_tgt.float(),
-                    unit_mask,
-                    batch_weight=distill_allocation_weight,
-                )
-            l_distill = l_distill + float(targets.distill_allocation_weight) * l_distill_allocation
-        if float(targets.distill_speech_shape_weight) > 0.0:
             l_distill_speech_shape = _batch_kl_div(
                 execution.speech_duration_exec,
                 targets.distill_speech_tgt.float(),
                 unit_mask,
-                batch_weight=distill_shape_weight,
+                batch_weight=speech_shape_weight,
             )
             l_distill = l_distill + float(targets.distill_speech_shape_weight) * l_distill_speech_shape
         if float(targets.distill_pause_shape_weight) > 0.0:
+            pause_shape_weight = _merge_batch_weight(
+                distill_shape_weight,
+                _positive_mass_gate(targets.distill_pause_tgt.float(), unit_mask),
+                blank_exec,
+            )
             l_distill_pause_shape = _batch_kl_div(
                 blank_exec,
                 targets.distill_pause_tgt.float(),
                 unit_mask,
-                batch_weight=distill_shape_weight,
+                batch_weight=pause_shape_weight,
             )
             l_distill = l_distill + float(targets.distill_pause_shape_weight) * l_distill_pause_shape
     else:

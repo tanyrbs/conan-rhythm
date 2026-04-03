@@ -129,6 +129,14 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     metrics = {
         "rhythm_metric_speech_budget_mean": _safe_mean(planner.speech_budget_win.squeeze(-1)),
         "rhythm_metric_pause_budget_mean": _safe_mean(planner.pause_budget_win.squeeze(-1)),
+        "rhythm_metric_dur_shape_abs_mean": _safe_mean(planner.dur_shape_unit.abs()),
+        "rhythm_metric_pause_shape_entropy": _safe_mean(
+            -(
+                planner.pause_shape_unit.float().clamp_min(1e-6)
+                * planner.pause_shape_unit.float().clamp_min(1e-6).log()
+            ).sum(dim=1)
+        ),
+        "rhythm_metric_boundary_score_mean": _safe_mean(planner.boundary_score_unit.float()),
         "rhythm_metric_speech_total_mean": _safe_mean(speech_total),
         "rhythm_metric_pause_total_mean": _safe_mean(pause_total),
         "rhythm_metric_pause_share_mean": _safe_mean(pause_total / total_exec),

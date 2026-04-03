@@ -43,6 +43,7 @@ from modules.Conan.rhythm.policy import (
     should_optimize_render_params,
     use_strict_mainline,
 )
+from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
 from modules.Conan.rhythm.stages import (
     resolve_runtime_dual_mode_teacher_enable,
 )
@@ -676,32 +677,15 @@ class RhythmConanTaskMixin:
         speech_budget = speech_exec.float().sum(dim=1, keepdim=True)
         pause_budget = blank_exec.float().sum(dim=1, keepdim=True)
         zero_delta = speech_budget.new_zeros(speech_budget.shape)
+        boundary_score = resolve_boundary_score_unit(planner, fallback=speech_exec.new_zeros(speech_exec.shape))
+        if torch.is_tensor(boundary_score):
+            boundary_score = boundary_score[:, :teacher_units]
         planner_view = SimpleNamespace(
             speech_budget_win=speech_budget,
             pause_budget_win=pause_budget,
             blank_budget_win=pause_budget,
-            boundary_score_unit=(
-                planner.boundary_score_unit[:, :teacher_units]
-                if planner is not None and torch.is_tensor(getattr(planner, "boundary_score_unit", None))
-                else planner.boundary_latent[:, :teacher_units]
-                if planner is not None and torch.is_tensor(getattr(planner, "boundary_latent", None))
-                else getattr(planner, "boundary_score_unit", None)
-                if planner is not None and getattr(planner, "boundary_score_unit", None) is not None
-                else getattr(planner, "boundary_latent", None)
-                if planner is not None
-                else speech_exec.new_zeros(speech_exec.shape)
-            ),
-            boundary_latent=(
-                planner.boundary_score_unit[:, :teacher_units]
-                if planner is not None and torch.is_tensor(getattr(planner, "boundary_score_unit", None))
-                else planner.boundary_latent[:, :teacher_units]
-                if planner is not None and torch.is_tensor(getattr(planner, "boundary_latent", None))
-                else getattr(planner, "boundary_score_unit", None)
-                if planner is not None and getattr(planner, "boundary_score_unit", None) is not None
-                else getattr(planner, "boundary_latent", None)
-                if planner is not None
-                else speech_exec.new_zeros(speech_exec.shape)
-            ),
+            boundary_score_unit=boundary_score,
+            boundary_latent=boundary_score,
             source_boundary_cue=(
                 planner.source_boundary_cue[:, :teacher_units]
                 if planner is not None and torch.is_tensor(getattr(planner, "source_boundary_cue", None))

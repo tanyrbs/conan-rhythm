@@ -54,6 +54,18 @@ class RhythmPlannerOutputs:
         return self.pause_budget_win
 
     @property
+    def dur_shape_unit(self) -> torch.Tensor:
+        """Planner-facing alias used by the weak-factorization mainline."""
+
+        return self.dur_logratio_unit
+
+    @property
+    def pause_shape_unit(self) -> torch.Tensor:
+        """Planner-facing alias used by the weak-factorization mainline."""
+
+        return self.pause_weight_unit
+
+    @property
     def boundary_latent(self) -> torch.Tensor:
         """Backward-compatible alias for legacy call sites/checkpoints."""
 

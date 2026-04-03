@@ -85,6 +85,17 @@ def compose_boundary_score_unit(
     return score.clamp(0.0, 1.0) * unit_mask
 
 
+def resolve_boundary_score_unit(planner, fallback: torch.Tensor | None = None) -> torch.Tensor | None:
+    if planner is None:
+        return fallback
+    boundary_score = getattr(planner, "boundary_score_unit", None)
+    if boundary_score is None:
+        boundary_score = getattr(planner, "boundary_latent", None)
+    if boundary_score is None:
+        return fallback
+    return boundary_score
+
+
 def build_deterministic_boundary_score(
     *,
     source_boundary_cue: torch.Tensor | None,

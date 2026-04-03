@@ -6,6 +6,7 @@ import torch
 
 from .frame_plan import build_frame_plan, build_interleaved_blank_slot_schedule
 from .renderer import render_rhythm_sequence
+from .source_boundary import resolve_boundary_score_unit
 
 
 def resolve_content_lengths(content: torch.Tensor, content_lengths: torch.Tensor | None = None) -> torch.Tensor:
@@ -283,9 +284,9 @@ def attach_rhythm_outputs(
     ret["pause_budget_win"] = execution.planner.pause_budget_win
     ret["dur_logratio_unit"] = execution.planner.dur_logratio_unit
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
-    boundary_score_unit = getattr(execution.planner, "boundary_score_unit", None)
-    if boundary_score_unit is None:
-        boundary_score_unit = getattr(execution.planner, "boundary_latent", None)
+    ret["dur_shape_unit"] = execution.planner.dur_shape_unit
+    ret["pause_shape_unit"] = execution.planner.pause_shape_unit
+    boundary_score_unit = resolve_boundary_score_unit(execution.planner)
     ret["boundary_score_unit"] = boundary_score_unit
     ret["boundary_latent"] = boundary_score_unit
     ret["source_boundary_cue"] = execution.planner.source_boundary_cue

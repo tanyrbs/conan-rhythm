@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from .contracts import RhythmExecution, RhythmPlannerOutputs, StreamingRhythmState
 from .frame_plan import build_frame_plan_from_execution, build_interleaved_blank_slot_schedule
+from .source_boundary import resolve_boundary_score_unit
 
 
 @dataclass
@@ -550,9 +551,7 @@ class StreamingRhythmProjector(nn.Module):
         )
         feasible_speech_budget_delta = (speech_budget_win - planner.speech_budget_win.float()).clamp_min(0.0)
         feasible_pause_budget_delta = (pause_budget_win - planner.pause_budget_win.float()).clamp_min(0.0)
-        planner_boundary_score = getattr(planner, "boundary_score_unit", None)
-        if planner_boundary_score is None:
-            planner_boundary_score = getattr(planner, "boundary_latent", boundary_score_unit)
+        planner_boundary_score = resolve_boundary_score_unit(planner, fallback=boundary_score_unit)
         execution_planner = RhythmPlannerOutputs(
             speech_budget_win=speech_budget_win,
             pause_budget_win=pause_budget_win,

@@ -13,6 +13,16 @@ from .contracts import (
     StreamingRhythmState,
 )
 from .controller import UnitRedistributionHead, WindowBudgetController
+from .factorization import (
+    COMPACT_REFERENCE_KEYS,
+    PLANNER_SURFACE_KEYS,
+    CompactPlannerIntervention,
+    apply_compact_reference_intervention,
+    clone_reference_conditioning,
+    collect_planner_surface_bundle,
+    compute_surface_distance_report,
+    extract_compact_reference_contract,
+)
 from .frame_plan import (
     RhythmFramePlan,
     build_frame_plan,
@@ -61,7 +71,7 @@ from .stages import (
     resolve_runtime_offline_teacher_enable,
     resolve_teacher_as_main,
 )
-from .source_boundary import build_source_boundary_cue, compose_boundary_score_unit
+from .source_boundary import build_source_boundary_cue, compose_boundary_score_unit, resolve_boundary_score_unit
 from .supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
@@ -110,12 +120,16 @@ __all__ = [
     'PLANNER_REF_STATS_KEYS',
     'PLANNER_REF_TRACE_KEYS',
     'MonotonicRhythmScheduler',
+    'COMPACT_REFERENCE_KEYS',
     'ReferenceSelection',
     'ReferenceSelector',
     'ReferenceRhythmEncoder',
     'RefRhythmDescriptor',
     'UnitRedistributionHead',
     'WindowBudgetController',
+    'PLANNER_SURFACE_KEYS',
+    'CompactPlannerIntervention',
+    'apply_compact_reference_intervention',
     'attach_rhythm_outputs',
     'build_content_nonpadding',
     'build_frame_plan',
@@ -144,7 +158,11 @@ __all__ = [
     'build_reference_teacher_targets',
     'build_source_phrase_cache',
     'build_source_rhythm_cache',
+    'clone_reference_conditioning',
+    'collect_planner_surface_bundle',
+    'compute_surface_distance_report',
     'expected_cache_contract',
+    'extract_compact_reference_contract',
     'exports_streaming_offline_sidecars',
     'normalize_distill_surface',
     'normalize_primary_target_surface',
@@ -183,6 +201,7 @@ __all__ = [
     'StreamingUnitizerState',
     'build_source_boundary_cue',
     'compose_boundary_score_unit',
+    'resolve_boundary_score_unit',
     'detect_rhythm_stage',
     'build_compressed_sequence',
     'compress_token_sequence',

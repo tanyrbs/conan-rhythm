@@ -4,6 +4,7 @@ See also:
 
 - `docs/rhythm_module_vision.md`
 - `docs/rhythm_supervision_policy.md`
+- `docs/rhythm_weak_factorization_mainline.md`
 
 ## Stage 0: Structural smoke / integration
 
