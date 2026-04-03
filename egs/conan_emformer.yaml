@@ -160,7 +160,7 @@ silent_token: 57
 content_embedding_dim: 102
 
 # Emformer-related parameters
-emformer_ckpt: checkpoints/emformer_test2
+emformer_ckpt: checkpoints/Emformer
 emformer_layers: 6
 chunk_size: 80
 right_context: 2
