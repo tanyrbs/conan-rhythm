@@ -11,12 +11,27 @@ from .reference_encoder import (
 from .reference_selector import ReferenceSelector
 
 
-class RefRhythmDescriptor(nn.Module):
-    """Minimal explicit rhythm descriptor.
+PLANNER_REF_STATS_KEYS = (
+    "global_rate",
+    "pause_ratio",
+)
 
-    Exposes a smaller, more interpretable surface on top of the underlying
-    reference rhythm encoder while keeping the cached `ref_rhythm_stats` and
-    `ref_rhythm_trace` contract for compatibility.
+PLANNER_REF_TRACE_KEYS = (
+    "local_rate_trace",
+    "boundary_trace",
+)
+
+
+class RefRhythmDescriptor(nn.Module):
+    """Reference descriptor with a compact planner-facing contract.
+
+    Cache compatibility is preserved through:
+      - ref_rhythm_stats [B, 6]
+      - ref_rhythm_trace [B, bins, 5]
+
+    The maintained planner consumes only:
+      - planner_ref_stats = [global_rate, pause_ratio]
+      - planner_ref_trace = [local_rate_trace, boundary_trace]
     """
 
     def __init__(
@@ -86,6 +101,23 @@ class RefRhythmDescriptor(nn.Module):
         return torch.minimum(phase_ptr, phase_ptr.new_full(phase_ptr.shape, max_start))
 
     @staticmethod
+    def _compact_slow_memory(slow_memory: torch.Tensor) -> torch.Tensor:
+        if slow_memory.dim() != 3:
+            return slow_memory
+        if slow_memory.size(-1) >= 3:
+            return torch.cat([slow_memory[:, :, 1:2], slow_memory[:, :, 2:3]], dim=-1)
+        if slow_memory.size(-1) == 2:
+            return slow_memory
+        raise ValueError(f"Unexpected slow rhythm memory shape: {tuple(slow_memory.shape)}")
+
+    @staticmethod
+    def _weighted_summary(memory: torch.Tensor, score_weight: torch.Tensor) -> torch.Tensor:
+        if memory.dim() == 2:
+            return memory
+        weight = score_weight.clamp_min(0.0).unsqueeze(-1)
+        return (memory * (1.0 + weight)).sum(dim=1) / (1.0 + weight).sum(dim=1).clamp_min(1e-6)
+
+    @staticmethod
     def from_stats_trace(
         ref_rhythm_stats: torch.Tensor,
         ref_rhythm_trace: torch.Tensor,
@@ -98,6 +130,8 @@ class RefRhythmDescriptor(nn.Module):
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
         boundary_trace = ref_rhythm_trace[:, :, 2:3]
+        planner_ref_stats = torch.cat([global_rate, pause_ratio], dim=-1)
+        planner_ref_trace = torch.cat([local_rate_trace, boundary_trace], dim=-1)
         out = {
             "ref_rhythm_stats": ref_rhythm_stats,
             "ref_rhythm_trace": ref_rhythm_trace,
@@ -105,13 +139,19 @@ class RefRhythmDescriptor(nn.Module):
             "pause_ratio": pause_ratio,
             "local_rate_trace": local_rate_trace,
             "boundary_trace": boundary_trace,
+            "planner_ref_stats": planner_ref_stats,
+            "planner_ref_trace": planner_ref_trace,
         }
         if not include_sidecar:
             return out
         if selector is None:
             slow_memory = ref_rhythm_trace
-            slow_indices = torch.arange(ref_rhythm_trace.size(1), device=ref_rhythm_trace.device)[None, :].expand(ref_rhythm_trace.size(0), -1)
+            slow_indices = torch.arange(ref_rhythm_trace.size(1), device=ref_rhythm_trace.device)[None, :].expand(
+                ref_rhythm_trace.size(0), -1
+            )
             slow_scores = boundary_trace.squeeze(-1)
+            slow_starts = slow_indices
+            slow_ends = slow_indices
         else:
             selection = selector(ref_rhythm_trace)
             slow_memory = selection.slow_rhythm_memory
@@ -119,19 +159,15 @@ class RefRhythmDescriptor(nn.Module):
             slow_scores = selection.slow_rhythm_scores
             slow_starts = selection.slow_rhythm_starts
             slow_ends = selection.slow_rhythm_ends
-        score_weight = slow_scores.clamp_min(0.0)
-        if slow_memory.dim() == 3:
-            weight = score_weight.unsqueeze(-1)
-            slow_summary = (slow_memory * (1.0 + weight)).sum(dim=1) / (1.0 + weight).sum(dim=1).clamp_min(1e-6)
-        else:
-            slow_summary = slow_memory
-        if selector is None:
-            slow_starts = slow_indices
-            slow_ends = slow_indices
+        slow_summary = RefRhythmDescriptor._weighted_summary(slow_memory, slow_scores)
+        planner_slow_memory = RefRhythmDescriptor._compact_slow_memory(slow_memory)
+        planner_slow_summary = RefRhythmDescriptor._weighted_summary(planner_slow_memory, slow_scores)
         out.update(
             {
                 "slow_rhythm_memory": slow_memory,
                 "slow_rhythm_summary": slow_summary,
+                "planner_slow_rhythm_memory": planner_slow_memory,
+                "planner_slow_rhythm_summary": planner_slow_summary,
                 "selector_meta_indices": slow_indices,
                 "selector_meta_scores": slow_scores,
                 "selector_meta_starts": slow_starts,
@@ -161,6 +197,24 @@ class RefRhythmDescriptor(nn.Module):
         effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
             ref_conditioning["ref_rhythm_trace"],
+            phase_ptr=self._phase_to_trace_start(phase_ptr, effective_horizon),
+            window_size=window_size,
+            horizon=effective_horizon,
+            visible_sizes=visible_sizes,
+        )
+
+    def sample_planner_trace_window(
+        self,
+        ref_conditioning: dict[str, torch.Tensor],
+        phase_ptr: torch.Tensor,
+        window_size: int,
+        *,
+        horizon: float | None = None,
+        visible_sizes: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
+        return self.encoder.sample_trace_window(
+            ref_conditioning["planner_ref_trace"],
             phase_ptr=self._phase_to_trace_start(phase_ptr, effective_horizon),
             window_size=window_size,
             horizon=effective_horizon,

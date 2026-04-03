@@ -45,7 +45,7 @@ class RhythmPlannerOutputs:
     total_budget_win: torch.Tensor
     pause_share_win: torch.Tensor
     anchor_gate: torch.Tensor
-    boundary_latent: torch.Tensor
+    boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
     source_boundary_cue: Optional[torch.Tensor] = None
 
@@ -54,9 +54,10 @@ class RhythmPlannerOutputs:
         return self.pause_budget_win
 
     @property
-    def boundary_score_unit(self) -> torch.Tensor:
-        # boundary_latent is kept as a compatibility alias for older call sites/checkpoints.
-        return self.boundary_latent
+    def boundary_latent(self) -> torch.Tensor:
+        """Backward-compatible alias for legacy call sites/checkpoints."""
+
+        return self.boundary_score_unit
 
 
 @dataclass

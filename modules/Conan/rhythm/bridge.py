@@ -137,8 +137,10 @@ def run_rhythm_frontend(
             content_lengths=resolved_lengths,
             mark_last_open=bool(infer),
         )
-    if rhythm_ref_conditioning is None:
-        rhythm_ref_conditioning = rhythm_module.encode_reference(ref)
+    rhythm_ref_conditioning = rhythm_module.build_reference_conditioning(
+        ref_conditioning=rhythm_ref_conditioning,
+        ref_mel=ref,
+    )
     if runtime_teacher_as_main:
         execution, offline_confidence = rhythm_module.forward_teacher(
             content_units=unit_batch.content_units,
@@ -270,11 +272,22 @@ def attach_rhythm_outputs(
     ret["rhythm_ref_conditioning"] = ref_conditioning
     ret["ref_rhythm_stats"] = ref_conditioning["ref_rhythm_stats"]
     ret["ref_rhythm_trace"] = ref_conditioning["ref_rhythm_trace"]
+    if "planner_ref_stats" in ref_conditioning:
+        ret["planner_ref_stats"] = ref_conditioning["planner_ref_stats"]
+    if "planner_ref_trace" in ref_conditioning:
+        ret["planner_ref_trace"] = ref_conditioning["planner_ref_trace"]
+    for key in ("global_rate", "pause_ratio", "local_rate_trace", "boundary_trace"):
+        if key in ref_conditioning:
+            ret[key] = ref_conditioning[key]
     ret["speech_budget_win"] = execution.planner.speech_budget_win
     ret["pause_budget_win"] = execution.planner.pause_budget_win
     ret["dur_logratio_unit"] = execution.planner.dur_logratio_unit
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
-    ret["boundary_latent"] = execution.planner.boundary_latent
+    boundary_score_unit = getattr(execution.planner, "boundary_score_unit", None)
+    if boundary_score_unit is None:
+        boundary_score_unit = getattr(execution.planner, "boundary_latent", None)
+    ret["boundary_score_unit"] = boundary_score_unit
+    ret["boundary_latent"] = boundary_score_unit
     ret["source_boundary_cue"] = execution.planner.source_boundary_cue
     ret["speech_duration_exec"] = execution.speech_duration_exec
     ret["blank_duration_exec"] = execution.blank_duration_exec

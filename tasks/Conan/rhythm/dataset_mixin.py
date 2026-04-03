@@ -9,6 +9,8 @@ import hashlib
 import torch
 from utils.commons.dataset_utils import collate_1d_or_2d
 import numpy as np
+from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
+from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
@@ -195,6 +197,20 @@ class RhythmConanDatasetMixin:
             policy = build_rhythm_hparams_policy(self.hparams)
             self._cached_rhythm_policy = policy
         return policy
+
+    def _rhythm_cache_contract(self) -> RhythmDatasetCacheContract:
+        contract = getattr(self, "_cached_rhythm_cache_contract", None)
+        if contract is None:
+            contract = RhythmDatasetCacheContract(self)
+            self._cached_rhythm_cache_contract = contract
+        return contract
+
+    def _rhythm_sample_assembler(self) -> RhythmDatasetSampleAssembler:
+        assembler = getattr(self, "_cached_rhythm_sample_assembler", None)
+        if assembler is None:
+            assembler = RhythmDatasetSampleAssembler(self)
+            self._cached_rhythm_sample_assembler = assembler
+        return assembler
 
     def _resolve_primary_target_surface(self) -> str:
         return self._rhythm_policy().primary_target_surface
@@ -501,314 +517,54 @@ class RhythmConanDatasetMixin:
         return int(self.hparams.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
 
     def _materialize_rhythm_cache_compat(self, item, *, item_name: str):
-        adapted = materialize_rhythm_cache_compat_fields(item)
-        if adapted is None or "rhythm_cache_version" not in adapted:
-            return adapted
-        found = int(self._extract_scalar(adapted["rhythm_cache_version"]))
-        expected = self._expected_rhythm_cache_version()
-        if found == expected or not is_rhythm_cache_version_compatible(found, expected):
-            return adapted
-        warned = getattr(self, "_rhythm_cache_compat_warned", None)
-        if warned is None:
-            warned = set()
-            self._rhythm_cache_compat_warned = warned
-        warn_key = (found, expected)
-        if warn_key not in warned:
-            print(
-                f"[rhythm-cache-compat] using compatible cached rhythm metadata "
-                f"version {found} for expected v{expected}; item={item_name}. "
-                "Re-binarizing to the maintained cache version is still recommended."
-            )
-            warned.add(warn_key)
-        return adapted
+        return self._rhythm_cache_contract().materialize_rhythm_cache_compat(
+            item,
+            item_name=item_name,
+        )
 
     @staticmethod
     def _extract_scalar(value):
-        arr = np.asarray(value)
-        if arr.size <= 0:
-            raise RuntimeError("Rhythm cache metadata contains an empty scalar field.")
-        return arr.reshape(-1)[0]
+        return RhythmDatasetCacheContract.extract_scalar(value)
 
     @staticmethod
     def _missing_keys(item, keys):
-        return [key for key in keys if key not in item]
+        return RhythmDatasetCacheContract.missing_keys(item, keys)
 
     def _require_cached_keys(self, *, item, keys, item_name: str, reason: str):
-        missing = self._missing_keys(item, keys)
-        if missing:
-            raise RuntimeError(
-                f"Rhythm cached_only requires {reason} in {item_name}, missing keys: {missing}"
-            )
+        self._rhythm_cache_contract().require_cached_keys(
+            item=item,
+            keys=keys,
+            item_name=item_name,
+            reason=reason,
+        )
 
     def _validate_rhythm_cache_version(self, item, *, item_name: str):
-        if "rhythm_cache_version" not in item:
-            raise RuntimeError(
-                f"Rhythm cached_only requires rhythm_cache_version in {item_name}. Re-binarize the dataset."
-            )
-        found = int(self._extract_scalar(item["rhythm_cache_version"]))
-        expected = self._expected_rhythm_cache_version()
-        if not is_rhythm_cache_version_compatible(found, expected):
-            compatible = compatible_rhythm_cache_versions(expected)
-            raise RuntimeError(
-                f"Rhythm cache version mismatch in {item_name}: found={found}, expected one of {compatible}. "
-                "Re-binarize the dataset."
-            )
+        self._rhythm_cache_contract().validate_rhythm_cache_version(item, item_name=item_name)
 
     def _validate_rhythm_cache_contract(self, item, *, item_name: str):
-        self._validate_rhythm_cache_version(item, item_name=item_name)
-        expected_numeric = {
-            "rhythm_unit_hop_ms": int(self.hparams.get("rhythm_unit_hop_ms", RHYTHM_UNIT_HOP_MS)),
-            "rhythm_trace_hop_ms": int(self.hparams.get("rhythm_trace_hop_ms", RHYTHM_TRACE_HOP_MS)),
-            "rhythm_trace_bins": int(self.hparams.get("rhythm_trace_bins", 24)),
-            "rhythm_trace_horizon": float(self.hparams.get("rhythm_trace_horizon", 0.35)),
-            "rhythm_slow_topk": int(self.hparams.get("rhythm_slow_topk", 6)),
-            "rhythm_selector_cell_size": int(self.hparams.get("rhythm_selector_cell_size", 3)),
-            "rhythm_source_phrase_threshold": float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
-            "rhythm_reference_mode_id": int(
-                self.hparams.get("rhythm_reference_mode_id", RHYTHM_REFERENCE_MODE_STATIC_REF_FULL)
-            ),
-        }
-        for key, expected in expected_numeric.items():
-            if key not in item:
-                raise RuntimeError(
-                    f"Rhythm cached_only requires {key} in {item_name}. Re-binarize the dataset."
-                )
-            found = self._extract_scalar(item[key])
-            if isinstance(expected, float):
-                if abs(float(found) - expected) > 1e-5:
-                    raise RuntimeError(
-                        f"Rhythm cache contract mismatch in {item_name} for {key}: "
-                        f"found={float(found):.6f}, expected={expected:.6f}. Re-binarize the dataset."
-                    )
-            else:
-                if int(found) != expected:
-                    raise RuntimeError(
-                        f"Rhythm cache contract mismatch in {item_name} for {key}: "
-                        f"found={int(found)}, expected={expected}. Re-binarize the dataset."
-                    )
-        if "rhythm_guidance_surface_name" not in item:
-            raise RuntimeError(
-                f"Rhythm cached_only requires rhythm_guidance_surface_name in {item_name}. Re-binarize the dataset."
-            )
-        guidance_name = str(self._extract_scalar(item["rhythm_guidance_surface_name"]))
-        if guidance_name != RHYTHM_GUIDANCE_SURFACE_NAME:
-            raise RuntimeError(
-                f"Rhythm guidance surface mismatch in {item_name}: "
-                f"found={guidance_name}, expected={RHYTHM_GUIDANCE_SURFACE_NAME}. Re-binarize the dataset."
-            )
+        self._rhythm_cache_contract().validate_rhythm_cache_contract(item, item_name=item_name)
 
     def _required_cached_target_keys(self):
-        primary_surface = self._resolve_primary_target_surface()
-        distill_surface = self._resolve_distill_surface()
-        keys = [
-            "rhythm_cache_version",
-            "rhythm_unit_hop_ms",
-            "rhythm_trace_hop_ms",
-            "rhythm_trace_bins",
-            "rhythm_trace_horizon",
-            "rhythm_slow_topk",
-            "rhythm_selector_cell_size",
-            "rhythm_source_phrase_threshold",
-            "rhythm_reference_mode_id",
-            "rhythm_guidance_surface_name",
-        ]
-        need_guidance = primary_surface == "guidance" or float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0
-        if need_guidance:
-            keys.extend([
-                "rhythm_speech_exec_tgt",
-                "rhythm_pause_exec_tgt",
-                "rhythm_speech_budget_tgt",
-                "rhythm_pause_budget_tgt",
-                "rhythm_target_confidence",
-                "rhythm_guidance_confidence",
-            ])
-        if float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0:
-            keys.extend([
-                "rhythm_guidance_speech_tgt",
-                "rhythm_guidance_pause_tgt",
-            ])
-        need_teacher = (
-            primary_surface == "teacher"
-            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
-            or (
-                float(self.hparams.get("lambda_rhythm_distill", 0.0)) > 0
-                and distill_surface == "cache"
-            )
-            or (
-                bool(self.hparams.get("rhythm_use_retimed_target_if_available", False))
-                and str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance")).strip().lower() == "teacher"
-            )
-        )
-        if need_teacher:
-            keys.extend([
-                "rhythm_teacher_speech_exec_tgt",
-                "rhythm_teacher_pause_exec_tgt",
-                "rhythm_teacher_speech_budget_tgt",
-                "rhythm_teacher_pause_budget_tgt",
-                "rhythm_teacher_allocation_tgt",
-                "rhythm_teacher_prefix_clock_tgt",
-                "rhythm_teacher_prefix_backlog_tgt",
-                "rhythm_teacher_confidence",
-                "rhythm_teacher_target_source_id",
-                "rhythm_teacher_surface_name",
-            ])
-        if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
-            keys.extend([
-                "rhythm_retimed_mel_tgt",
-                "rhythm_retimed_mel_len",
-                "rhythm_retimed_frame_weight",
-                "rhythm_retimed_target_source_id",
-                "rhythm_retimed_target_confidence",
-                "rhythm_retimed_target_surface_name",
-            ])
-        return tuple(dict.fromkeys(keys))
+        return self._rhythm_cache_contract().required_cached_target_keys()
 
     def _validate_retimed_cache_contract(self, item, *, item_name: str):
-        if "rhythm_retimed_target_source_id" not in item:
-            raise RuntimeError(
-                f"Rhythm cached_only requires rhythm_retimed_target_source_id in {item_name}. Re-binarize the dataset."
-            )
-        found_source_id = int(self._extract_scalar(item["rhythm_retimed_target_source_id"]))
-        expected_source = str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
-        expected_source_id = RHYTHM_RETIMED_SOURCE_TEACHER if expected_source == "teacher" else RHYTHM_RETIMED_SOURCE_GUIDANCE
-        if found_source_id != expected_source_id:
-            raise RuntimeError(
-                f"Rhythm retimed cache source mismatch in {item_name}: "
-                f"found={found_source_id}, expected={expected_source_id}. Re-binarize the dataset."
-            )
-        if "rhythm_retimed_target_surface_name" not in item:
-            raise RuntimeError(
-                f"Rhythm cached_only requires rhythm_retimed_target_surface_name in {item_name}. Re-binarize the dataset."
-            )
-        found_surface = str(self._extract_scalar(item["rhythm_retimed_target_surface_name"]))
-        expected_surface = self._resolve_expected_teacher_surface_name() if expected_source_id == RHYTHM_RETIMED_SOURCE_TEACHER else RHYTHM_GUIDANCE_SURFACE_NAME
-        if found_surface != expected_surface:
-            raise RuntimeError(
-                f"Rhythm retimed surface mismatch in {item_name}: "
-                f"found={found_surface}, expected={expected_surface}. Re-binarize the dataset."
-            )
+        self._rhythm_cache_contract().validate_retimed_cache_contract(item, item_name=item_name)
 
     def _validate_source_cache_shapes(self, cache, *, item_name: str):
-        lengths = {key: int(np.asarray(cache[key]).reshape(-1).shape[0]) for key in self._RHYTHM_SOURCE_CACHE_KEYS}
-        if len(set(lengths.values())) != 1:
-            raise RuntimeError(
-                f"Rhythm source cache shape mismatch in {item_name}: {lengths}. Re-binarize the dataset."
-            )
+        self._rhythm_cache_contract().validate_source_cache_shapes(cache, item_name=item_name)
 
     def _validate_reference_conditioning_shapes(self, conditioning, *, item_name: str):
-        stats = np.asarray(conditioning["ref_rhythm_stats"])
-        trace = np.asarray(conditioning["ref_rhythm_trace"])
-        stats_dim = int(self.hparams.get("rhythm_stats_dim", 6))
-        trace_bins = int(self.hparams.get("rhythm_trace_bins", 24))
-        trace_dim = int(self.hparams.get("rhythm_trace_dim", 5))
-        if stats.reshape(-1).shape[0] != stats_dim:
-            raise RuntimeError(
-                f"Rhythm stats shape mismatch in {item_name}: found={tuple(stats.shape)}, expected_last_dim={stats_dim}."
-            )
-        if trace.ndim != 2 or trace.shape[0] != trace_bins or trace.shape[1] != trace_dim:
-            raise RuntimeError(
-                f"Rhythm trace shape mismatch in {item_name}: found={tuple(trace.shape)}, expected=({trace_bins}, {trace_dim})."
-            )
-        sidecar_keys = self._RHYTHM_REF_DEBUG_CACHE_KEYS
-        if not all(key in conditioning for key in sidecar_keys):
-            return
-        slow_memory = np.asarray(conditioning["slow_rhythm_memory"])
-        slow_summary = np.asarray(conditioning["slow_rhythm_summary"])
-        selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
-        selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
-        selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
-        selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
-        slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
-        if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
-            raise RuntimeError(
-                f"Slow rhythm memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
-            )
-        if slow_memory.shape[0] > slow_topk:
-            raise RuntimeError(
-                f"Slow rhythm memory count mismatch in {item_name}: found={slow_memory.shape[0]}, expected<= {slow_topk}."
-            )
-        if slow_summary.reshape(-1).shape[0] != trace_dim:
-            raise RuntimeError(
-                f"Slow rhythm summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={trace_dim}."
-            )
-        selector_len = int(slow_memory.shape[0])
-        selector_lengths = {
-            "selector_meta_indices": int(selector_indices.shape[0]),
-            "selector_meta_scores": int(selector_scores.shape[0]),
-            "selector_meta_starts": int(selector_starts.shape[0]),
-            "selector_meta_ends": int(selector_ends.shape[0]),
-        }
-        if len(set(selector_lengths.values()) | {selector_len}) != 1:
-            raise RuntimeError(
-                f"Selector metadata shape mismatch in {item_name}: slow_memory={selector_len}, meta={selector_lengths}."
-            )
-        if selector_len > 0:
-            if selector_indices.min() < 0 or selector_indices.max() >= trace_bins:
-                raise RuntimeError(
-                    f"Selector indices out of range in {item_name}: min={selector_indices.min()}, max={selector_indices.max()}, trace_bins={trace_bins}."
-                )
-            if selector_starts.min() < 0 or selector_ends.max() >= trace_bins or np.any(selector_starts > selector_ends):
-                raise RuntimeError(
-                    f"Selector cell spans invalid in {item_name}: starts={selector_starts.tolist()}, ends={selector_ends.tolist()}, trace_bins={trace_bins}."
-                )
+        self._rhythm_cache_contract().validate_reference_conditioning_shapes(
+            conditioning,
+            item_name=item_name,
+        )
 
     def _validate_target_shapes(self, targets, *, item_name: str, expected_units: int):
-        unit_keys = [
-            "rhythm_speech_exec_tgt",
-            "rhythm_pause_exec_tgt",
-            "rhythm_blank_exec_tgt",
-            "rhythm_guidance_speech_tgt",
-            "rhythm_guidance_pause_tgt",
-            "rhythm_guidance_blank_tgt",
-            "rhythm_teacher_speech_exec_tgt",
-            "rhythm_teacher_pause_exec_tgt",
-            "rhythm_teacher_blank_exec_tgt",
-            "rhythm_teacher_allocation_tgt",
-            "rhythm_teacher_prefix_clock_tgt",
-            "rhythm_teacher_prefix_backlog_tgt",
-        ]
-        for key in unit_keys:
-            if key not in targets:
-                continue
-            found = int(np.asarray(targets[key]).reshape(-1).shape[0])
-            if found != expected_units:
-                raise RuntimeError(
-                    f"Rhythm target length mismatch in {item_name} for {key}: "
-                    f"found={found}, expected={expected_units}."
-                )
-        budget_keys = [
-            "rhythm_speech_budget_tgt",
-            "rhythm_pause_budget_tgt",
-            "rhythm_teacher_speech_budget_tgt",
-            "rhythm_teacher_pause_budget_tgt",
-        ]
-        for key in budget_keys:
-            if key not in targets:
-                continue
-            found = int(np.asarray(targets[key]).reshape(-1).shape[0])
-            if found != 1:
-                raise RuntimeError(
-                    f"Rhythm budget target shape mismatch in {item_name} for {key}: expected scalar/[1], found={tuple(np.asarray(targets[key]).shape)}."
-                )
-        if "rhythm_retimed_mel_tgt" in targets or "rhythm_retimed_mel_len" in targets or "rhythm_retimed_frame_weight" in targets:
-            required = ("rhythm_retimed_mel_tgt", "rhythm_retimed_mel_len", "rhythm_retimed_frame_weight")
-            missing = [key for key in required if key not in targets]
-            if missing:
-                raise RuntimeError(
-                    f"Rhythm retimed cache incomplete in {item_name}, missing={missing}. Re-binarize the dataset."
-                )
-            mel = np.asarray(targets["rhythm_retimed_mel_tgt"])
-            frame_weight = np.asarray(targets["rhythm_retimed_frame_weight"]).reshape(-1)
-            mel_len = int(self._extract_scalar(targets["rhythm_retimed_mel_len"]))
-            if mel.ndim != 2:
-                raise RuntimeError(
-                    f"Rhythm retimed mel target must be rank-2 in {item_name}, found shape={tuple(mel.shape)}."
-                )
-            if mel.shape[0] != mel_len or frame_weight.shape[0] != mel_len:
-                raise RuntimeError(
-                    f"Rhythm retimed cache length mismatch in {item_name}: mel_len={mel_len}, "
-                    f"mel_frames={mel.shape[0]}, weight_frames={frame_weight.shape[0]}."
-                )
+        self._rhythm_cache_contract().validate_target_shapes(
+            targets,
+            item_name=item_name,
+            expected_units=expected_units,
+        )
 
     def _should_use_self_rhythm_reference(self, item, *, target_mode: str) -> bool:
         policy = str(self.hparams.get("rhythm_cached_reference_policy", "self") or "self").strip().lower()
@@ -1077,7 +833,6 @@ class RhythmConanDatasetMixin:
         return merged
 
     def __getitem__(self, index):
-        hparams=self.hparams
         sample = super().__getitem__(index)
         raw_item = self._get_item(index)
         item_name = str(raw_item.get("item_name", "<unknown-item>"))
@@ -1089,172 +844,12 @@ class RhythmConanDatasetMixin:
                 raw_ref_item,
                 item_name=str(raw_ref_item.get("item_name", "<unknown-ref-item>")),
             )
-        
-        # if isinstance(item['hubert'], str):
-        #     # Convert string to numeric array
-        #     content = [float(x) for x in item['hubert'].split()]
-        #     sample["content"] = torch.LongTensor(content)
-        # else:
-            # Already a numeric array case
-        visible_len = int(sample["mel"].shape[0])
-        full_content = self._coerce_content_sequence(item["hubert"])
-        full_content_len = len(full_content)
-        if bool(hparams.get("rhythm_enable_v2", False)) and bool(
-            hparams.get("rhythm_strict_content_mel_contract", True)
-        ):
-            tolerance = int(hparams.get("rhythm_content_mel_tolerance", 0) or 0)
-            if abs(full_content_len - visible_len) > tolerance:
-                raise RuntimeError(
-                    f"Rhythm content/mel contract violated for {item_name}: hubert_len={full_content_len}, "
-                    f"mel_len={visible_len}, tolerance={tolerance}. Re-binarize or align upstream hop settings."
-                )
-        if full_content_len < visible_len:
-            raise RuntimeError(
-                f"Rhythm content sequence shorter than mel for {item_name}: hubert_len={full_content_len}, "
-                f"mel_len={visible_len}."
-            )
-        content_visible = full_content[:visible_len]
-        if len(content_visible) != visible_len:
-            raise RuntimeError(
-                f"Visible content prefix mismatch for {item_name}: visible_tokens={len(content_visible)}, "
-                f"mel_len={visible_len}."
-            )
-        sample["content"] = torch.LongTensor(content_visible)
-        target_mode = self._resolve_rhythm_target_mode()
-        full_visible_tokens = np.asarray(content_visible, dtype=np.int64)
-        stream_visible_tokens = self._select_streaming_visible_tokens(
-            full_visible_tokens,
+        return self._rhythm_sample_assembler().assemble(
+            sample=sample,
+            item=item,
+            ref_item=ref_item,
             item_name=item_name,
         )
-
-        optional_rhythm_keys = self._resolve_optional_sample_keys()
-        rhythm_runtime_fields = {}
-        source_cache = self._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
-        stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
-        offline_units = stream_units
-        if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):
-            if self._should_export_streaming_offline_sidecars():
-                offline_source_cache = self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)
-                rhythm_runtime_fields.update(self._prefix_source_cache(offline_source_cache, prefix="rhythm_offline_"))
-                offline_units = int(np.asarray(offline_source_cache["dur_anchor_src"]).reshape(-1).shape[0])
-                if self._should_export_offline_teacher_aux():
-                    rhythm_runtime_fields.update(
-                        self._build_offline_teacher_aux_fields(
-                            item,
-                            offline_units=offline_units,
-                        )
-                    )
-            else:
-                offline_units = int(np.asarray(self._get_source_rhythm_cache(item, full_visible_tokens, target_mode=target_mode)["dur_anchor_src"]).reshape(-1).shape[0])
-        if self._should_export_streaming_prefix_meta():
-            rhythm_runtime_fields["rhythm_stream_visible_units"] = np.asarray([stream_units], dtype=np.float32)
-            rhythm_runtime_fields["rhythm_stream_full_units"] = np.asarray([offline_units], dtype=np.float32)
-            rhythm_runtime_fields["rhythm_stream_prefix_ratio"] = np.asarray(
-                [float(stream_units) / float(max(offline_units, 1))],
-                dtype=np.float32,
-            )
-        rhythm_ref_item = item if self._should_use_self_rhythm_reference(item, target_mode=target_mode) else ref_item
-        ref_conditioning = self._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
-        rhythm_runtime_fields.update(source_cache)
-        rhythm_runtime_fields.update(ref_conditioning)
-        rhythm_runtime_fields.update(
-            self._merge_rhythm_targets(
-                item,
-                source_cache,
-                ref_conditioning,
-                sample,
-            )
-        )
-
-        for key in optional_rhythm_keys:
-            if key in rhythm_runtime_fields:
-                value = rhythm_runtime_fields[key]
-            elif key in item:
-                value = item[key]
-            else:
-                continue
-            if key in {"ref_rhythm_trace", "slow_rhythm_memory"}:
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {
-                "source_boundary_cue",
-                "phrase_group_pos",
-                "phrase_final_mask",
-                "slow_rhythm_summary",
-                "selector_meta_scores",
-                "rhythm_teacher_allocation_tgt",
-                "rhythm_teacher_prefix_clock_tgt",
-                "rhythm_teacher_prefix_backlog_tgt",
-                "rhythm_offline_source_boundary_cue",
-                "rhythm_offline_phrase_group_pos",
-                "rhythm_offline_phrase_final_mask",
-                "rhythm_stream_prefix_ratio",
-                "rhythm_stream_visible_units",
-                "rhythm_stream_full_units",
-            } or "stats" in key or "budget" in key:
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence", "rhythm_offline_teacher_confidence"}:
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key in {
-                "phrase_group_index",
-                "rhythm_offline_content_units",
-                "rhythm_offline_dur_anchor_src",
-                "rhythm_offline_open_run_mask",
-                "rhythm_offline_sep_hint",
-                "rhythm_offline_phrase_group_index",
-                "selector_meta_indices",
-                "selector_meta_starts",
-                "selector_meta_ends",
-                "rhythm_cache_version",
-                "rhythm_unit_hop_ms",
-                "rhythm_trace_hop_ms",
-                "rhythm_trace_bins",
-                "rhythm_slow_topk",
-                "rhythm_selector_cell_size",
-                "rhythm_reference_mode_id",
-                "rhythm_teacher_target_source_id",
-                "rhythm_retimed_target_source_id",
-            }:
-                sample[key] = torch.tensor(value, dtype=torch.long)
-            elif key == "rhythm_retimed_mel_tgt":
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            elif key == "rhythm_retimed_mel_len":
-                sample[key] = torch.tensor(value, dtype=torch.long)
-            elif key == "rhythm_retimed_frame_weight":
-                sample[key] = torch.tensor(value, dtype=torch.float32)
-            else:
-                sample[key] = torch.tensor(value)
-        sample.pop("ref_item_id", None)
-
-        # sample['content'] = torch.LongTensor(item['hubert'])
-        # note = torch.LongTensor(item['ep_pitches'][:hparams['max_input_tokens']])
-        # note_dur = torch.FloatTensor(item['ep_notedurs'][:hparams['max_input_tokens']])
-        # note_type = torch.LongTensor(item['ep_types'][:hparams['max_input_tokens']])
-        # sample["note"], sample["note_dur"], sample["note_type"] = note, note_dur, note_type
-
-        # for key in ['mix_tech','falsetto_tech','breathy_tech','bubble_tech','strong_tech','weak_tech','pharyngeal_tech','vibrato_tech','glissando_tech']:
-        #     if key not in item:
-        #         item[key] = [2] * len(item['ph'])
-
-        # mix = torch.LongTensor(item['mix_tech'][:hparams['max_input_tokens']])
-        # falsetto= torch.LongTensor(item['falsetto_tech'][:hparams['max_input_tokens']])
-        # breathy = torch.LongTensor(item['breathy_tech'][:hparams['max_input_tokens']])
-        # sample['mix'],sample['falsetto'],sample['breathy']=mix,falsetto,breathy
-
-        # bubble = torch.LongTensor(item['bubble_tech'][:hparams['max_input_tokens']])
-        # strong = torch.LongTensor(item['strong_tech'][:hparams['max_input_tokens']])
-        # weak = torch.LongTensor(item['weak_tech'][:hparams['max_input_tokens']])
-        # sample['bubble'],sample['strong'],sample['weak']=bubble,strong,weak
-
-        # pharyngeal = torch.LongTensor(item['pharyngeal_tech'][:hparams['max_input_tokens']])
-        # vibrato = torch.LongTensor(item['vibrato_tech'][:hparams['max_input_tokens']])
-        # glissando = torch.LongTensor(item['glissando_tech'][:hparams['max_input_tokens']])
-        # sample['pharyngeal'],sample['vibrato'],sample['glissando'] = pharyngeal,vibrato,glissando
-        
-        return sample
     
     def collater(self, samples):
         if len(samples) == 0:

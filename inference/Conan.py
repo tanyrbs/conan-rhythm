@@ -1,60 +1,100 @@
 import os
-import torch
-import numpy as np
-from typing import Dict, List
-import json
-import time
-from datetime import datetime
+from typing import Any, Dict, List
 
-from utils.commons.hparams import hparams, set_hparams
-from utils.commons.ckpt_utils import load_ckpt, load_ckpt_emformer
-from utils.audio import librosa_wav2spec
-from utils.audio.io import save_wav
-from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
-from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
+import numpy as np
+import torch
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from modules.Conan.Conan import Conan
-# Emformer feature extractor
 from modules.Emformer.emformer import EmformerDistillModel
+from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
+from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
+from utils.audio import librosa_wav2spec
+from utils.audio.io import save_wav
+from utils.commons.ckpt_utils import load_ckpt
+from utils.commons.hparams import hparams, set_hparams
+
+try:
+    from inference.streaming_runtime import (
+        PrefixCodeBuffer,
+        RollingMelContextBuffer,
+        build_streaming_latency_report,
+        build_streaming_layout_report,
+        resolve_chunk_frames,
+        resolve_mel_frame_ms,
+        resolve_vocoder_left_context_frames,
+    )
+except ImportError:  # pragma: no cover - supports direct `python inference/Conan.py`
+    from streaming_runtime import (
+        PrefixCodeBuffer,
+        RollingMelContextBuffer,
+        build_streaming_latency_report,
+        build_streaming_layout_report,
+        resolve_chunk_frames,
+        resolve_mel_frame_ms,
+        resolve_vocoder_left_context_frames,
+    )
+
 __all__ = ["StreamingVoiceConversion"]
+
 
 class StreamingVoiceConversion:
     """
     Streaming style-transfer inference using Emformer for feature extraction.
     """
-    tokens_per_chunk: int = 4  # 4 HuBERT tokens ≈ 80 ms
-    
+
+    tokens_per_chunk: int = 4  # 4 HuBERT tokens ~= 80 ms with the default hop.
+
     def __init__(self, hp: Dict):
         self.hparams = hp
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = self._build_model()
         self.vocoder = self._build_vocoder()
         self.emformer = self._build_emformer()
+        self.vocoder_native_streaming_capable = bool(self.vocoder.supports_native_streaming())
+        self.vocoder_left_context_frames, self.vocoder_left_context_source = resolve_vocoder_left_context_frames(
+            self.hparams
+        )
+        self.streaming_layout = build_streaming_layout_report(
+            self.hparams,
+            vocoder_left_context_frames=self.vocoder_left_context_frames,
+            vocoder_native_streaming=self.vocoder_native_streaming_capable,
+        )
+        self.runtime_metadata = self.get_streaming_runtime_metadata()
+        self.last_inference_metadata = dict(self.runtime_metadata)
         self._vocoder_warm_zero()
 
     def _build_model(self):
-        m = Conan(0, self.hparams)
-        m.eval()
-        load_ckpt(m, self.hparams["work_dir"], strict=False)
-        return m.to(self.device)
+        model = Conan(0, self.hparams)
+        model.eval()
+        load_ckpt(model, self.hparams["work_dir"], strict=False)
+        return model.to(self.device)
 
     def _build_vocoder(self):
-
         vocoder_cls = get_vocoder_cls(self.hparams["vocoder"])
         if vocoder_cls is None:
-            raise ValueError(f"Vocoder '{self.hparams['vocoder']}' is not registered. Check vocoder name and registration.")
+            raise ValueError(
+                f"Vocoder '{self.hparams['vocoder']}' is not registered. "
+                "Check vocoder name and registration."
+            )
         return vocoder_cls()
 
     def _build_emformer(self):
         emformer = EmformerDistillModel(self.hparams, output_dim=100)
-        # load checkpoint
         load_ckpt(emformer, self.hparams["emformer_ckpt"], strict=False)
         emformer.eval()
         return emformer.to(self.device)
 
     def _vocoder_warm_zero(self):
-        _ = self.vocoder.spec2wav(np.zeros((4, 80), dtype=np.float32))
-        
+        warm_frames = max(4, int(self.vocoder_left_context_frames) + 1)
+        _ = self.vocoder.spec2wav(
+            np.zeros((warm_frames, self.hparams["audio_num_mel_bins"]), dtype=np.float32)
+        )
+
     @staticmethod
     def _wav_to_mel(path: str) -> np.ndarray:
         mel = librosa_wav2spec(
@@ -70,82 +110,134 @@ class StreamingVoiceConversion:
         )["mel"]
         return np.clip(mel, hparams["mel_vmin"], hparams["mel_vmax"])
 
-    def infer_once(self, inp: Dict):
-        # 1. Load reference mel
+    def get_streaming_runtime_metadata(self, *, duration_seconds: float | None = None) -> dict[str, Any]:
+        latency_report = build_streaming_latency_report(
+            self.hparams,
+            duration_seconds=duration_seconds,
+            vocoder=self.vocoder,
+        )
+        return {
+            "streaming_capabilities": {
+                "frontend_stateful_streaming": True,
+                "acoustic_decoder_native_incremental": False,
+                "vocoder_native_streaming": bool(self.vocoder_native_streaming_capable),
+                "full_end_to_end_stateful_streaming": False,
+            },
+            "vocoder_left_context_frames": int(self.vocoder_left_context_frames),
+            "vocoder_left_context_source": str(self.vocoder_left_context_source),
+            "streaming_layout": self.streaming_layout.to_metadata(),
+            "latency_report": latency_report,
+        }
+
+    def _prepare_spk_embed(self, ref_mel_batch: torch.Tensor, spk_embed=None) -> torch.Tensor:
+        if spk_embed is None:
+            with torch.no_grad():
+                return self.model.encode_spk_embed(ref_mel_batch.transpose(1, 2)).transpose(1, 2)
+        if isinstance(spk_embed, np.ndarray):
+            spk_embed = torch.from_numpy(spk_embed)
+        if not torch.is_tensor(spk_embed):
+            raise TypeError(f"Unsupported spk_embed type: {type(spk_embed)!r}")
+        spk_embed = spk_embed.float().to(self.device)
+        if spk_embed.dim() == 1:
+            spk_embed = spk_embed.unsqueeze(0).unsqueeze(1)
+        elif spk_embed.dim() == 2:
+            spk_embed = spk_embed.unsqueeze(1)
+        return spk_embed
+
+    def _render_vocoder_chunk(
+        self,
+        mel_chunk: torch.Tensor,
+        *,
+        mel_context_buffer: RollingMelContextBuffer,
+        f0_chunk=None,
+    ) -> np.ndarray:
+        if mel_chunk.numel() <= 0:
+            return np.zeros(0, dtype=np.float32)
+        if self.vocoder_native_streaming_capable:
+            return np.asarray(
+                self.vocoder.spec2wav_stream(mel_chunk.detach().cpu().numpy(), f0=f0_chunk),
+                dtype=np.float32,
+            )
+
+        mel_window, context_frames = mel_context_buffer.build_window(mel_chunk)
+        wav_window = np.asarray(
+            self.vocoder.spec2wav(mel_window.detach().cpu().numpy(), f0=f0_chunk),
+            dtype=np.float32,
+        )
+        hop_size = int(self.hparams["hop_size"])
+        new_frames = int(mel_chunk.size(0))
+        start_sample = max(0, context_frames * hop_size)
+        end_sample = min(len(wav_window), start_sample + new_frames * hop_size)
+        return wav_window[start_sample:end_sample]
+
+    def infer_once(self, inp: Dict, spk_embed=None, return_metadata: bool = False):
+        if hasattr(self.vocoder, "reset_stream"):
+            self.vocoder.reset_stream()
+
         ref_mel_np = self._wav_to_mel(inp["ref_wav"])
         ref_mel = torch.from_numpy(ref_mel_np).float().to(self.device)
 
-        # 2. Load src mel
         src_mel_np = self._wav_to_mel(inp["src_wav"])
         src_mel = torch.from_numpy(src_mel_np).unsqueeze(0).to(self.device)  # [1, T, 80]
-        total_frames = src_mel.shape[1]
-        # 3. Streaming Emformer + main model with proper state management
-        chunk_size = self.hparams["chunk_size"] // 20  # frames per chunk (20ms per frame)
-        right_context = self.hparams["right_context"]  # frames
-        seg = chunk_size
-        rc = right_context
+        total_frames = int(src_mel.shape[1])
 
-        content_code_buffer = []  # list of [emit,] tensors
-        mel_chunks = []
-        wav_chunks = []
+        seg = resolve_chunk_frames(self.hparams)
+        rc = int(self.hparams["right_context"])
+        mel_frame_ms = resolve_mel_frame_ms(self.hparams)
+
+        code_buffer = PrefixCodeBuffer(total_capacity=max(total_frames, 1))
+        mel_context_buffer = RollingMelContextBuffer(
+            left_context_frames=self.vocoder_left_context_frames
+        )
+        mel_chunks: list[torch.Tensor] = []
+        wav_chunks: list[np.ndarray] = []
         prev_committed_len = 0
         pos = 0
-        state = None  # Emformer state for streaming
+        num_chunks = 0
+        state = None
         rhythm_state = None
-        # Reserved for future decoder-side incremental cache / limited-window decode.
         decoder_cache = None
         rhythm_ref_conditioning = None
+        last_mel_out = None
+
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
-            # Speaker/style embedding is utterance-static, compute once per request.
-            spk_embed = self.model.encode_spk_embed(ref_mel_batch.transpose(1, 2)).transpose(1, 2)
+            prepared_spk_embed = self._prepare_spk_embed(ref_mel_batch, spk_embed=spk_embed)
             if getattr(self.model, "rhythm_enable_v2", False):
                 rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(ref_mel_batch)
         require_runtime_ref = bool(self.hparams.get("style", False)) and not bool(
             getattr(self.model, "rhythm_minimal_style_only", False)
         )
-        
 
         while pos < total_frames:
-            # 1) How many NEW frames do we want to emit this step?
+            num_chunks += 1
             emit = min(seg, total_frames - pos)
-
-            # 2) How much genuine look-ahead is still available?
             look = min(rc, total_frames - (pos + emit))
-            
-            # 3) Build the real chunk (emit + look) … then pad
-            real_len = emit + look
-            chunk = src_mel[:, pos:pos + real_len, :]  # (1, real_len, 80)
 
-            # Pad so that len(chunk) == seg + rc, as Emformer expects
+            real_len = emit + look
+            chunk = src_mel[:, pos : pos + real_len, :]
             need_pad = (seg + rc) - real_len
             if need_pad > 0:
-                pad = chunk[:, -1:, :].expand(1, need_pad, src_mel.shape[2])  # repeat last frame
-                chunk = torch.cat([chunk, pad], dim=1)  # (1, seg+rc, 80)
+                pad = chunk[:, -1:, :].expand(1, need_pad, src_mel.shape[2])
+                chunk = torch.cat([chunk, pad], dim=1)
 
-            # 4) Run one streaming step (length **includes** the right context)
             lengths = torch.full((1,), chunk.size(1), dtype=torch.long, device=self.device)
             with torch.no_grad():
                 chunk_out, _, state = self.emformer.emformer.infer(chunk, lengths, state)
-                # Apply projection if needed
-                if self.emformer.mode == 'both':
+                if self.emformer.mode == "both":
                     chunk_out = self.emformer.proj1(chunk_out)
                 else:
                     chunk_out = self.emformer.proj(chunk_out)
-                
-                # Convert to tokens if needed
                 if chunk_out.dim() == 3 and chunk_out.shape[-1] > 1:
-                    chunk_out = torch.argmax(chunk_out, dim=-1)  # [1, seg+rc]
-                
-            # Emformer drops the right context in its output; keep only `emit` frames
-            new_codes = chunk_out[:, :emit]  # [1, emit]
-            content_code_buffer.append(new_codes.squeeze(0))  # [emit]
-            all_codes = torch.cat(content_code_buffer, dim=0).unsqueeze(0)  # [1, T_so_far]
-            
+                    chunk_out = torch.argmax(chunk_out, dim=-1)
+
+            new_codes = chunk_out[:, :emit]
+            all_codes = code_buffer.append(new_codes)
+
             with torch.no_grad():
                 out = self.model(
                     content=all_codes,
-                    spk_embed=spk_embed,
+                    spk_embed=prepared_spk_embed,
                     target=None,
                     ref=ref_mel_batch if require_runtime_ref else None,
                     f0=None,
@@ -160,7 +252,8 @@ class StreamingVoiceConversion:
                 rhythm_state = out.get("rhythm_state_next", rhythm_state)
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 decoder_cache = out.get("decoder_cache", decoder_cache)
-                mel_out = out["mel_out"][0]
+                last_mel_out = out["mel_out"][0]
+
             mel_new, prev_committed_len = extract_incremental_committed_mel(
                 out,
                 prev_committed_len=prev_committed_len,
@@ -168,27 +261,63 @@ class StreamingVoiceConversion:
             )
             if mel_new.numel() > 0:
                 mel_chunks.append(mel_new)
-            pos += emit
-            if mel_new.numel() > 0:
-                wav_chunk = self.vocoder.spec2wav(mel_new.cpu().numpy())
+                wav_chunk = self._render_vocoder_chunk(
+                    mel_new,
+                    mel_context_buffer=mel_context_buffer,
+                )
                 if len(wav_chunk) > 0:
                     wav_chunks.append(wav_chunk)
-        if prev_committed_len < int(mel_out.shape[0]):
-            mel_tail = mel_out[prev_committed_len:]
+            pos += emit
+
+        if last_mel_out is None:
+            raise RuntimeError("Streaming inference produced no mel output.")
+
+        if prev_committed_len < int(last_mel_out.shape[0]):
+            mel_tail = last_mel_out[prev_committed_len:]
             if mel_tail.numel() > 0:
                 mel_chunks.append(mel_tail)
-                wav_tail = self.vocoder.spec2wav(mel_tail.cpu().numpy())
+                wav_tail = self._render_vocoder_chunk(
+                    mel_tail,
+                    mel_context_buffer=mel_context_buffer,
+                )
                 if len(wav_tail) > 0:
                     wav_chunks.append(wav_tail)
-        mel_pred = torch.cat(mel_chunks, dim=0)
-        if len(wav_chunks) > 0:
-            wav_pred = np.concatenate(wav_chunks, axis=0)
-        else:
-            wav_pred = self.vocoder.spec2wav(mel_pred.cpu().numpy())
 
-        # wav_pred = self.vocoder.spec2wav(mel_pred.cpu().numpy())
-        
-        
+        if mel_chunks:
+            mel_pred = torch.cat(mel_chunks, dim=0)
+        else:
+            mel_pred = last_mel_out.new_zeros((0, last_mel_out.size(-1)))
+
+        if wav_chunks:
+            wav_pred = np.concatenate(wav_chunks, axis=0)
+        elif mel_pred.numel() > 0:
+            wav_pred = self.vocoder.spec2wav(mel_pred.detach().cpu().numpy())
+        else:
+            wav_pred = np.zeros(0, dtype=np.float32)
+
+        duration_seconds = float(total_frames * self.hparams["hop_size"]) / float(
+            self.hparams["audio_sample_rate"]
+        )
+        self.last_inference_metadata = self.get_streaming_runtime_metadata(
+            duration_seconds=duration_seconds
+        )
+        self.last_inference_metadata.update(
+            {
+                "source_total_frames": int(total_frames),
+                "source_duration_seconds": float(duration_seconds),
+                "num_streaming_chunks": int(num_chunks),
+                "committed_mel_frames": int(mel_pred.shape[0]),
+                "mel_frame_ms": float(mel_frame_ms),
+                "vocoder_left_context_frames_effective": int(self.vocoder_left_context_frames),
+                "vocoder_left_context_source": str(self.vocoder_left_context_source),
+                "vocoder_native_streaming_capable": bool(self.vocoder_native_streaming_capable),
+                "emformer_stateful_content_frontend": True,
+                "full_end_to_end_stateful_streaming": False,
+            }
+        )
+
+        if return_metadata:
+            return wav_pred, mel_pred.cpu().numpy(), self.last_inference_metadata
         return wav_pred, mel_pred.cpu().numpy()
 
     def test_multiple_sentences(self, test_cases: List[Dict]):
@@ -204,10 +333,9 @@ class StreamingVoiceConversion:
 
 if __name__ == "__main__":
     set_hparams()
-    # Example usage: update with your own wav paths
     demo = [
         {"ref_wav": "path/to/reference_audio.wav", "src_wav": "path/to/source_audio.wav"},
     ]
-    
+
     engine = StreamingVoiceConversion(hparams)
     engine.test_multiple_sentences(demo)

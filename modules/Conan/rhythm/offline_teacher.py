@@ -8,34 +8,27 @@ import torch.nn.functional as F
 
 from .controller import ResidualTemporalBlock, masked_mean, masked_softmax
 from .contracts import RhythmPlannerOutputs
-from .source_boundary import _masked_standardize, build_deterministic_boundary_score
+from .source_boundary import _masked_standardize, compose_boundary_score_unit
 
 
 @dataclass
 class OfflineTeacherConfig:
-    """Extra capacity for the learned offline planner teacher.
-
-    The teacher stays on the same public contract as the student
-    (planner surface -> shared projector), but it uses a richer
-    non-causal temporal stack and stronger global conditioning.
-    """
+    """Non-causal teacher planner on the same compact public surface."""
 
     num_blocks: int = 6
     kernel_size: int = 5
     dilations: tuple[int, ...] = (1, 2, 4, 8, 2, 1)
     phrase_kernel_sizes: tuple[int, ...] = (3, 7)
     global_gate_scale: float = 0.12
-    pause_trace_weight: float = 0.30
-    boundary_trace_weight: float = 0.30
     confidence_agreement_weight: float = 0.25
     confidence_floor: float = 0.05
     confidence_ceiling: float = 1.0
     max_total_logratio: float = 0.8
     max_unit_logratio: float = 0.6
     pause_share_max: float = 0.45
+    pause_share_residual_max: float = 0.12
     boundary_feature_scale: float = 0.35
-    boundary_source_cue_weight: float = 0.35
-    pause_boundary_latent_weight: float = 0.35
+    boundary_source_cue_weight: float = 0.65
     pause_source_boundary_weight: float = 0.20
     min_speech_frames: float = 1.0
 
@@ -113,13 +106,7 @@ def _masked_cosine_similarity(x: torch.Tensor, y: torch.Tensor, mask: torch.Tens
 
 
 class OfflineRhythmTeacherPlanner(nn.Module):
-    """Stronger non-causal offline planner used as the learned teacher.
-
-    Design goals:
-    - keep the same public teacher surface as before
-    - be substantially stronger than the streaming scheduler
-    - distill only an executable surface through the shared projector
-    """
+    """Stronger non-causal teacher using the compact 4-surface contract."""
 
     def __init__(
         self,
@@ -134,12 +121,10 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         self.max_total_logratio = float(self.config.max_total_logratio)
         self.max_unit_logratio = float(self.config.max_unit_logratio)
         self.pause_share_max = float(max(0.0, self.config.pause_share_max))
+        self.pause_share_residual_max = float(max(0.0, self.config.pause_share_residual_max))
         self.boundary_feature_scale = float(self.config.boundary_feature_scale)
         self.boundary_source_cue_weight = float(self.config.boundary_source_cue_weight)
-        self.pause_boundary_latent_weight = float(self.config.pause_boundary_latent_weight)
         self.pause_source_boundary_weight = float(self.config.pause_source_boundary_weight)
-        self.pause_trace_weight = float(self.config.pause_trace_weight)
-        self.boundary_trace_weight = float(self.config.boundary_trace_weight)
         self.min_speech_frames = float(self.config.min_speech_frames)
         self.confidence_agreement_weight = float(self.config.confidence_agreement_weight)
         self.confidence_floor = float(self.config.confidence_floor)
@@ -189,14 +174,10 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             nn.SiLU(),
         )
         self.total_budget_head = nn.Linear(hidden_size, 1)
-        self.pause_share_head = nn.Linear(hidden_size, 1)
+        self.pause_share_residual_head = nn.Linear(hidden_size, 1)
         self.anchor_gate_head = nn.Linear(hidden_size, 1)
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
-        # Compatibility-only parameter surface. Kept for older checkpoints, unused in forward.
-        self.boundary_head = nn.Linear(hidden_size, 1)
-        for param in self.boundary_head.parameters():
-            param.requires_grad = False
         self.confidence_trunk = nn.Sequential(
             nn.Linear(hidden_size + stats_dim + trace_dim + 5, hidden_size),
             nn.SiLU(),
@@ -218,32 +199,32 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         *,
         hidden: torch.Tensor,
         unit_mask: torch.Tensor,
-        trace_context: torch.Tensor,
+        planner_trace_context: torch.Tensor,
         slow_rhythm_summary: torch.Tensor,
-        ref_rhythm_stats: torch.Tensor,
+        planner_ref_stats: torch.Tensor,
         dur_anchor_src: torch.Tensor,
-        source_boundary_cue: torch.Tensor,
+        boundary_score_unit: torch.Tensor,
         agreement: torch.Tensor,
     ) -> torch.Tensor:
         pooled_hidden = masked_mean(hidden, unit_mask, dim=1)
-        pooled_trace = masked_mean(trace_context, unit_mask, dim=1)
+        pooled_trace = masked_mean(planner_trace_context, unit_mask, dim=1)
         visible = unit_mask.sum(dim=1).clamp_min(1.0)
         src_total = (dur_anchor_src.float() * unit_mask).sum(dim=1)
         pooled_anchor = src_total / visible
-        pooled_boundary = (source_boundary_cue.float() * unit_mask).sum(dim=1) / visible
+        pooled_boundary = (boundary_score_unit.float() * unit_mask).sum(dim=1) / visible
         global_input = torch.cat(
             [
                 pooled_hidden,
                 pooled_trace,
                 slow_rhythm_summary,
-                ref_rhythm_stats,
+                planner_ref_stats,
                 pooled_anchor.unsqueeze(-1),
                 src_total.log1p().unsqueeze(-1),
                 visible.log1p().unsqueeze(-1),
                 pooled_boundary.unsqueeze(-1),
                 agreement.unsqueeze(-1),
-                ref_rhythm_stats[:, 0:1],
-                ref_rhythm_stats[:, 4:5],
+                planner_ref_stats[:, 0:1],
+                planner_ref_stats[:, 1:2],
             ],
             dim=-1,
         )
@@ -263,18 +244,33 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         dur_anchor_src: torch.Tensor,
         unit_mask: torch.Tensor,
         ref_conditioning: dict[str, torch.Tensor],
-        trace_context: torch.Tensor,
+        planner_trace_context: torch.Tensor,
+        full_trace_context: torch.Tensor | None = None,
         source_boundary_cue: torch.Tensor | None = None,
     ) -> tuple[RhythmPlannerOutputs, dict[str, torch.Tensor]]:
         unit_mask = unit_mask.float()
         if source_boundary_cue is None:
             source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
-        slow_rhythm_summary = ref_conditioning.get("slow_rhythm_summary")
+        if full_trace_context is None:
+            full_trace_context = planner_trace_context
+        planner_ref_stats = ref_conditioning["planner_ref_stats"]
+        slow_rhythm_summary = ref_conditioning.get("planner_slow_rhythm_summary")
         if slow_rhythm_summary is None:
-            slow_rhythm_summary = masked_mean(trace_context, unit_mask, dim=1)
+            slow_rhythm_summary = masked_mean(planner_trace_context, unit_mask, dim=1)
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
-        trace_delta = self._build_trace_delta(trace_context)
-        boundary_feat = (source_boundary_cue.float() * self.boundary_feature_scale).unsqueeze(-1)
+        trace_delta = self._build_trace_delta(planner_trace_context)
+        boundary_trace = (
+            planner_trace_context[:, :, 1]
+            if planner_trace_context.size(-1) > 1
+            else planner_trace_context.squeeze(-1)
+        )
+        boundary_score_unit = compose_boundary_score_unit(
+            unit_mask=unit_mask,
+            source_boundary_cue=source_boundary_cue,
+            boundary_trace=boundary_trace,
+            source_weight=self.boundary_source_cue_weight,
+        )
+        boundary_feat = (boundary_score_unit.float() * self.boundary_feature_scale).unsqueeze(-1)
 
         anchor_mass = dur_anchor_src.float() * unit_mask
         total_anchor = anchor_mass.sum(dim=1, keepdim=True).clamp_min(1.0)
@@ -286,12 +282,12 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         x = (
             self.unit_in(unit_states)
             + self.anchor_proj(src_log)
-            + self.trace_proj(trace_context)
+            + self.trace_proj(planner_trace_context)
             + self.trace_delta_proj(trace_delta)
             + self.boundary_proj(boundary_feat)
             + self.progress_proj(position_feat)
             + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
-            + self.stats_proj(ref_conditioning["ref_rhythm_stats"]).unsqueeze(1)
+            + self.stats_proj(planner_ref_stats).unsqueeze(1)
         )
         local_features = [x]
         for kernel_size in self.config.phrase_kernel_sizes:
@@ -301,39 +297,39 @@ class OfflineRhythmTeacherPlanner(nn.Module):
 
         agreement = _masked_cosine_similarity(
             _masked_standardize(source_boundary_cue.float(), unit_mask),
-            _masked_standardize(trace_context[:, :, 2].float(), unit_mask),
+            _masked_standardize(boundary_trace.float(), unit_mask),
             unit_mask,
         ).clamp(-1.0, 1.0)
         global_hidden = self._build_global_hidden(
             hidden=x,
             unit_mask=unit_mask,
-            trace_context=trace_context,
+            planner_trace_context=planner_trace_context,
             slow_rhythm_summary=slow_rhythm_summary,
-            ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
+            planner_ref_stats=planner_ref_stats,
             dur_anchor_src=dur_anchor_src,
-            source_boundary_cue=source_boundary_cue,
+            boundary_score_unit=boundary_score_unit,
             agreement=agreement,
         )
         for block in self.blocks:
             x = block(x, global_hidden)
 
         pooled_hidden = masked_mean(x, unit_mask, dim=1)
-        pooled_trace = masked_mean(trace_context, unit_mask, dim=1)
+        pooled_trace = masked_mean(planner_trace_context, unit_mask, dim=1)
         trace_var = (
-            ((trace_context[:, :, 1] - pooled_trace[:, None, 1]) ** 2) * unit_mask
+            ((planner_trace_context[:, :, 0] - pooled_trace[:, None, 0]) ** 2) * unit_mask
         ).sum(dim=1) / unit_mask.sum(dim=1).clamp_min(1.0)
-        pooled_boundary = masked_mean(source_boundary_cue.unsqueeze(-1), unit_mask, dim=1).squeeze(-1)
+        pooled_boundary = masked_mean(boundary_score_unit.unsqueeze(-1), unit_mask, dim=1).squeeze(-1)
         refined_input = torch.cat(
             [
                 pooled_hidden,
                 pooled_trace,
                 slow_rhythm_summary,
-                ref_conditioning["ref_rhythm_stats"],
+                planner_ref_stats,
                 pooled_boundary.unsqueeze(-1),
                 trace_var.unsqueeze(-1),
                 agreement.unsqueeze(-1),
-                ref_conditioning["ref_rhythm_stats"][:, 0:1],
-                ref_conditioning["ref_rhythm_stats"][:, 4:5],
+                planner_ref_stats[:, 0:1],
+                planner_ref_stats[:, 1:2],
                 total_anchor.log1p(),
                 unit_mask.sum(dim=1, keepdim=True).log1p(),
             ],
@@ -342,12 +338,12 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         global_hidden = self.global_refine(refined_input)
 
         raw_total_logratio = torch.tanh(self.total_budget_head(global_hidden)) * self.max_total_logratio
-        raw_pause_share = torch.sigmoid(self.pause_share_head(global_hidden))
         anchor_gate = torch.sigmoid(self.anchor_gate_head(global_hidden))
+        pause_ratio_hint = planner_ref_stats[:, 1:2].clamp(0.0, self.pause_share_max)
+        pause_share_delta = torch.tanh(self.pause_share_residual_head(global_hidden)) * self.pause_share_residual_max
+        pause_share = (pause_ratio_hint + pause_share_delta).clamp(0.0, self.pause_share_max)
 
-        src_total = total_anchor
-        total_budget = src_total * torch.exp(raw_total_logratio * anchor_gate)
-        pause_share = self.pause_share_max * raw_pause_share
+        total_budget = total_anchor * torch.exp(raw_total_logratio * anchor_gate)
         pause_budget = total_budget * pause_share
         min_speech_budget = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0) * self.min_speech_frames
         speech_budget = (total_budget - pause_budget).clamp_min(min_speech_budget)
@@ -357,17 +353,8 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
-        boundary_latent = build_deterministic_boundary_score(
-            source_boundary_cue=source_boundary_cue,
-            boundary_trace=trace_context[:, :, 2] if trace_context.size(-1) > 2 else None,
-            unit_mask=unit_mask,
-            source_weight=self.boundary_source_cue_weight,
-            trace_weight=self.boundary_trace_weight,
-        )
         pause_logits = self.pause_head(x).squeeze(-1)
-        pause_logits = pause_logits + self.pause_boundary_latent_weight * boundary_latent
-        pause_logits = pause_logits + self.pause_source_boundary_weight * source_boundary_cue.float()
-        pause_logits = pause_logits + self.pause_trace_weight * trace_context[:, :, 0].float()
+        pause_logits = pause_logits + self.pause_source_boundary_weight * boundary_score_unit.float()
         pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
 
         planner = RhythmPlannerOutputs(
@@ -378,15 +365,15 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             total_budget_win=total_budget,
             pause_share_win=pause_share,
             anchor_gate=anchor_gate,
-            boundary_latent=boundary_latent,
-            trace_context=trace_context,
+            boundary_score_unit=boundary_score_unit,
+            trace_context=full_trace_context,
             source_boundary_cue=source_boundary_cue,
         )
 
         confidence_input = torch.cat(
             [
                 global_hidden,
-                ref_conditioning["ref_rhythm_stats"],
+                planner_ref_stats,
                 pooled_trace,
                 agreement.unsqueeze(-1),
                 trace_var.unsqueeze(-1),

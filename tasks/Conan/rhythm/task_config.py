@@ -8,18 +8,20 @@ from modules.Conan.rhythm.policy import (
     parse_optional_bool,
     resolve_pause_boundary_weight,
 )
-from modules.Conan.rhythm.validation import collect_rhythm_contract_issues
+from tasks.Conan.rhythm.config_contract import (
+    collect_config_contract_evaluation,
+)
 
 
 def validate_rhythm_training_hparams(hparams) -> None:
     if not bool(hparams.get("rhythm_enable_v2", False)):
         return
-    result = collect_rhythm_contract_issues(hparams, model_dry_run=False)
-    if result.errors:
-        raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(result.errors))
-    if result.warnings:
+    report = collect_config_contract_evaluation(hparams, model_dry_run=False).report
+    if report.errors:
+        raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(report.errors))
+    if report.warnings:
         print("| Rhythm V2 config warnings:")
-        for warning in result.warnings:
+        for warning in report.warnings:
             print(f"|   - {warning}")
 
 

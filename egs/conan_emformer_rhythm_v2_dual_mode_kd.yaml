@@ -27,8 +27,6 @@ rhythm_offline_teacher_kernel_size: 5
 rhythm_offline_teacher_dilations: [1, 2, 4, 8, 2, 1]
 rhythm_offline_teacher_phrase_kernels: [3, 7]
 rhythm_offline_teacher_global_gate_scale: 0.12
-rhythm_offline_teacher_pause_trace_weight: 0.30
-rhythm_offline_teacher_boundary_trace_weight: 0.30
 rhythm_offline_teacher_confidence_agreement_weight: 0.25
 # Keep loss count unchanged: strengthen pause placement + feasible-state regularization
 # inside existing maintained losses.
@@ -41,6 +39,8 @@ lambda_rhythm_distill: 0.35
 rhythm_distill_budget_weight: 0.10
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.50
+rhythm_distill_speech_shape_weight: 0.20
+rhythm_distill_pause_shape_weight: 0.20
 
 rhythm_enable_aux_optimizer_losses: true
 lambda_rhythm_teacher_aux: 0.50

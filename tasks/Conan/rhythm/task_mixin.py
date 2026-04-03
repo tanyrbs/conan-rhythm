@@ -5,16 +5,31 @@ contracts, runtime target handling, and validation helpers for easier
 debugging and focused inspection.
 """
 
-import random
 from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
 
 from tasks.Conan.base_gen_task import f0_to_figure
+from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
 from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
+from tasks.Conan.rhythm.runtime_modes import (
+    build_rhythm_ref_conditioning,
+    collect_planner_runtime_outputs,
+    resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
+    resolve_task_runtime_state,
+)
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
+from tasks.Conan.rhythm.task_config import (
+    parse_task_optional_bool,
+    resolve_task_distill_surface,
+    resolve_task_pause_boundary_weight,
+    resolve_task_primary_target_surface,
+    resolve_task_retimed_target_mode,
+    resolve_task_target_mode,
+    validate_rhythm_training_hparams,
+)
 from tasks.Conan.rhythm.targets import (
     DistillConfidenceBundle,
     RhythmTargetBuildConfig,
@@ -22,26 +37,15 @@ from tasks.Conan.rhythm.targets import (
     build_rhythm_loss_targets_from_sample,
     scale_rhythm_loss_terms,
 )
-from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
-from modules.Conan.rhythm.factory import resolve_runtime_offline_teacher_enable
 from modules.Conan.rhythm.policy import (
-    normalize_distill_surface,
-    normalize_primary_target_surface,
-    normalize_retimed_target_mode,
-    normalize_rhythm_target_mode,
-    parse_optional_bool,
     resolve_apply_override,
     resolve_cumplan_lambda,
-    resolve_pause_boundary_weight,
     should_optimize_render_params,
     use_strict_mainline,
 )
 from modules.Conan.rhythm.stages import (
-    detect_rhythm_stage,
     resolve_runtime_dual_mode_teacher_enable,
-    resolve_teacher_as_main,
 )
-from modules.Conan.rhythm.validation import collect_rhythm_contract_issues
 from utils.audio.pitch.utils import denorm_f0
 from utils.commons.hparams import hparams
 from utils.commons.tensor_utils import tensors_to_scalars
@@ -52,15 +56,7 @@ from utils.nn.seq_utils import weights_nonzero_speech
 class RhythmConanTaskMixin:
     @staticmethod
     def _validate_rhythm_training_hparams():
-        if not bool(hparams.get("rhythm_enable_v2", False)):
-            return
-        result = collect_rhythm_contract_issues(hparams, model_dry_run=False)
-        if result.errors:
-            raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(result.errors))
-        if result.warnings:
-            print("| Rhythm V2 config warnings:")
-            for warning in result.warnings:
-                print(f"|   - {warning}")
+        validate_rhythm_training_hparams(hparams)
 
     def _collect_rhythm_gen_params(self):
         if self.model is None or not getattr(self.model, "rhythm_enable_v2", False):
@@ -134,11 +130,11 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _resolve_rhythm_pause_boundary_weight() -> float:
-        return resolve_pause_boundary_weight(hparams)
+        return resolve_task_pause_boundary_weight(hparams)
 
     @staticmethod
     def _parse_optional_bool(value):
-        return parse_optional_bool(value)
+        return parse_task_optional_bool(value)
 
     def _resolve_rhythm_apply_override(self, *, infer: bool, test: bool, explicit=None, current_step=None):
         effective_step = int(self.global_step if current_step is None else current_step)
@@ -152,17 +148,15 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _resolve_rhythm_target_mode() -> str:
-        return normalize_rhythm_target_mode(hparams.get("rhythm_dataset_target_mode", "prefer_cache"))
+        return resolve_task_target_mode(hparams)
 
     @staticmethod
     def _resolve_rhythm_primary_target_surface() -> str:
-        return normalize_primary_target_surface(
-            hparams.get("rhythm_primary_target_surface", "guidance")
-        )
+        return resolve_task_primary_target_surface(hparams)
 
     @staticmethod
     def _resolve_rhythm_distill_surface() -> str:
-        return normalize_distill_surface(hparams.get("rhythm_distill_surface", "auto"))
+        return resolve_task_distill_surface(hparams)
 
     @staticmethod
     def _use_rhythm_strict_mainline() -> bool:
@@ -269,6 +263,8 @@ class RhythmConanTaskMixin:
             distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
             distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
             distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
+            distill_speech_shape_weight=float(hparams.get("rhythm_distill_speech_shape_weight", 0.0)),
+            distill_pause_shape_weight=float(hparams.get("rhythm_distill_pause_shape_weight", 0.0)),
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
             pause_boundary_weight=RhythmConanTaskMixin._resolve_rhythm_pause_boundary_weight(),
@@ -287,22 +283,7 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _resolve_retimed_target_mode() -> str:
-        return normalize_retimed_target_mode(hparams.get("rhythm_retimed_target_mode", "cached"))
-
-    @staticmethod
-    def _merge_retimed_weight(frame_weight, confidence):
-        if frame_weight is None and confidence is None:
-            return None
-        if confidence is not None:
-            confidence = confidence.float().clamp_min(float(hparams.get("rhythm_retimed_confidence_floor", 0.05)))
-        if frame_weight is None:
-            return confidence
-        frame_weight = frame_weight.float()
-        if confidence is None:
-            return frame_weight
-        while confidence.dim() < frame_weight.dim():
-            confidence = confidence.unsqueeze(-1)
-        return frame_weight * confidence
+        return resolve_task_retimed_target_mode(hparams)
 
     def _resolve_acoustic_target_post_model(
         self,
@@ -314,59 +295,16 @@ class RhythmConanTaskMixin:
         test: bool,
         current_step=None,
     ):
-        target = sample["mels"]
-        frame_weight = None
-        is_retimed = False
-        source = "source"
-        effective_step = int(self.global_step if current_step is None else current_step)
-        start_step = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
-        if (
-            not bool(apply_rhythm_render)
-            or not bool(hparams.get("rhythm_use_retimed_target_if_available", False))
-            or effective_step < start_step
-        ):
-            return target, is_retimed, frame_weight, source
-
-        stage = "test" if test else ("valid" if infer else "train")
-        target_mode = self._resolve_retimed_target_mode()
-        online_start = int(hparams.get("rhythm_online_retimed_target_start_steps", start_step) or start_step)
-        online_ready = effective_step >= online_start
-        prefer_online = target_mode in {"online", "hybrid"} and online_ready
-
-        if prefer_online:
-            online_target = model_out.get("rhythm_online_retimed_mel_tgt")
-            if online_target is not None:
-                target = online_target
-                frame_weight = self._merge_retimed_weight(
-                    model_out.get("rhythm_online_retimed_frame_weight"),
-                    None,
-                )
-                is_retimed = True
-                source = "online"
-                return target, is_retimed, frame_weight, source
-            if target_mode == "online":
-                raise RuntimeError(
-                    f"Rhythm online retimed target is required for the active render path ({stage}) but is unavailable."
-                )
-
-        cached_target = sample.get("rhythm_retimed_mel_tgt")
-        if cached_target is not None:
-            target = cached_target
-            frame_weight = self._merge_retimed_weight(
-                sample.get("rhythm_retimed_frame_weight"),
-                sample.get("rhythm_retimed_target_confidence"),
-            )
-            is_retimed = True
-            source = "cached"
-            return target, is_retimed, frame_weight, source
-
-        require_retimed = bool(hparams.get("rhythm_require_retimed_cache", False))
-        if require_retimed or (not test and self._resolve_rhythm_target_mode() == "cached_only"):
-            raise RuntimeError(
-                "Rhythm retimed target is required for the active render path "
-                f"({stage}) but neither online nor cached retimed targets are available."
-            )
-        return target, is_retimed, frame_weight, source
+        return resolve_task_acoustic_target_post_model(
+            sample,
+            model_out,
+            hparams=hparams,
+            global_step=int(self.global_step),
+            apply_rhythm_render=apply_rhythm_render,
+            infer=infer,
+            test=test,
+            current_step=current_step,
+        )
 
     @staticmethod
     def _resample_sequence_length(x: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -445,136 +383,6 @@ class RhythmConanTaskMixin:
         weights = self._expand_frame_weight(frame_weight, target[:, 0])
         return (ssim_loss * weights).sum() / weights.sum().clamp_min(1.0)
 
-    def _update_public_loss_aliases(self, losses):
-        device = None
-        for value in losses.values():
-            if isinstance(value, torch.Tensor):
-                device = value.device
-                break
-        zero = torch.tensor(0.0, device=device or "cpu")
-        if "rhythm_exec_speech" in losses:
-            losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
-        if "rhythm_exec_pause" in losses:
-            losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
-        losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
-        cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
-        losses["L_cumplan"] = cumplan.detach() if isinstance(cumplan, torch.Tensor) else zero
-        losses["L_prefix_state"] = losses["L_cumplan"]
-        losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
-        rhythm_exec = losses.get("rhythm_exec")
-        losses["L_rhythm_exec"] = rhythm_exec.detach() if isinstance(rhythm_exec, torch.Tensor) else zero
-        stream_state = losses.get("rhythm_stream_state")
-        losses["L_stream_state"] = stream_state.detach() if isinstance(stream_state, torch.Tensor) else zero
-        pitch_value = losses.get("pitch")
-        if not isinstance(pitch_value, torch.Tensor):
-            pitch_value = zero
-            for loss_name in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
-                value = losses.get(loss_name)
-                if isinstance(value, torch.Tensor):
-                    pitch_value = pitch_value + value.detach()
-        else:
-            pitch_value = pitch_value.detach()
-        losses["L_pitch"] = pitch_value
-        losses["L_distill_exec"] = losses.get("rhythm_distill_exec", zero).detach() if isinstance(losses.get("rhythm_distill_exec"), torch.Tensor) else zero
-        losses["L_distill_budget"] = losses.get("rhythm_distill_budget", zero).detach() if isinstance(losses.get("rhythm_distill_budget"), torch.Tensor) else zero
-        losses["L_distill_prefix"] = losses.get("rhythm_distill_prefix", zero).detach() if isinstance(losses.get("rhythm_distill_prefix"), torch.Tensor) else zero
-        base_value = losses.get("base")
-        if isinstance(base_value, torch.Tensor):
-            base = base_value.detach()
-        else:
-            base = zero
-            for loss_name in self.mel_losses.keys():
-                value = losses.get(loss_name)
-                if isinstance(value, torch.Tensor):
-                    base = base + value.detach()
-        losses["L_base"] = base
-
-    @staticmethod
-    def _detach_loss_value(losses, key):
-        value = losses.get(key)
-        if isinstance(value, torch.Tensor):
-            losses[key] = value.detach()
-        return value
-
-    def _compact_base_optimizer_losses(self, losses, *, schedule_only_stage: bool):
-        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
-            return
-        base_terms = []
-        base_keys = []
-        for loss_name in self.mel_losses.keys():
-            value = losses.get(loss_name)
-            if isinstance(value, torch.Tensor):
-                base_keys.append(loss_name)
-                if value.requires_grad:
-                    base_terms.append(value)
-        if not base_terms:
-            return
-        losses["base"] = sum(base_terms)
-        for key in base_keys:
-            self._detach_loss_value(losses, key)
-
-    def _compact_pitch_optimizer_losses(self, losses, *, schedule_only_stage: bool):
-        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
-            return
-        pitch_keys = []
-        pitch_terms = []
-        for key in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
-            value = losses.get(key)
-            if isinstance(value, torch.Tensor):
-                pitch_keys.append(key)
-                if value.requires_grad:
-                    pitch_terms.append(value)
-        if not pitch_terms:
-            return
-        losses["pitch"] = sum(pitch_terms)
-        for key in pitch_keys:
-            self._detach_loss_value(losses, key)
-
-    def _compact_rhythm_optimizer_losses(self, losses, *, schedule_only_stage: bool):
-        # Keep these available for logging/ablation, but do not silently detach
-        # an objective that is explicitly enabled in config.
-        keep_plan = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
-        keep_guidance = keep_plan or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
-        keep_distill = (
-            keep_plan
-            or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
-            or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
-        )
-        if not keep_plan:
-            self._detach_loss_value(losses, "rhythm_plan")
-        if not keep_guidance:
-            self._detach_loss_value(losses, "rhythm_guidance")
-        if not keep_distill:
-            self._detach_loss_value(losses, "rhythm_distill")
-        if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
-            return
-        exec_terms = []
-        exec_keys = []
-        for key in ("rhythm_exec_speech", "rhythm_exec_pause"):
-            value = losses.get(key)
-            if isinstance(value, torch.Tensor):
-                exec_keys.append(key)
-                if value.requires_grad:
-                    exec_terms.append(value)
-        if exec_terms:
-            losses["rhythm_exec"] = sum(exec_terms)
-            for key in exec_keys:
-                self._detach_loss_value(losses, key)
-        budget = losses.get("rhythm_budget")
-        cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
-        state_terms = []
-        if isinstance(budget, torch.Tensor) and budget.requires_grad:
-            state_terms.append(float(hparams.get("rhythm_joint_budget_macro_weight", 0.35)) * budget)
-        if isinstance(cumplan, torch.Tensor) and cumplan.requires_grad:
-            state_terms.append(float(hparams.get("rhythm_joint_cumplan_macro_weight", 0.65)) * cumplan)
-        if state_terms:
-            losses["rhythm_stream_state"] = sum(state_terms)
-        self._detach_loss_value(losses, "rhythm_budget")
-        if "rhythm_cumplan" in losses:
-            self._detach_loss_value(losses, "rhythm_cumplan")
-        elif "rhythm_carry" in losses:
-            self._detach_loss_value(losses, "rhythm_carry")
-
     def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
         if frame_weight is None:
             self.add_mel_loss(mel_out, target, losses)
@@ -620,27 +428,12 @@ class RhythmConanTaskMixin:
             sep_hint=source_cache.get("sep_hint"),
             boundary_confidence=source_cache.get("boundary_confidence"),
         )
-        rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
+        rhythm_ref_conditioning = build_rhythm_ref_conditioning(
+            sample,
+            explicit=kwargs.get("rhythm_ref_conditioning"),
+        )
         if rhythm_ref_conditioning is None:
-            ref_stats = sample.get("ref_rhythm_stats")
-            ref_trace = sample.get("ref_rhythm_trace")
-            if ref_stats is None or ref_trace is None:
-                raise RuntimeError("rhythm_teacher_only_stage requires ref_rhythm_stats and ref_rhythm_trace.")
-            rhythm_ref_conditioning = {
-                "ref_rhythm_stats": ref_stats,
-                "ref_rhythm_trace": ref_trace,
-            }
-            for extra_key in (
-                "slow_rhythm_memory",
-                "slow_rhythm_summary",
-                "selector_meta_indices",
-                "selector_meta_scores",
-                "selector_meta_starts",
-                "selector_meta_ends",
-            ):
-                extra_value = sample.get(extra_key)
-                if extra_value is not None:
-                    rhythm_ref_conditioning[extra_key] = extra_value
+            raise RuntimeError("rhythm_teacher_only_stage requires ref_rhythm_stats and ref_rhythm_trace.")
         teacher_scale = self.model._resolve_rhythm_source_boundary_scale(
             infer=False,
             global_steps=int(self.global_step),
@@ -674,20 +467,16 @@ class RhythmConanTaskMixin:
             "rhythm_offline_confidence_prefix": confidence.get("prefix") if isinstance(confidence, dict) else None,
             "rhythm_offline_confidence_allocation": confidence.get("allocation") if isinstance(confidence, dict) else None,
         }
-        planner = getattr(execution, "planner", None)
-        if planner is not None:
-            for attr_name in (
-                "feasible_speech_budget_delta",
-                "feasible_pause_budget_delta",
-                "feasible_total_budget_delta",
-            ):
-                attr_value = getattr(planner, attr_name, None)
-                if attr_value is not None:
-                    output[attr_name] = attr_value
+        output.update(collect_planner_runtime_outputs(execution))
         losses = {}
         self.add_rhythm_loss(output, sample, losses)
-        self._compact_rhythm_optimizer_losses(losses, schedule_only_stage=False)
-        self._update_public_loss_aliases(losses)
+        route_conan_optimizer_losses(
+            losses,
+            mel_loss_names=tuple(self.mel_losses.keys()),
+            hparams=hparams,
+            schedule_only_stage=False,
+        )
+        update_public_loss_aliases(losses, mel_loss_names=tuple(self.mel_losses.keys()))
         return losses, output
 
     def run_model(self, sample, infer=False, test=False, **kwargs):
@@ -703,69 +492,30 @@ class RhythmConanTaskMixin:
         # notes, note_durs, note_types = sample["notes"], sample["note_durs"], sample["note_types"]
 
         target = sample["mels"]
-        effective_global_step = 200000 if test else int(self.global_step)
-        use_reference = (
-            test
-            or effective_global_step >= hparams["random_speaker_steps"]
-            or bool(hparams.get("rhythm_force_reference_conditioning", False))
-        )
-        if use_reference:
-            ref = sample['ref_mels']
-        else:
-            ref = target
-        rhythm_apply_override = self._resolve_rhythm_apply_override(
+        runtime_state = resolve_task_runtime_state(
+            hparams,
+            global_step=int(self.global_step),
             infer=infer,
             test=test,
-            explicit=kwargs.get("rhythm_apply_override"),
-            current_step=effective_global_step,
+            explicit_apply_override=kwargs.get("rhythm_apply_override"),
+            has_f0=f0 is not None,
+            has_uv=uv is not None,
         )
-        apply_rhythm_render = resolve_rhythm_apply_mode(
-            hparams,
-            infer=infer,
-            override=rhythm_apply_override,
-        )
-        retimed_stage_active = bool(
-            apply_rhythm_render
-            and not infer
-            and not test
-            and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
-            and effective_global_step >= int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
-        )
-        use_retimed_pitch_target = bool(hparams.get("rhythm_use_retimed_pitch_target", False))
-        disable_source_pitch_supervision = bool(
-            retimed_stage_active
-            and (
-                not use_retimed_pitch_target
-                or f0 is None
-                or uv is None
-                or bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", False))
-            )
-        )
+        effective_global_step = runtime_state.effective_global_step
+        ref = sample["ref_mels"] if runtime_state.use_reference else target
+        rhythm_apply_override = runtime_state.rhythm_apply_override
+        apply_rhythm_render = runtime_state.apply_rhythm_render
+        retimed_stage_active = runtime_state.retimed_stage_active
+        disable_source_pitch_supervision = runtime_state.disable_source_pitch_supervision
         if disable_source_pitch_supervision and retimed_stage_active and not self._warned_retimed_pitch_supervision:
             print("| Rhythm V2: retimed canvas active, disabling source-aligned pitch supervision for this run.")
             self._warned_retimed_pitch_supervision = True
-        rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
-        if rhythm_ref_conditioning is None:
-            ref_stats = sample.get("ref_rhythm_stats")
-            ref_trace = sample.get("ref_rhythm_trace")
-            if ref_stats is not None and ref_trace is not None:
-                rhythm_ref_conditioning = {
-                    "ref_rhythm_stats": ref_stats,
-                    "ref_rhythm_trace": ref_trace,
-                }
-                for extra_key in (
-                    "slow_rhythm_memory",
-                    "slow_rhythm_summary",
-                    "selector_meta_indices",
-                    "selector_meta_scores",
-                    "selector_meta_starts",
-                    "selector_meta_ends",
-                ):
-                    extra_value = sample.get(extra_key)
-                    if extra_value is not None:
-                        rhythm_ref_conditioning[extra_key] = extra_value
-        stage = detect_rhythm_stage(hparams)
-        teacher_as_main = resolve_teacher_as_main(hparams, stage=stage, infer=bool(infer))
+        rhythm_ref_conditioning = build_rhythm_ref_conditioning(
+            sample,
+            explicit=kwargs.get("rhythm_ref_conditioning"),
+        )
+        stage = runtime_state.stage
+        teacher_as_main = runtime_state.teacher_as_main
         if stage == "teacher_offline" and not teacher_as_main:
             teacher_only_result = self._run_offline_teacher_model(
                 sample,
@@ -794,14 +544,7 @@ class RhythmConanTaskMixin:
         # mix, falsetto, breathy=sample['mix'], sample['falsetto'], sample['breathy']
         # bubble,strong,weak=sample['bubble'],sample['strong'],sample['weak']
         # pharyngeal, vibrato, glissando = sample['pharyngeal'], sample['vibrato'], sample['glissando']
-        disable_acoustic_train_path = bool(
-            not infer
-            and not test
-            and not bool(apply_rhythm_render)
-            and hparams.get("rhythm_enable_v2", False)
-            and hparams.get("rhythm_optimize_module_only", False)
-            and hparams.get("rhythm_fastpath_disable_acoustic_when_module_only", True)
-        )
+        disable_acoustic_train_path = runtime_state.disable_acoustic_train_path
         disable_source_pitch_supervision = bool(disable_source_pitch_supervision or disable_acoustic_train_path)
         if disable_acoustic_train_path and rhythm_ref_conditioning is not None:
             ref = None
@@ -828,17 +571,7 @@ class RhythmConanTaskMixin:
             test=test,
             current_step=effective_global_step,
         )
-        rhythm_execution = output.get("rhythm_execution")
-        if rhythm_execution is not None and getattr(rhythm_execution, "planner", None) is not None:
-            planner = rhythm_execution.planner
-            for attr_name in (
-                "feasible_speech_budget_delta",
-                "feasible_pause_budget_delta",
-                "feasible_total_budget_delta",
-            ):
-                attr_value = getattr(planner, attr_name, None)
-                if attr_value is not None:
-                    output[attr_name] = attr_value
+        output.update(collect_planner_runtime_outputs(output.get("rhythm_execution")))
         
         losses = {}
         output["acoustic_target_mel"] = acoustic_target
@@ -880,10 +613,13 @@ class RhythmConanTaskMixin:
                 if self.global_step > hparams['vq_start'] and 'vq_loss' in output and 'ppl' in output:
                     losses['vq_loss'] = output['vq_loss']
                     losses['ppl'] = output['ppl']
-            self._compact_base_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
-            self._compact_pitch_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
-            self._compact_rhythm_optimizer_losses(losses, schedule_only_stage=schedule_only_stage)
-            self._update_public_loss_aliases(losses)
+            route_conan_optimizer_losses(
+                losses,
+                mel_loss_names=tuple(self.mel_losses.keys()),
+                hparams=hparams,
+                schedule_only_stage=schedule_only_stage,
+            )
+            update_public_loss_aliases(losses, mel_loss_names=tuple(self.mel_losses.keys()))
         
         return losses, output
 
@@ -944,9 +680,24 @@ class RhythmConanTaskMixin:
             speech_budget_win=speech_budget,
             pause_budget_win=pause_budget,
             blank_budget_win=pause_budget,
-            boundary_latent=(
-                planner.boundary_latent[:, :teacher_units]
+            boundary_score_unit=(
+                planner.boundary_score_unit[:, :teacher_units]
+                if planner is not None and torch.is_tensor(getattr(planner, "boundary_score_unit", None))
+                else planner.boundary_latent[:, :teacher_units]
                 if planner is not None and torch.is_tensor(getattr(planner, "boundary_latent", None))
+                else getattr(planner, "boundary_score_unit", None)
+                if planner is not None and getattr(planner, "boundary_score_unit", None) is not None
+                else getattr(planner, "boundary_latent", None)
+                if planner is not None
+                else speech_exec.new_zeros(speech_exec.shape)
+            ),
+            boundary_latent=(
+                planner.boundary_score_unit[:, :teacher_units]
+                if planner is not None and torch.is_tensor(getattr(planner, "boundary_score_unit", None))
+                else planner.boundary_latent[:, :teacher_units]
+                if planner is not None and torch.is_tensor(getattr(planner, "boundary_latent", None))
+                else getattr(planner, "boundary_score_unit", None)
+                if planner is not None and getattr(planner, "boundary_score_unit", None) is not None
                 else getattr(planner, "boundary_latent", None)
                 if planner is not None
                 else speech_exec.new_zeros(speech_exec.shape)

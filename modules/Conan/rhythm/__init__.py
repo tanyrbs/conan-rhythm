@@ -37,6 +37,7 @@ from .policy import (
     use_strict_mainline,
 )
 from .reference_descriptor import RefRhythmDescriptor
+from .reference_descriptor import PLANNER_REF_STATS_KEYS, PLANNER_REF_TRACE_KEYS
 from .reference_encoder import (
     REF_RHYTHM_STATS_KEYS,
     REF_RHYTHM_TRACE_KEYS,
@@ -60,7 +61,7 @@ from .stages import (
     resolve_runtime_offline_teacher_enable,
     resolve_teacher_as_main,
 )
-from .source_boundary import build_source_boundary_cue
+from .source_boundary import build_source_boundary_cue, compose_boundary_score_unit
 from .supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
@@ -106,6 +107,8 @@ from .unit_frontend import RhythmUnitBatch, RhythmUnitFrontend
 __all__ = [
     'REF_RHYTHM_STATS_KEYS',
     'REF_RHYTHM_TRACE_KEYS',
+    'PLANNER_REF_STATS_KEYS',
+    'PLANNER_REF_TRACE_KEYS',
     'MonotonicRhythmScheduler',
     'ReferenceSelection',
     'ReferenceSelector',
@@ -179,6 +182,7 @@ __all__ = [
     'StreamingRhythmState',
     'StreamingUnitizerState',
     'build_source_boundary_cue',
+    'compose_boundary_score_unit',
     'detect_rhythm_stage',
     'build_compressed_sequence',
     'compress_token_sequence',

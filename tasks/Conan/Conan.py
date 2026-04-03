@@ -4,7 +4,6 @@ from tasks.Conan.base_gen_task import AuxDecoderMIDITask
 from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
 from modules.Conan.rhythm.stages import detect_rhythm_stage
-from modules.Conan.rhythm.validation import collect_rhythm_contract_issues
 from utils.commons.hparams import hparams
 import torch
 import torch.nn as nn
@@ -62,18 +61,6 @@ class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
                 self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
         else:
             self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
-
-    @staticmethod
-    def _validate_rhythm_training_hparams():
-        if not bool(hparams.get("rhythm_enable_v2", False)):
-            return
-        result = collect_rhythm_contract_issues(hparams, model_dry_run=False)
-        if result.errors:
-            raise ValueError("Invalid Rhythm V2 training config:\n- " + "\n- ".join(result.errors))
-        if result.warnings:
-            print("| Rhythm V2 config warnings:")
-            for warning in result.warnings:
-                print(f"|   - {warning}")
 
     def build_disc_model(self):
         disc_win_num = int(hparams.get('disc_win_num', 0) or 0)

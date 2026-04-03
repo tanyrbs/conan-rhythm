@@ -12,35 +12,6 @@ def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return ((x - mean) / var.clamp_min(1e-6).sqrt()) * mask
 
 
-def build_deterministic_boundary_score(
-    *,
-    source_boundary_cue: torch.Tensor | None,
-    boundary_trace: torch.Tensor | None,
-    unit_mask: torch.Tensor,
-    source_weight: float = 0.35,
-    trace_weight: float = 0.35,
-) -> torch.Tensor:
-    """Observed boundary score used as a compatibility alias for boundary_latent.
-
-    This is intentionally non-learned:
-    - source_boundary_cue keeps cache/source-side boundary evidence
-    - boundary_trace keeps reference-side boundary tendency
-    """
-
-    unit_mask = unit_mask.float()
-    score = unit_mask.new_zeros(unit_mask.shape)
-    total_weight = 0.0
-    if source_boundary_cue is not None:
-        score = score + float(source_weight) * source_boundary_cue.float().clamp(0.0, 1.0)
-        total_weight += float(source_weight)
-    if boundary_trace is not None:
-        score = score + float(trace_weight) * boundary_trace.float().clamp(0.0, 1.0)
-        total_weight += float(trace_weight)
-    if total_weight <= 0.0:
-        return score
-    return (score / total_weight).clamp(0.0, 1.0) * unit_mask
-
-
 def build_source_boundary_cue(
     *,
     dur_anchor_src: torch.Tensor,
@@ -50,13 +21,7 @@ def build_source_boundary_cue(
     sealed_mask: torch.Tensor | None = None,
     boundary_confidence: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Build a cheap, prefix-safe boundary cue.
-
-    This stays intentionally heuristic and non-learned:
-    - separator-aware unit breaks are treated as strong evidence
-    - local duration peaks / jumps are treated as weaker phrase-boundary evidence
-    - open tail units are mildly suppressed because they are not yet commit-safe
-    """
+    """Build a cheap, prefix-safe source-side boundary prior."""
 
     unit_mask = unit_mask.float()
     log_anchor = torch.log1p(dur_anchor_src.float().clamp_min(0.0)) * unit_mask
@@ -82,3 +47,59 @@ def build_source_boundary_cue(
         cue = cue * (0.80 + 0.20 * sealed_mask.float())
 
     return cue.clamp(0.0, 1.0) * unit_mask
+
+
+def compose_boundary_score_unit(
+    *,
+    unit_mask: torch.Tensor,
+    source_boundary_cue: torch.Tensor | None = None,
+    boundary_trace: torch.Tensor | None = None,
+    source_weight: float = 0.65,
+) -> torch.Tensor:
+    """Deterministic boundary evidence sidecar.
+
+    The maintained planner no longer uses a learnable boundary latent.
+    Boundary evidence is a deterministic blend of:
+      - source-side prefix-safe structural cues
+      - reference-side boundary trace
+    """
+
+    unit_mask = unit_mask.float()
+    if source_boundary_cue is None and boundary_trace is None:
+        return unit_mask.new_zeros(unit_mask.shape)
+    if source_boundary_cue is None:
+        source_boundary_cue = unit_mask.new_zeros(unit_mask.shape)
+    else:
+        source_boundary_cue = source_boundary_cue.float().clamp(0.0, 1.0)
+    if boundary_trace is None:
+        boundary_trace = unit_mask.new_zeros(unit_mask.shape)
+    else:
+        if boundary_trace.dim() == 3 and boundary_trace.size(-1) == 1:
+            boundary_trace = boundary_trace.squeeze(-1)
+        boundary_trace = boundary_trace.float().clamp(0.0, 1.0)
+    source_weight = float(max(0.0, min(1.0, source_weight)))
+    trace_weight = 1.0 - source_weight
+    blended = source_weight * source_boundary_cue + trace_weight * boundary_trace
+    agreement = torch.minimum(source_boundary_cue, boundary_trace)
+    score = 0.85 * blended + 0.15 * agreement
+    return score.clamp(0.0, 1.0) * unit_mask
+
+
+def build_deterministic_boundary_score(
+    *,
+    source_boundary_cue: torch.Tensor | None,
+    boundary_trace: torch.Tensor | None,
+    unit_mask: torch.Tensor,
+    source_weight: float = 0.35,
+    trace_weight: float = 0.35,
+) -> torch.Tensor:
+    """Backward-compatible alias for the old deterministic boundary helper."""
+
+    total = float(source_weight) + float(trace_weight)
+    normalized_source = 0.5 if total <= 0.0 else float(source_weight) / total
+    return compose_boundary_score_unit(
+        unit_mask=unit_mask,
+        source_boundary_cue=source_boundary_cue,
+        boundary_trace=boundary_trace,
+        source_weight=normalized_source,
+    )

@@ -64,22 +64,15 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
         dilations=tuple(int(x) for x in hparams.get('rhythm_offline_teacher_dilations', (1, 2, 4, 8, 2, 1))),
         phrase_kernel_sizes=tuple(int(x) for x in phrase_kernels),
         global_gate_scale=float(hparams.get('rhythm_offline_teacher_global_gate_scale', 0.12)),
-        pause_trace_weight=float(hparams.get('rhythm_offline_teacher_pause_trace_weight', 0.30)),
-        boundary_trace_weight=float(
-            hparams.get(
-                'rhythm_offline_teacher_boundary_trace_weight',
-                hparams.get('rhythm_boundary_trace_weight', 0.30),
-            )
-        ),
         confidence_agreement_weight=float(hparams.get('rhythm_offline_teacher_confidence_agreement_weight', 0.25)),
         confidence_floor=float(hparams.get('rhythm_offline_teacher_confidence_floor', 0.05)),
         confidence_ceiling=float(hparams.get('rhythm_offline_teacher_confidence_ceiling', 1.0)),
         max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
+        pause_share_residual_max=float(hparams.get('rhythm_pause_share_residual_max', 0.12)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
-        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.20)),
-        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
+        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
     )
@@ -105,15 +98,9 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
+        pause_share_residual_max=float(hparams.get('rhythm_pause_share_residual_max', 0.12)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
-        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.20)),
-        boundary_trace_weight=float(
-            hparams.get(
-                'rhythm_boundary_trace_weight',
-                hparams.get('rhythm_boundary_source_cue_weight', 0.20),
-            )
-        ),
-        pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
+        boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),

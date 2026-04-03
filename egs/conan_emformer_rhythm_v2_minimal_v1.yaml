@@ -34,3 +34,5 @@ lambda_rhythm_distill: 0.0
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.25
+rhythm_distill_speech_shape_weight: 0.0
+rhythm_distill_pause_shape_weight: 0.0

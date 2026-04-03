@@ -41,10 +41,9 @@ class StreamingRhythmModule(nn.Module):
         max_total_logratio: float = 0.8,
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
+        pause_share_residual_max: float = 0.12,
         boundary_feature_scale: float = 0.35,
-        boundary_source_cue_weight: float = 0.35,
-        boundary_trace_weight: float = 0.35,
-        pause_boundary_latent_weight: float = 0.35,
+        boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
@@ -60,17 +59,18 @@ class StreamingRhythmModule(nn.Module):
             selector_cell_size=selector_cell_size,
             smooth_kernel=trace_smooth_kernel,
         )
+        planner_stats_dim = 2
+        planner_trace_dim = 2
         self.scheduler = MonotonicRhythmScheduler(
             hidden_size=hidden_size,
-            stats_dim=stats_dim,
-            trace_dim=trace_dim,
+            stats_dim=planner_stats_dim,
+            trace_dim=planner_trace_dim,
             max_total_logratio=max_total_logratio,
             max_unit_logratio=max_unit_logratio,
             pause_share_max=pause_share_max,
+            pause_share_residual_max=pause_share_residual_max,
             boundary_feature_scale=boundary_feature_scale,
             boundary_source_cue_weight=boundary_source_cue_weight,
-            boundary_trace_weight=boundary_trace_weight,
-            pause_boundary_latent_weight=pause_boundary_latent_weight,
             pause_source_boundary_weight=pause_source_boundary_weight,
         )
         self.enable_learned_offline_teacher = bool(enable_learned_offline_teacher)
@@ -79,17 +79,16 @@ class StreamingRhythmModule(nn.Module):
                 max_total_logratio=max_total_logratio,
                 max_unit_logratio=max_unit_logratio,
                 pause_share_max=pause_share_max,
+                pause_share_residual_max=pause_share_residual_max,
                 boundary_feature_scale=boundary_feature_scale,
                 boundary_source_cue_weight=boundary_source_cue_weight,
-                boundary_trace_weight=boundary_trace_weight,
-                pause_boundary_latent_weight=pause_boundary_latent_weight,
                 pause_source_boundary_weight=pause_source_boundary_weight,
             )
         self.offline_teacher = (
             OfflineRhythmTeacherPlanner(
                 hidden_size=hidden_size,
-                stats_dim=stats_dim,
-                trace_dim=trace_dim,
+                stats_dim=planner_stats_dim,
+                trace_dim=planner_trace_dim,
                 config=offline_teacher_config,
             )
             if self.enable_learned_offline_teacher
@@ -136,6 +135,12 @@ class StreamingRhythmModule(nn.Module):
                 slow_memory = enriched["slow_rhythm_memory"]
                 if slow_memory.dim() == 3:
                     enriched["slow_rhythm_summary"] = slow_memory.mean(dim=1)
+            if "planner_slow_rhythm_summary" not in enriched and "planner_slow_rhythm_memory" in enriched:
+                planner_slow_memory = enriched["planner_slow_rhythm_memory"]
+                if planner_slow_memory.dim() == 3:
+                    enriched["planner_slow_rhythm_summary"] = planner_slow_memory.mean(dim=1)
+            elif "planner_slow_rhythm_summary" not in enriched and "planner_ref_trace" in enriched:
+                enriched["planner_slow_rhythm_summary"] = enriched["planner_ref_trace"].mean(dim=1)
             return enriched
         if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
             return self.reference_descriptor.from_stats_trace(
@@ -157,6 +162,23 @@ class StreamingRhythmModule(nn.Module):
         visible_sizes: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.reference_descriptor.sample_trace_window(
+            ref_conditioning,
+            phase_ptr=phase_ptr,
+            window_size=window_size,
+            horizon=horizon,
+            visible_sizes=visible_sizes,
+        )
+
+    def sample_planner_trace_window(
+        self,
+        *,
+        ref_conditioning: dict[str, torch.Tensor],
+        phase_ptr: torch.Tensor,
+        window_size: int,
+        horizon: float | None = None,
+        visible_sizes: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.reference_descriptor.sample_planner_trace_window(
             ref_conditioning,
             phase_ptr=phase_ptr,
             window_size=window_size,
@@ -217,12 +239,20 @@ class StreamingRhythmModule(nn.Module):
             horizon=trace_horizon,
             visible_sizes=visible_sizes,
         )
+        planner_trace_context = self.sample_planner_trace_window(
+            ref_conditioning=ref_conditioning,
+            phase_ptr=state.phase_ptr,
+            window_size=content_units.size(1),
+            horizon=trace_horizon,
+            visible_sizes=visible_sizes,
+        )
         planner = self.scheduler(
             unit_states=unit_embed,
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             ref_conditioning=ref_conditioning,
             trace_context=trace_context,
+            planner_trace_context=planner_trace_context,
             state=state,
             source_boundary_cue=source_boundary_cue,
         )
@@ -233,7 +263,7 @@ class StreamingRhythmModule(nn.Module):
             pause_budget_win=planner.pause_budget_win,
             dur_logratio_unit=planner.dur_logratio_unit,
             pause_weight_unit=planner.pause_weight_unit,
-            boundary_latent=planner.boundary_latent,
+            boundary_score_unit=planner.boundary_score_unit,
             state=state,
             open_run_mask=open_run_mask,
             planner=planner,
@@ -433,12 +463,20 @@ class StreamingRhythmModule(nn.Module):
             horizon=1.0,
             visible_sizes=visible_sizes,
         )
+        planner_trace_context = self.sample_planner_trace_window(
+            ref_conditioning=ref_conditioning,
+            phase_ptr=unit_mask.new_zeros((unit_mask.size(0),)),
+            window_size=content_units.size(1),
+            horizon=1.0,
+            visible_sizes=visible_sizes,
+        )
         planner, confidence = self.offline_teacher(
             unit_states=unit_embed,
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             ref_conditioning=ref_conditioning,
-            trace_context=trace_context,
+            planner_trace_context=planner_trace_context,
+            full_trace_context=trace_context,
             source_boundary_cue=source_boundary_cue,
         )
         execution = self.projector(
@@ -448,7 +486,7 @@ class StreamingRhythmModule(nn.Module):
             pause_budget_win=planner.pause_budget_win,
             dur_logratio_unit=planner.dur_logratio_unit,
             pause_weight_unit=planner.pause_weight_unit,
-            boundary_latent=planner.boundary_latent,
+            boundary_score_unit=planner.boundary_score_unit,
             state=self.init_state(batch_size=content_units.size(0), device=content_units.device),
             open_run_mask=torch.zeros_like(content_units) if open_run_mask is None else open_run_mask,
             planner=planner,

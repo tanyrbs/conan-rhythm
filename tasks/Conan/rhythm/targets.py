@@ -17,6 +17,8 @@ class RhythmTargetBuildConfig:
     distill_budget_weight: float
     distill_allocation_weight: float
     distill_prefix_weight: float
+    distill_speech_shape_weight: float
+    distill_pause_shape_weight: float
     plan_local_weight: float
     plan_cum_weight: float
     pause_boundary_weight: float
@@ -41,6 +43,14 @@ class RhythmTargetBuildConfig:
     @property
     def use_distill_prefix(self) -> bool:
         return self.use_distill and self.distill_prefix_weight > 0.0
+
+    @property
+    def use_distill_speech_shape(self) -> bool:
+        return self.use_distill and self.distill_speech_shape_weight > 0.0
+
+    @property
+    def use_distill_pause_shape(self) -> bool:
+        return self.use_distill and self.distill_pause_shape_weight > 0.0
 
 
 @dataclass(frozen=True)
@@ -354,6 +364,8 @@ def build_rhythm_loss_targets_from_sample(
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),
+        distill_speech_shape_weight=float(config.distill_speech_shape_weight),
+        distill_pause_shape_weight=float(config.distill_pause_shape_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
     )
@@ -382,6 +394,8 @@ def build_identity_rhythm_loss_targets(
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),
+        distill_speech_shape_weight=float(config.distill_speech_shape_weight),
+        distill_pause_shape_weight=float(config.distill_pause_shape_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
     )
@@ -421,12 +435,12 @@ def scale_rhythm_loss_terms(
         "rhythm_distill_speech_shape": (
             rhythm_losses["rhythm_distill_speech_shape"]
             * lambda_distill
-            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+            * float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
         ).detach(),
         "rhythm_distill_pause_shape": (
             rhythm_losses["rhythm_distill_pause_shape"]
             * lambda_distill
-            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+            * float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
         ).detach(),
         "rhythm_distill_allocation": (
             rhythm_losses["rhythm_distill_allocation"]

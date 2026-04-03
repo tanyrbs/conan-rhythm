@@ -67,7 +67,7 @@ def _allocate_pause_budget(
 def _project_pause_impl(
     *,
     pause_weight_unit: torch.Tensor,
-    boundary_latent: torch.Tensor,
+    boundary_score_unit: torch.Tensor,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
     previous_pause_exec: torch.Tensor | None,
@@ -81,7 +81,7 @@ def _project_pause_impl(
 ) -> torch.Tensor:
     scores = pause_weight_unit.float().clamp_min(0.0)
     boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
+        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
     )
     scores = (scores + boundary_bias) * unit_mask.float()
     total_units = scores.size(1)
@@ -123,7 +123,7 @@ def _project_pause_impl(
 def _project_pause_simple_impl(
     *,
     pause_weight_unit: torch.Tensor,
-    boundary_latent: torch.Tensor,
+    boundary_score_unit: torch.Tensor,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
     previous_pause_exec: torch.Tensor | None,
@@ -134,7 +134,7 @@ def _project_pause_simple_impl(
 ) -> torch.Tensor:
     scores = pause_weight_unit.float().clamp_min(0.0)
     boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
+        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
     )
     scores = (scores + boundary_bias) * unit_mask.float()
     return _allocate_pause_budget(
@@ -361,7 +361,7 @@ class StreamingRhythmProjector(nn.Module):
         self,
         *,
         pause_weight_unit: torch.Tensor,
-        boundary_latent: torch.Tensor,
+        boundary_score_unit: torch.Tensor,
         unit_mask: torch.Tensor,
         pause_budget_win: torch.Tensor,
         state: StreamingRhythmState,
@@ -373,7 +373,7 @@ class StreamingRhythmProjector(nn.Module):
         if selection_mode == "simple":
             return _project_pause_simple_impl(
                 pause_weight_unit=pause_weight_unit,
-                boundary_latent=boundary_latent,
+                boundary_score_unit=boundary_score_unit,
                 unit_mask=unit_mask,
                 pause_budget_win=pause_budget_win,
                 previous_pause_exec=state.previous_pause_exec,
@@ -387,7 +387,7 @@ class StreamingRhythmProjector(nn.Module):
         temperature = float(max(1e-4, self.config.pause_soft_temperature))
         return _project_pause_impl(
             pause_weight_unit=pause_weight_unit,
-            boundary_latent=boundary_latent,
+            boundary_score_unit=boundary_score_unit,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
             previous_pause_exec=state.previous_pause_exec,
@@ -406,7 +406,7 @@ class StreamingRhythmProjector(nn.Module):
         state: StreamingRhythmState,
         unit_mask: torch.Tensor,
         open_run_mask: torch.Tensor | None,
-        boundary_latent: torch.Tensor | None,
+        boundary_score_unit: torch.Tensor | None,
         force_full_commit: bool,
     ) -> torch.Tensor:
         batch_size, _ = unit_mask.shape
@@ -429,10 +429,10 @@ class StreamingRhythmProjector(nn.Module):
             if (
                 bool(self.config.use_boundary_commit_guard)
                 and candidate > 0
-                and boundary_latent is not None
+                and boundary_score_unit is not None
                 and candidate < visible
             ):
-                boundary_value = float(boundary_latent[batch_idx, candidate - 1].item())
+                boundary_value = float(boundary_score_unit[batch_idx, candidate - 1].item())
                 if boundary_value < float(self.config.boundary_commit_threshold):
                     candidate = max(prev, candidate - 1)
             commit[batch_idx] = max(prev, candidate)
@@ -531,7 +531,7 @@ class StreamingRhythmProjector(nn.Module):
         pause_budget_win: torch.Tensor,
         dur_logratio_unit: torch.Tensor,
         pause_weight_unit: torch.Tensor,
-        boundary_latent: torch.Tensor,
+        boundary_score_unit: torch.Tensor,
         state: StreamingRhythmState,
         open_run_mask: torch.Tensor | None = None,
         planner: RhythmPlannerOutputs,
@@ -550,6 +550,9 @@ class StreamingRhythmProjector(nn.Module):
         )
         feasible_speech_budget_delta = (speech_budget_win - planner.speech_budget_win.float()).clamp_min(0.0)
         feasible_pause_budget_delta = (pause_budget_win - planner.pause_budget_win.float()).clamp_min(0.0)
+        planner_boundary_score = getattr(planner, "boundary_score_unit", None)
+        if planner_boundary_score is None:
+            planner_boundary_score = getattr(planner, "boundary_latent", boundary_score_unit)
         execution_planner = RhythmPlannerOutputs(
             speech_budget_win=speech_budget_win,
             pause_budget_win=pause_budget_win,
@@ -558,7 +561,7 @@ class StreamingRhythmProjector(nn.Module):
             total_budget_win=speech_budget_win + pause_budget_win,
             pause_share_win=pause_budget_win / (speech_budget_win + pause_budget_win).clamp_min(1e-6),
             anchor_gate=planner.anchor_gate,
-            boundary_latent=planner.boundary_latent,
+            boundary_score_unit=planner_boundary_score,
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
         )
@@ -577,7 +580,7 @@ class StreamingRhythmProjector(nn.Module):
         )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
-            boundary_latent=boundary_latent,
+            boundary_score_unit=boundary_score_unit,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
             state=state,
@@ -614,7 +617,7 @@ class StreamingRhythmProjector(nn.Module):
             state=state,
             unit_mask=unit_mask,
             open_run_mask=open_run_mask,
-            boundary_latent=boundary_latent,
+            boundary_score_unit=boundary_score_unit,
             force_full_commit=force_full_commit,
         )
         next_state = self._advance_state(

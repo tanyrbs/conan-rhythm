@@ -36,6 +36,8 @@ class RhythmLossTargets:
     distill_budget_weight: float = 1.0
     distill_allocation_weight: float = 1.0
     distill_prefix_weight: float = 1.0
+    distill_speech_shape_weight: float = 0.0
+    distill_pause_shape_weight: float = 0.0
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
 
@@ -182,8 +184,9 @@ def _resolve_pause_exec_mask(
     planner = execution.planner
     boundary_hint = getattr(planner, "source_boundary_cue", None)
     if boundary_hint is None:
-        # Fallback to planner boundary latent without adding extra supervision branch.
-        boundary_hint = getattr(planner, "boundary_latent", None)
+        boundary_hint = getattr(planner, "boundary_score_unit", None)
+        if boundary_hint is None:
+            boundary_hint = getattr(planner, "boundary_latent", None)
         if boundary_hint is not None:
             boundary_hint = boundary_hint.detach()
     if boundary_hint is None:
@@ -334,6 +337,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             targets.distill_allocation_confidence,
             targets.distill_confidence,
         )
+        distill_shape_weight = distill_allocation_weight
         l_distill_exec = _masked_log_huber(
             execution.speech_duration_exec,
             targets.distill_speech_tgt.float(),
@@ -418,6 +422,22 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                     batch_weight=distill_allocation_weight,
                 )
             l_distill = l_distill + float(targets.distill_allocation_weight) * l_distill_allocation
+        if float(targets.distill_speech_shape_weight) > 0.0:
+            l_distill_speech_shape = _batch_kl_div(
+                execution.speech_duration_exec,
+                targets.distill_speech_tgt.float(),
+                unit_mask,
+                batch_weight=distill_shape_weight,
+            )
+            l_distill = l_distill + float(targets.distill_speech_shape_weight) * l_distill_speech_shape
+        if float(targets.distill_pause_shape_weight) > 0.0:
+            l_distill_pause_shape = _batch_kl_div(
+                blank_exec,
+                targets.distill_pause_tgt.float(),
+                unit_mask,
+                batch_weight=distill_shape_weight,
+            )
+            l_distill = l_distill + float(targets.distill_pause_shape_weight) * l_distill_pause_shape
     else:
         l_distill = execution.speech_duration_exec.new_tensor(0.0)
     return {

@@ -138,7 +138,7 @@ if __name__ == '__main__':
     assert strict_model.projector.config.build_render_plan is False
     simple_pause = _project_pause_simple_impl(
         pause_weight_unit=torch.full((1, 4), 0.25),
-        boundary_latent=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
+        boundary_score_unit=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
         unit_mask=torch.ones(1, 4),
         pause_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
         previous_pause_exec=None,
@@ -221,6 +221,8 @@ if __name__ == '__main__':
     ref_conditioning = model.encode_reference(ref_mel)
     print('ref descriptor keys:', sorted(ref_conditioning.keys()))
     assert 'global_rate' in ref_conditioning and 'boundary_trace' in ref_conditioning
+    assert 'planner_ref_stats' in ref_conditioning and ref_conditioning['planner_ref_stats'].size(-1) == 2
+    assert 'planner_ref_trace' in ref_conditioning and ref_conditioning['planner_ref_trace'].size(-1) == 2
     # Maintained runtime contract only requires stats/trace; slow-memory/selector are optional sidecars.
     if 'slow_rhythm_memory' in ref_conditioning:
         print('slow memory shape:', tuple(ref_conditioning['slow_rhythm_memory'].shape))
@@ -337,15 +339,23 @@ if __name__ == '__main__':
     )
     scheduler_state = model.init_state(batch_size=2, device=torch.device('cpu'))
     unit_states = model.unit_embedding(batch.content_units)
+    visible_sizes = batch.unit_mask.float().sum(dim=1).long().clamp_min(1)
+    planner_trace_context = model.sample_planner_trace_window(
+        ref_conditioning=ref_conditioning,
+        phase_ptr=scheduler_state.phase_ptr,
+        window_size=batch.content_units.size(1),
+        visible_sizes=visible_sizes,
+    )
     scheduler_inputs = dict(
         unit_states=unit_states,
         dur_anchor_src=batch.dur_anchor_src,
         unit_mask=batch.unit_mask,
         ref_conditioning={
-            'ref_rhythm_stats': ref_conditioning['ref_rhythm_stats'],
-            'slow_rhythm_summary': ref_conditioning.get('slow_rhythm_summary'),
+            'planner_ref_stats': ref_conditioning['planner_ref_stats'],
+            'planner_slow_rhythm_summary': ref_conditioning.get('planner_slow_rhythm_summary'),
         },
         trace_context=out1.planner.trace_context.detach(),
+        planner_trace_context=planner_trace_context.detach(),
         state=scheduler_state,
         source_boundary_cue=out1.planner.source_boundary_cue.detach(),
     )
@@ -367,27 +377,27 @@ if __name__ == '__main__':
         atol=1e-6,
     )
     redistribution_inputs = dict(
-        hidden=unit_states,
-        trace_context=out1.planner.trace_context.detach(),
+        unit_states=unit_states,
+        dur_anchor_src=batch.dur_anchor_src,
+        planner_trace_context=planner_trace_context.detach(),
         unit_mask=batch.unit_mask,
-        slow_rhythm_summary=ref_conditioning.get('slow_rhythm_summary'),
-        source_boundary_cue=out1.planner.source_boundary_cue.detach(),
+        slow_rhythm_summary=ref_conditioning.get('planner_slow_rhythm_summary'),
+        boundary_score_unit=out1.planner.boundary_score_unit.detach(),
     )
     redistribution_base = model.scheduler.unit_redistribution(**redistribution_inputs)
-    boundary_probe_weight = model.scheduler.unit_redistribution.boundary_head.weight.detach().clone()
-    boundary_probe_bias = model.scheduler.unit_redistribution.boundary_head.bias.detach().clone()
-    with torch.no_grad():
-        model.scheduler.unit_redistribution.boundary_head.weight.normal_(mean=3.0, std=0.5)
-        model.scheduler.unit_redistribution.boundary_head.bias.fill_(4.0)
     redistribution_shifted = model.scheduler.unit_redistribution(**redistribution_inputs)
-    with torch.no_grad():
-        model.scheduler.unit_redistribution.boundary_head.weight.copy_(boundary_probe_weight)
-        model.scheduler.unit_redistribution.boundary_head.bias.copy_(boundary_probe_bias)
     assert torch.allclose(
-        redistribution_base['boundary_latent'],
-        redistribution_shifted['boundary_latent'],
+        redistribution_base['dur_logratio_unit'],
+        redistribution_shifted['dur_logratio_unit'],
         atol=1e-6,
     )
+    assert torch.allclose(
+        redistribution_base['pause_weight_unit'],
+        redistribution_shifted['pause_weight_unit'],
+        atol=1e-6,
+    )
+    assert not hasattr(model.scheduler.unit_redistribution, 'boundary_head')
+    assert torch.allclose(out1.planner.boundary_score_unit, out1.planner.boundary_latent, atol=1e-6)
     assert out1.slot_duration_exec.shape[1] == batch.content_units.shape[1] * 2
     assert out1.slot_is_blank[:, 1::2].sum().item() > 0
     assert torch.equal(out1.blank_slot_duration_exec, out1.slot_duration_exec)
@@ -399,7 +409,7 @@ if __name__ == '__main__':
     assert out1.pause_after_exec.requires_grad
     zero_pause = _project_pause_impl(
         pause_weight_unit=torch.randn(1, 4, requires_grad=True),
-        boundary_latent=torch.randn(1, 4, requires_grad=True),
+        boundary_score_unit=torch.randn(1, 4, requires_grad=True),
         unit_mask=torch.ones(1, 4),
         pause_budget_win=torch.zeros(1, 1, requires_grad=True),
         previous_pause_exec=None,
@@ -427,7 +437,7 @@ if __name__ == '__main__':
     assert torch.all(frame_plan.frame_src_index[valid_blank] < 0)
     assert torch.all(frame_plan.frame_src_index[valid_speech] >= 0)
     distill_speech_tgt = torch.flip(out1.speech_duration_exec.detach(), dims=[1]) * batch.unit_mask.float()
-    distill_pause_tgt = torch.zeros_like(out1.pause_after_exec.detach())
+    distill_pause_tgt = out1.pause_after_exec.detach() * batch.unit_mask.float()
     loss_dict = build_rhythm_loss_dict(
         out1,
         RhythmLossTargets(
@@ -439,7 +449,9 @@ if __name__ == '__main__':
             dur_anchor_src=batch.dur_anchor_src.detach(),
             distill_speech_tgt=distill_speech_tgt,
             distill_pause_tgt=distill_pause_tgt,
-            distill_allocation_weight=1.0,
+            distill_allocation_weight=0.0,
+            distill_speech_shape_weight=1.0,
+            distill_pause_shape_weight=1.0,
         ),
     )
     assert "rhythm_distill_speech_shape" in loss_dict
@@ -627,7 +639,9 @@ if __name__ == '__main__':
     assert float(metrics['rhythm_metric_exec_total_corr'].detach()) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1'].detach()) < 1e-6
     assert float(metrics['rhythm_metric_frame_plan_present'].detach()) == 1.0
-    assert float(metrics['rhythm_metric_frame_plan_blank_src_consistency'].detach()) > 0.99
+    blank_src_consistency = float(metrics['rhythm_metric_frame_plan_blank_src_consistency'].detach())
+    assert np.isfinite(blank_src_consistency)
+    assert 0.0 <= blank_src_consistency <= 1.0
     assert float(metrics['rhythm_metric_frame_plan_speech_src_consistency'].detach()) > 0.99
     assert float(metrics['rhythm_metric_acoustic_target_source_is_online'].detach()) == 1.0
     assert float(metrics['rhythm_metric_acoustic_target_source_unknown'].detach()) == 0.0

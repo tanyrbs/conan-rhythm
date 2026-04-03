@@ -34,10 +34,10 @@ rhythm_hidden_size: 256
 rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
 rhythm_pause_share_max: 0.45
+rhythm_pause_share_residual_max: 0.12
 # Keep source-boundary cues as soft priors, not dominant pause-placement owners.
 rhythm_boundary_feature_scale: 0.35
-rhythm_boundary_source_cue_weight: 0.20
-rhythm_pause_boundary_latent_weight: 0.25
+rhythm_boundary_source_cue_weight: 0.65
 rhythm_pause_source_boundary_weight: 0.10
 rhythm_source_boundary_scale: 0.60
 rhythm_source_boundary_scale_train_start: 1.00
@@ -155,6 +155,8 @@ lambda_rhythm_distill: 0.0
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.25
+rhythm_distill_speech_shape_weight: 0.0
+rhythm_distill_pause_shape_weight: 0.0
 rhythm_compact_joint_loss: true
 rhythm_joint_budget_macro_weight: 0.35
 rhythm_joint_cumplan_macro_weight: 0.65

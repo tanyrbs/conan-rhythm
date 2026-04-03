@@ -1,5 +1,8 @@
 import argparse
+import json
 import math
+import os
+import statistics
 import time
 from itertools import cycle
 from pathlib import Path
@@ -106,21 +109,70 @@ def _global_param_norm(params):
     return math.sqrt(total)
 
 
+def _safe_mean(values):
+    return sum(values) / len(values) if values else None
+
+
+def _safe_median(values):
+    return statistics.median(values) if values else None
+
+
+def _safe_p95(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _get_process_rss_bytes():
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return None
+    try:
+        return int(psutil.Process(os.getpid()).memory_info().rss)
+    except Exception:
+        return None
+
+
+def _maybe_compile_model(model, *, torch_compile_mode: str, torch_compile_fullgraph: bool):
+    if torch_compile_mode == "none":
+        return model
+    if not hasattr(torch, "compile"):
+        raise RuntimeError("torch.compile is not available in this torch build.")
+    kwargs = {"fullgraph": bool(torch_compile_fullgraph)}
+    if torch_compile_mode != "default":
+        kwargs["mode"] = torch_compile_mode
+    return torch.compile(model, **kwargs)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="CPU mini-train probe for Rhythm V2")
+    parser = argparse.ArgumentParser(description="Mini-train throughput / memory probe for Rhythm V2")
     parser.add_argument("--config", required=True)
     parser.add_argument("--binary_data_dir", required=True)
     parser.add_argument("--processed_data_dir", required=True)
     parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument("--warmup_steps", type=int, default=2)
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--exp_name", type=str, default="debug_cpu_probe")
     parser.add_argument("--max_sentences", type=int, default=1)
     parser.add_argument("--max_tokens", type=int, default=3000)
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "auto"])
+    parser.add_argument(
+        "--torch_compile_mode",
+        type=str,
+        default="none",
+        choices=["none", "default", "reduce-overhead", "max-autotune"],
+    )
+    parser.add_argument("--torch_compile_fullgraph", action="store_true")
+    parser.add_argument("--profile_json", type=str, default="")
     args = parser.parse_args()
 
     if args.steps <= 0 or args.steps > 500:
         raise ValueError("--steps must be in [1, 500].")
+    if args.warmup_steps < 0 or args.warmup_steps >= args.steps:
+        raise ValueError("--warmup_steps must be in [0, steps - 1].")
 
     torch.manual_seed(1234)
     set_hparams(
@@ -146,6 +198,11 @@ def main():
     task = ConanTask()
     task.build_tts_model()
     task.model.to(device)
+    task.model = _maybe_compile_model(
+        task.model,
+        torch_compile_mode=args.torch_compile_mode,
+        torch_compile_fullgraph=args.torch_compile_fullgraph,
+    )
     task.model.train()
     optimizers = task.build_optimizer(task.model)
     optimizer = optimizers[0]
@@ -167,23 +224,32 @@ def main():
     tracked_initial = {name: param.detach().cpu().clone() for name, param in tracked_params}
     param_norm_start = _global_param_norm(task.gen_params)
 
-    print(f"[cpu-probe] config={args.config}")
-    print(f"[cpu-probe] device={device}")
-    print(f"[cpu-probe] split={args.split} dataset_len={len(dataset)} steps={args.steps}")
-    print(f"[cpu-probe] trainable_gen_params={trainable_param_count:,}")
-    print(f"[cpu-probe] trainable_model_params={all_trainable_param_count:,}")
-    print(f"[cpu-probe] trainable_gen_tensors={trainable_tensor_count}")
-    print("[cpu-probe] tracked_params:")
+    print(f"[train-probe] config={args.config}")
+    print(f"[train-probe] device={device}")
+    print(f"[train-probe] split={args.split} dataset_len={len(dataset)} steps={args.steps} warmup_steps={args.warmup_steps}")
+    print(f"[train-probe] torch_compile_mode={args.torch_compile_mode} fullgraph={bool(args.torch_compile_fullgraph)}")
+    print(f"[train-probe] trainable_gen_params={trainable_param_count:,}")
+    print(f"[train-probe] trainable_model_params={all_trainable_param_count:,}")
+    print(f"[train-probe] trainable_gen_tensors={trainable_tensor_count}")
+    print("[train-probe] tracked_params:")
     for name, _ in tracked_params:
         print(f"  - {name}")
 
     history = []
     start_time = time.time()
     for step in range(args.steps):
+        fetch_start = time.perf_counter()
         batch = next(iterator)
+        fetch_time = time.perf_counter() - fetch_start
+        move_start = time.perf_counter()
         batch = _move_to_device(batch, device)
+        move_time = time.perf_counter() - move_start
         optimizer.zero_grad(set_to_none=True)
         task.global_step = step
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.synchronize(device)
+        step_start = time.perf_counter()
         total_loss, loss_output = task._training_step(batch, step, 0)
         if total_loss is None:
             raise RuntimeError("Generator training step returned None.")
@@ -197,6 +263,9 @@ def main():
             torch.nn.utils.clip_grad_norm_(task.gen_params, hparams["clip_grad_norm"]).cpu()
         )
         optimizer.step()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        step_time = time.perf_counter() - step_start
 
         scalar_losses = {}
         for key in (
@@ -214,6 +283,13 @@ def main():
                 scalar_losses[key] = value
         scalar_losses["total_loss"] = float(total_loss.detach().cpu())
         scalar_losses["grad_norm_before_clip"] = grad_norm_before_clip
+        scalar_losses["fetch_time_sec"] = fetch_time
+        scalar_losses["move_time_sec"] = move_time
+        scalar_losses["step_time_sec"] = step_time
+        scalar_losses["cpu_rss_bytes"] = _get_process_rss_bytes()
+        if device.type == "cuda":
+            scalar_losses["cuda_peak_allocated_bytes"] = int(torch.cuda.max_memory_allocated(device))
+            scalar_losses["cuda_peak_reserved_bytes"] = int(torch.cuda.max_memory_reserved(device))
         scalar_losses.update(grad_stats)
         history.append(scalar_losses)
         detail_parts = []
@@ -231,22 +307,32 @@ def main():
                 detail_parts.append(f"budget={scalar_losses['L_budget']:.4f}")
             if "L_cumplan" in scalar_losses:
                 detail_parts.append(f"cumplan={scalar_losses['L_cumplan']:.4f}")
+        mem_part = ""
+        if scalar_losses.get("cpu_rss_bytes") is not None:
+            mem_part += f" rss={(scalar_losses['cpu_rss_bytes'] / (1024 ** 2)):.1f}MB"
+        if "cuda_peak_allocated_bytes" in scalar_losses:
+            mem_part += f" cuda_peak={(scalar_losses['cuda_peak_allocated_bytes'] / (1024 ** 2)):.1f}MB"
         print(
-            "[cpu-probe] "
+            "[train-probe] "
             f"step={step:02d} total={scalar_losses['total_loss']:.4f} "
             f"base={scalar_losses.get('L_base', 0.0):.4f} "
             f"pitch={scalar_losses.get('L_pitch', 0.0):.4f} "
             + " ".join(detail_parts) + " "
+            f"fetch={fetch_time * 1000.0:.1f}ms "
+            f"move={move_time * 1000.0:.1f}ms "
+            f"step={step_time * 1000.0:.1f}ms "
             f"grad_norm={grad_norm_before_clip:.4f} "
             f"grad_params={grad_stats['params_with_grad']}/{trainable_tensor_count} "
             f"grad_abs_max={grad_stats['grad_abs_max']:.4e}"
+            f"{mem_part}"
         )
 
     elapsed = time.time() - start_time
     param_norm_end = _global_param_norm(task.gen_params)
+    measured_history = history[args.warmup_steps:]
 
     def summarize(key):
-        values = [item[key] for item in history if key in item]
+        values = [item[key] for item in measured_history if key in item and item[key] is not None]
         if not values:
             return None
         return {
@@ -257,7 +343,27 @@ def main():
             "mean": sum(values) / len(values),
         }
 
-    print("[cpu-probe] summary:")
+    throughput_summary = {}
+    for key in (
+        "fetch_time_sec",
+        "move_time_sec",
+        "step_time_sec",
+        "cpu_rss_bytes",
+        "cuda_peak_allocated_bytes",
+        "cuda_peak_reserved_bytes",
+    ):
+        values = [item[key] for item in measured_history if key in item and item[key] is not None]
+        if not values:
+            continue
+        throughput_summary[key] = {
+            "mean": _safe_mean(values),
+            "median": _safe_median(values),
+            "p95": _safe_p95(values),
+            "max": max(values),
+            "min": min(values),
+        }
+
+    print("[train-probe] summary:")
     for key in (
         "total_loss",
         "L_base",
@@ -269,7 +375,7 @@ def main():
         "L_budget",
         "L_cumplan",
         "grad_norm_before_clip",
-    ):
+        ):
         summary = summarize(key)
         if summary is None:
             continue
@@ -283,8 +389,31 @@ def main():
         f"delta={param_norm_end - param_norm_start:.4f}"
     )
     print(f"  - wall_time_sec: {elapsed:.2f}")
+    if "step_time_sec" in throughput_summary and throughput_summary["step_time_sec"]["mean"]:
+        mean_step = throughput_summary["step_time_sec"]["mean"]
+        print(
+            f"  - throughput: mean_step_ms={mean_step * 1000.0:.2f} "
+            f"median_step_ms={throughput_summary['step_time_sec']['median'] * 1000.0:.2f} "
+            f"p95_step_ms={throughput_summary['step_time_sec']['p95'] * 1000.0:.2f} "
+            f"steps_per_sec={1.0 / mean_step:.3f}"
+        )
+    if "cpu_rss_bytes" in throughput_summary:
+        print(
+            f"  - cpu_rss_mb: mean={throughput_summary['cpu_rss_bytes']['mean'] / (1024 ** 2):.2f} "
+            f"peak={throughput_summary['cpu_rss_bytes']['max'] / (1024 ** 2):.2f}"
+        )
+    if "cuda_peak_allocated_bytes" in throughput_summary:
+        print(
+            f"  - cuda_peak_allocated_mb: mean={throughput_summary['cuda_peak_allocated_bytes']['mean'] / (1024 ** 2):.2f} "
+            f"peak={throughput_summary['cuda_peak_allocated_bytes']['max'] / (1024 ** 2):.2f}"
+        )
+    if "cuda_peak_reserved_bytes" in throughput_summary:
+        print(
+            f"  - cuda_peak_reserved_mb: mean={throughput_summary['cuda_peak_reserved_bytes']['mean'] / (1024 ** 2):.2f} "
+            f"peak={throughput_summary['cuda_peak_reserved_bytes']['max'] / (1024 ** 2):.2f}"
+        )
 
-    print("[cpu-probe] tracked_param_deltas:")
+    print("[train-probe] tracked_param_deltas:")
     for name, param in tracked_params:
         initial = tracked_initial[name]
         current = param.detach().cpu()
@@ -292,6 +421,49 @@ def main():
         delta_norm = float(torch.linalg.vector_norm(delta).cpu())
         delta_max = float(delta.abs().max().cpu())
         print(f"  - {name}: delta_norm={delta_norm:.6f} delta_abs_max={delta_max:.6e}")
+
+    if args.profile_json:
+        profile_payload = {
+            "config": args.config,
+            "binary_data_dir": args.binary_data_dir,
+            "processed_data_dir": args.processed_data_dir,
+            "split": args.split,
+            "device": str(device),
+            "steps": args.steps,
+            "warmup_steps": args.warmup_steps,
+            "torch_compile_mode": args.torch_compile_mode,
+            "torch_compile_fullgraph": bool(args.torch_compile_fullgraph),
+            "trainable_gen_params": trainable_param_count,
+            "trainable_model_params": all_trainable_param_count,
+            "trainable_gen_tensors": trainable_tensor_count,
+            "wall_time_sec": elapsed,
+            "param_norm": {
+                "start": param_norm_start,
+                "end": param_norm_end,
+                "delta": param_norm_end - param_norm_start,
+            },
+            "loss_summary": {
+                key: summarize(key)
+                for key in (
+                    "total_loss",
+                    "L_base",
+                    "L_rhythm_exec",
+                    "L_stream_state",
+                    "L_pitch",
+                    "L_exec_speech",
+                    "L_exec_pause",
+                    "L_budget",
+                    "L_cumplan",
+                    "grad_norm_before_clip",
+                )
+                if summarize(key) is not None
+            },
+            "throughput_summary": throughput_summary,
+        }
+        profile_path = Path(args.profile_json)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(json.dumps(profile_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[train-probe] profile_json={profile_path}")
 
 
 if __name__ == "__main__":

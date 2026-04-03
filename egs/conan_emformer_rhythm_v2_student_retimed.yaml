@@ -48,6 +48,8 @@ rhythm_feasible_debt_weight: 0.05
 rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.0
+rhythm_distill_speech_shape_weight: 0.0
+rhythm_distill_pause_shape_weight: 0.0
 lambda_mel_adv: 0.0
 
 use_pitch_embed: true

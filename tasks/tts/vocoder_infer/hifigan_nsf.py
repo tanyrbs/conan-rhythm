@@ -11,6 +11,19 @@ import glob
 import re
 import os
 
+
+def _resolve_vocoder_left_context_frames(source):
+    for key in ("vocoder_left_context_frames", "streaming_vocoder_left_context_frames", "vocoder_stream_context"):
+        value = source.get(key, None)
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return 48
+
+
 def denoise(wav, v=0.1):
     spec = librosa.stft(y=wav, n_fft=hparams['fft_size'], hop_length=hparams['hop_size'],
                         win_length=hparams['win_size'], pad_mode='constant')
@@ -59,8 +72,11 @@ class HifiGAN(BaseVocoder):
             if os.path.exists(config_path):
                 self.model, self.config, self.device = load_model(config_path=config_path, checkpoint_path=ckpt)
                 
-        self.stream_context = hparams['vocoder_stream_context']
+        self.stream_context = _resolve_vocoder_left_context_frames(hparams)
         self.reset_stream()
+
+    def supports_native_streaming(self) -> bool:
+        return False
 
     def reset_stream(self):
         """Call before starting a new utterance to clear buffer"""
@@ -81,5 +97,10 @@ class HifiGAN(BaseVocoder):
         if hparams.get('vocoder_denoise_c', 0.0) > 0:
             wav_out = denoise(wav_out, v=hparams['vocoder_denoise_c'])
         return wav_out
+
+    def spec2wav_stream(self, mel, **kwargs):
+        raise NotImplementedError(
+            "HifiGAN_NSF wrapper exposes only stateless spec2wav(); native streaming is not enabled in mainline."
+        )
 
     
