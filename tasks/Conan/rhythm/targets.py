@@ -22,6 +22,8 @@ class RhythmTargetBuildConfig:
     plan_local_weight: float
     plan_cum_weight: float
     pause_boundary_weight: float
+    budget_raw_weight: float
+    budget_exec_weight: float
     feasible_debt_weight: float
 
     @property
@@ -73,6 +75,7 @@ class DistillConfidenceBundle:
     budget: Optional[torch.Tensor] = None
     prefix: Optional[torch.Tensor] = None
     allocation: Optional[torch.Tensor] = None
+    shape: Optional[torch.Tensor] = None
 
 
 NormalizeConfidenceFn = Callable[..., torch.Tensor]
@@ -142,6 +145,24 @@ def _resolve_sample_confidence(sample: dict, *, primary_target_surface: str):
     return _detach_optional(sample.get("rhythm_target_confidence"))
 
 
+def _normalize_optional_confidence(
+    confidence,
+    *,
+    batch_size: int,
+    device: torch.device,
+    fallback_confidence: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
+    if confidence is None:
+        confidence = fallback_confidence
+    if confidence is None:
+        return torch.ones((batch_size, 1), device=device)
+    if isinstance(confidence, torch.Tensor):
+        tensor = confidence.detach().float().reshape(batch_size, -1)[:, :1].to(device=device)
+    else:
+        tensor = torch.as_tensor(confidence, dtype=torch.float32, device=device).reshape(batch_size, -1)[:, :1]
+    return tensor.clamp(min=0.0, max=1.0)
+
+
 def _normalize_distill_confidences(
     *,
     confidence_bundle: DistillConfidenceBundle,
@@ -178,6 +199,17 @@ def _normalize_distill_confidences(
         allocation=normalize_component_confidence(
             confidence_bundle.allocation,
             fallback_confidence=shared,
+            batch_size=batch_size,
+            device=device,
+        ),
+        shape=normalize_component_confidence(
+            confidence_bundle.shape,
+            fallback_confidence=normalize_component_confidence(
+                confidence_bundle.exec,
+                fallback_confidence=shared,
+                batch_size=batch_size,
+                device=device,
+            ),
             batch_size=batch_size,
             device=device,
         ),
@@ -228,7 +260,12 @@ def build_rhythm_loss_targets_from_sample(
         distill_prefix_clock = sample.get("rhythm_teacher_prefix_clock_tgt") if config.use_distill_prefix else None
         distill_prefix_backlog = sample.get("rhythm_teacher_prefix_backlog_tgt") if config.use_distill_prefix else None
         distill_confidences = DistillConfidenceBundle(
-            shared=_detach_optional(sample.get("rhythm_teacher_confidence"))
+            shared=_detach_optional(sample.get("rhythm_teacher_confidence")),
+            exec=_detach_optional(sample.get("rhythm_teacher_confidence_exec")),
+            budget=_detach_optional(sample.get("rhythm_teacher_confidence_budget")),
+            prefix=_detach_optional(sample.get("rhythm_teacher_confidence_prefix")),
+            allocation=_detach_optional(sample.get("rhythm_teacher_confidence_allocation")),
+            shape=_detach_optional(sample.get("rhythm_teacher_confidence_shape")),
         )
 
     if (
@@ -269,6 +306,7 @@ def build_rhythm_loss_targets_from_sample(
             budget=_detach_optional(offline_confidences.budget),
             prefix=_detach_optional(offline_confidences.prefix),
             allocation=_detach_optional(offline_confidences.allocation),
+            shape=_detach_optional(offline_confidences.shape),
         )
         if distill_confidences.shared is None:
             distill_confidences = DistillConfidenceBundle(
@@ -277,6 +315,7 @@ def build_rhythm_loss_targets_from_sample(
                 budget=distill_confidences.budget,
                 prefix=distill_confidences.prefix,
                 allocation=distill_confidences.allocation,
+                shape=distill_confidences.shape,
             )
 
     if (
@@ -295,7 +334,14 @@ def build_rhythm_loss_targets_from_sample(
         distill_confidences = DistillConfidenceBundle(shared=algorithmic_teacher.confidence.detach())
 
     if config.use_distill and (distill_speech is None or distill_pause is None):
-        return None
+        distill_speech = None
+        distill_pause = None
+        distill_speech_budget = None
+        distill_pause_budget = None
+        distill_allocation = None
+        distill_prefix_clock = None
+        distill_prefix_backlog = None
+        distill_confidences = DistillConfidenceBundle()
 
     if distill_speech is not None and distill_pause is not None:
         if distill_speech.size(1) != unit_batch.dur_anchor_src.size(1):
@@ -342,13 +388,33 @@ def build_rhythm_loss_targets_from_sample(
         dur_anchor_src=unit_batch.dur_anchor_src,
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
-        sample_confidence=_resolve_sample_confidence(
-            sample,
-            primary_target_surface=config.primary_target_surface,
+        sample_confidence=_normalize_optional_confidence(
+            _resolve_sample_confidence(
+                sample,
+                primary_target_surface=config.primary_target_surface,
+            ),
+            batch_size=unit_batch.dur_anchor_src.size(0),
+            device=unit_batch.dur_anchor_src.device,
         ),
         guidance_speech_tgt=guidance_speech,
         guidance_pause_tgt=guidance_pause,
-        guidance_confidence=sample.get("rhythm_guidance_confidence") if config.use_guidance else None,
+        guidance_confidence=(
+            _normalize_optional_confidence(
+                sample.get("rhythm_guidance_confidence"),
+                batch_size=unit_batch.dur_anchor_src.size(0),
+                device=unit_batch.dur_anchor_src.device,
+                fallback_confidence=_normalize_optional_confidence(
+                    _resolve_sample_confidence(
+                        sample,
+                        primary_target_surface=config.primary_target_surface,
+                    ),
+                    batch_size=unit_batch.dur_anchor_src.size(0),
+                    device=unit_batch.dur_anchor_src.device,
+                ),
+            )
+            if config.use_guidance
+            else None
+        ),
         distill_speech_tgt=distill_speech,
         distill_pause_tgt=distill_pause,
         distill_speech_budget_tgt=distill_speech_budget,
@@ -361,11 +427,14 @@ def build_rhythm_loss_targets_from_sample(
         distill_budget_confidence=distill_confidences.budget,
         distill_prefix_confidence=distill_confidences.prefix,
         distill_allocation_confidence=distill_confidences.allocation,
+        distill_shape_confidence=distill_confidences.shape,
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),
         distill_speech_shape_weight=float(config.distill_speech_shape_weight),
         distill_pause_shape_weight=float(config.distill_pause_shape_weight),
+        budget_raw_weight=float(config.budget_raw_weight),
+        budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
     )
@@ -396,6 +465,8 @@ def build_identity_rhythm_loss_targets(
         distill_prefix_weight=float(config.distill_prefix_weight),
         distill_speech_shape_weight=float(config.distill_speech_shape_weight),
         distill_pause_shape_weight=float(config.distill_pause_shape_weight),
+        budget_raw_weight=float(config.budget_raw_weight),
+        budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
     )
@@ -408,22 +479,77 @@ def scale_rhythm_loss_terms(
     cumplan_lambda: float,
 ) -> dict[str, torch.Tensor]:
     lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0)
+    prefix_state = rhythm_losses.get(
+        "rhythm_prefix_state",
+        rhythm_losses.get("rhythm_cumplan", rhythm_losses["rhythm_carry"]),
+    )
+    scaled_prefix_state = prefix_state * float(cumplan_lambda)
     return {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25),
+        "rhythm_budget_raw_surface": (
+            rhythm_losses.get("rhythm_budget_raw_surface", rhythm_losses["rhythm_budget"])
+            * hparams.get("lambda_rhythm_budget", 0.25)
+        ).detach(),
+        "rhythm_budget_exec_surface": (
+            rhythm_losses.get("rhythm_budget_exec_surface", rhythm_losses["rhythm_budget"])
+            * hparams.get("lambda_rhythm_budget", 0.25)
+        ).detach(),
+        "rhythm_budget_total_surface": (
+            rhythm_losses.get(
+                "rhythm_budget_total_surface",
+                rhythm_losses.get("rhythm_budget_raw_surface", rhythm_losses["rhythm_budget"]),
+            )
+            * hparams.get("lambda_rhythm_budget", 0.25)
+        ).detach(),
+        "rhythm_budget_pause_share_surface": (
+            rhythm_losses.get(
+                "rhythm_budget_pause_share_surface",
+                rhythm_losses.get("rhythm_budget_exec_surface", rhythm_losses["rhythm_budget"]),
+            )
+            * hparams.get("lambda_rhythm_budget", 0.25)
+        ).detach(),
         "rhythm_feasible_debt": (
             rhythm_losses["rhythm_feasible_debt"]
             * hparams.get("lambda_rhythm_budget", 0.25)
             * float(hparams.get("rhythm_feasible_debt_weight", 0.05))
         ).detach(),
-        "rhythm_cumplan": rhythm_losses["rhythm_cumplan"] * float(cumplan_lambda),
+        "rhythm_prefix_state": scaled_prefix_state,
+        "rhythm_cumplan": scaled_prefix_state.detach(),
+        "rhythm_carry": scaled_prefix_state.detach(),
         "rhythm_plan": rhythm_losses["rhythm_plan"] * hparams.get("lambda_rhythm_plan", 0.0),
         "rhythm_guidance": rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0),
         "rhythm_distill": rhythm_losses["rhythm_distill"] * lambda_distill,
         "rhythm_distill_exec": (rhythm_losses["rhythm_distill_exec"] * lambda_distill).detach(),
         "rhythm_distill_budget": (
             rhythm_losses["rhythm_distill_budget"]
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        ).detach(),
+        "rhythm_distill_budget_raw_surface": (
+            rhythm_losses.get("rhythm_distill_budget_raw_surface", rhythm_losses["rhythm_distill_budget"])
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        ).detach(),
+        "rhythm_distill_budget_exec_surface": (
+            rhythm_losses.get("rhythm_distill_budget_exec_surface", rhythm_losses["rhythm_distill_budget"])
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        ).detach(),
+        "rhythm_distill_budget_total_surface": (
+            rhythm_losses.get(
+                "rhythm_distill_budget_total_surface",
+                rhythm_losses.get("rhythm_distill_budget_raw_surface", rhythm_losses["rhythm_distill_budget"]),
+            )
+            * lambda_distill
+            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
+        ).detach(),
+        "rhythm_distill_budget_pause_share_surface": (
+            rhythm_losses.get(
+                "rhythm_distill_budget_pause_share_surface",
+                rhythm_losses.get("rhythm_distill_budget_exec_surface", rhythm_losses["rhythm_distill_budget"]),
+            )
             * lambda_distill
             * float(hparams.get("rhythm_distill_budget_weight", 0.5))
         ).detach(),

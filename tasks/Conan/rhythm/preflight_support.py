@@ -14,7 +14,7 @@ from modules.Conan.rhythm.stages import (
     resolve_runtime_dual_mode_teacher_enable,
     resolve_teacher_as_main,
 )
-from modules.Conan.rhythm.supervision import (
+from modules.Conan.rhythm.surface_metadata import (
     compatible_rhythm_cache_versions,
     materialize_rhythm_cache_compat_fields,
 )
@@ -199,11 +199,17 @@ def main():
         errors.append("binary_data_dir is empty.")
     elif not os.path.isdir(binary_dir):
         errors.append(f"binary_data_dir does not exist: {binary_dir}")
+    processed_dir = hp.get("processed_data_dir", "")
+    if not processed_dir:
+        errors.append("processed_data_dir is empty.")
+    elif not os.path.isdir(processed_dir):
+        errors.append(f"processed_data_dir does not exist: {processed_dir}")
 
     print(f"[preflight] config={args.config}")
     print(f"[preflight] profile={context.profile}")
     print(f"[preflight] stage={context.stage}")
     print(f"[preflight] binary_data_dir={binary_dir}")
+    print(f"[preflight] processed_data_dir={processed_dir}")
     printable_groups = [" | ".join(group) for group in required_groups]
     print(f"[preflight] required_field_group_count={len(required_groups)}")
     print(f"[preflight] required_field_groups={printable_groups}")

@@ -89,6 +89,13 @@ egs/vc.yaml
 **/TechDet/
 
 test*/
+!tests/
+!tests/__init__.py
+!tests/rhythm/
+!tests/rhythm/__init__.py
+!tests/rhythm/*.py
+!tests/rhythm/test_budget_surfaces.py
+!tests/rhythm/test_projector_invariants.py
 results*/
 modules/fastspeech/
 

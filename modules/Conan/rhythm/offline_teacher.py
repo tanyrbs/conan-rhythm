@@ -175,7 +175,12 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         )
         self.total_budget_head = nn.Linear(hidden_size, 1)
         self.pause_share_residual_head = nn.Linear(hidden_size, 1)
+        # Compatibility-only stub for old checkpoints; keep the module but retire
+        # its runtime role because it is multiplicatively confounded with the
+        # total log-ratio head.
         self.anchor_gate_head = nn.Linear(hidden_size, 1)
+        for param in self.anchor_gate_head.parameters():
+            param.requires_grad = False
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
         self.confidence_trunk = nn.Sequential(
@@ -338,12 +343,11 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         global_hidden = self.global_refine(refined_input)
 
         raw_total_logratio = torch.tanh(self.total_budget_head(global_hidden)) * self.max_total_logratio
-        anchor_gate = torch.sigmoid(self.anchor_gate_head(global_hidden))
         pause_ratio_hint = planner_ref_stats[:, 1:2].clamp(0.0, self.pause_share_max)
         pause_share_delta = torch.tanh(self.pause_share_residual_head(global_hidden)) * self.pause_share_residual_max
         pause_share = (pause_ratio_hint + pause_share_delta).clamp(0.0, self.pause_share_max)
 
-        total_budget = total_anchor * torch.exp(raw_total_logratio * anchor_gate)
+        total_budget = total_anchor * torch.exp(raw_total_logratio)
         pause_budget = total_budget * pause_share
         min_speech_budget = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0) * self.min_speech_frames
         speech_budget = (total_budget - pause_budget).clamp_min(min_speech_budget)
@@ -362,9 +366,6 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             pause_budget_win=pause_budget,
             dur_logratio_unit=dur_logratio,
             pause_weight_unit=pause_weight,
-            total_budget_win=total_budget,
-            pause_share_win=pause_share,
-            anchor_gate=anchor_gate,
             boundary_score_unit=boundary_score_unit,
             trace_context=full_trace_context,
             source_boundary_cue=source_boundary_cue,

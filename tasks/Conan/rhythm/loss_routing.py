@@ -75,15 +75,17 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
         for key in exec_keys:
             _detach_loss_value(losses, key)
     budget = losses.get("rhythm_budget")
-    cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
+    prefix_state = losses.get("rhythm_prefix_state", losses.get("rhythm_cumplan", losses.get("rhythm_carry")))
     state_terms = []
     if isinstance(budget, torch.Tensor) and budget.requires_grad:
         state_terms.append(float(hparams.get("rhythm_joint_budget_macro_weight", 0.35)) * budget)
-    if isinstance(cumplan, torch.Tensor) and cumplan.requires_grad:
-        state_terms.append(float(hparams.get("rhythm_joint_cumplan_macro_weight", 0.65)) * cumplan)
+    if isinstance(prefix_state, torch.Tensor) and prefix_state.requires_grad:
+        state_terms.append(float(hparams.get("rhythm_joint_cumplan_macro_weight", 0.65)) * prefix_state)
     if state_terms:
         losses["rhythm_stream_state"] = sum(state_terms)
     _detach_loss_value(losses, "rhythm_budget")
+    if "rhythm_prefix_state" in losses:
+        _detach_loss_value(losses, "rhythm_prefix_state")
     if "rhythm_cumplan" in losses:
         _detach_loss_value(losses, "rhythm_cumplan")
     if "rhythm_carry" in losses:
@@ -121,8 +123,8 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     if "rhythm_exec_pause" in losses:
         losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
-    cumplan = losses.get("rhythm_cumplan", losses.get("rhythm_carry"))
-    losses["L_cumplan"] = cumplan.detach() if isinstance(cumplan, torch.Tensor) else zero
+    prefix_state = losses.get("rhythm_prefix_state", losses.get("rhythm_cumplan", losses.get("rhythm_carry")))
+    losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero
     losses["L_prefix_state"] = losses["L_cumplan"]
     losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
     rhythm_exec = losses.get("rhythm_exec")

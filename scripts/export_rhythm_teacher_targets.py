@@ -136,16 +136,17 @@ def main() -> None:
         "style=True",
         "rhythm_minimal_style_only=True",
         "rhythm_stage=teacher_offline",
-        "rhythm_teacher_only_stage=true",
-        "rhythm_teacher_as_main=true",
-        "rhythm_schedule_only_stage=false",
-        "rhythm_optimize_module_only=true",
-        "rhythm_enable_learned_offline_teacher=true",
-        "rhythm_runtime_enable_learned_offline_teacher=true",
-        "rhythm_enable_dual_mode_teacher=false",
+        "rhythm_teacher_only_stage=True",
+        "rhythm_teacher_as_main=True",
+        "rhythm_schedule_only_stage=False",
+        "rhythm_optimize_module_only=True",
+        "rhythm_enable_learned_offline_teacher=True",
+        "rhythm_runtime_enable_learned_offline_teacher=True",
+        "rhythm_enable_dual_mode_teacher=False",
         "rhythm_primary_target_surface=guidance",
         "rhythm_distill_surface=none",
         "lambda_rhythm_distill=0.0",
+        "rhythm_streaming_prefix_train=False",
     ]
     if args.binary_data_dir:
         hp_overrides.append(f"binary_data_dir='{args.binary_data_dir}'")
@@ -257,14 +258,24 @@ def main() -> None:
                     unit_mask=unit_batch.unit_mask[sample_idx].detach().cpu().numpy(),
                     confidence=confidence,
                 )
+                expected_units = int(unit_batch.dur_anchor_src[sample_idx].detach().cpu().numel())
+                written_units = int(np.asarray(bundle["rhythm_teacher_speech_exec_tgt"]).reshape(-1).shape[0])
+                if written_units != expected_units:
+                    raise RuntimeError(
+                        f"Teacher export length mismatch for item='{item_name}': "
+                        f"written_units={written_units}, expected_units={expected_units}."
+                    )
                 component_conf = {}
                 for key, out_key in (
                     ("rhythm_teacher_confidence_exec", "rhythm_offline_confidence_exec"),
                     ("rhythm_teacher_confidence_budget", "rhythm_offline_confidence_budget"),
                     ("rhythm_teacher_confidence_prefix", "rhythm_offline_confidence_prefix"),
                     ("rhythm_teacher_confidence_allocation", "rhythm_offline_confidence_allocation"),
+                    ("rhythm_teacher_confidence_shape", "rhythm_offline_confidence_shape"),
                 ):
                     value = output.get(out_key)
+                    if value is None and key == "rhythm_teacher_confidence_shape":
+                        value = output.get("rhythm_offline_confidence_exec")
                     if value is not None:
                         component_conf[key] = np.asarray(
                             [

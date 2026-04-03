@@ -21,15 +21,37 @@ class RhythmPublicInputs:
 @dataclass
 class StreamingRhythmState:
     phase_ptr: torch.Tensor
-    backlog: torch.Tensor
     clock_delta: torch.Tensor
     commit_frontier: torch.Tensor
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
-    phase_anchor_progress: Optional[torch.Tensor] = None
-    phase_anchor_total: Optional[torch.Tensor] = None
+    phase_anchor: Optional[torch.Tensor] = None
     speech_budget_debt: Optional[torch.Tensor] = None
     pause_budget_debt: Optional[torch.Tensor] = None
+
+    @property
+    def backlog(self) -> torch.Tensor:
+        return self.clock_delta.clamp_min(0.0)
+
+    @property
+    def phase_anchor_progress(self) -> Optional[torch.Tensor]:
+        if self.phase_anchor is None:
+            return None
+        return self.phase_anchor[..., 0]
+
+    @property
+    def phase_anchor_total(self) -> Optional[torch.Tensor]:
+        if self.phase_anchor is None:
+            return None
+        return self.phase_anchor[..., 1]
+
+    @property
+    def phase_progress_ratio(self) -> Optional[torch.Tensor]:
+        if self.phase_anchor is None:
+            return None
+        progress = self.phase_anchor[..., 0].float()
+        total = self.phase_anchor[..., 1].float().clamp_min(1.0)
+        return progress / total
 
     @property
     def previous_blank_exec(self) -> Optional[torch.Tensor]:
@@ -42,9 +64,6 @@ class RhythmPlannerOutputs:
     pause_budget_win: torch.Tensor
     dur_logratio_unit: torch.Tensor
     pause_weight_unit: torch.Tensor
-    total_budget_win: torch.Tensor
-    pause_share_win: torch.Tensor
-    anchor_gate: torch.Tensor
     boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
     source_boundary_cue: Optional[torch.Tensor] = None
@@ -64,6 +83,72 @@ class RhythmPlannerOutputs:
         """Planner-facing alias used by the weak-factorization mainline."""
 
         return self.pause_weight_unit
+
+    @property
+    def total_budget_win(self) -> torch.Tensor:
+        """Derived compatibility alias; do not persist a redundant field."""
+
+        return self.speech_budget_win + self.pause_budget_win
+
+    @property
+    def pause_share_win(self) -> torch.Tensor:
+        """Derived compatibility alias; only speech/pause budgets are primitive."""
+
+        return self.pause_budget_win / self.total_budget_win.clamp_min(1e-6)
+
+    @property
+    def anchor_gate(self) -> torch.Tensor:
+        """Compatibility alias for the retired multiplicative gate."""
+
+        return torch.ones_like(self.speech_budget_win)
+
+    @property
+    def raw_speech_budget_win(self) -> torch.Tensor:
+        return getattr(self, "_raw_speech_budget_win", self.speech_budget_win)
+
+    @raw_speech_budget_win.setter
+    def raw_speech_budget_win(self, value: torch.Tensor) -> None:
+        self._raw_speech_budget_win = value
+
+    @property
+    def raw_pause_budget_win(self) -> torch.Tensor:
+        return getattr(self, "_raw_pause_budget_win", self.pause_budget_win)
+
+    @raw_pause_budget_win.setter
+    def raw_pause_budget_win(self, value: torch.Tensor) -> None:
+        self._raw_pause_budget_win = value
+
+    @property
+    def effective_speech_budget_win(self) -> torch.Tensor:
+        return self.speech_budget_win
+
+    @property
+    def effective_pause_budget_win(self) -> torch.Tensor:
+        return self.pause_budget_win
+
+    @property
+    def feasible_speech_budget_delta(self) -> torch.Tensor:
+        return getattr(self, "_feasible_speech_budget_delta", torch.zeros_like(self.speech_budget_win))
+
+    @feasible_speech_budget_delta.setter
+    def feasible_speech_budget_delta(self, value: torch.Tensor) -> None:
+        self._feasible_speech_budget_delta = value
+
+    @property
+    def feasible_pause_budget_delta(self) -> torch.Tensor:
+        return getattr(self, "_feasible_pause_budget_delta", torch.zeros_like(self.pause_budget_win))
+
+    @feasible_pause_budget_delta.setter
+    def feasible_pause_budget_delta(self, value: torch.Tensor) -> None:
+        self._feasible_pause_budget_delta = value
+
+    @property
+    def feasible_total_budget_delta(self) -> torch.Tensor:
+        return getattr(self, "_feasible_total_budget_delta", torch.zeros_like(self.total_budget_win))
+
+    @feasible_total_budget_delta.setter
+    def feasible_total_budget_delta(self, value: torch.Tensor) -> None:
+        self._feasible_total_budget_delta = value
 
     @property
     def boundary_latent(self) -> torch.Tensor:

@@ -10,6 +10,14 @@ from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
 
 
+def resolve_content_vocab_size(hparams) -> int:
+    for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "content_embedding_dim"):
+        value = hparams.get(key, None)
+        if value is not None:
+            return int(value)
+    return 102
+
+
 def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
     strict_mainline = use_strict_mainline(hparams)
     pause_selection_mode = str(
@@ -73,22 +81,19 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
         pause_share_residual_max=float(hparams.get('rhythm_pause_share_residual_max', 0.12)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
-        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
+        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
     )
 
 
 def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule:
-    num_units = int(
-        hparams.get(
-            'content_vocab_size',
-            hparams.get('content_num_units', hparams.get('content_num_embeddings', 102)),
-        )
-    )
+    num_units = resolve_content_vocab_size(hparams)
     return StreamingRhythmModule(
         num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
         trace_bins=int(hparams.get('rhythm_trace_bins', 24)),
+        # These configure the public cached descriptor contract.
+        # Planner-internal dims are fixed and validated inside StreamingRhythmModule.
         stats_dim=int(hparams.get('rhythm_stats_dim', 6)),
         trace_dim=int(hparams.get('rhythm_trace_dim', 5)),
         trace_horizon=float(hparams.get('rhythm_trace_horizon', 0.35)),
@@ -101,7 +106,8 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         pause_share_residual_max=float(hparams.get('rhythm_pause_share_residual_max', 0.12)),
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
-        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
+        pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
+        min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),

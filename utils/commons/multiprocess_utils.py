@@ -1,7 +1,23 @@
 import os
 import traceback
 from functools import partial
+from queue import Empty
 from tqdm import tqdm
+
+
+def _resolve_num_workers(num_workers=None):
+    if num_workers is None:
+        num_workers = int(os.getenv('N_PROC', os.cpu_count()))
+    return max(0, int(num_workers))
+
+
+def _invoke_map_func(map_func, arg, *, ctx=None):
+    map_func_ = partial(map_func, ctx=ctx) if ctx is not None else map_func
+    if isinstance(arg, dict):
+        return map_func_(**arg)
+    if isinstance(arg, (list, tuple)):
+        return map_func_(*arg)
+    return map_func_(arg)
 
 
 def chunked_worker(worker_id, args_queue=None, results_queue=None, init_ctx_func=None):
@@ -12,13 +28,7 @@ def chunked_worker(worker_id, args_queue=None, results_queue=None, init_ctx_func
             return
         job_idx, map_func, arg = args
         try:
-            map_func_ = partial(map_func, ctx=ctx) if ctx is not None else map_func
-            if isinstance(arg, dict):
-                res = map_func_(**arg)
-            elif isinstance(arg, (list, tuple)):
-                res = map_func_(*arg)
-            else:
-                res = map_func_(arg)
+            res = _invoke_map_func(map_func, arg, ctx=ctx)
             results_queue.put((job_idx, res))
         except:
             traceback.print_exc()
@@ -31,16 +41,14 @@ class MultiprocessManager:
             from multiprocessing.dummy import Queue, Process
         else:
             from multiprocessing import Queue, Process
-        if num_workers is None:
-            num_workers = int(os.getenv('N_PROC', os.cpu_count()))
-        self.num_workers = num_workers
+        self.num_workers = max(1, _resolve_num_workers(num_workers))
         self.results_queue = Queue(maxsize=-1)
         self.jobs_pending = []
         self.args_queue = Queue(maxsize=queue_max)
         self.workers = []
         self.total_jobs = 0
         self.multithread = multithread
-        for i in range(num_workers):
+        for i in range(self.num_workers):
             if multithread:
                 p = Process(target=chunked_worker,
                             args=(i, self.args_queue, self.results_queue, init_ctx_func))
@@ -60,11 +68,22 @@ class MultiprocessManager:
 
     def get_results(self):
         self.n_finished = 0
+        queue_poll_timeout = float(os.getenv('MP_QUEUE_POLL_TIMEOUT', '5.0'))
         while self.n_finished < self.total_jobs:
             while len(self.jobs_pending) > 0 and not self.args_queue.full():
                 self.args_queue.put(self.jobs_pending[0])
                 self.jobs_pending = self.jobs_pending[1:]
-            job_id, res = self.results_queue.get()
+            try:
+                job_id, res = self.results_queue.get(timeout=queue_poll_timeout)
+            except Empty:
+                dead_workers = [w.pid for w in self.workers if not w.is_alive()]
+                if dead_workers:
+                    self.close()
+                    raise RuntimeError(
+                        "Multiprocess worker exited before all jobs finished. "
+                        f"dead_workers={dead_workers}, finished={self.n_finished}, total={self.total_jobs}"
+                    )
+                continue
             yield job_id, res
             self.n_finished += 1
         for w in range(self.num_workers):
@@ -108,25 +127,36 @@ def multiprocess_run(map_func, args, num_workers=None, ordered=True, init_ctx_fu
     :param multithread:
     :return:
     """
-    if num_workers is None:
-        num_workers = int(os.getenv('N_PROC', os.cpu_count()))
+    num_workers = _resolve_num_workers(num_workers)
+    if num_workers <= 1:
+        ctx = init_ctx_func(0) if init_ctx_func is not None else None
+        for idx, arg in enumerate(args):
+            try:
+                yield idx, _invoke_map_func(map_func, arg, ctx=ctx)
+            except:
+                traceback.print_exc()
+                yield idx, None
+        return
+
     manager = MultiprocessManager(num_workers, init_ctx_func, multithread, queue_max=queue_max)
-    for arg in args:
-        manager.add_job(map_func, arg)
-    if ordered:
-        n_jobs = len(args)
-        results = ['<WAIT>' for _ in range(n_jobs)]
-        i_now = 0
-        for job_i, res in manager.get_results():
-            results[job_i] = res
-            while i_now < n_jobs and (not isinstance(results[i_now], str) or results[i_now] != '<WAIT>'):
-                yield i_now, results[i_now]
-                results[i_now] = None
-                i_now += 1
-    else:
-        for job_i, res in manager.get_results():
-            yield job_i, res
-    manager.close()
+    try:
+        for arg in args:
+            manager.add_job(map_func, arg)
+        if ordered:
+            n_jobs = len(args)
+            results = ['<WAIT>' for _ in range(n_jobs)]
+            i_now = 0
+            for job_i, res in manager.get_results():
+                results[job_i] = res
+                while i_now < n_jobs and (not isinstance(results[i_now], str) or results[i_now] != '<WAIT>'):
+                    yield i_now, results[i_now]
+                    results[i_now] = None
+                    i_now += 1
+        else:
+            for job_i, res in manager.get_results():
+                yield job_i, res
+    finally:
+        manager.close()
 
 def chunked_worker_old(worker_id, map_func, args, results_queue=None, init_ctx_func=None):
     ctx = init_ctx_func(worker_id) if init_ctx_func is not None else None

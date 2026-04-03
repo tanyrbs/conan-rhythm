@@ -95,7 +95,8 @@ class BaseBinarizer:
         total_sec = 0
         items = []
         args = [{'item': item} for item in meta_data]
-        for item_id, item in multiprocess_run_tqdm(process_item, args, desc='Processing data'):
+        for item_id, item in multiprocess_run_tqdm(
+                process_item, args, num_workers=self.num_workers, desc='Processing data'):
             if item is not None:
                 items.append(item)
         if self.binarization_args['with_spk_embed']:

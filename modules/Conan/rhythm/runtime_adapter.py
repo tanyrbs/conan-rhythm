@@ -152,6 +152,7 @@ class ConanRhythmAdapter(nn.Module):
         rhythm_state=None,
         rhythm_ref_conditioning=None,
         rhythm_apply_override=None,
+        rhythm_runtime_overrides: dict | None = None,
         rhythm_source_cache: dict | None = None,
         rhythm_offline_source_cache: dict | None = None,
         speech_state_fn=None,
@@ -167,6 +168,15 @@ class ConanRhythmAdapter(nn.Module):
             infer=bool(infer),
             global_steps=int(global_steps),
             teacher=False,
+        )
+        runtime_overrides = dict(rhythm_runtime_overrides or {})
+        projector_pause_topk_ratio_override = runtime_overrides.pop(
+            "projector_pause_topk_ratio_override",
+            projector_pause_topk_ratio_override,
+        )
+        source_boundary_scale_override = runtime_overrides.pop(
+            "source_boundary_scale_override",
+            source_boundary_scale_override,
         )
         runtime_teacher_enabled = bool(
             getattr(
@@ -197,6 +207,10 @@ class ConanRhythmAdapter(nn.Module):
                 global_steps=int(global_steps),
                 teacher=True,
             )
+        teacher_source_boundary_scale_override = runtime_overrides.pop(
+            "teacher_source_boundary_scale_override",
+            teacher_source_boundary_scale_override,
+        )
         ret["rhythm_stage"] = stage
         ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
         ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
@@ -240,6 +254,9 @@ class ConanRhythmAdapter(nn.Module):
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
+            trace_horizon=runtime_overrides.pop("trace_horizon", None),
+            projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
+            projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
         )
         content_embed, tgt_nonpadding = attach_rhythm_outputs(
             ret=ret,

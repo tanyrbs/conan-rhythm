@@ -15,6 +15,7 @@ from .contracts import (
 from .controller import UnitRedistributionHead, WindowBudgetController
 from .factorization import (
     COMPACT_REFERENCE_KEYS,
+    COMPACT_REFERENCE_ALIAS_KEYS,
     PLANNER_SURFACE_KEYS,
     CompactPlannerIntervention,
     apply_compact_reference_intervention,
@@ -23,6 +24,7 @@ from .factorization import (
     compute_surface_distance_report,
     extract_compact_reference_contract,
 )
+from .feasibility import FeasibleBudgetProjection, lift_projector_budgets_to_feasible_region
 from .frame_plan import (
     RhythmFramePlan,
     build_frame_plan,
@@ -43,6 +45,7 @@ from .policy import (
     parse_optional_bool,
     resolve_apply_override,
     resolve_cumplan_lambda,
+    resolve_prefix_state_lambda,
     resolve_pause_boundary_weight,
     use_strict_mainline,
 )
@@ -72,7 +75,8 @@ from .stages import (
     resolve_teacher_as_main,
 )
 from .source_boundary import build_source_boundary_cue, compose_boundary_score_unit, resolve_boundary_score_unit
-from .supervision import (
+from .retimed_targets import build_online_retimed_bundle, build_retimed_mel_target
+from .surface_metadata import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
     RHYTHM_REFERENCE_MODE_STATIC_REF_FULL,
@@ -85,19 +89,21 @@ from .supervision import (
     RHYTHM_TEACHER_TARGET_SOURCE_LEARNED_OFFLINE,
     RHYTHM_TRACE_HOP_MS,
     RHYTHM_UNIT_HOP_MS,
-    build_item_rhythm_bundle,
-    build_learned_offline_teacher_export_bundle,
-    build_learned_offline_teacher_bundle,
-    build_online_retimed_bundle,
-    build_reference_guided_targets,
-    build_reference_rhythm_conditioning,
-    build_retimed_mel_target,
-    build_reference_teacher_targets,
-    build_source_phrase_cache,
-    build_source_rhythm_cache,
     normalize_teacher_target_source,
     resolve_teacher_surface_name,
     resolve_teacher_target_source_id,
+)
+from .supervision import (
+    build_item_rhythm_bundle,
+    build_reference_guided_targets,
+    build_reference_rhythm_conditioning,
+    build_reference_teacher_targets,
+    build_source_phrase_cache,
+    build_source_rhythm_cache,
+)
+from .teacher_cache import (
+    build_learned_offline_teacher_export_bundle,
+    build_learned_offline_teacher_bundle,
 )
 from .teacher import (
     AlgorithmicRhythmTeacher,
@@ -121,6 +127,7 @@ __all__ = [
     'PLANNER_REF_TRACE_KEYS',
     'MonotonicRhythmScheduler',
     'COMPACT_REFERENCE_KEYS',
+    'COMPACT_REFERENCE_ALIAS_KEYS',
     'ReferenceSelection',
     'ReferenceSelector',
     'ReferenceRhythmEncoder',
@@ -164,6 +171,8 @@ __all__ = [
     'expected_cache_contract',
     'extract_compact_reference_contract',
     'exports_streaming_offline_sidecars',
+    'FeasibleBudgetProjection',
+    'lift_projector_budgets_to_feasible_region',
     'normalize_distill_surface',
     'normalize_primary_target_surface',
     'normalize_retimed_target_mode',
@@ -174,6 +183,7 @@ __all__ = [
     'resolve_teacher_target_source_id',
     'resolve_apply_override',
     'resolve_cumplan_lambda',
+    'resolve_prefix_state_lambda',
     'resolve_pause_boundary_weight',
     'build_algorithmic_teacher_targets',
     'build_interleaved_blank_slot_schedule',

@@ -145,6 +145,15 @@ def collect_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]
         return runtime_outputs
     planner = rhythm_execution.planner
     for attr_name in (
+        "raw_speech_budget_win",
+        "raw_pause_budget_win",
+        "effective_speech_budget_win",
+        "effective_pause_budget_win",
+    ):
+        attr_value = getattr(planner, attr_name, None)
+        if attr_value is not None:
+            runtime_outputs[attr_name] = attr_value
+    for attr_name in (
         "feasible_speech_budget_delta",
         "feasible_pause_budget_delta",
         "feasible_total_budget_delta",

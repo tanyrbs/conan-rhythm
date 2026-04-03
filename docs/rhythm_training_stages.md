@@ -38,7 +38,7 @@ Current state:
 - runtime learned-offline teacher enable resolution now comes from the shared stage helper in `modules/Conan/rhythm/stages.py`; task validation, preflight, and runtime no longer each maintain their own approximation
 - slot schedule / frame plan are now lazily materialized only when render / retimed closure actually needs them; strict non-render paths keep these fields absent
 - cached-only loading now accepts compatible `rhythm_cache_version: 4` metadata when the maintained `v5` hop/trace/reference contract still matches; missing teacher/retimed source ids are inferred from cached surface names during load/preflight
-- latest local checks passed for `py_compile`, `smoke_test`, `export_rhythm_teacher_targets.py --help`, real-data preflight dry-run on local `libritts_single_smoke_rhythm_v4` for `teacher_offline`, and a real-data CPU mini-train probe for `teacher_offline`
+- dated author-local checks have covered `py_compile`, `smoke_test`, `export_rhythm_teacher_targets.py --help`, real-data preflight dry-run on local `libritts_single_smoke_rhythm_v4` for `teacher_offline`, and a real-data CPU mini-train probe for `teacher_offline`; treat this as local evidence, not a repository-wide guarantee
 - maintained `student_kd` / `student_retimed` still correctly reject that local smoke cache until learned-offline teacher assets are exported and re-binarized into cache
 
 ---
@@ -192,6 +192,8 @@ Current bridge step already in repo:
 - retimed targets can now be aligned to decoder output either by resampling or by explicit length trimming without shape mismatch
 - online retimed bundle can now also build F0/UV targets from the same frame plan; if that path is disabled or unavailable, source-aligned pitch supervision is automatically gated off
 - pause-boundary emphasis and projector feasible-debt regularization are now absorbed into maintained `L_exec_pause` / `L_budget`, rather than creating new optimizer loss names
+- maintained `L_budget` now supervises `total_budget + pause_share` rather than two absolute budgets, so the loss matches the weak-factorized planner contract
+- `modules/Conan/Conan.py` is now thinner again: routine acoustic forward glue lives in `modules/Conan/acoustic_runtime.py`, while `Conan.py` stays focused on model definition and rhythm-stage integration
 - mel GAN should stay disabled on the retimed canvas unless real/fake targets are explicitly aligned to the same acoustic canvas
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
@@ -210,11 +212,13 @@ Recommended future config direction after retimed targets exist:
 
 - enable train-time retimed rendering explicitly
 - keep `L_base` as the outer acoustic objective
-- keep the main timing path on executed speech/pause + light budget / cumulative-plan guardrail
+- keep the main timing path on executed speech/pause + light budget / prefix-state guardrail (`L_cumplan` remains the public compatibility alias)
 - keep optimizer view compact in joint mode: `L_base + L_rhythm_exec + L_stream_state (+ optional L_pitch)`
 - keep KD focused on executed speech/pause plus optional prefix carry + tiny budget only when explicitly enabled
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 - treat scheduler outputs as debug/regression tensors, and treat projector execution as the real maintained contract
+- for `student_kd`, keep `rhythm_distill_allocation_weight: 0`; do not combine allocation KL with shape KL on the maintained path
+- if warm-starting from an older Conan checkpoint, use `load_ckpt_strict: false` and optionally `load_ckpt_force: false` so shared acoustic weights can load while new rhythm heads stay random-init
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.
 

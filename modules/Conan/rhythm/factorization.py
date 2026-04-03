@@ -11,6 +11,10 @@ COMPACT_REFERENCE_KEYS = (
     "pause_ratio",
     "local_rate_trace",
     "boundary_trace",
+)
+
+
+COMPACT_REFERENCE_ALIAS_KEYS = (
     "planner_ref_stats",
     "planner_ref_trace",
 )
@@ -56,10 +60,14 @@ def extract_compact_reference_contract(ref_conditioning: dict[str, torch.Tensor]
     for key in COMPACT_REFERENCE_KEYS:
         if key in ref_conditioning and isinstance(ref_conditioning[key], torch.Tensor):
             compact[key] = ref_conditioning[key]
-    if "planner_ref_stats" not in compact and {"global_rate", "pause_ratio"} <= compact.keys():
+    if {"global_rate", "pause_ratio"} <= compact.keys():
         compact["planner_ref_stats"] = torch.cat([compact["global_rate"], compact["pause_ratio"]], dim=-1)
-    if "planner_ref_trace" not in compact and {"local_rate_trace", "boundary_trace"} <= compact.keys():
+    elif "planner_ref_stats" in ref_conditioning and isinstance(ref_conditioning["planner_ref_stats"], torch.Tensor):
+        compact["planner_ref_stats"] = ref_conditioning["planner_ref_stats"]
+    if {"local_rate_trace", "boundary_trace"} <= compact.keys():
         compact["planner_ref_trace"] = torch.cat([compact["local_rate_trace"], compact["boundary_trace"]], dim=-1)
+    elif "planner_ref_trace" in ref_conditioning and isinstance(ref_conditioning["planner_ref_trace"], torch.Tensor):
+        compact["planner_ref_trace"] = ref_conditioning["planner_ref_trace"]
     return compact
 
 
@@ -94,9 +102,9 @@ def apply_compact_reference_intervention(
             compact["boundary_trace"].float() * float(intervention.boundary_trace_scale)
             + float(intervention.boundary_trace_bias)
         ).clamp(0.0, 1.0)
-    if "planner_ref_stats" in compact and {"global_rate", "pause_ratio"} <= compact.keys():
+    if {"global_rate", "pause_ratio"} <= compact.keys():
         compact["planner_ref_stats"] = torch.cat([compact["global_rate"], compact["pause_ratio"]], dim=-1)
-    if "planner_ref_trace" in compact and {"local_rate_trace", "boundary_trace"} <= compact.keys():
+    if {"local_rate_trace", "boundary_trace"} <= compact.keys():
         compact["planner_ref_trace"] = torch.cat([compact["local_rate_trace"], compact["boundary_trace"]], dim=-1)
     return compact
 
@@ -174,6 +182,7 @@ def compute_surface_distance_report(
 
 __all__ = [
     "COMPACT_REFERENCE_KEYS",
+    "COMPACT_REFERENCE_ALIAS_KEYS",
     "PLANNER_SURFACE_KEYS",
     "CompactPlannerIntervention",
     "apply_compact_reference_intervention",

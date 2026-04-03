@@ -435,7 +435,7 @@ class VCBinarizer(BaseBinarizer):
             )
 
         for item_id, item in multiprocess_run_tqdm(
-                process_item, args, desc=f'Processing {prefix}'):
+                process_item, args, num_workers=self.num_workers, desc=f'Processing {prefix}'):
             # item['spk_embed'] = voice_encoder.embed_utterance(item['wav']) \
             #     if self.binarization_args['with_spk_embed'] else None
             if item is None:
@@ -559,7 +559,11 @@ class ConanBinarizer(VCBinarizer):
         return item
     
     @staticmethod
-    def process_align(ph_durs, mel, item, hop_size=hparams['hop_size'], audio_sample_rate=hparams['audio_sample_rate']):
+    def process_align(ph_durs, mel, item, hop_size=None, audio_sample_rate=None):
+        if hop_size is None:
+            hop_size = hparams['hop_size']
+        if audio_sample_rate is None:
+            audio_sample_rate = hparams['audio_sample_rate']
         mel2ph = np.zeros([mel.shape[0]], int)
         startTime = 0
 
@@ -654,7 +658,11 @@ class EmformerBinarizer(VCBinarizer):
         return item
     
     @staticmethod
-    def process_align(ph_durs, mel, item, hop_size=hparams['hop_size'], audio_sample_rate=hparams['audio_sample_rate']):
+    def process_align(ph_durs, mel, item, hop_size=None, audio_sample_rate=None):
+        if hop_size is None:
+            hop_size = hparams['hop_size']
+        if audio_sample_rate is None:
+            audio_sample_rate = hparams['audio_sample_rate']
         mel2ph = np.zeros([mel.shape[0]], int)
         startTime = 0
 

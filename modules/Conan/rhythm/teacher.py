@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .contracts import RhythmTeacherTargets
+from .prefix_state import build_prefix_state_from_exec_torch
 from .reference_encoder import sample_progress_trace
 
 
@@ -132,22 +133,6 @@ def _build_source_boundary_pause_prior(
     return float(cfg.source_boundary_pause_weight) * gate.unsqueeze(-1) * source_prior
 
 
-def _build_prefix_carry_targets(
-    *,
-    dur_anchor_src: torch.Tensor,
-    speech_exec: torch.Tensor,
-    pause_exec: torch.Tensor,
-    unit_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    unit_mask = unit_mask.float()
-    prefix_clock = torch.cumsum(
-        ((speech_exec + pause_exec) - dur_anchor_src.float()) * unit_mask,
-        dim=1,
-    ) * unit_mask
-    prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
-    return prefix_clock, prefix_backlog
-
-
 def build_algorithmic_teacher_targets(
     *,
     dur_anchor_src: torch.Tensor,
@@ -227,10 +212,10 @@ def build_algorithmic_teacher_targets(
     pause_exec = pause_scores * pause_budget
 
     allocation_tgt = _masked_normalize(speech_exec + pause_exec, unit_mask)
-    prefix_clock_tgt, prefix_backlog_tgt = _build_prefix_carry_targets(
-        dur_anchor_src=dur_anchor_src,
+    prefix_clock_tgt, prefix_backlog_tgt = build_prefix_state_from_exec_torch(
         speech_exec=speech_exec,
         pause_exec=pause_exec,
+        dur_anchor_src=dur_anchor_src,
         unit_mask=unit_mask,
     )
     confidence = _estimate_confidence(

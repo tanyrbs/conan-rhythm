@@ -101,7 +101,11 @@ class WindowBudgetController(nn.Module):
         )
         self.total_budget_head = nn.Linear(hidden_size, 1)
         self.pause_share_residual_head = nn.Linear(hidden_size, 1)
+        # Compatibility-only stub for old checkpoints; the maintained planner no
+        # longer multiplies a separate anchor gate into the total log-ratio.
         self.anchor_gate_head = nn.Linear(hidden_size, 1)
+        for param in self.anchor_gate_head.parameters():
+            param.requires_grad = False
 
     def forward(
         self,
@@ -114,7 +118,6 @@ class WindowBudgetController(nn.Module):
         slow_rhythm_summary: torch.Tensor | None,
         boundary_score_unit: torch.Tensor | None,
         phase_ptr: torch.Tensor,
-        backlog: torch.Tensor,
         clock_delta: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
@@ -125,8 +128,11 @@ class WindowBudgetController(nn.Module):
             slow_rhythm_summary = masked_mean(planner_trace_context, unit_mask, dim=1)
         boundary_feat = (boundary_score_unit.float() * self.boundary_feature_scale).unsqueeze(-1)
         phase = phase_ptr.view(-1, 1, 1).expand(-1, unit_states.size(1), -1)
-        backlog_pair = torch.stack([backlog.float(), clock_delta.float()], dim=-1)
-        backlog_pair = backlog_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
+        clock_delta = clock_delta.float()
+        clock_pos = clock_delta.clamp_min(0.0)
+        clock_neg = (-clock_delta).clamp_min(0.0)
+        clock_pair = torch.stack([clock_pos, clock_neg], dim=-1)
+        clock_pair = clock_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
 
         x = (
             unit_states
@@ -136,7 +142,7 @@ class WindowBudgetController(nn.Module):
             + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
             + self.stats_proj(planner_ref_stats).unsqueeze(1)
             + self.phase_proj(phase)
-            + self.backlog_proj(backlog_pair)
+            + self.backlog_proj(clock_pair)
         )
         x = self.in_proj(x)
         for block in self.blocks:
@@ -155,15 +161,14 @@ class WindowBudgetController(nn.Module):
                 pooled_anchor.unsqueeze(-1),
                 pooled_boundary.unsqueeze(-1),
                 phase_ptr.unsqueeze(-1).float(),
-                backlog.unsqueeze(-1).float(),
-                clock_delta.unsqueeze(-1).float(),
+                clock_pos.unsqueeze(-1),
+                clock_neg.unsqueeze(-1),
             ],
             dim=-1,
         )
         global_hidden = self.pool_mlp(global_input)
 
         raw_total_logratio = torch.tanh(self.total_budget_head(global_hidden)) * self.max_total_logratio
-        anchor_gate = torch.sigmoid(self.anchor_gate_head(global_hidden))
         pause_ratio_hint = planner_ref_stats[:, 1:2].float().clamp(self.pause_share_min, self.pause_share_max)
         pause_share_delta = (
             torch.tanh(self.pause_share_residual_head(global_hidden)) * self.pause_share_residual_max
@@ -171,18 +176,15 @@ class WindowBudgetController(nn.Module):
         pause_share = (pause_ratio_hint + pause_share_delta).clamp(self.pause_share_min, self.pause_share_max)
 
         src_total = (dur_anchor_src.float() * unit_mask).sum(dim=1, keepdim=True).clamp_min(1.0)
-        total_budget = src_total * torch.exp(raw_total_logratio * anchor_gate)
+        total_budget = src_total * torch.exp(raw_total_logratio)
         pause_budget = total_budget * pause_share
         min_speech_budget = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0) * self.min_speech_frames
         speech_budget = (total_budget - pause_budget).clamp_min(min_speech_budget)
         pause_budget = (total_budget - speech_budget).clamp_min(0.0)
 
         return {
-            'total_budget_win': total_budget,
             'speech_budget_win': speech_budget,
             'pause_budget_win': pause_budget,
-            'pause_share_win': pause_share,
-            'anchor_gate': anchor_gate,
         }
 
 

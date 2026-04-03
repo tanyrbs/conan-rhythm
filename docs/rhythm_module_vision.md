@@ -76,7 +76,7 @@ Joint compact optimizer view (maintained):
 
 5. `L_base`
 6. `L_rhythm_exec` (macro: `L_exec_speech + L_exec_pause`)
-7. `L_stream_state` (macro: budget + cumplan guardrail)
+7. `L_stream_state` (macro: budget + prefix-state guardrail; `L_cumplan` is the public compatibility alias)
 8. `L_pitch` (optional, only when retimed pitch targets are ready)
 
 Staged / optional branch losses:
@@ -253,9 +253,9 @@ The branch is structurally much cleaner now, but it is **not yet a fully proven 
 
 The biggest remaining gaps are:
 
-1. **Offline teacher**
-   - distillation interface exists
-   - strong offline teacher is still missing
+1. **Offline teacher evidence**
+   - standalone offline-teacher / export / cache plumbing now exists
+   - what is still missing is long-run training evidence and a stable asset-generation loop, not the structural branch itself
 
 2. **Train / infer retiming consistency**
    - decoder side still needs stronger training on the retimed execution canvas

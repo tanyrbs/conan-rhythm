@@ -4,10 +4,15 @@ import torch.nn as nn
 from modules.Conan.diff.net import DiffNet, F0DiffNet, OriDiffNet, CausalConv1d
 from modules.Conan.flow.flow import FlowMel
 from modules.Conan.flow.flow_f0 import ReflowF0
+from modules.Conan.acoustic_runtime import (
+    maybe_short_circuit_acoustic_train,
+    prepare_content_inputs,
+    run_acoustic_path,
+)
 from modules.Conan.pitch_mixin import ConanPitchMixin
 from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
-from modules.Conan.rhythm.bridge import build_content_nonpadding
 from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
+from modules.Conan.rhythm.factory import resolve_content_vocab_size
 from modules.commons.conv import ConvBlocks, CausalFM
 from modules.commons.nar_tts_modules import PitchPredictor
 from modules.commons.transformer import SinusoidalPositionalEmbedding
@@ -39,13 +44,18 @@ class Conan(ConanPitchMixin, FastSpeech):
 
         hidden_size = hparams["hidden_size"]
         kernel_size = hparams["kernel_size"]
-        content_vocab_size = int(hparams.get("content_vocab_size", hparams.get("content_embedding_dim", 102)))
+        content_vocab_size = resolve_content_vocab_size(hparams)
+        self._init_content_backbone(
+            hidden_size=hidden_size,
+            kernel_size=kernel_size,
+            content_vocab_size=content_vocab_size,
+        )
+        self._init_rhythm_components(hparams=hparams, hidden_size=hidden_size)
+        self._init_style_components(hparams=hparams)
+        self._init_pitch_components(hparams=hparams)
+
+    def _init_content_backbone(self, *, hidden_size: int, kernel_size: int, content_vocab_size: int) -> None:
         self.content_embedding = nn.Embedding(content_vocab_size, hidden_size)
-        # self.content_proj = nn.Sequential(
-        #     nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, padding=kernel_size//2),
-        #     # nn.Linear(80, hidden_size, bias=True)
-        #     nn.LeakyReLU()
-        # )
         self.content_proj = nn.Sequential(
             CausalConv1d(hidden_size, hidden_size, kernel_size=kernel_size, dilation=1),
             nn.LeakyReLU(),
@@ -61,77 +71,60 @@ class Conan(ConanPitchMixin, FastSpeech):
             num_layers=5,
         )
 
+    def _init_rhythm_components(self, *, hparams, hidden_size: int) -> None:
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
         self.rhythm_minimal_style_only = bool(hparams.get("rhythm_minimal_style_only", False))
-        if self.rhythm_enable_v2:
-            self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
-            # Compatibility aliases for existing training/inference code paths.
-            self.rhythm_unit_frontend = self.rhythm_adapter.unit_frontend
-            self.rhythm_module = self.rhythm_adapter.module
-            self.rhythm_pause_state = self.rhythm_adapter.pause_state
-            self.rhythm_render_phase_mlp = self.rhythm_adapter.render_phase_mlp
-            self.rhythm_render_phase_gain = self.rhythm_adapter.render_phase_gain
+        if not self.rhythm_enable_v2:
+            return
+        self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
+        self.rhythm_unit_frontend = self.rhythm_adapter.unit_frontend
+        self.rhythm_module = self.rhythm_adapter.module
+        self.rhythm_pause_state = self.rhythm_adapter.pause_state
+        self.rhythm_render_phase_mlp = self.rhythm_adapter.render_phase_mlp
+        self.rhythm_render_phase_gain = self.rhythm_adapter.render_phase_gain
 
-        if hparams["style"] and not self.rhythm_minimal_style_only:
-            self.padding_idx = 0
-            self.prosody_extractor = LocalStyleAdaptor(
-                self.hidden_size, hparams["nVQ"], self.padding_idx
-            )
-            self.l1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
-            self.align = ProsodyAligner(num_layers=2)
+    def _init_style_components(self, *, hparams) -> None:
+        if not hparams["style"] or self.rhythm_minimal_style_only:
+            return
+        self.padding_idx = 0
+        self.prosody_extractor = LocalStyleAdaptor(
+            self.hidden_size, hparams["nVQ"], self.padding_idx
+        )
+        self.l1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.align = ProsodyAligner(num_layers=2)
+        self.max_source_positions = DEFAULT_MAX_SOURCE_POSITIONS
+        self.embed_positions = SinusoidalPositionalEmbedding(
+            self.hidden_size,
+            self.padding_idx,
+            init_size=self.max_source_positions + self.padding_idx + 1,
+        )
 
-            # build attention layer
-            self.max_source_positions = DEFAULT_MAX_SOURCE_POSITIONS
-            self.embed_positions = SinusoidalPositionalEmbedding(
-                self.hidden_size,
-                self.padding_idx,
-                init_size=self.max_source_positions + self.padding_idx + 1,
-            )
+    def _build_uv_predictor(self, *, hparams) -> PitchPredictor:
+        return PitchPredictor(
+            self.hidden_size,
+            n_chans=128,
+            n_layers=5,
+            dropout_rate=0.1,
+            odim=2,
+            kernel_size=hparams["predictor_kernel"],
+        )
 
-        # self.time_ratio = hparams['sample_rate'] / hparams['hop_size'] / 50.0
-        if hparams["f0_gen"] == "flow":
-            self.uv_predictor = PitchPredictor(
-                self.hidden_size,
-                n_chans=128,
-                n_layers=5,
-                dropout_rate=0.1,
-                odim=2,
-                kernel_size=hparams["predictor_kernel"],
-            )
-            self.pitch_flownet = F0DiffNet(in_dims=1)
-            self.f0_gen = ReflowF0(
-                out_dims=1,
-                denoise_fn=self.pitch_flownet,
-                timesteps=hparams["f0_timesteps"],
-                f0_K_step=hparams["f0_K_step"],
-            )
-        else:
-            self.uv_predictor = PitchPredictor(
-                self.hidden_size,
-                n_chans=128,
-                n_layers=5,
-                dropout_rate=0.1,
-                odim=2,
-                kernel_size=hparams["predictor_kernel"],
-            )
+    def _init_pitch_components(self, *, hparams) -> None:
+        self.uv_predictor = self._build_uv_predictor(hparams=hparams)
+        if hparams["f0_gen"] != "flow":
+            return
+        self.pitch_flownet = F0DiffNet(in_dims=1)
+        self.f0_gen = ReflowF0(
+            out_dims=1,
+            denoise_fn=self.pitch_flownet,
+            timesteps=hparams["f0_timesteps"],
+            f0_K_step=hparams["f0_K_step"],
+        )
 
     def _unit_speech_state_fn(self, unit_ids):
         unit_embed = self.content_embedding(unit_ids)
         unit_embed = self.content_proj(unit_embed.transpose(1, 2)).transpose(1, 2)
         return unit_embed
-
-    def _resolve_style_embed(self, *, spk_embed, ref, ret):
-        if spk_embed is not None:
-            ret["style_embed"] = style_embed = spk_embed
-            return style_embed
-        if ref is None:
-            raise ValueError(
-                "When spk_embed is None, need target tensor to extract speaker embedding."
-            )
-        ret["style_embed"] = style_embed = self.encode_spk_embed(
-            ref.transpose(1, 2)
-        ).transpose(1, 2)
-        return style_embed
 
     def _rhythm_render_frame_state_post(
         self,
@@ -166,17 +159,6 @@ class Conan(ConanPitchMixin, FastSpeech):
             teacher=teacher,
         )
 
-    def _prepare_content_inputs(self, *, content, content_lengths, ret):
-        ret["content"] = content
-        ret["content_base"] = content
-        tgt_nonpadding = build_content_nonpadding(
-            content,
-            content_lengths=content_lengths,
-        )[:, :, None]
-        content_embed = self._unit_speech_state_fn(content)
-        ret["content_embed_proj"] = content_embed
-        return content_embed, tgt_nonpadding
-
     def _run_rhythm_stage(
         self,
         *,
@@ -194,6 +176,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         rhythm_state,
         rhythm_ref_conditioning,
         rhythm_apply_override,
+        rhythm_runtime_overrides,
         kwargs,
     ):
         if not self.rhythm_enable_v2:
@@ -213,47 +196,11 @@ class Conan(ConanPitchMixin, FastSpeech):
             rhythm_state=rhythm_state,
             rhythm_ref_conditioning=rhythm_ref_conditioning,
             rhythm_apply_override=rhythm_apply_override,
+            rhythm_runtime_overrides=rhythm_runtime_overrides,
             rhythm_source_cache=kwargs.get("rhythm_source_cache"),
             rhythm_offline_source_cache=kwargs.get("rhythm_offline_source_cache"),
             speech_state_fn=self._unit_speech_state_fn,
         )
-
-    def _maybe_short_circuit_acoustic_train(
-        self,
-        *,
-        ret,
-        infer,
-        target,
-        f0,
-        content,
-        content_embed,
-        tgt_nonpadding,
-        disable_acoustic_train_path,
-    ) -> bool:
-        if not disable_acoustic_train_path or bool(infer):
-            return False
-        ret["tgt_nonpadding"] = tgt_nonpadding
-        ret["rhythm_disable_acoustic_train_path"] = 1.0
-        if target is not None:
-            ret["mel_out"] = target
-        else:
-            mel_len = (
-                int(tgt_nonpadding.squeeze(-1).sum(dim=1).max().item())
-                if tgt_nonpadding.numel() > 0
-                else int(content.size(1))
-            )
-            ret["mel_out"] = content_embed.new_zeros((content.size(0), mel_len, self.out_dims))
-        if f0 is not None:
-            ret["f0_denorm_pred"] = f0.float()
-        return True
-
-    def _build_pitch_input(self, *, content_embed, style_embed, ref, ret, infer, global_steps):
-        pitch_inp = content_embed + style_embed
-        if self.hparams["style"] and not self.rhythm_minimal_style_only:
-            prosody = self.get_prosody(pitch_inp, ref, ret, infer, global_steps)
-            pitch_inp = pitch_inp + prosody
-        ret["pitch_embed"] = pitch_inp
-        return pitch_inp
 
     def forward(
         self,
@@ -272,7 +219,9 @@ class Conan(ConanPitchMixin, FastSpeech):
         rhythm_state = kwargs.get("rhythm_state")
         rhythm_ref_conditioning = kwargs.get("rhythm_ref_conditioning")
         rhythm_apply_override = kwargs.get("rhythm_apply_override")
-        content_embed, tgt_nonpadding = self._prepare_content_inputs(
+        rhythm_runtime_overrides = kwargs.get("rhythm_runtime_overrides")
+        content_embed, tgt_nonpadding = prepare_content_inputs(
+            self,
             content=content,
             content_lengths=content_lengths,
             ret=ret,
@@ -292,11 +241,13 @@ class Conan(ConanPitchMixin, FastSpeech):
             rhythm_state=rhythm_state,
             rhythm_ref_conditioning=rhythm_ref_conditioning,
             rhythm_apply_override=rhythm_apply_override,
+            rhythm_runtime_overrides=rhythm_runtime_overrides,
             kwargs=kwargs,
         )
 
         disable_acoustic_train_path = bool(kwargs.get("disable_acoustic_train_path", False))
-        if self._maybe_short_circuit_acoustic_train(
+        if maybe_short_circuit_acoustic_train(
+            self,
             ret=ret,
             infer=infer,
             target=target,
@@ -308,32 +259,19 @@ class Conan(ConanPitchMixin, FastSpeech):
         ):
             return ret
 
-        style_embed = self._resolve_style_embed(
+        return run_acoustic_path(
+            self,
+            ret=ret,
+            content_embed=content_embed,
+            tgt_nonpadding=tgt_nonpadding,
             spk_embed=spk_embed,
             ref=ref,
-            ret=ret,
-        )
-        pitch_inp = self._build_pitch_input(
-            content_embed=content_embed,
-            style_embed=style_embed,
-            ref=ref,
-            ret=ret,
+            f0=f0,
+            uv=uv,
             infer=infer,
             global_steps=global_steps,
+            forward_kwargs=kwargs,
         )
-        if infer:
-            f0, uv = None, None
-        pitch_embed_out = self.forward_pitch(pitch_inp, f0, uv, ret, **kwargs)
-        ret["decoder_inp"] = decoder_inp = pitch_inp + pitch_embed_out
-        ret["mel_out"] = self.forward_decoder(
-            decoder_inp,
-            tgt_nonpadding,
-            ret,
-            infer=infer,
-            **kwargs,
-        )
-        ret["tgt_nonpadding"] = tgt_nonpadding
-        return ret
 
     def encode_spk_embed(self, x):
         in_nonpadding = (x.abs().sum(dim=-2) > 0).float()[:, None, :]

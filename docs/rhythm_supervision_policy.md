@@ -65,12 +65,13 @@ Do not collapse those two claims.
 Maintained usage preference:
 
 - use teacher surfaces as the primary **target source** when teacher-first cached training is enabled
-- maintained stage-1/stage-3 configs now mark this contract explicitly with `rhythm_strict_mainline: true`
+- maintained **student-stage** configs (`student_kd` / `student_retimed`) now mark this contract explicitly with `rhythm_strict_mainline: true`
 - keep extra KD losses (`L_distill*`) optional, stage-specific, and off by default in the maintained chain
 - do not keep task-side surrogate pause execution in the maintained path; if pause gradients disappear, fix the projector branch itself
 - keep student-mainline runtime teacher branches off (`rhythm_enable_learned_offline_teacher: false` on `student_kd` / `student_retimed`); only `teacher_offline` and legacy dual-mode should pay runtime teacher complexity
 - dual-mode KD may enable the runtime learned teacher branch, but it remains an optional research/stage-2 branch rather than the default maintained chain
 - when streaming-prefix training exports a longer offline source sidecar, the runtime teacher should consume matching full-length offline cached teacher surfaces (`rhythm_offline_teacher_*`) for its own auxiliary supervision instead of reusing student-prefix-sliced teacher targets
+- learned-offline teacher export should keep `rhythm_streaming_prefix_train: false` so exported `.npz` assets stay full-length and stable
 
 ---
 

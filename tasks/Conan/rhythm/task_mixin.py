@@ -5,15 +5,21 @@ contracts, runtime target handling, and validation helpers for easier
 debugging and focused inspection.
 """
 
-from types import SimpleNamespace
-
 import torch
 import torch.nn.functional as F
 
 from tasks.Conan.base_gen_task import f0_to_figure
 from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
-from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
+from tasks.Conan.rhythm.distill_confidence import (
+    build_runtime_distill_confidence_bundle as build_runtime_distill_confidence_bundle_helper,
+    normalize_component_distill_confidence as normalize_component_distill_confidence_helper,
+    normalize_distill_confidence as normalize_distill_confidence_helper,
+)
+from tasks.Conan.rhythm.runtime_teacher_supervision import (
+    build_runtime_teacher_supervision_targets as build_runtime_teacher_supervision_targets_helper,
+)
 from tasks.Conan.rhythm.runtime_modes import (
     build_rhythm_ref_conditioning,
     collect_planner_runtime_outputs,
@@ -31,7 +37,6 @@ from tasks.Conan.rhythm.task_config import (
     validate_rhythm_training_hparams,
 )
 from tasks.Conan.rhythm.targets import (
-    DistillConfidenceBundle,
     RhythmTargetBuildConfig,
     build_identity_rhythm_loss_targets,
     build_rhythm_loss_targets_from_sample,
@@ -39,11 +44,11 @@ from tasks.Conan.rhythm.targets import (
 )
 from modules.Conan.rhythm.policy import (
     resolve_apply_override,
-    resolve_cumplan_lambda,
+    resolve_prefix_state_lambda,
     should_optimize_render_params,
     use_strict_mainline,
 )
-from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
+from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
 from modules.Conan.rhythm.stages import (
     resolve_runtime_dual_mode_teacher_enable,
 )
@@ -126,8 +131,12 @@ class RhythmConanTaskMixin:
         return dedup
 
     @staticmethod
+    def _get_rhythm_prefix_state_lambda() -> float:
+        return resolve_prefix_state_lambda(hparams)
+
+    @staticmethod
     def _get_rhythm_cumplan_lambda() -> float:
-        return resolve_cumplan_lambda(hparams)
+        return RhythmConanTaskMixin._get_rhythm_prefix_state_lambda()
 
     @staticmethod
     def _resolve_rhythm_pause_boundary_weight() -> float:
@@ -199,11 +208,11 @@ class RhythmConanTaskMixin:
         speech_budget = speech_exec.float().sum(dim=1, keepdim=True)
         pause_budget = pause_exec.float().sum(dim=1, keepdim=True)
         allocation = (speech_exec.float() + pause_exec.float()) * unit_mask[:, :student_units].float()
-        prefix_clock, prefix_backlog = RhythmConanTaskMixin._build_prefix_carry_from_exec(
-            speech_exec,
-            pause_exec,
-            dur_anchor_src[:, :student_units],
-            unit_mask[:, :student_units],
+        prefix_clock, prefix_backlog = build_prefix_state_from_exec_torch(
+            speech_exec=speech_exec,
+            pause_exec=pause_exec,
+            dur_anchor_src=dur_anchor_src[:, :student_units],
+            unit_mask=unit_mask[:, :student_units],
         )
         return (
             speech_exec,
@@ -216,27 +225,14 @@ class RhythmConanTaskMixin:
         )
 
     @staticmethod
-    def _build_prefix_carry_from_exec(speech_exec, pause_exec, dur_anchor_src, unit_mask):
-        unit_mask = unit_mask.float()
-        prefix_clock = torch.cumsum(
-            ((speech_exec.float() + pause_exec.float()) - dur_anchor_src.float()) * unit_mask,
-            dim=1,
-        ) * unit_mask
-        prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
-        return prefix_clock, prefix_backlog
-
-    @staticmethod
     def _normalize_distill_confidence(distill_confidence, *, batch_size: int, device: torch.device):
-        floor = float(hparams.get("rhythm_distill_confidence_floor", 0.05))
-        power = float(hparams.get("rhythm_distill_confidence_power", 1.0))
-        if distill_confidence is None:
-            confidence = torch.ones((batch_size, 1), device=device)
-        else:
-            confidence = distill_confidence.detach().float().reshape(batch_size, -1)[:, :1].to(device=device)
-        confidence = confidence.clamp(min=floor, max=1.0)
-        if abs(power - 1.0) > 1e-8:
-            confidence = confidence.pow(power)
-        return confidence
+        return normalize_distill_confidence_helper(
+            distill_confidence,
+            batch_size=batch_size,
+            device=device,
+            floor=float(hparams.get("rhythm_distill_confidence_floor", 0.05)),
+            power=float(hparams.get("rhythm_distill_confidence_power", 1.0)),
+        )
 
     @staticmethod
     def _normalize_component_distill_confidence(
@@ -246,12 +242,13 @@ class RhythmConanTaskMixin:
         batch_size: int,
         device: torch.device,
     ):
-        if component_confidence is None:
-            return fallback_confidence
-        return RhythmConanTaskMixin._normalize_distill_confidence(
+        return normalize_component_distill_confidence_helper(
             component_confidence,
+            fallback_confidence=fallback_confidence,
             batch_size=batch_size,
             device=device,
+            floor=float(hparams.get("rhythm_distill_confidence_floor", 0.05)),
+            power=float(hparams.get("rhythm_distill_confidence_power", 1.0)),
         )
 
     @staticmethod
@@ -269,18 +266,14 @@ class RhythmConanTaskMixin:
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
             pause_boundary_weight=RhythmConanTaskMixin._resolve_rhythm_pause_boundary_weight(),
+            budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
+            budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
         )
 
     @staticmethod
-    def _build_runtime_distill_confidence_bundle(output) -> DistillConfidenceBundle:
-        return DistillConfidenceBundle(
-            shared=output.get("rhythm_offline_confidence"),
-            exec=output.get("rhythm_offline_confidence_exec"),
-            budget=output.get("rhythm_offline_confidence_budget"),
-            prefix=output.get("rhythm_offline_confidence_prefix"),
-            allocation=output.get("rhythm_offline_confidence_allocation"),
-        )
+    def _build_runtime_distill_confidence_bundle(output):
+        return build_runtime_distill_confidence_bundle_helper(output)
 
     @staticmethod
     def _resolve_retimed_target_mode() -> str:
@@ -467,6 +460,9 @@ class RhythmConanTaskMixin:
             "rhythm_offline_confidence_budget": confidence.get("budget") if isinstance(confidence, dict) else None,
             "rhythm_offline_confidence_prefix": confidence.get("prefix") if isinstance(confidence, dict) else None,
             "rhythm_offline_confidence_allocation": confidence.get("allocation") if isinstance(confidence, dict) else None,
+            "rhythm_offline_confidence_shape": (
+                confidence.get("shape", confidence.get("exec")) if isinstance(confidence, dict) else None
+            ),
         }
         output.update(collect_planner_runtime_outputs(execution))
         losses = {}
@@ -663,125 +659,17 @@ class RhythmConanTaskMixin:
             losses['uv'] = (F.binary_cross_entropy_with_logits(
                 output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv']
 
-    @staticmethod
-    def _slice_runtime_teacher_execution(execution, *, teacher_units: int):
-        if execution is None:
-            return None
-        current_units = int(execution.speech_duration_exec.size(1))
-        if teacher_units >= current_units:
-            return execution
-        planner = getattr(execution, "planner", None)
-        speech_exec = execution.speech_duration_exec[:, :teacher_units]
-        blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[:, :teacher_units]
-        pause_exec = execution.pause_after_exec[:, :teacher_units]
-        speech_budget = speech_exec.float().sum(dim=1, keepdim=True)
-        pause_budget = blank_exec.float().sum(dim=1, keepdim=True)
-        zero_delta = speech_budget.new_zeros(speech_budget.shape)
-        boundary_score = resolve_boundary_score_unit(planner, fallback=speech_exec.new_zeros(speech_exec.shape))
-        if torch.is_tensor(boundary_score):
-            boundary_score = boundary_score[:, :teacher_units]
-        planner_view = SimpleNamespace(
-            speech_budget_win=speech_budget,
-            pause_budget_win=pause_budget,
-            blank_budget_win=pause_budget,
-            boundary_score_unit=boundary_score,
-            boundary_latent=boundary_score,
-            source_boundary_cue=(
-                planner.source_boundary_cue[:, :teacher_units]
-                if planner is not None and torch.is_tensor(getattr(planner, "source_boundary_cue", None))
-                else getattr(planner, "source_boundary_cue", None)
-                if planner is not None
-                else None
-            ),
-            feasible_speech_budget_delta=zero_delta,
-            feasible_pause_budget_delta=zero_delta,
-            feasible_total_budget_delta=zero_delta,
-        )
-        return SimpleNamespace(
-            speech_duration_exec=speech_exec,
-            blank_duration_exec=blank_exec,
-            pause_after_exec=pause_exec,
-            planner=planner_view,
-        )
-
     def _build_runtime_teacher_supervision_targets(self, output, sample):
-        runtime_teacher = output.get("rhythm_offline_execution")
-        offline_unit_batch = output.get("rhythm_offline_unit_batch")
-        unit_batch = output.get("rhythm_unit_batch")
-        if runtime_teacher is None:
-            return None
-        if offline_unit_batch is not None and all(
-            key in sample
-            for key in (
-                "rhythm_offline_teacher_speech_exec_tgt",
-                "rhythm_offline_teacher_pause_exec_tgt",
-            )
-        ):
-            batch_for_targets = offline_unit_batch
-            speech_exec_key = "rhythm_offline_teacher_speech_exec_tgt"
-            pause_exec_key = "rhythm_offline_teacher_pause_exec_tgt"
-            speech_budget_key = "rhythm_offline_teacher_speech_budget_tgt"
-            pause_budget_key = "rhythm_offline_teacher_pause_budget_tgt"
-        else:
-            batch_for_targets = unit_batch if unit_batch is not None else offline_unit_batch
-            speech_exec_key = "rhythm_teacher_speech_exec_tgt"
-            pause_exec_key = (
-                "rhythm_teacher_pause_exec_tgt"
-                if "rhythm_teacher_pause_exec_tgt" in sample
-                else "rhythm_teacher_blank_exec_tgt"
-            )
-            speech_budget_key = "rhythm_teacher_speech_budget_tgt"
-            pause_budget_key = (
-                "rhythm_teacher_pause_budget_tgt"
-                if "rhythm_teacher_pause_budget_tgt" in sample
-                else "rhythm_teacher_blank_budget_tgt"
-            )
-        if batch_for_targets is None or not all(key in sample for key in (speech_exec_key, pause_exec_key)):
-            return None
-        teacher_units = min(
-            int(runtime_teacher.speech_duration_exec.size(1)),
-            int(batch_for_targets.dur_anchor_src.size(1)),
-            int(sample[speech_exec_key].size(1)),
-            int(sample[pause_exec_key].size(1)),
-        )
-        if teacher_units <= 0:
-            return None
-        unit_mask = batch_for_targets.unit_mask
-        if unit_mask is None:
-            unit_mask = batch_for_targets.dur_anchor_src.gt(0).float()
-        speech_exec_tgt = sample[speech_exec_key][:, :teacher_units].float()
-        pause_exec_tgt = sample[pause_exec_key][:, :teacher_units].float()
-        speech_budget_tgt = sample.get(speech_budget_key)
-        pause_budget_tgt = sample.get(pause_budget_key)
-        if speech_budget_tgt is None:
-            speech_budget_tgt = speech_exec_tgt.sum(dim=1, keepdim=True)
-        else:
-            speech_budget_tgt = speech_budget_tgt[:, :1].float()
-        if pause_budget_tgt is None:
-            pause_budget_tgt = pause_exec_tgt.sum(dim=1, keepdim=True)
-        else:
-            pause_budget_tgt = pause_budget_tgt[:, :1].float()
-        sample_confidence = sample.get(
-            "rhythm_offline_teacher_confidence",
-            sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence")),
-        )
-        if isinstance(sample_confidence, torch.Tensor):
-            sample_confidence = sample_confidence.detach()
-        teacher_execution = self._slice_runtime_teacher_execution(runtime_teacher, teacher_units=teacher_units)
-        targets = RhythmLossTargets(
-            speech_exec_tgt=speech_exec_tgt,
-            pause_exec_tgt=pause_exec_tgt,
-            speech_budget_tgt=speech_budget_tgt,
-            pause_budget_tgt=pause_budget_tgt,
-            unit_mask=unit_mask[:, :teacher_units],
-            dur_anchor_src=batch_for_targets.dur_anchor_src[:, :teacher_units],
+        return build_runtime_teacher_supervision_targets_helper(
+            output=output,
+            sample=sample,
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
-            sample_confidence=sample_confidence,
             pause_boundary_weight=self._resolve_rhythm_pause_boundary_weight(),
+            budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
+            budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
         )
-        return teacher_execution, targets
 
     def _build_rhythm_mainline_targets(self, output, sample):
         unit_batch = output.get("rhythm_unit_batch")
@@ -793,7 +681,7 @@ class RhythmConanTaskMixin:
             config=self._build_rhythm_target_build_config(),
             normalize_distill_confidence=self._normalize_distill_confidence,
             normalize_component_confidence=self._normalize_component_distill_confidence,
-            build_prefix_carry_from_exec=self._build_prefix_carry_from_exec,
+            build_prefix_carry_from_exec=build_prefix_state_from_exec_torch,
             slice_rhythm_surface_to_student=self._slice_rhythm_surface_to_student,
         )
 
@@ -814,7 +702,7 @@ class RhythmConanTaskMixin:
             offline_confidences=self._build_runtime_distill_confidence_bundle(output),
             normalize_distill_confidence=self._normalize_distill_confidence,
             normalize_component_confidence=self._normalize_component_distill_confidence,
-            build_prefix_carry_from_exec=self._build_prefix_carry_from_exec,
+            build_prefix_carry_from_exec=build_prefix_state_from_exec_torch,
             slice_rhythm_surface_to_student=self._slice_rhythm_surface_to_student,
         )
         if targets is not None:
@@ -831,14 +719,12 @@ class RhythmConanTaskMixin:
         if targets is None:
             return
         rhythm_execution = output["rhythm_execution"]
-        if rhythm_execution is not None and "rhythm_pause_exec_surrogate_used" not in output:
-            output["rhythm_pause_exec_surrogate_used"] = 0.0
         rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
         losses.update(
             scale_rhythm_loss_terms(
                 rhythm_losses,
                 hparams=hparams,
-                cumplan_lambda=self._get_rhythm_cumplan_lambda(),
+                cumplan_lambda=self._get_rhythm_prefix_state_lambda(),
             )
         )
 
@@ -855,7 +741,7 @@ class RhythmConanTaskMixin:
                 )
                 teacher_state = (
                     teacher_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)
-                    + teacher_losses["rhythm_cumplan"] * self._get_rhythm_cumplan_lambda()
+                    + teacher_losses["rhythm_prefix_state"] * self._get_rhythm_prefix_state_lambda()
                 )
                 teacher_aux = teacher_exec + teacher_state
                 losses["rhythm_distill"] = losses["rhythm_distill"] + lambda_teacher_aux * teacher_aux
@@ -1017,4 +903,3 @@ class RhythmConanTaskMixin:
         result.update(tensors_to_scalars(build_rhythm_metric_dict(outputs, sample)))
         result.update(stream_metrics)
         return result
-

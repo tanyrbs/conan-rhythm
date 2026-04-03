@@ -21,6 +21,7 @@ class MonotonicRhythmScheduler(nn.Module):
         max_unit_logratio: float = 0.6,
         pause_share_max: float = 0.45,
         pause_share_residual_max: float = 0.12,
+        min_speech_frames: float = 1.0,
         boundary_feature_scale: float = 0.35,
         boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
@@ -34,6 +35,7 @@ class MonotonicRhythmScheduler(nn.Module):
             max_total_logratio=max_total_logratio,
             pause_share_max=pause_share_max,
             pause_share_residual_max=pause_share_residual_max,
+            min_speech_frames=min_speech_frames,
             boundary_feature_scale=boundary_feature_scale,
         )
         self.unit_redistribution = UnitRedistributionHead(
@@ -106,7 +108,6 @@ class MonotonicRhythmScheduler(nn.Module):
             slow_rhythm_summary=slow_rhythm_summary,
             boundary_score_unit=boundary_score_unit,
             phase_ptr=state.phase_ptr,
-            backlog=state.backlog,
             clock_delta=state.clock_delta,
         )
         redistribution_outputs = self.unit_redistribution(
@@ -122,9 +123,6 @@ class MonotonicRhythmScheduler(nn.Module):
             pause_budget_win=budget_outputs["pause_budget_win"],
             dur_logratio_unit=redistribution_outputs["dur_logratio_unit"],
             pause_weight_unit=redistribution_outputs["pause_weight_unit"],
-            total_budget_win=budget_outputs["total_budget_win"],
-            pause_share_win=budget_outputs["pause_share_win"],
-            anchor_gate=budget_outputs["anchor_gate"],
             boundary_score_unit=boundary_score_unit,
             trace_context=trace_context,
             source_boundary_cue=source_boundary_cue,

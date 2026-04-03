@@ -18,7 +18,16 @@ It should **not** be described as a fully identifiable disentangled factor model
 - `pause_ratio`
 - `local_rate_trace`
 - `boundary_trace`
+
+Internal deterministic sidecar:
+
 - `source_boundary_cue`
+
+Implementation note:
+
+- `planner_ref_stats` / `planner_ref_trace` are compatibility aliases derived from the four semantic variables above
+- they are not first-class compact variables for intervention or reporting
+- `source_boundary_cue` is injected as deterministic evidence for scheduler/projector stability; it is not a public compact factor
 
 ### Planner surfaces
 
@@ -27,6 +36,13 @@ It should **not** be described as a fully identifiable disentangled factor model
 - `dur_shape_unit` (`dur_logratio_unit` runtime alias)
 - `pause_shape_unit` (`pause_weight_unit` runtime alias)
 - `boundary_score_unit` (deterministic sidecar, not a free latent)
+
+Training-facing budget supervision should stay aligned with the factorized contract:
+
+- supervise `total_budget_win = speech_budget_win + pause_budget_win`
+- supervise `pause_share_win = pause_budget_win / total_budget_win`
+- avoid re-encoding the same error twice by applying two separate absolute-budget losses as the main maintained path
+- treat `total_budget_win` / `pause_share_win` as derived readouts; the primitive planner budgets remain `speech_budget_win` / `pause_budget_win`
 
 ### Binding execution contract
 
@@ -51,10 +67,14 @@ It should **not** be described as a fully identifiable disentangled factor model
    - `distill_speech_shape`
    - `distill_pause_shape`
    - keep execution/budget/prefix supervision separate from shape supervision
+   - shape distill should follow the execution-confidence path, not allocation confidence
+   - shape confidence falls back to execution confidence, not allocation confidence
 
 4. **Projector is the only binding execution authority**
    - planner surfaces are explicit and debuggable
    - executed speech/pause and monotonic state are the maintained truth
+   - feasibility lifting may reallocate speech/pause within the same total budget
+   - `feasible_total_budget_delta` records only real total-budget increases, not redistribution noise
 
 ## Evaluation added for this mainline
 

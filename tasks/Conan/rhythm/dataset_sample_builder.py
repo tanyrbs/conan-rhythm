@@ -34,7 +34,17 @@ class RhythmDatasetSampleAssembler:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
             return torch.tensor(value, dtype=torch.float32)
-        if key in {"rhythm_target_confidence", "rhythm_guidance_confidence", "rhythm_teacher_confidence", "rhythm_offline_teacher_confidence"}:
+        if key in {
+            "rhythm_target_confidence",
+            "rhythm_guidance_confidence",
+            "rhythm_teacher_confidence",
+            "rhythm_teacher_confidence_exec",
+            "rhythm_teacher_confidence_budget",
+            "rhythm_teacher_confidence_prefix",
+            "rhythm_teacher_confidence_allocation",
+            "rhythm_teacher_confidence_shape",
+            "rhythm_offline_teacher_confidence",
+        }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
             return torch.tensor(value, dtype=torch.float32)

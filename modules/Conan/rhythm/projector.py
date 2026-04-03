@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .contracts import RhythmExecution, RhythmPlannerOutputs, StreamingRhythmState
+from .feasibility import FeasibleBudgetProjection, lift_projector_budgets_to_feasible_region
 from .frame_plan import build_frame_plan_from_execution, build_interleaved_blank_slot_schedule
 from .source_boundary import resolve_boundary_score_unit
 
@@ -157,13 +158,11 @@ class StreamingRhythmProjector(nn.Module):
         zeros = torch.zeros(batch_size, device=device)
         return StreamingRhythmState(
             phase_ptr=zeros.clone(),
-            backlog=zeros.clone(),
             clock_delta=zeros.clone(),
             commit_frontier=torch.zeros(batch_size, dtype=torch.long, device=device),
             previous_speech_exec=None,
             previous_pause_exec=None,
-            phase_anchor_progress=zeros.clone(),
-            phase_anchor_total=zeros.clone(),
+            phase_anchor=torch.stack([zeros.clone(), zeros.clone()], dim=-1),
             speech_budget_debt=zeros.clone(),
             pause_budget_debt=zeros.clone(),
         )
@@ -242,54 +241,19 @@ class StreamingRhythmProjector(nn.Module):
         pause_budget_win: torch.Tensor,
         state: StreamingRhythmState,
         reuse_prefix: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        speech_rows = []
-        pause_rows = []
-        previous_speech = state.previous_speech_exec
-        previous_pause = state.previous_pause_exec
-        for batch_idx in range(unit_mask.size(0)):
-            speech_budget_row = speech_budget_win[batch_idx].float()
-            pause_budget_row = pause_budget_win[batch_idx].float()
-            frontier = int(state.commit_frontier[batch_idx].item()) if reuse_prefix else 0
-            prefix_speech = speech_budget_row.new_tensor(0.0)
-            prefix_pause = pause_budget_row.new_tensor(0.0)
-            tail_mask = unit_mask[batch_idx].float().clone()
-            if frontier > 0:
-                if previous_speech is not None and batch_idx < previous_speech.size(0):
-                    valid_frontier = min(frontier, int(previous_speech.size(1)), int(tail_mask.size(0)))
-                    prefix_speech = (
-                        previous_speech[batch_idx, :valid_frontier].float()
-                        * tail_mask[:valid_frontier]
-                    ).sum()
-                    tail_mask[:valid_frontier] = 0.0
-                if previous_pause is not None and batch_idx < previous_pause.size(0):
-                    valid_frontier = min(frontier, int(previous_pause.size(1)), int(unit_mask.size(1)))
-                    prefix_pause = (
-                        previous_pause[batch_idx, :valid_frontier].float()
-                        * unit_mask[batch_idx, :valid_frontier].float()
-                    ).sum()
-            active_tail = int(tail_mask.sum().item())
-            min_tail_speech = float(active_tail) * float(self.config.min_speech_frames)
-            required_speech = prefix_speech + speech_budget_row.new_tensor(min_tail_speech)
-            if float(speech_budget_row.item()) < float(required_speech.item()):
-                deficit = required_speech - speech_budget_row
-                speech_budget_row = required_speech
-                pause_budget_row = pause_budget_row + deficit
-            max_expand = float(self.config.max_speech_expand)
-            if max_expand > 0.0 and active_tail > 0:
-                tail_anchor = (dur_anchor_src[batch_idx].float() * tail_mask).sum()
-                max_tail_speech = tail_anchor.clamp_min(0.0) * max_expand
-                max_total_speech = prefix_speech + max_tail_speech
-                if float(speech_budget_row.item()) > float(max_total_speech.item()):
-                    overflow = speech_budget_row - max_total_speech
-                    speech_budget_row = max_total_speech
-                    pause_budget_row = pause_budget_row + overflow
-            if float(pause_budget_row.item()) < float(prefix_pause.item()):
-                speech_budget_row = speech_budget_row + (prefix_pause - pause_budget_row)
-                pause_budget_row = prefix_pause
-            speech_rows.append(speech_budget_row.reshape(1, 1))
-            pause_rows.append(pause_budget_row.reshape(1, 1))
-        return torch.cat(speech_rows, dim=0), torch.cat(pause_rows, dim=0)
+    ) -> FeasibleBudgetProjection:
+        return lift_projector_budgets_to_feasible_region(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            speech_budget_win=speech_budget_win,
+            pause_budget_win=pause_budget_win,
+            previous_speech_exec=state.previous_speech_exec,
+            previous_pause_exec=state.previous_pause_exec,
+            commit_frontier=state.commit_frontier,
+            reuse_prefix=reuse_prefix,
+            min_speech_frames=float(self.config.min_speech_frames),
+            max_speech_expand=float(self.config.max_speech_expand),
+        )
 
     def _project_speech(
         self,
@@ -453,17 +417,11 @@ class StreamingRhythmProjector(nn.Module):
     ) -> StreamingRhythmState:
         batch_size = dur_anchor_src.size(0)
         next_phase = state.phase_ptr.clone()
-        next_backlog = state.backlog.clone()
         next_clock = state.clock_delta.clone()
-        next_phase_progress = (
-            state.phase_anchor_progress.clone()
-            if state.phase_anchor_progress is not None
-            else torch.zeros_like(next_phase)
-        )
-        next_phase_total = (
-            state.phase_anchor_total.clone()
-            if state.phase_anchor_total is not None
-            else torch.zeros_like(next_phase)
+        next_phase_anchor = (
+            state.phase_anchor.clone()
+            if state.phase_anchor is not None
+            else torch.zeros(next_phase.size(0), 2, device=next_phase.device, dtype=next_phase.dtype)
         )
         next_speech_budget_debt = (
             speech_budget_debt.detach().clone()
@@ -487,8 +445,8 @@ class StreamingRhythmProjector(nn.Module):
             prev = int(state.commit_frontier[batch_idx].item())
             curr = int(commit_frontier[batch_idx].item())
             prev_phase = state.phase_ptr[batch_idx].float().clamp(0.0, 1.0)
-            prev_phase_progress = next_phase_progress[batch_idx].float().clamp_min(0.0)
-            prev_phase_total = next_phase_total[batch_idx].float().clamp_min(1.0)
+            prev_phase_progress = next_phase_anchor[batch_idx, 0].float().clamp_min(0.0)
+            prev_phase_total = next_phase_anchor[batch_idx, 1].float().clamp_min(1.0)
             visible_anchor = dur_anchor_src[batch_idx].float().clamp_min(0.0)
             visible_anchor_total = visible_anchor.sum().clamp_min(1.0)
             committed_anchor = visible_anchor[:curr].sum()
@@ -497,28 +455,25 @@ class StreamingRhythmProjector(nn.Module):
             monotonic_phase_progress = torch.maximum(prev_phase_progress, committed_anchor)
             monotonic_phase_total = torch.maximum(prev_phase_total, visible_anchor_total)
             raw_phase = (monotonic_phase_progress / monotonic_phase_total).clamp(0.0, 1.0)
-            next_phase_progress[batch_idx] = monotonic_phase_progress
-            next_phase_total[batch_idx] = monotonic_phase_total
+            next_phase_anchor[batch_idx, 0] = monotonic_phase_progress
+            next_phase_anchor[batch_idx, 1] = monotonic_phase_total
             next_phase[batch_idx] = torch.maximum(prev_phase, raw_phase)
             if curr <= prev:
-                next_phase_progress[batch_idx] = prev_phase_progress
-                next_phase_total[batch_idx] = prev_phase_total
+                next_phase_anchor[batch_idx, 0] = prev_phase_progress
+                next_phase_anchor[batch_idx, 1] = prev_phase_total
                 next_phase[batch_idx] = prev_phase
                 continue
             exec_prefix = effective_duration_exec[batch_idx, prev:curr].sum()
             src_prefix = dur_anchor_src[batch_idx, prev:curr].float().sum()
             delta = exec_prefix - src_prefix
             next_clock[batch_idx] = next_clock[batch_idx] + delta
-            next_backlog[batch_idx] = next_clock[batch_idx].clamp_min(0.0)
         return StreamingRhythmState(
             phase_ptr=next_phase,
-            backlog=next_backlog,
             clock_delta=next_clock,
             commit_frontier=commit_frontier.long(),
             previous_speech_exec=speech_duration_exec.detach(),
             previous_pause_exec=pause_after_exec.detach(),
-            phase_anchor_progress=next_phase_progress,
-            phase_anchor_total=next_phase_total,
+            phase_anchor=next_phase_anchor,
             speech_budget_debt=next_speech_budget_debt,
             pause_budget_debt=next_pause_budget_debt,
         )
@@ -541,7 +496,7 @@ class StreamingRhythmProjector(nn.Module):
         pause_topk_ratio_override: float | None = None,
     ) -> RhythmExecution:
         unit_mask = unit_mask.float()
-        speech_budget_win, pause_budget_win = self._lift_budgets_to_feasible_region(
+        feasibility = self._lift_budgets_to_feasible_region(
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             speech_budget_win=speech_budget_win,
@@ -549,26 +504,25 @@ class StreamingRhythmProjector(nn.Module):
             state=state,
             reuse_prefix=reuse_prefix,
         )
-        feasible_speech_budget_delta = (speech_budget_win - planner.speech_budget_win.float()).clamp_min(0.0)
-        feasible_pause_budget_delta = (pause_budget_win - planner.pause_budget_win.float()).clamp_min(0.0)
+        speech_budget_win = feasibility.speech_budget_win
+        pause_budget_win = feasibility.pause_budget_win
+        feasible_speech_budget_delta = feasibility.speech_budget_delta
+        feasible_pause_budget_delta = feasibility.pause_budget_delta
         planner_boundary_score = resolve_boundary_score_unit(planner, fallback=boundary_score_unit)
         execution_planner = RhythmPlannerOutputs(
             speech_budget_win=speech_budget_win,
             pause_budget_win=pause_budget_win,
             dur_logratio_unit=planner.dur_logratio_unit,
             pause_weight_unit=planner.pause_weight_unit,
-            total_budget_win=speech_budget_win + pause_budget_win,
-            pause_share_win=pause_budget_win / (speech_budget_win + pause_budget_win).clamp_min(1e-6),
-            anchor_gate=planner.anchor_gate,
             boundary_score_unit=planner_boundary_score,
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
         )
-        execution_planner.feasible_speech_budget_delta = feasible_speech_budget_delta.detach()
-        execution_planner.feasible_pause_budget_delta = feasible_pause_budget_delta.detach()
-        execution_planner.feasible_total_budget_delta = (
-            feasible_speech_budget_delta + feasible_pause_budget_delta
-        ).detach()
+        execution_planner.raw_speech_budget_win = planner.speech_budget_win
+        execution_planner.raw_pause_budget_win = planner.pause_budget_win
+        execution_planner.feasible_speech_budget_delta = feasible_speech_budget_delta
+        execution_planner.feasible_pause_budget_delta = feasible_pause_budget_delta
+        execution_planner.feasible_total_budget_delta = feasibility.total_budget_delta
         speech_duration_exec = self._project_speech(
             dur_anchor_src=dur_anchor_src,
             dur_logratio_unit=dur_logratio_unit,
@@ -579,7 +533,7 @@ class StreamingRhythmProjector(nn.Module):
         )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
-            boundary_score_unit=boundary_score_unit,
+            boundary_score_unit=planner_boundary_score,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
             state=state,
@@ -616,7 +570,7 @@ class StreamingRhythmProjector(nn.Module):
             state=state,
             unit_mask=unit_mask,
             open_run_mask=open_run_mask,
-            boundary_score_unit=boundary_score_unit,
+            boundary_score_unit=planner_boundary_score,
             force_full_commit=force_full_commit,
         )
         next_state = self._advance_state(

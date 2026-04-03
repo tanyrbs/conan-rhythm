@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
+
 
 def _safe_mean(x: torch.Tensor) -> torch.Tensor:
     if x.numel() <= 0:
@@ -57,22 +59,6 @@ def _masked_kl(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> tor
     return (tgt * (torch.log(tgt) - torch.log(pred))).sum(dim=1).mean()
 
 
-def _build_prefix_carry(
-    *,
-    speech_exec: torch.Tensor,
-    blank_exec: torch.Tensor,
-    dur_anchor_src: torch.Tensor,
-    unit_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    unit_mask = unit_mask.float()
-    prefix_clock = torch.cumsum(
-        ((speech_exec.float() + blank_exec.float()) - dur_anchor_src.float()) * unit_mask,
-        dim=1,
-    ) * unit_mask
-    prefix_backlog = prefix_clock.clamp_min(0.0) * unit_mask
-    return prefix_clock, prefix_backlog
-
-
 def _slice_to_visible_prefix(tensor: torch.Tensor, target_units: int) -> torch.Tensor:
     return tensor[:, :target_units]
 
@@ -112,10 +98,14 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     speech_total = execution.speech_duration_exec.float().sum(dim=1)
     pause_total = blank_exec.float().sum(dim=1)
     total_exec = (speech_total + pause_total).clamp_min(1e-6)
+    raw_speech_budget = getattr(planner, "raw_speech_budget_win", planner.speech_budget_win).float().squeeze(-1)
+    raw_pause_budget = getattr(planner, "raw_pause_budget_win", planner.pause_budget_win).float().squeeze(-1)
+    effective_speech_budget = getattr(planner, "effective_speech_budget_win", planner.speech_budget_win).float().squeeze(-1)
+    effective_pause_budget = getattr(planner, "effective_pause_budget_win", planner.pause_budget_win).float().squeeze(-1)
     commit_ratio = execution.commit_frontier.float() / visible_units
-    pred_prefix_clock, pred_prefix_backlog = _build_prefix_carry(
+    pred_prefix_clock, pred_prefix_backlog = build_prefix_state_from_exec_torch(
         speech_exec=execution.speech_duration_exec,
-        blank_exec=blank_exec,
+        pause_exec=blank_exec,
         dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else execution.speech_duration_exec,
         unit_mask=unit_mask,
     )
@@ -127,8 +117,12 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     final_prefix_clock = pred_prefix_clock.gather(1, final_indices).squeeze(1)
 
     metrics = {
-        "rhythm_metric_speech_budget_mean": _safe_mean(planner.speech_budget_win.squeeze(-1)),
-        "rhythm_metric_pause_budget_mean": _safe_mean(planner.pause_budget_win.squeeze(-1)),
+        "rhythm_metric_speech_budget_mean": _safe_mean(effective_speech_budget),
+        "rhythm_metric_pause_budget_mean": _safe_mean(effective_pause_budget),
+        "rhythm_metric_raw_speech_budget_mean": _safe_mean(raw_speech_budget),
+        "rhythm_metric_raw_pause_budget_mean": _safe_mean(raw_pause_budget),
+        "rhythm_metric_effective_speech_budget_mean": _safe_mean(effective_speech_budget),
+        "rhythm_metric_effective_pause_budget_mean": _safe_mean(effective_pause_budget),
         "rhythm_metric_dur_shape_abs_mean": _safe_mean(planner.dur_shape_unit.abs()),
         "rhythm_metric_pause_shape_entropy": _safe_mean(
             -(
@@ -145,7 +139,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "rhythm_metric_expand_ratio_mean": _safe_mean(speech_total / anchor_total.clamp_min(1.0)),
         "rhythm_metric_commit_ratio_mean": _safe_mean(commit_ratio),
         "rhythm_metric_budget_violation_mean": _safe_mean(
-            ((speech_total + pause_total) - (planner.speech_budget_win.squeeze(-1) + planner.pause_budget_win.squeeze(-1))).abs()
+            ((speech_total + pause_total) - (effective_speech_budget + effective_pause_budget)).abs()
         ),
         "rhythm_metric_prefix_clock_abs_mean": _safe_mean(pred_prefix_clock.abs()),
         "rhythm_metric_prefix_backlog_mean": _safe_mean(pred_prefix_backlog),
@@ -219,10 +213,8 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
                 "rhythm_metric_clock_delta_abs_mean": _safe_mean(state_next.clock_delta.abs()),
             }
         )
-        phase_progress = getattr(state_next, "phase_anchor_progress", None)
-        phase_total = getattr(state_next, "phase_anchor_total", None)
-        if phase_progress is not None and phase_total is not None:
-            progress_ratio = phase_progress.float() / phase_total.float().clamp_min(1.0)
+        progress_ratio = getattr(state_next, "phase_progress_ratio", None)
+        if progress_ratio is not None:
             phase_ptr = state_next.phase_ptr.float()
             metrics["rhythm_metric_phase_progress_ratio_mean"] = _safe_mean(progress_ratio)
             metrics["rhythm_metric_phase_ptr_vs_progress_l1"] = _safe_mean((phase_ptr - progress_ratio).abs())
@@ -252,9 +244,9 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
             getattr(offline_execution, "blank_duration_exec", offline_execution.pause_after_exec),
             target_units,
         )
-        offline_prefix_clock, offline_prefix_backlog = _build_prefix_carry(
+        offline_prefix_clock, offline_prefix_backlog = build_prefix_state_from_exec_torch(
             speech_exec=offline_speech,
-            blank_exec=offline_blank,
+            pause_exec=offline_blank,
             dur_anchor_src=unit_batch.dur_anchor_src if unit_batch is not None else offline_execution.speech_duration_exec,
             unit_mask=unit_mask,
         )
@@ -355,14 +347,14 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
     if offline_confidence is not None:
         metrics["rhythm_metric_offline_confidence_mean"] = _safe_mean(offline_confidence.float())
     offline_component_values = []
-    for component in ("exec", "budget", "prefix", "allocation"):
+    for component in ("exec", "budget", "prefix", "allocation", "shape"):
         component_value = output.get(f"rhythm_offline_confidence_{component}")
         if component_value is not None:
             component_mean = _safe_mean(component_value.float())
             metrics[f"rhythm_metric_offline_confidence_{component}_mean"] = component_mean
             offline_component_values.append(component_mean)
     metrics["rhythm_metric_offline_confidence_component_coverage"] = execution.speech_duration_exec.new_tensor(
-        float(len(offline_component_values)) / 4.0
+        float(len(offline_component_values)) / 5.0
     )
     if len(offline_component_values) > 0:
         component_stack = torch.stack(offline_component_values, dim=0)
@@ -385,6 +377,7 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         "L_base": "rhythm_metric_alias_L_base",
         "L_pitch": "rhythm_metric_alias_L_pitch",
         "rhythm_exec": "rhythm_metric_compact_rhythm_exec",
+        "rhythm_prefix_state": "rhythm_metric_compact_prefix_state",
         "rhythm_stream_state": "rhythm_metric_compact_stream_state",
         "base": "rhythm_metric_compact_base",
         "pitch": "rhythm_metric_compact_pitch",
@@ -405,12 +398,20 @@ def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | No
         )
         if "rhythm_speech_budget_tgt" in sample:
             metrics["rhythm_metric_budget_speech_l1"] = (
-                planner.speech_budget_win.float() - sample["rhythm_speech_budget_tgt"].float()
+                effective_speech_budget.unsqueeze(-1) - sample["rhythm_speech_budget_tgt"].float()
             ).abs().mean()
+            metrics["rhythm_metric_raw_budget_speech_l1"] = (
+                raw_speech_budget.unsqueeze(-1) - sample["rhythm_speech_budget_tgt"].float()
+            ).abs().mean()
+            metrics["rhythm_metric_effective_budget_speech_l1"] = metrics["rhythm_metric_budget_speech_l1"]
         if pause_budget_key in sample:
             metrics["rhythm_metric_budget_pause_l1"] = (
-                planner.pause_budget_win.float() - sample[pause_budget_key].float()
+                effective_pause_budget.unsqueeze(-1) - sample[pause_budget_key].float()
             ).abs().mean()
+            metrics["rhythm_metric_raw_budget_pause_l1"] = (
+                raw_pause_budget.unsqueeze(-1) - sample[pause_budget_key].float()
+            ).abs().mean()
+            metrics["rhythm_metric_effective_budget_pause_l1"] = metrics["rhythm_metric_budget_pause_l1"]
         if "rhythm_speech_exec_tgt" in sample:
             metrics["rhythm_metric_exec_speech_l1"] = _masked_l1(
                 execution.speech_duration_exec,

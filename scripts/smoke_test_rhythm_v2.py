@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import torch
 from pathlib import Path
@@ -7,6 +8,7 @@ root = Path(__file__).resolve().parent.parent
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
+from modules.Conan.rhythm.contracts import RhythmPlannerOutputs
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
 from modules.Conan.pitch_utils import (
     apply_silent_content_to_uv,
@@ -47,6 +49,9 @@ from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Structural smoke test for Rhythm V2.")
+    parser.parse_args()
+
     def _scalar_str(x):
         arr = np.asarray(x).reshape(-1)
         if arr.size <= 0:
@@ -300,6 +305,45 @@ if __name__ == '__main__':
     assert strict_out.slot_unit_index is None
     assert strict_out.frame_plan is None
 
+    forced_planner = RhythmPlannerOutputs(
+        speech_budget_win=torch.zeros((1, 1), dtype=torch.float32, requires_grad=True),
+        pause_budget_win=torch.zeros((1, 1), dtype=torch.float32, requires_grad=True),
+        dur_logratio_unit=torch.zeros((1, 4), dtype=torch.float32, requires_grad=True),
+        pause_weight_unit=torch.full((1, 4), 0.25, dtype=torch.float32, requires_grad=True),
+        boundary_score_unit=torch.zeros((1, 4), dtype=torch.float32),
+        trace_context=torch.zeros((1, 4, 2), dtype=torch.float32),
+        source_boundary_cue=torch.zeros((1, 4), dtype=torch.float32),
+    )
+    forced_exec = strict_model.projector(
+        dur_anchor_src=torch.full((1, 4), 2.0, dtype=torch.float32),
+        unit_mask=torch.ones((1, 4), dtype=torch.float32),
+        speech_budget_win=forced_planner.speech_budget_win,
+        pause_budget_win=forced_planner.pause_budget_win,
+        dur_logratio_unit=forced_planner.dur_logratio_unit,
+        pause_weight_unit=forced_planner.pause_weight_unit,
+        boundary_score_unit=forced_planner.boundary_score_unit,
+        state=strict_model.init_state(batch_size=1, device=torch.device('cpu')),
+        planner=forced_planner,
+        reuse_prefix=False,
+        force_full_commit=True,
+    )
+    assert torch.allclose(forced_exec.planner.raw_speech_budget_win, forced_planner.speech_budget_win)
+    assert torch.allclose(forced_exec.planner.raw_pause_budget_win, forced_planner.pause_budget_win)
+    assert float(forced_exec.planner.speech_budget_win.item()) >= 4.0
+    forced_losses = build_rhythm_loss_dict(
+        forced_exec,
+        RhythmLossTargets(
+            speech_exec_tgt=forced_exec.speech_duration_exec.detach(),
+            pause_exec_tgt=forced_exec.pause_after_exec.detach(),
+            speech_budget_tgt=forced_exec.planner.speech_budget_win.detach(),
+            pause_budget_tgt=forced_exec.planner.pause_budget_win.detach(),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            dur_anchor_src=torch.full((1, 4), 2.0, dtype=torch.float32),
+        ),
+    )
+    assert forced_losses["rhythm_feasible_debt"].requires_grad
+    assert float(forced_losses["rhythm_budget"].detach().item()) > 0.0
+
     out1 = model(
         content_units=batch.content_units,
         dur_anchor_src=batch.dur_anchor_src,
@@ -527,9 +571,11 @@ if __name__ == '__main__':
             "rhythm_offline_confidence_budget": offline_conf["budget"],
             "rhythm_offline_confidence_prefix": offline_conf["prefix"],
             "rhythm_offline_confidence_allocation": offline_conf["allocation"],
+            "rhythm_offline_confidence_shape": offline_conf.get("shape", offline_conf["exec"]),
             "rhythm_frame_plan": out1.frame_plan,
             "acoustic_target_source": "online",
             "rhythm_exec": torch.tensor(0.6),
+            "rhythm_prefix_state": torch.tensor(0.12),
             "rhythm_stream_state": torch.tensor(0.2),
             "base": torch.tensor(1.4),
             "pitch": torch.tensor(0.3),

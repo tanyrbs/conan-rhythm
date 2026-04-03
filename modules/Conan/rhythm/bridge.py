@@ -114,6 +114,9 @@ def run_rhythm_frontend(
     projector_pause_topk_ratio_override: float | None = None,
     source_boundary_scale_override: float | None = None,
     teacher_source_boundary_scale_override: float | None = None,
+    trace_horizon: float | None = None,
+    projector_reuse_prefix: bool = True,
+    projector_force_full_commit: bool = False,
 ):
     if not rhythm_enable_v2:
         return None
@@ -195,6 +198,9 @@ def run_rhythm_frontend(
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
+            trace_horizon=trace_horizon,
+            projector_reuse_prefix=projector_reuse_prefix,
+            projector_force_full_commit=projector_force_full_commit,
             offline_content_units=offline_unit_batch.content_units if offline_unit_batch is not None else None,
             offline_dur_anchor_src=offline_unit_batch.dur_anchor_src if offline_unit_batch is not None else None,
             offline_unit_mask=offline_unit_batch.unit_mask if offline_unit_batch is not None else None,
@@ -218,6 +224,9 @@ def run_rhythm_frontend(
             boundary_confidence=unit_batch.boundary_confidence,
             ref_conditioning=rhythm_ref_conditioning,
             state=rhythm_state,
+            trace_horizon=trace_horizon,
+            projector_reuse_prefix=projector_reuse_prefix,
+            projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
         )

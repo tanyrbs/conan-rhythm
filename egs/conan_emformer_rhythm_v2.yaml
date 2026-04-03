@@ -143,6 +143,8 @@ rhythm_renderer_phase_init_gain: 0.10
 lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.15
+rhythm_budget_raw_weight: 1.0
+rhythm_budget_exec_weight: 0.25
 lambda_rhythm_cumplan: 0.15
 # Keep the extra planner-proxy loss disabled in the mainline.
 # Schedule supervision should come primarily from executed speech/pause,

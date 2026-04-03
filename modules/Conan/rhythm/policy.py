@@ -9,7 +9,7 @@ from .stages import (
     resolve_runtime_offline_teacher_enable as resolve_runtime_offline_teacher_enable_from_stage,
     resolve_teacher_as_main as resolve_teacher_as_main_from_stage,
 )
-from .supervision import (
+from .surface_metadata import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_REFERENCE_MODE_STATIC_REF_FULL,
     RHYTHM_TRACE_HOP_MS,
@@ -120,10 +120,14 @@ def resolve_pause_boundary_weight(hparams: Mapping[str, Any]) -> float:
     return float(hparams.get("rhythm_pause_boundary_weight", 0.35))
 
 
-def resolve_cumplan_lambda(hparams: Mapping[str, Any]) -> float:
+def resolve_prefix_state_lambda(hparams: Mapping[str, Any]) -> float:
     if "lambda_rhythm_cumplan" in hparams:
         return float(hparams.get("lambda_rhythm_cumplan", 0.15))
     return float(hparams.get("lambda_rhythm_carry", 0.15))
+
+
+def resolve_cumplan_lambda(hparams: Mapping[str, Any]) -> float:
+    return resolve_prefix_state_lambda(hparams)
 
 
 def resolve_runtime_offline_teacher_enable(

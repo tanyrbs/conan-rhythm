@@ -11,6 +11,7 @@ from utils.commons.dataset_utils import collate_1d_or_2d
 import numpy as np
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
+from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_numpy
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
@@ -100,6 +101,11 @@ class RhythmConanDatasetMixin:
         "rhythm_target_confidence",
         "rhythm_guidance_confidence",
         "rhythm_teacher_confidence",
+        "rhythm_teacher_confidence_exec",
+        "rhythm_teacher_confidence_budget",
+        "rhythm_teacher_confidence_prefix",
+        "rhythm_teacher_confidence_allocation",
+        "rhythm_teacher_confidence_shape",
         "rhythm_teacher_target_source_id",
         "rhythm_retimed_target_source_id",
         "rhythm_retimed_target_confidence",
@@ -175,6 +181,13 @@ class RhythmConanDatasetMixin:
         "rhythm_teacher_speech_budget_tgt",
         "rhythm_teacher_pause_budget_tgt",
         "rhythm_teacher_confidence",
+    )
+    _RHYTHM_RUNTIME_TEACHER_CONFIDENCE_COMPONENT_KEYS = (
+        "rhythm_teacher_confidence_exec",
+        "rhythm_teacher_confidence_budget",
+        "rhythm_teacher_confidence_prefix",
+        "rhythm_teacher_confidence_allocation",
+        "rhythm_teacher_confidence_shape",
     )
     _RHYTHM_RUNTIME_TEACHER_ALLOCATION_KEYS = (
         "rhythm_teacher_allocation_tgt",
@@ -266,6 +279,8 @@ class RhythmConanDatasetMixin:
         distill_budget_weight = float(self.hparams.get("rhythm_distill_budget_weight", 0.5))
         distill_allocation_weight = float(self.hparams.get("rhythm_distill_allocation_weight", 0.5))
         distill_prefix_weight = float(self.hparams.get("rhythm_distill_prefix_weight", 0.25))
+        distill_speech_shape_weight = float(self.hparams.get("rhythm_distill_speech_shape_weight", 0.0))
+        distill_pause_shape_weight = float(self.hparams.get("rhythm_distill_pause_shape_weight", 0.0))
         require_retimed_cache = policy.require_retimed_cache
         retimed_source = str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
         export_retimed_targets = self._should_export_runtime_retimed_targets()
@@ -282,6 +297,16 @@ class RhythmConanDatasetMixin:
         )
         if need_teacher_core:
             keys.extend(self._RHYTHM_RUNTIME_TEACHER_CORE_KEYS)
+        if lambda_distill > 0.0 and distill_surface == "cache":
+            keys.extend(("rhythm_teacher_confidence_exec",))
+            if distill_budget_weight > 0.0:
+                keys.extend(("rhythm_teacher_confidence_budget",))
+            if distill_prefix_weight > 0.0:
+                keys.extend(("rhythm_teacher_confidence_prefix",))
+            if distill_allocation_weight > 0.0:
+                keys.extend(("rhythm_teacher_confidence_allocation",))
+            if distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0:
+                keys.extend(("rhythm_teacher_confidence_shape",))
 
         need_teacher_prefix = lambda_distill > 0.0 and distill_surface == "cache"
         if need_teacher_prefix and distill_allocation_weight > 0.0:
@@ -344,6 +369,11 @@ class RhythmConanDatasetMixin:
             "rhythm_target_confidence": ("float", 0.0),
             "rhythm_guidance_confidence": ("float", 0.0),
             "rhythm_teacher_confidence": ("float", 0.0),
+            "rhythm_teacher_confidence_exec": ("float", 0.0),
+            "rhythm_teacher_confidence_budget": ("float", 0.0),
+            "rhythm_teacher_confidence_prefix": ("float", 0.0),
+            "rhythm_teacher_confidence_allocation": ("float", 0.0),
+            "rhythm_teacher_confidence_shape": ("float", 0.0),
             "rhythm_teacher_target_source_id": ("long", 0),
             "rhythm_retimed_target_source_id": ("long", 0),
             "rhythm_retimed_target_confidence": ("float", 0.0),
@@ -581,6 +611,12 @@ class RhythmConanDatasetMixin:
         if visible_units >= full_units:
             return with_blank_aliases(dict(cached_targets))
         adapted = with_blank_aliases(dict(cached_targets))
+        visible_anchor = np.asarray(source_cache["dur_anchor_src"]).reshape(-1).astype(np.float32)
+        full_anchor = (
+            np.asarray(item["dur_anchor_src"]).reshape(-1)[:visible_units].astype(np.float32)
+            if "dur_anchor_src" in item
+            else visible_anchor.copy()
+        )
         unit_keys = [
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
@@ -598,8 +634,35 @@ class RhythmConanDatasetMixin:
         for key in unit_keys:
             if key in adapted:
                 adapted[key] = np.asarray(adapted[key]).reshape(-1)[:visible_units].astype(np.float32)
+        if visible_units > 0 and full_anchor.shape[0] >= visible_units:
+            tail_full = float(full_anchor[visible_units - 1])
+            tail_visible = float(visible_anchor[visible_units - 1])
+            tail_ratio = tail_visible / max(tail_full, 1e-6)
+            if tail_ratio < 0.999999:
+                for key in (
+                    "rhythm_speech_exec_tgt",
+                    "rhythm_pause_exec_tgt",
+                    "rhythm_blank_exec_tgt",
+                    "rhythm_guidance_speech_tgt",
+                    "rhythm_guidance_pause_tgt",
+                    "rhythm_guidance_blank_tgt",
+                    "rhythm_teacher_speech_exec_tgt",
+                    "rhythm_teacher_pause_exec_tgt",
+                    "rhythm_teacher_blank_exec_tgt",
+                ):
+                    if key in adapted:
+                        arr = np.asarray(adapted[key]).reshape(-1).astype(np.float32)
+                        arr[-1] *= float(tail_ratio)
+                        adapted[key] = arr
         if "rhythm_teacher_allocation_tgt" in adapted:
-            alloc = np.asarray(adapted["rhythm_teacher_allocation_tgt"]).reshape(-1).astype(np.float32)
+            if "rhythm_teacher_speech_exec_tgt" in adapted and "rhythm_teacher_pause_exec_tgt" in adapted:
+                alloc = (
+                    np.asarray(adapted["rhythm_teacher_speech_exec_tgt"]).reshape(-1).astype(np.float32)
+                    + np.asarray(adapted["rhythm_teacher_pause_exec_tgt"]).reshape(-1).astype(np.float32)
+                )
+            else:
+                alloc = np.asarray(adapted["rhythm_teacher_allocation_tgt"]).reshape(-1).astype(np.float32)
+            alloc = alloc * (visible_anchor > 0).astype(np.float32)
             denom = float(np.maximum(alloc.sum(), 1e-6))
             adapted["rhythm_teacher_allocation_tgt"] = alloc / denom
         if "rhythm_speech_exec_tgt" in adapted:
@@ -620,6 +683,15 @@ class RhythmConanDatasetMixin:
                 [float(np.asarray(adapted["rhythm_teacher_pause_exec_tgt"]).sum())], dtype=np.float32
             )
             adapted["rhythm_teacher_blank_budget_tgt"] = adapted["rhythm_teacher_pause_budget_tgt"].copy()
+        if "rhythm_teacher_speech_exec_tgt" in adapted and "rhythm_teacher_pause_exec_tgt" in adapted:
+            prefix_clock, prefix_backlog = build_prefix_state_from_exec_numpy(
+                speech_exec=adapted["rhythm_teacher_speech_exec_tgt"],
+                pause_exec=adapted["rhythm_teacher_pause_exec_tgt"],
+                dur_anchor_src=visible_anchor,
+                unit_mask=(visible_anchor > 0).astype(np.float32),
+            )
+            adapted["rhythm_teacher_prefix_clock_tgt"] = prefix_clock.astype(np.float32)
+            adapted["rhythm_teacher_prefix_backlog_tgt"] = prefix_backlog.astype(np.float32)
         if "rhythm_retimed_mel_tgt" in adapted:
             source_id = int(np.asarray(adapted.get("rhythm_retimed_target_source_id", [RHYTHM_RETIMED_SOURCE_GUIDANCE])).reshape(-1)[0])
             if source_id == RHYTHM_RETIMED_SOURCE_TEACHER and "rhythm_teacher_speech_exec_tgt" in adapted:

@@ -12,13 +12,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-from torch.utils.data import DataLoader
-
-from tasks.Conan.Conan import ConanTask
-from tasks.Conan.dataset import ConanDataset
-from utils.commons.hparams import hparams, set_hparams
-
 
 def _move_to_device(obj, device):
     if isinstance(obj, torch.Tensor):
@@ -147,15 +140,39 @@ def _maybe_compile_model(model, *, torch_compile_mode: str, torch_compile_fullgr
     return torch.compile(model, **kwargs)
 
 
+def _validate_probe_paths(*, binary_data_dir: str, processed_data_dir: str, split: str) -> None:
+    if not binary_data_dir or not os.path.isdir(binary_data_dir):
+        raise FileNotFoundError(
+            f"binary_data_dir does not exist: {binary_data_dir}. Run binarize/preflight first."
+        )
+    if not processed_data_dir or not os.path.isdir(processed_data_dir):
+        raise FileNotFoundError(
+            f"processed_data_dir does not exist: {processed_data_dir}. Point the probe at the processed corpus root."
+        )
+    required_files = (
+        os.path.join(binary_data_dir, f"{split}.idx"),
+        os.path.join(binary_data_dir, f"{split}.data"),
+        os.path.join(binary_data_dir, f"{split}_lengths.npy"),
+    )
+    missing = [path for path in required_files if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(
+            "Probe dataset is incomplete. Missing files: "
+            + ", ".join(missing)
+            + ". Run preflight or re-binarize before probing."
+        )
+
+
 def main():
+    global torch, ConanTask, ConanDataset, set_hparams, hparams, DataLoader
     parser = argparse.ArgumentParser(description="Mini-train throughput / memory probe for Rhythm V2")
     parser.add_argument("--config", required=True)
     parser.add_argument("--binary_data_dir", required=True)
     parser.add_argument("--processed_data_dir", required=True)
     parser.add_argument("--steps", type=int, default=12)
-    parser.add_argument("--warmup_steps", type=int, default=2)
+    parser.add_argument("--warmup_steps", type=int, default=None)
     parser.add_argument("--split", type=str, default="train")
-    parser.add_argument("--exp_name", type=str, default="debug_cpu_probe")
+    parser.add_argument("--exp_name", type=str, default="")
     parser.add_argument("--max_sentences", type=int, default=1)
     parser.add_argument("--max_tokens", type=int, default=3000)
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "auto"])
@@ -171,8 +188,22 @@ def main():
 
     if args.steps <= 0 or args.steps > 500:
         raise ValueError("--steps must be in [1, 500].")
+    if args.warmup_steps is None:
+        args.warmup_steps = max(0, min(2, args.steps - 1))
     if args.warmup_steps < 0 or args.warmup_steps >= args.steps:
         raise ValueError("--warmup_steps must be in [0, steps - 1].")
+    _validate_probe_paths(
+        binary_data_dir=args.binary_data_dir,
+        processed_data_dir=args.processed_data_dir,
+        split=args.split,
+    )
+
+    import torch  # type: ignore[no-redef]
+    from torch.utils.data import DataLoader  # type: ignore[no-redef]
+
+    from tasks.Conan.Conan import ConanTask  # type: ignore[no-redef]
+    from tasks.Conan.dataset import ConanDataset  # type: ignore[no-redef]
+    from utils.commons.hparams import hparams, set_hparams  # type: ignore[no-redef]
 
     torch.manual_seed(1234)
     set_hparams(
@@ -276,7 +307,7 @@ def main():
             "L_exec_speech",
             "L_exec_pause",
             "L_budget",
-            "L_cumplan",
+            "L_prefix_state",
         ):
             value = _tensor_to_float(loss_output.get(key))
             if value is not None:
@@ -305,8 +336,9 @@ def main():
         else:
             if "L_budget" in scalar_losses:
                 detail_parts.append(f"budget={scalar_losses['L_budget']:.4f}")
-            if "L_cumplan" in scalar_losses:
-                detail_parts.append(f"cumplan={scalar_losses['L_cumplan']:.4f}")
+            prefix_state_value = scalar_losses.get("L_prefix_state", scalar_losses.get("L_cumplan"))
+            if prefix_state_value is not None:
+                detail_parts.append(f"prefix_state={prefix_state_value:.4f}")
         mem_part = ""
         if scalar_losses.get("cpu_rss_bytes") is not None:
             mem_part += f" rss={(scalar_losses['cpu_rss_bytes'] / (1024 ** 2)):.1f}MB"
@@ -373,7 +405,7 @@ def main():
         "L_exec_speech",
         "L_exec_pause",
         "L_budget",
-        "L_cumplan",
+        "L_prefix_state",
         "grad_norm_before_clip",
         ):
         summary = summarize(key)
@@ -453,7 +485,7 @@ def main():
                     "L_exec_speech",
                     "L_exec_pause",
                     "L_budget",
-                    "L_cumplan",
+                    "L_prefix_state",
                     "grad_norm_before_clip",
                 )
                 if summarize(key) is not None
