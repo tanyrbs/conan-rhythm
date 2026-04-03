@@ -18,11 +18,12 @@ from modules.Conan.rhythm.supervision import (
     build_reference_teacher_targets,
     build_retimed_mel_target,
     build_source_rhythm_cache,
-    normalize_teacher_target_source,
-    resolve_teacher_surface_name,
-    resolve_teacher_target_source_id,
+    compatible_rhythm_cache_versions,
+    is_rhythm_cache_version_compatible,
+    materialize_rhythm_cache_compat_fields,
     with_blank_aliases,
 )
+from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
 from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
 
 class ConanDataset(FastSpeechDataset):
@@ -183,60 +184,33 @@ class ConanDataset(FastSpeechDataset):
     )
     _RHYTHM_CACHE_AUDIT_KEYS = _RHYTHM_META_KEYS
 
+    def _rhythm_policy(self):
+        policy = getattr(self, "_cached_rhythm_policy", None)
+        if policy is None:
+            policy = build_rhythm_hparams_policy(self.hparams)
+            self._cached_rhythm_policy = policy
+        return policy
+
     def _resolve_primary_target_surface(self) -> str:
-        surface = str(self.hparams.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
-        aliases = {
-            "cache_teacher": "teacher",
-            "offline": "teacher",
-            "offline_teacher": "teacher",
-            "teacher_surface": "teacher",
-            "guidance_surface": "guidance",
-            "self": "guidance",
-        }
-        resolved = aliases.get(surface, surface)
-        if resolved not in {"guidance", "teacher"}:
-            raise ValueError(f"Unsupported rhythm_primary_target_surface: {surface}")
-        return resolved
+        return self._rhythm_policy().primary_target_surface
+
+    def _resolve_rhythm_stage(self) -> str:
+        return self._rhythm_policy().stage
 
     def _resolve_distill_surface(self) -> str:
-        surface = str(self.hparams.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
-        aliases = {
-            "off": "none",
-            "disable": "none",
-            "disabled": "none",
-            "false": "none",
-            "cache_teacher": "cache",
-            "cached_teacher": "cache",
-            "full_context": "offline",
-            "shared_offline": "offline",
-            "algo": "algorithmic",
-            "teacher": "cache",
-        }
-        resolved = aliases.get(surface, surface)
-        if resolved not in {"auto", "none", "cache", "offline", "algorithmic"}:
-            raise ValueError(f"Unsupported rhythm_distill_surface: {surface}")
-        return resolved
+        return self._rhythm_policy().distill_surface
 
     def _resolve_rhythm_target_mode(self) -> str:
-        mode = str(self.hparams.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
-        aliases = {
-            "auto": "prefer_cache",
-            "offline": "cached_only",
-            "offline_only": "cached_only",
-            "never": "cached_only",
-            "runtime": "runtime_only",
-            "always": "runtime_only",
-        }
-        return aliases.get(mode, mode)
+        return self._rhythm_policy().target_mode
 
     def _resolve_teacher_target_source(self) -> str:
-        return normalize_teacher_target_source(self.hparams.get("rhythm_teacher_target_source", "algorithmic"))
+        return self._rhythm_policy().teacher_target_source
 
     def _resolve_expected_teacher_surface_name(self) -> str:
-        return resolve_teacher_surface_name(self._resolve_teacher_target_source())
+        return self._rhythm_policy().teacher_surface_name
 
     def _resolve_expected_teacher_target_source_id(self) -> int:
-        return resolve_teacher_target_source_id(self._resolve_teacher_target_source())
+        return self._rhythm_policy().teacher_target_source_id
 
     def _should_sample_streaming_prefix(self) -> bool:
         return (
@@ -251,40 +225,27 @@ class ConanDataset(FastSpeechDataset):
         return bool(self.hparams.get("rhythm_export_cache_audit_to_sample", False))
 
     def _should_export_streaming_offline_sidecars(self) -> bool:
-        return bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)) or float(
-            self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0
-        ) > 0.0
+        return self._rhythm_policy().exports_streaming_offline_sidecars()
 
     def _should_export_offline_teacher_aux(self) -> bool:
-        return (
-            bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False))
-            and bool(self.hparams.get("rhythm_enable_learned_offline_teacher", True))
-        ) or float(self.hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
+        return self._rhythm_policy().should_export_offline_teacher_aux()
 
     def _should_export_streaming_prefix_meta(self) -> bool:
         return self._should_sample_streaming_prefix()
 
     def _should_export_runtime_retimed_targets(self) -> bool:
-        if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
-            return True
-        if not bool(self.hparams.get("rhythm_use_retimed_target_if_available", False)):
-            return False
-        if self.prefix == "train":
-            return bool(self.hparams.get("rhythm_apply_train_override", False))
-        if self.prefix in {"valid", "dev"}:
-            return bool(self.hparams.get("rhythm_apply_valid_override", False))
-        # test/infer does not need acoustic supervision targets by default.
-        return False
+        return self._rhythm_policy().should_export_runtime_retimed_targets(split=self.prefix)
 
     def _resolve_runtime_target_export_keys(self) -> tuple[str, ...]:
-        primary_surface = self._resolve_primary_target_surface()
-        distill_surface = self._resolve_distill_surface()
+        policy = self._rhythm_policy()
+        primary_surface = policy.primary_target_surface
+        distill_surface = policy.distill_surface
         lambda_guidance = float(self.hparams.get("lambda_rhythm_guidance", 0.0))
         lambda_distill = float(self.hparams.get("lambda_rhythm_distill", 0.0))
         distill_budget_weight = float(self.hparams.get("rhythm_distill_budget_weight", 0.5))
         distill_allocation_weight = float(self.hparams.get("rhythm_distill_allocation_weight", 0.5))
         distill_prefix_weight = float(self.hparams.get("rhythm_distill_prefix_weight", 0.25))
-        require_retimed_cache = bool(self.hparams.get("rhythm_require_retimed_cache", False))
+        require_retimed_cache = policy.require_retimed_cache
         retimed_source = str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
         export_retimed_targets = self._should_export_runtime_retimed_targets()
 
@@ -294,7 +255,7 @@ class ConanDataset(FastSpeechDataset):
 
         need_teacher_core = (
             primary_surface == "teacher"
-            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or policy.require_cached_teacher
             or (lambda_distill > 0.0 and distill_surface == "cache")
             or ((export_retimed_targets or require_retimed_cache) and retimed_source == "teacher")
         )
@@ -309,7 +270,7 @@ class ConanDataset(FastSpeechDataset):
 
         need_teacher_budget = (
             primary_surface == "teacher"
-            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
+            or policy.require_cached_teacher
             or (lambda_distill > 0.0 and distill_surface == "cache" and distill_budget_weight > 0.0)
         )
         if not need_teacher_budget:
@@ -534,6 +495,28 @@ class ConanDataset(FastSpeechDataset):
     def _expected_rhythm_cache_version(self) -> int:
         return int(self.hparams.get("rhythm_cache_version", RHYTHM_CACHE_VERSION))
 
+    def _materialize_rhythm_cache_compat(self, item, *, item_name: str):
+        adapted = materialize_rhythm_cache_compat_fields(item)
+        if adapted is None or "rhythm_cache_version" not in adapted:
+            return adapted
+        found = int(self._extract_scalar(adapted["rhythm_cache_version"]))
+        expected = self._expected_rhythm_cache_version()
+        if found == expected or not is_rhythm_cache_version_compatible(found, expected):
+            return adapted
+        warned = getattr(self, "_rhythm_cache_compat_warned", None)
+        if warned is None:
+            warned = set()
+            self._rhythm_cache_compat_warned = warned
+        warn_key = (found, expected)
+        if warn_key not in warned:
+            print(
+                f"[rhythm-cache-compat] using compatible cached rhythm metadata "
+                f"version {found} for expected v{expected}; item={item_name}. "
+                "Re-binarizing to the maintained cache version is still recommended."
+            )
+            warned.add(warn_key)
+        return adapted
+
     @staticmethod
     def _extract_scalar(value):
         arr = np.asarray(value)
@@ -559,9 +542,11 @@ class ConanDataset(FastSpeechDataset):
             )
         found = int(self._extract_scalar(item["rhythm_cache_version"]))
         expected = self._expected_rhythm_cache_version()
-        if found != expected:
+        if not is_rhythm_cache_version_compatible(found, expected):
+            compatible = compatible_rhythm_cache_versions(expected)
             raise RuntimeError(
-                f"Rhythm cache version mismatch in {item_name}: found={found}, expected={expected}. Re-binarize the dataset."
+                f"Rhythm cache version mismatch in {item_name}: found={found}, expected one of {compatible}. "
+                "Re-binarize the dataset."
             )
 
     def _validate_rhythm_cache_contract(self, item, *, item_name: str):
@@ -1089,10 +1074,16 @@ class ConanDataset(FastSpeechDataset):
     def __getitem__(self, index):
         hparams=self.hparams
         sample = super(ConanDataset, self).__getitem__(index)
-        item = self._get_item(index)
+        raw_item = self._get_item(index)
+        item_name = str(raw_item.get("item_name", "<unknown-item>"))
+        item = self._materialize_rhythm_cache_compat(raw_item, item_name=item_name)
         ref_item = None
         if "ref_item_id" in sample:
-            ref_item = self._get_item(int(sample["ref_item_id"]))
+            raw_ref_item = self._get_item(int(sample["ref_item_id"]))
+            ref_item = self._materialize_rhythm_cache_compat(
+                raw_ref_item,
+                item_name=str(raw_ref_item.get("item_name", "<unknown-ref-item>")),
+            )
         
         # if isinstance(item['hubert'], str):
         #     # Convert string to numeric array
@@ -1101,7 +1092,6 @@ class ConanDataset(FastSpeechDataset):
         # else:
             # Already a numeric array case
         visible_len = int(sample["mel"].shape[0])
-        item_name = str(item.get("item_name", "<unknown-item>"))
         full_content = self._coerce_content_sequence(item["hubert"])
         full_content_len = len(full_content)
         if bool(hparams.get("rhythm_enable_v2", False)) and bool(

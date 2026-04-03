@@ -5,6 +5,12 @@ import torch.nn as nn
 
 from .bridge import attach_rhythm_outputs, run_rhythm_frontend
 from .factory import build_streaming_rhythm_module_from_hparams
+from .stages import (
+    detect_rhythm_stage,
+    resolve_runtime_dual_mode_teacher_enable,
+    resolve_runtime_offline_teacher_enable,
+    resolve_teacher_as_main,
+)
 from .supervision import build_online_retimed_bundle
 from .unit_frontend import RhythmUnitFrontend
 
@@ -50,6 +56,20 @@ class ConanRhythmAdapter(nn.Module):
         gain = torch.tanh(self.render_phase_gain).view(1, 1, 1)
         frame_states = frame_states + gain * edge_scale * phase_residual
         return frame_states * total_mask.unsqueeze(-1)
+
+    def render_frame_state_post(
+        self,
+        frame_states: torch.Tensor,
+        frame_phase_features: torch.Tensor,
+        blank_mask: torch.Tensor,
+        total_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._render_frame_state_post(
+            frame_states=frame_states,
+            frame_phase_features=frame_phase_features,
+            blank_mask=blank_mask,
+            total_mask=total_mask,
+        )
 
     def _resolve_pause_topk_ratio(self, *, infer: bool, global_steps: int) -> float | None:
         final_ratio = float(self.hparams.get("rhythm_projector_pause_topk_ratio", 0.35))
@@ -99,6 +119,22 @@ class ConanRhythmAdapter(nn.Module):
         progress = min(max((int(global_steps) - warmup_steps) / float(anneal_steps), 0.0), 1.0)
         return float(start_scale + (end_scale - start_scale) * progress)
 
+    def resolve_pause_topk_ratio(self, *, infer: bool, global_steps: int) -> float | None:
+        return self._resolve_pause_topk_ratio(infer=infer, global_steps=global_steps)
+
+    def resolve_source_boundary_scale(
+        self,
+        *,
+        infer: bool,
+        global_steps: int,
+        teacher: bool = False,
+    ) -> float | None:
+        return self._resolve_source_boundary_scale(
+            infer=infer,
+            global_steps=global_steps,
+            teacher=teacher,
+        )
+
     def forward(
         self,
         *,
@@ -122,11 +158,12 @@ class ConanRhythmAdapter(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if ref is None and rhythm_ref_conditioning is None:
             return content_embed, tgt_nonpadding, f0, uv
-        projector_pause_topk_ratio_override = self._resolve_pause_topk_ratio(
+        stage = detect_rhythm_stage(self.hparams)
+        projector_pause_topk_ratio_override = self.resolve_pause_topk_ratio(
             infer=bool(infer),
             global_steps=int(global_steps),
         )
-        source_boundary_scale_override = self._resolve_source_boundary_scale(
+        source_boundary_scale_override = self.resolve_source_boundary_scale(
             infer=bool(infer),
             global_steps=int(global_steps),
             teacher=False,
@@ -135,18 +172,34 @@ class ConanRhythmAdapter(nn.Module):
             getattr(
                 self.module,
                 "enable_learned_offline_teacher",
-                self.hparams.get("rhythm_enable_learned_offline_teacher", False),
+                resolve_runtime_offline_teacher_enable(self.hparams, stage=stage),
             )
         )
-        dual_mode_teacher_enabled = bool(self.hparams.get("rhythm_enable_dual_mode_teacher", False)) and not bool(infer)
-        algorithmic_teacher_enabled = bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False)) and not bool(infer)
+        teacher_as_main = resolve_teacher_as_main(
+            self.hparams,
+            stage=stage,
+            infer=bool(infer),
+        )
+        dual_mode_teacher_enabled = resolve_runtime_dual_mode_teacher_enable(
+            self.hparams,
+            stage=stage,
+            infer=bool(infer),
+        )
+        algorithmic_teacher_enabled = (
+            bool(self.hparams.get("rhythm_enable_algorithmic_teacher", False))
+            and not bool(infer)
+            and stage in {"legacy_dual_mode_kd", "transitional"}
+        )
         teacher_source_boundary_scale_override = None
-        if dual_mode_teacher_enabled or algorithmic_teacher_enabled:
-            teacher_source_boundary_scale_override = self._resolve_source_boundary_scale(
+        if teacher_as_main or dual_mode_teacher_enabled or algorithmic_teacher_enabled:
+            teacher_source_boundary_scale_override = self.resolve_source_boundary_scale(
                 infer=bool(infer),
                 global_steps=int(global_steps),
                 teacher=True,
             )
+        ret["rhythm_stage"] = stage
+        ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
+        ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
         if projector_pause_topk_ratio_override is not None:
             ret["rhythm_projector_pause_topk_ratio"] = torch.full(
                 (content.size(0), 1),
@@ -183,6 +236,7 @@ class ConanRhythmAdapter(nn.Module):
             enable_dual_mode_teacher=dual_mode_teacher_enabled,
             enable_learned_offline_teacher=runtime_teacher_enabled,
             enable_algorithmic_teacher=algorithmic_teacher_enabled,
+            teacher_as_main=teacher_as_main,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,

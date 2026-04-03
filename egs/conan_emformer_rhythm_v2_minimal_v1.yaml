@@ -3,6 +3,7 @@ base_config: egs/conan_emformer_rhythm_v2.yaml
 # Minimal Strong-Rhythm V1:
 # canonical formal base for all maintained training stages.
 # Keep the runtime path narrow and cache-first before any stage-specific override.
+rhythm_stage: minimal_v1
 rhythm_minimal_v1_profile: true
 rhythm_strict_mainline: true
 rhythm_dataset_target_mode: cached_only

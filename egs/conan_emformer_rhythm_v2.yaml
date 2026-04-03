@@ -6,14 +6,15 @@ binarization_args:
 
 # Rhythm V2 transitional/debug profile.
 # Maintained formal training entrypoints should use:
-#   0) egs/conan_emformer_rhythm_v2_offline_teacher.yaml
-#   1) egs/conan_emformer_rhythm_v2_schedule_only.yaml
-#   2) egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml
-#   3) egs/conan_emformer_rhythm_v2_retimed_train.yaml
+#   1) egs/conan_emformer_rhythm_v2_teacher_offline.yaml
+#   2) egs/conan_emformer_rhythm_v2_student_kd.yaml
+#   3) egs/conan_emformer_rhythm_v2_student_retimed.yaml
 # Legacy runtime dual-mode KD is kept separately as a research-only branch.
 # This config is kept for migration checks and conservative fallback runs.
 rhythm_enable_v2: true
+rhythm_stage: transitional
 rhythm_teacher_only_stage: false
+rhythm_teacher_as_main: false
 rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
@@ -78,9 +79,9 @@ rhythm_retimed_stretch_weight_min: 0.35
 # Transitional setting:
 # use cached targets first, but still allow runtime fallback while refreshing caches.
 # Maintained experiments should move through:
-#   offline_teacher -> export learned_offline teacher assets
-#   minimal_v1 -> schedule_only -> teacher_student_kd -> retimed_train
-# `dual_mode_kd` remains a separate legacy research branch.
+#   teacher_offline -> export learned_offline teacher assets
+#   student_kd -> student_retimed
+# `schedule_only` / `dual_mode_kd` remain separate legacy branches.
 rhythm_dataset_target_mode: prefer_cache
 rhythm_primary_target_surface: guidance
 rhythm_distill_surface: auto

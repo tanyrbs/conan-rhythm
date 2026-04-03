@@ -123,13 +123,20 @@ def _project_pause_impl(
 def _project_pause_simple_impl(
     *,
     pause_weight_unit: torch.Tensor,
+    boundary_latent: torch.Tensor,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
     previous_pause_exec: torch.Tensor | None,
     commit_frontier: torch.Tensor,
     reuse_prefix: bool,
+    pause_min_boundary_weight: float,
+    pause_boundary_bias_weight: float,
 ) -> torch.Tensor:
-    scores = pause_weight_unit.float().clamp_min(0.0) * unit_mask.float()
+    scores = pause_weight_unit.float().clamp_min(0.0)
+    boundary_bias = pause_boundary_bias_weight * (
+        pause_min_boundary_weight + boundary_latent.float().clamp_min(0.0)
+    )
+    scores = (scores + boundary_bias) * unit_mask.float()
     return _allocate_pause_budget(
         candidate_scores=scores,
         unit_mask=unit_mask,
@@ -296,11 +303,14 @@ class StreamingRhythmProjector(nn.Module):
         if selection_mode == "simple":
             return _project_pause_simple_impl(
                 pause_weight_unit=pause_weight_unit,
+                boundary_latent=boundary_latent,
                 unit_mask=unit_mask,
                 pause_budget_win=pause_budget_win,
                 previous_pause_exec=state.previous_pause_exec,
                 commit_frontier=state.commit_frontier,
                 reuse_prefix=reuse_prefix,
+                pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
+                pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
             )
         topk_ratio = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
         topk_ratio = float(max(0.0, min(1.0, topk_ratio)))

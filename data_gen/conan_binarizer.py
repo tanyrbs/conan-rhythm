@@ -2,9 +2,9 @@ from resemblyzer import VoiceEncoder
 from utils.audio import librosa_wav2spec
 import shutil
 import random, os, json
+import traceback
 from copy import deepcopy
 import logging
-from data_gen.tts.base_binarizer import BaseBinarizer, BinarizationError
 from utils.commons.hparams import hparams
 from utils.commons.indexed_datasets import IndexedDatasetBuilder
 from utils.commons.multiprocess_utils import multiprocess_run_tqdm
@@ -13,7 +13,6 @@ import numpy as np
 from tqdm import tqdm
 from utils.audio.align import get_mel2ph, mel2token_to_dur
 from utils.text.text_encoder import build_token_encoder
-import json
 from utils.audio.pitch.utils import f0_to_coarse
 from modules.Conan.rhythm.supervision import build_item_rhythm_bundle, normalize_teacher_target_source
 np.seterr(divide='ignore', invalid='ignore')
@@ -77,7 +76,8 @@ def _resolve_teacher_bundle_override(item: dict) -> dict | None:
     searched = ', '.join(dedup_paths) if dedup_paths else '<none>'
     raise BinarizationError(
         f"Missing learned_offline teacher targets for item '{item_name}'. "
-        f"Set rhythm_teacher_target_dir or rhythm_teacher_npz_fn. searched={searched}"
+        f"Set rhythm_teacher_target_dir or rhythm_teacher_npz_fn. searched={searched}. "
+        "Export them first with scripts/export_rhythm_teacher_targets.py from a teacher_offline checkpoint."
     )
 
 

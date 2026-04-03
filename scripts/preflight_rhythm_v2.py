@@ -14,14 +14,25 @@ if ROOT_DIR not in sys.path:
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
-    RHYTHM_REFERENCE_MODE_STATIC_REF_FULL,
     RHYTHM_RETIMED_SOURCE_GUIDANCE,
     RHYTHM_RETIMED_SOURCE_TEACHER,
-    RHYTHM_TRACE_HOP_MS,
-    RHYTHM_UNIT_HOP_MS,
-    normalize_teacher_target_source,
-    resolve_teacher_surface_name,
-    resolve_teacher_target_source_id,
+    compatible_rhythm_cache_versions,
+    is_rhythm_cache_version_compatible,
+    materialize_rhythm_cache_compat_fields,
+)
+from modules.Conan.rhythm.policy import (
+    build_rhythm_hparams_policy,
+    expected_cache_contract as build_expected_cache_contract,
+    normalize_distill_surface as policy_normalize_distill_surface,
+    normalize_primary_target_surface as policy_normalize_primary_target_surface,
+    normalize_retimed_target_mode as policy_normalize_retimed_target_mode,
+    resolve_cumplan_lambda as resolve_policy_cumplan_lambda,
+    resolve_runtime_offline_teacher_enable as resolve_policy_runtime_offline_teacher_enable,
+)
+from modules.Conan.rhythm.stages import (
+    detect_rhythm_stage,
+    resolve_runtime_dual_mode_teacher_enable,
+    resolve_teacher_as_main,
 )
 from utils.commons.hparams import set_hparams
 from utils.commons.indexed_datasets import IndexedDataset
@@ -84,54 +95,15 @@ RETIMED_FIELD_GROUPS = [
 
 
 def _normalize_surface(surface: str) -> str:
-    aliases = {
-        "cache_teacher": "teacher",
-        "offline": "teacher",
-        "offline_teacher": "teacher",
-        "teacher_surface": "teacher",
-        "guidance_surface": "guidance",
-        "self": "guidance",
-    }
-    return aliases.get(surface, surface)
+    return policy_normalize_primary_target_surface(surface)
 
 
 def _normalize_distill(surface: str) -> str:
-    aliases = {
-        "off": "none",
-        "disable": "none",
-        "disabled": "none",
-        "false": "none",
-        "cache_teacher": "cache",
-        "cached_teacher": "cache",
-        "full_context": "offline",
-        "shared_offline": "offline",
-        "algo": "algorithmic",
-        "teacher": "cache",
-    }
-    return aliases.get(surface, surface)
+    return policy_normalize_distill_surface(surface)
 
 
 def _normalize_retimed_target_mode(mode: str) -> str:
-    aliases = {
-        "cache": "cached",
-        "cached_only": "cached",
-        "teacher": "cached",
-        "runtime": "online",
-        "online_only": "online",
-        "mixed": "hybrid",
-    }
-    return aliases.get(mode, mode)
-
-
-def _resolve_runtime_offline_teacher_enable(hp: dict) -> bool:
-    """Mirror factory runtime-teacher resolution to catch config/runtime mismatches in preflight."""
-    explicit_runtime = hp.get("rhythm_runtime_enable_learned_offline_teacher", None)
-    if explicit_runtime is not None:
-        return bool(explicit_runtime)
-
-    return bool(hp.get("rhythm_enable_dual_mode_teacher", False)) and bool(
-        hp.get("rhythm_enable_learned_offline_teacher", False)
-    )
+    return policy_normalize_retimed_target_mode(mode)
 
 
 def _extract_scalar(value):
@@ -142,67 +114,23 @@ def _extract_scalar(value):
 
 
 def _expected_cache_contract(hp: dict) -> dict[str, int | float]:
-    return {
-        "rhythm_cache_version": int(hp.get("rhythm_cache_version", RHYTHM_CACHE_VERSION)),
-        "rhythm_unit_hop_ms": int(hp.get("rhythm_unit_hop_ms", RHYTHM_UNIT_HOP_MS)),
-        "rhythm_trace_hop_ms": int(hp.get("rhythm_trace_hop_ms", RHYTHM_TRACE_HOP_MS)),
-        "rhythm_trace_bins": int(hp.get("rhythm_trace_bins", 24)),
-        "rhythm_trace_horizon": float(hp.get("rhythm_trace_horizon", 0.35)),
-        "rhythm_slow_topk": int(hp.get("rhythm_slow_topk", 6)),
-        "rhythm_selector_cell_size": int(hp.get("rhythm_selector_cell_size", 3)),
-        "rhythm_source_phrase_threshold": float(hp.get("rhythm_source_phrase_threshold", 0.55)),
-        "rhythm_reference_mode_id": int(
-            hp.get("rhythm_reference_mode_id", RHYTHM_REFERENCE_MODE_STATIC_REF_FULL)
-        ),
-    }
+    return build_expected_cache_contract(hp)
 
 
 def _resolve_expected_teacher_target_source(hp: dict) -> str:
-    return normalize_teacher_target_source(hp.get("rhythm_teacher_target_source", "algorithmic"))
+    return build_rhythm_hparams_policy(hp).teacher_target_source
 
 
 def _resolve_expected_teacher_surface(hp: dict) -> str:
-    return resolve_teacher_surface_name(_resolve_expected_teacher_target_source(hp))
+    return build_rhythm_hparams_policy(hp).teacher_surface_name
 
 
 def _resolve_expected_teacher_target_source_id(hp: dict) -> int:
-    return resolve_teacher_target_source_id(_resolve_expected_teacher_target_source(hp))
+    return build_rhythm_hparams_policy(hp).teacher_target_source_id
 
 
 def _detect_stage(hp: dict, config_path: str) -> str:
-    distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
-    config_name = str(config_path).lower()
-    if bool(hp.get("rhythm_teacher_only_stage", False)) or "offline_teacher" in config_name or "teacher_only" in config_name:
-        return "offline_teacher"
-    if (
-        bool(hp.get("rhythm_apply_train_override", False))
-        or bool(hp.get("rhythm_apply_valid_override", False))
-        or bool(hp.get("rhythm_require_retimed_cache", False))
-        or "retimed_train" in config_name
-    ):
-        return "retimed_train"
-    if (
-        "teacher_student_kd" in config_name
-        or (
-            float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0
-            and distill == "cache"
-            and not bool(hp.get("rhythm_enable_dual_mode_teacher", False))
-        )
-    ):
-        return "teacher_student_kd"
-    if (
-        bool(hp.get("rhythm_enable_dual_mode_teacher", False))
-        or distill in {"offline", "algorithmic"}
-        or "dual_mode_kd" in config_name
-    ):
-        return "dual_mode_kd"
-    if (
-        bool(hp.get("rhythm_schedule_only_stage", False))
-        or bool(hp.get("rhythm_optimize_module_only", False))
-        or "schedule_only" in config_name
-    ):
-        return "schedule_only"
-    return "transitional"
+    return detect_rhythm_stage(hp, config_name=config_path)
 
 
 def _detect_profile(hp: dict, config_path: str) -> str:
@@ -219,9 +147,7 @@ def _detect_profile(hp: dict, config_path: str) -> str:
 
 
 def _resolve_cumplan_lambda(hp: dict) -> float:
-    if "lambda_rhythm_cumplan" in hp:
-        return float(hp.get("lambda_rhythm_cumplan", 0.0))
-    return float(hp.get("lambda_rhythm_carry", 0.0))
+    return resolve_policy_cumplan_lambda(hp)
 
 
 def _validate_profile_contract(
@@ -236,9 +162,10 @@ def _validate_profile_contract(
     if profile != "minimal_v1":
         return profile, errors, warnings
 
-    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
-    primary = _normalize_surface(str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower())
-    distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
+    policy = build_rhythm_hparams_policy(hp, config_path=config_path)
+    target_mode = policy.target_mode
+    primary = policy.primary_target_surface
+    distill = policy.distill_surface
     if target_mode != "cached_only":
         errors.append("minimal_v1 profile requires rhythm_dataset_target_mode: cached_only.")
     if primary != "teacher":
@@ -294,28 +221,34 @@ def _validate_profile_contract(
 def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
-    stage = _detect_stage(hp, config_path)
+    policy = build_rhythm_hparams_policy(hp, config_path=config_path)
+    stage = policy.stage
     profile = _detect_profile(hp, config_path)
-    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
-    primary = _normalize_surface(str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower())
-    distill = _normalize_distill(str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower())
-    require_cached_teacher = bool(hp.get("rhythm_require_cached_teacher", False))
-    require_retimed_cache = bool(hp.get("rhythm_require_retimed_cache", False))
+    target_mode = policy.target_mode
+    primary = policy.primary_target_surface
+    distill = policy.distill_surface
+    require_cached_teacher = policy.require_cached_teacher
+    require_retimed_cache = policy.require_retimed_cache
     enable_dual = bool(hp.get("rhythm_enable_dual_mode_teacher", False))
     enable_learned_offline_teacher = bool(hp.get("rhythm_enable_learned_offline_teacher", True))
     explicit_runtime_teacher_enable = hp.get("rhythm_runtime_enable_learned_offline_teacher", None)
-    runtime_offline_teacher_enable = _resolve_runtime_offline_teacher_enable(hp)
-    expected_teacher_source = _resolve_expected_teacher_target_source(hp)
-    expected_teacher_surface = _resolve_expected_teacher_surface(hp)
-    schedule_only = bool(hp.get("rhythm_schedule_only_stage", False))
-    strict_mainline = bool(hp.get("rhythm_strict_mainline", False))
+    runtime_offline_teacher_enable = policy.runtime_offline_teacher_enabled
+    runtime_dual_mode_teacher_enable = resolve_runtime_dual_mode_teacher_enable(
+        hp,
+        stage=stage,
+        infer=False,
+    )
+    expected_teacher_source = policy.teacher_target_source
+    legacy_schedule_flag = bool(hp.get("rhythm_schedule_only_stage", False))
+    strict_mainline = policy.strict_mainline
     optimize_module_only = bool(hp.get("rhythm_optimize_module_only", False))
     lambda_distill = float(hp.get("lambda_rhythm_distill", 0.0))
     lambda_teacher_aux = float(hp.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)
+    teacher_as_main = policy.teacher_as_main
     apply_train = bool(hp.get("rhythm_apply_train_override", False))
     apply_valid = bool(hp.get("rhythm_apply_valid_override", False))
     use_retimed_target = bool(hp.get("rhythm_use_retimed_target_if_available", False))
-    retimed_target_mode = _normalize_retimed_target_mode(str(hp.get("rhythm_retimed_target_mode", "cached") or "cached").strip().lower())
+    retimed_target_mode = policy.retimed_target_mode
     retimed_target_start = int(hp.get("rhythm_retimed_target_start_steps", 0) or 0)
     online_target_start = int(hp.get("rhythm_online_retimed_target_start_steps", retimed_target_start) or retimed_target_start)
     use_retimed_pitch_target = bool(hp.get("rhythm_use_retimed_pitch_target", False))
@@ -364,6 +297,10 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         errors.append(
             "rhythm_enable_dual_mode_teacher requires runtime learned offline teacher branch to be enabled "
             "(check rhythm_runtime_enable_learned_offline_teacher / factory resolution)."
+        )
+    if runtime_dual_mode_teacher_enable and not enable_dual:
+        errors.append(
+            "Runtime dual-mode teacher resolved enabled while rhythm_enable_dual_mode_teacher is false."
         )
     if explicit_runtime_teacher_enable is True and not enable_learned_offline_teacher and lambda_distill <= 0.0:
         warnings.append(
@@ -416,211 +353,241 @@ def _validate_stage_contract(hp: dict, *, config_path: str) -> tuple[str, list[s
         if missing_public:
             warnings.append(f"rhythm_public_losses is missing maintained mainline aliases: {missing_public}.")
 
-    if stage == "offline_teacher":
+    if stage == "teacher_offline":
         if strict_mainline:
             warnings.append(
-                "offline_teacher is a teacher-asset build path; keep rhythm_strict_mainline=false for the maintained student mainline."
+                "teacher_offline is a teacher-asset build path; keep rhythm_strict_mainline=false for the maintained student mainline."
             )
+        if legacy_schedule_flag:
+            errors.append("teacher_offline stage should keep rhythm_schedule_only_stage: false.")
         if not enable_learned_offline_teacher:
-            errors.append("offline_teacher stage requires rhythm_enable_learned_offline_teacher: true.")
+            errors.append("teacher_offline stage requires rhythm_enable_learned_offline_teacher: true.")
         if not runtime_offline_teacher_enable:
-            errors.append("offline_teacher stage requires runtime offline teacher branch enabled.")
+            errors.append("teacher_offline stage requires runtime offline teacher branch enabled.")
+        if not teacher_as_main:
+            errors.append("teacher_offline stage requires rhythm_teacher_as_main: true.")
+        if runtime_dual_mode_teacher_enable:
+            errors.append("teacher_offline stage should not resolve runtime dual-mode teacher execution.")
         if enable_dual:
-            errors.append("offline_teacher stage should keep rhythm_enable_dual_mode_teacher: false.")
+            errors.append("teacher_offline stage should keep rhythm_enable_dual_mode_teacher: false.")
         if lambda_distill > 0.0:
-            errors.append("offline_teacher stage should keep lambda_rhythm_distill: 0.")
+            errors.append("teacher_offline stage should keep lambda_rhythm_distill: 0.")
         if lambda_teacher_aux > 0.0:
-            errors.append("offline_teacher stage should keep lambda_rhythm_teacher_aux: 0.")
+            errors.append("teacher_offline stage should keep lambda_rhythm_teacher_aux: 0.")
         if primary == "teacher":
             errors.append(
-                "offline_teacher stage should not use rhythm_primary_target_surface: teacher; "
+                "teacher_offline stage should not use rhythm_primary_target_surface: teacher; "
                 "bootstrap the teacher from guidance/self targets."
             )
         teacher_target_source = _resolve_expected_teacher_target_source(hp)
         if teacher_target_source != "algorithmic":
             warnings.append(
-                "offline_teacher stage does not consume learned_offline teacher caches; "
+                "teacher_offline stage does not consume learned_offline teacher caches; "
                 "prefer rhythm_teacher_target_source: algorithmic for clarity."
             )
-    elif stage == "schedule_only":
+    elif stage == "legacy_schedule_only":
+        warnings.append(
+            "legacy_schedule_only is no longer part of the maintained chain; prefer "
+            "teacher_offline -> student_kd -> student_retimed."
+        )
         if target_mode != "cached_only":
-            errors.append("Formal schedule-only stage should use rhythm_dataset_target_mode: cached_only.")
+            errors.append("legacy_schedule_only should use rhythm_dataset_target_mode: cached_only.")
         if primary != "teacher":
-            errors.append("Formal schedule-only stage should use rhythm_primary_target_surface: teacher.")
+            errors.append("legacy_schedule_only should use rhythm_primary_target_surface: teacher.")
         if not require_cached_teacher:
-            errors.append("Formal schedule-only stage should require cached teacher surfaces.")
+            errors.append("legacy_schedule_only should require cached teacher surfaces.")
         if expected_teacher_source != "learned_offline":
-            errors.append("Formal schedule-only stage should use rhythm_teacher_target_source: learned_offline.")
-        if not schedule_only:
-            errors.append("Formal schedule-only stage should keep rhythm_schedule_only_stage: true.")
+            errors.append("legacy_schedule_only should use rhythm_teacher_target_source: learned_offline.")
+        if not legacy_schedule_flag:
+            errors.append("legacy_schedule_only should keep rhythm_schedule_only_stage: true.")
         if not optimize_module_only:
-            errors.append("Formal schedule-only stage should keep rhythm_optimize_module_only: true.")
+            errors.append("legacy_schedule_only should keep rhythm_optimize_module_only: true.")
+        if teacher_as_main:
+            errors.append("legacy_schedule_only should keep rhythm_teacher_as_main: false.")
         if enable_dual:
-            errors.append("Stage-1 schedule-only should not enable rhythm_enable_dual_mode_teacher.")
+            errors.append("legacy_schedule_only should not enable rhythm_enable_dual_mode_teacher.")
         if enable_learned_offline_teacher:
             errors.append(
-                "Stage-1 schedule-only should set rhythm_enable_learned_offline_teacher: false "
+                "legacy_schedule_only should set rhythm_enable_learned_offline_teacher: false "
                 "to avoid unnecessary runtime teacher branch allocation."
             )
         if runtime_offline_teacher_enable:
             errors.append(
-                "Stage-1 schedule-only should keep runtime offline teacher disabled "
+                "legacy_schedule_only should keep runtime offline teacher disabled "
                 "(rhythm_runtime_enable_learned_offline_teacher should resolve to false)."
             )
+        if runtime_dual_mode_teacher_enable:
+            errors.append("legacy_schedule_only should not resolve runtime dual-mode teacher execution.")
         if lambda_teacher_aux > 0.0:
-            errors.append("Stage-1 schedule-only should keep lambda_rhythm_teacher_aux: 0.")
+            errors.append("legacy_schedule_only should keep lambda_rhythm_teacher_aux: 0.")
         if lambda_distill > 0.0 or distill != "none":
-            errors.append("Stage-1 schedule-only should keep distillation disabled.")
+            errors.append("legacy_schedule_only should keep distillation disabled.")
         if apply_train or apply_valid:
-            errors.append("Stage-1 schedule-only should not enable train/valid retimed rendering.")
+            errors.append("legacy_schedule_only should not enable train/valid retimed rendering.")
         if export_debug_sidecars:
-            warnings.append("Stage-1 schedule-only should keep rhythm_export_debug_sidecars: false unless debugging schema.")
+            warnings.append("legacy_schedule_only should keep rhythm_export_debug_sidecars: false unless debugging schema.")
         if export_cache_audit_to_sample:
-            warnings.append("Stage-1 schedule-only should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
-    elif stage == "teacher_student_kd":
+            warnings.append("legacy_schedule_only should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
+    elif stage == "student_kd":
         if target_mode != "cached_only":
-            errors.append("Formal teacher->student KD stage should use rhythm_dataset_target_mode: cached_only.")
+            errors.append("student_kd should use rhythm_dataset_target_mode: cached_only.")
         if primary != "teacher":
-            errors.append("Formal teacher->student KD stage should use rhythm_primary_target_surface: teacher.")
+            errors.append("student_kd should use rhythm_primary_target_surface: teacher.")
         if distill != "cache":
-            errors.append("Formal teacher->student KD stage should use rhythm_distill_surface: cache.")
+            errors.append("student_kd should use rhythm_distill_surface: cache.")
         if lambda_distill <= 0.0:
-            errors.append("Formal teacher->student KD stage should keep lambda_rhythm_distill > 0.")
+            errors.append("student_kd should keep lambda_rhythm_distill > 0.")
+        if teacher_as_main:
+            errors.append("student_kd should keep rhythm_teacher_as_main: false.")
         if enable_dual:
-            errors.append("Formal teacher->student KD stage should keep rhythm_enable_dual_mode_teacher: false.")
+            errors.append("student_kd should keep rhythm_enable_dual_mode_teacher: false.")
         if enable_learned_offline_teacher:
-            errors.append("Formal teacher->student KD stage should keep rhythm_enable_learned_offline_teacher: false.")
+            errors.append("student_kd should keep rhythm_enable_learned_offline_teacher: false.")
         if runtime_offline_teacher_enable:
             errors.append(
-                "Formal teacher->student KD stage should keep runtime offline teacher disabled "
+                "student_kd should keep runtime offline teacher disabled "
                 "(rhythm_runtime_enable_learned_offline_teacher should resolve false)."
             )
+        if runtime_dual_mode_teacher_enable:
+            errors.append("student_kd should not resolve runtime dual-mode teacher execution.")
         if not require_cached_teacher:
-            errors.append("Formal teacher->student KD stage should require cached teacher surfaces.")
+            errors.append("student_kd should require cached teacher surfaces.")
         if expected_teacher_source != "learned_offline":
-            errors.append("Formal teacher->student KD stage should use rhythm_teacher_target_source: learned_offline.")
+            errors.append("student_kd should use rhythm_teacher_target_source: learned_offline.")
         if lambda_guidance > 0.0:
-            errors.append("Formal teacher->student KD stage should keep lambda_rhythm_guidance: 0.")
+            errors.append("student_kd should keep lambda_rhythm_guidance: 0.")
         if distill_allocation_weight > 0.0:
-            errors.append("Formal teacher->student KD stage should keep rhythm_distill_allocation_weight: 0.")
+            errors.append("student_kd should keep rhythm_distill_allocation_weight: 0.")
         if distill_budget_weight > 0.15:
-            warnings.append("Formal teacher->student KD stage usually keeps rhythm_distill_budget_weight <= 0.15.")
+            warnings.append("student_kd usually keeps rhythm_distill_budget_weight <= 0.15.")
         if distill_prefix_weight <= 0.0:
-            warnings.append("Formal teacher->student KD stage usually keeps rhythm_distill_prefix_weight > 0.")
+            warnings.append("student_kd usually keeps rhythm_distill_prefix_weight > 0.")
         if lambda_teacher_aux > 0.0:
-            errors.append("Formal teacher->student KD stage should keep lambda_rhythm_teacher_aux: 0.")
+            errors.append("student_kd should keep lambda_rhythm_teacher_aux: 0.")
         if apply_train or apply_valid:
-            errors.append("Teacher->student KD stage should not enable train/valid retimed rendering; that belongs to stage-3.")
+            errors.append("student_kd should not enable train/valid retimed rendering; that belongs to stage-3.")
         if retimed_target_mode != "cached":
-            warnings.append("Teacher->student KD stage usually keeps rhythm_retimed_target_mode: cached (retimed closure starts in stage-3).")
+            warnings.append("student_kd usually keeps rhythm_retimed_target_mode: cached (retimed closure starts in stage-3).")
         if export_debug_sidecars:
-            warnings.append("Teacher->student KD stage should keep rhythm_export_debug_sidecars: false unless debugging schema.")
+            warnings.append("student_kd should keep rhythm_export_debug_sidecars: false unless debugging schema.")
         if export_cache_audit_to_sample:
-            warnings.append("Teacher->student KD stage should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
+            warnings.append("student_kd should keep rhythm_export_cache_audit_to_sample: false unless cache-audit runs.")
         if not optimize_module_only:
-            warnings.append("Teacher->student KD stage usually keeps rhythm_optimize_module_only: true for a short maintained stage-2 path.")
-    elif stage == "dual_mode_kd":
+            warnings.append("student_kd usually keeps rhythm_optimize_module_only: true for a short maintained stage-2 path.")
+    elif stage == "legacy_dual_mode_kd":
         warnings.append(
-            "dual_mode_kd resolves to a legacy research path. Maintained student chain is now "
-            "schedule_only -> teacher_student_kd -> retimed_train; offline_teacher is a separate teacher-asset build path."
+            "legacy_dual_mode_kd resolves to a research path. Maintained chain is now "
+            "teacher_offline -> student_kd -> student_retimed."
         )
+        if teacher_as_main:
+            errors.append("legacy_dual_mode_kd should keep rhythm_teacher_as_main: false.")
         if not enable_dual:
-            errors.append("Legacy dual-mode KD stage requires rhythm_enable_dual_mode_teacher: true.")
+            errors.append("legacy_dual_mode_kd requires rhythm_enable_dual_mode_teacher: true.")
         if not enable_learned_offline_teacher:
-            errors.append("Legacy dual-mode KD stage requires rhythm_enable_learned_offline_teacher: true.")
+            errors.append("legacy_dual_mode_kd requires rhythm_enable_learned_offline_teacher: true.")
         if not runtime_offline_teacher_enable:
-            errors.append("Legacy dual-mode KD stage requires runtime offline teacher branch enabled.")
+            errors.append("legacy_dual_mode_kd requires runtime offline teacher branch enabled.")
+        if not runtime_dual_mode_teacher_enable:
+            errors.append("legacy_dual_mode_kd requires runtime dual-mode teacher execution enabled.")
         if distill != "offline":
-            errors.append("Legacy dual-mode KD stage requires rhythm_distill_surface: offline.")
+            errors.append("legacy_dual_mode_kd requires rhythm_distill_surface: offline.")
         if lambda_teacher_aux <= 0.0:
-            warnings.append("Legacy dual-mode KD stage usually carries lambda_rhythm_teacher_aux > 0 when kept as a research branch.")
-    elif stage == "retimed_train":
+            warnings.append("legacy_dual_mode_kd usually carries lambda_rhythm_teacher_aux > 0 when kept as a research branch.")
+    elif stage == "student_retimed":
         if target_mode != "cached_only":
-            errors.append("Formal retimed-train stage should use rhythm_dataset_target_mode: cached_only.")
+            errors.append("student_retimed should use rhythm_dataset_target_mode: cached_only.")
         if primary != "teacher":
-            errors.append("Formal retimed-train stage should use rhythm_primary_target_surface: teacher.")
+            errors.append("student_retimed should use rhythm_primary_target_surface: teacher.")
         if expected_teacher_source != "learned_offline":
-            errors.append("Formal retimed-train stage should use rhythm_teacher_target_source: learned_offline.")
+            errors.append("student_retimed should use rhythm_teacher_target_source: learned_offline.")
+        if teacher_as_main:
+            errors.append("student_retimed should keep rhythm_teacher_as_main: false.")
         if lambda_distill > 0.0:
             if distill != "cache":
-                errors.append("Formal retimed-train stage with KD enabled should use rhythm_distill_surface: cache.")
+                errors.append("student_retimed with KD enabled should use rhythm_distill_surface: cache.")
             if enable_dual:
-                errors.append("Formal retimed-train stage with KD enabled should keep rhythm_enable_dual_mode_teacher: false.")
+                errors.append("student_retimed with KD enabled should keep rhythm_enable_dual_mode_teacher: false.")
             if enable_learned_offline_teacher:
                 errors.append(
-                    "Formal retimed-train stage with KD enabled should keep rhythm_enable_learned_offline_teacher: false."
+                    "student_retimed with KD enabled should keep rhythm_enable_learned_offline_teacher: false."
                 )
             if runtime_offline_teacher_enable:
                 errors.append(
-                    "Formal retimed-train stage with KD enabled should keep runtime offline teacher disabled "
+                    "student_retimed with KD enabled should keep runtime offline teacher disabled "
                     "(rhythm_runtime_enable_learned_offline_teacher should resolve false)."
                 )
+            if runtime_dual_mode_teacher_enable:
+                errors.append("student_retimed with KD enabled should not resolve runtime dual-mode teacher execution.")
         else:
             if distill not in {"none", "off", "disable", "disabled", "false"}:
-                warnings.append("Formal retimed-train stage without KD usually keeps rhythm_distill_surface: none.")
+                warnings.append("student_retimed without KD usually keeps rhythm_distill_surface: none.")
             if enable_dual:
-                warnings.append("Formal retimed-train stage without KD usually keeps rhythm_enable_dual_mode_teacher: false.")
+                warnings.append("student_retimed without KD usually keeps rhythm_enable_dual_mode_teacher: false.")
             if enable_learned_offline_teacher:
                 warnings.append(
-                    "Formal retimed-train stage without KD usually keeps rhythm_enable_learned_offline_teacher: false "
+                    "student_retimed without KD usually keeps rhythm_enable_learned_offline_teacher: false "
                     "to reduce unused runtime overhead."
                 )
             if runtime_offline_teacher_enable:
                 warnings.append(
-                    "Formal retimed-train stage without KD usually keeps runtime offline teacher disabled "
+                    "student_retimed without KD usually keeps runtime offline teacher disabled "
                     "to reduce unnecessary branch overhead."
                 )
+            if runtime_dual_mode_teacher_enable:
+                warnings.append(
+                    "student_retimed without KD usually keeps runtime dual-mode teacher execution disabled."
+                )
         if lambda_teacher_aux > 0.0:
-            errors.append("Formal retimed-train stage should keep lambda_rhythm_teacher_aux: 0.")
+            errors.append("student_retimed should keep lambda_rhythm_teacher_aux: 0.")
         if not require_cached_teacher:
-            errors.append("Formal retimed-train stage should require cached teacher surfaces.")
+            errors.append("student_retimed should require cached teacher surfaces.")
         if not require_retimed_cache:
-            errors.append("Formal retimed-train stage should require cached retimed mel targets.")
+            errors.append("student_retimed should require cached retimed mel targets.")
         if not use_retimed_target:
-            errors.append("Formal retimed-train stage requires rhythm_use_retimed_target_if_available: true.")
+            errors.append("student_retimed requires rhythm_use_retimed_target_if_available: true.")
         if not apply_train or not apply_valid:
-            errors.append("Formal retimed-train stage should enable both train/valid retimed rendering.")
+            errors.append("student_retimed should enable both train/valid retimed rendering.")
         if retimed_target_start > 0:
             errors.append(
-                "Formal retimed-train stage should set rhythm_retimed_target_start_steps: 0 "
+                "student_retimed should set rhythm_retimed_target_start_steps: 0 "
                 "for immediate train/infer closure on the retimed canvas."
             )
-        if schedule_only:
-            errors.append("Formal retimed-train stage should set rhythm_schedule_only_stage: false.")
+        if legacy_schedule_flag:
+            errors.append("student_retimed should set rhythm_schedule_only_stage: false.")
         if optimize_module_only:
-            errors.append("Formal retimed-train stage should set rhythm_optimize_module_only: false.")
+            errors.append("student_retimed should set rhythm_optimize_module_only: false.")
         if not compact_joint_loss:
-            errors.append("Formal retimed-train stage should keep rhythm_compact_joint_loss: true.")
+            errors.append("student_retimed should keep rhythm_compact_joint_loss: true.")
         if retimed_source != "teacher":
-            errors.append("Formal retimed-train stage should use rhythm_binarize_retimed_mel_source: teacher.")
+            errors.append("student_retimed should use rhythm_binarize_retimed_mel_source: teacher.")
         if not binarize_teacher:
-            errors.append("Formal retimed-train stage requires rhythm_binarize_teacher_targets: true.")
+            errors.append("student_retimed requires rhythm_binarize_teacher_targets: true.")
         if not binarize_retimed:
-            errors.append("Formal retimed-train stage requires rhythm_binarize_retimed_mel_targets: true.")
+            errors.append("student_retimed requires rhythm_binarize_retimed_mel_targets: true.")
         if lambda_guidance > 0.0:
-            errors.append("Formal retimed-train stage should keep lambda_rhythm_guidance: 0.")
+            errors.append("student_retimed should keep lambda_rhythm_guidance: 0.")
         if distill_allocation_weight > 0.0:
-            errors.append("Formal retimed-train stage should keep rhythm_distill_allocation_weight: 0.")
+            errors.append("student_retimed should keep rhythm_distill_allocation_weight: 0.")
         if distill_budget_weight > 0.15:
-            warnings.append("Formal retimed-train stage usually keeps rhythm_distill_budget_weight <= 0.15.")
+            warnings.append("student_retimed usually keeps rhythm_distill_budget_weight <= 0.15.")
         if distill_prefix_weight <= 0.0 and lambda_distill > 0.0:
-            warnings.append("Formal retimed-train stage usually keeps rhythm_distill_prefix_weight > 0.")
+            warnings.append("student_retimed usually keeps rhythm_distill_prefix_weight > 0.")
         if not disable_mel_adv_when_retimed:
-            errors.append("Formal retimed-train stage should keep rhythm_disable_mel_adv_when_retimed: true.")
+            errors.append("student_retimed should keep rhythm_disable_mel_adv_when_retimed: true.")
         if lambda_mel_adv > 0.0:
-            errors.append("Formal retimed-train stage should keep lambda_mel_adv: 0.0 on the retimed canvas.")
+            errors.append("student_retimed should keep lambda_mel_adv: 0.0 on the retimed canvas.")
         if export_debug_sidecars:
-            warnings.append("Formal retimed-train stage should keep rhythm_export_debug_sidecars: false to preserve runtime-minimal batch contract.")
+            warnings.append("student_retimed should keep rhythm_export_debug_sidecars: false to preserve runtime-minimal batch contract.")
         if export_cache_audit_to_sample:
-            warnings.append("Formal retimed-train stage should keep rhythm_export_cache_audit_to_sample: false except dedicated cache audits.")
+            warnings.append("student_retimed should keep rhythm_export_cache_audit_to_sample: false except dedicated cache audits.")
         if retimed_target_mode == "online":
-            warnings.append("Formal retimed-train stage uses online-only retimed targets; cached retimed targets will not act as a warm-start fallback.")
+            warnings.append("student_retimed uses online-only retimed targets; cached retimed targets will not act as a warm-start fallback.")
     else:
         if profile != "minimal_v1":
             warnings.append(
                 "This config resolves to a transitional/prefer_cache path, not the maintained formal chain "
-                "(offline_teacher -> teacher_student_kd -> retimed_train, with schedule_only kept as the pure cached-student warm start "
-                "and dual_mode_kd kept only as a legacy research branch)."
+                "(teacher_offline -> student_kd -> student_retimed, with legacy_schedule_only and legacy_dual_mode_kd "
+                "kept only as legacy research branches)."
             )
         if (
             not enable_dual
@@ -705,7 +672,7 @@ def _collect_presence(ds: IndexedDataset, limit: int) -> tuple[list[dict], Count
     mismatches: list[str] = []
     num_items = min(len(ds), max(1, limit))
     for idx in range(num_items):
-        item = ds[idx]
+        item = materialize_rhythm_cache_compat_fields(ds[idx])
         items.append(item)
         for key in item.keys():
             counts[key] += 1
@@ -738,6 +705,13 @@ def _validate_inspected_items(items: list[dict], hp: dict, *, split: str) -> lis
                     errors.append(f"{item_name}: missing cached_only contract key '{key}'.")
                     continue
                 found = _extract_scalar(item[key])
+                if key == "rhythm_cache_version":
+                    if not is_rhythm_cache_version_compatible(int(found), int(expected)):
+                        errors.append(
+                            f"{item_name}: cache contract mismatch for {key}, found={int(found)}, "
+                            f"expected one of {compatible_rhythm_cache_versions(int(expected))}."
+                        )
+                    continue
                 if isinstance(expected, float):
                     if abs(float(found) - expected) > 1e-5:
                         errors.append(
@@ -795,6 +769,7 @@ def _validate_inspected_items(items: list[dict], hp: dict, *, split: str) -> lis
 
 def _run_dataset_and_model_dry_run(split: str, *, run_model: bool, hp: dict) -> list[str]:
     errors: list[str] = []
+    stage = detect_rhythm_stage(hp)
     try:
         from tasks.Conan.dataset import ConanDataset
     except Exception as exc:
@@ -825,13 +800,36 @@ def _run_dataset_and_model_dry_run(split: str, *, run_model: bool, hp: dict) -> 
             errors.append(f"Model dry-run for split '{split}' did not produce mel_out.")
         if "rhythm_execution" not in output:
             errors.append(f"Model dry-run for split '{split}' did not produce rhythm_execution.")
-        runtime_teacher_enabled = _resolve_runtime_offline_teacher_enable(hp)
-        dual_mode_enabled = bool(hp.get("rhythm_enable_dual_mode_teacher", False))
+        runtime_teacher_enabled = resolve_policy_runtime_offline_teacher_enable(hp, stage=stage)
+        dual_mode_enabled = resolve_runtime_dual_mode_teacher_enable(
+            hp,
+            stage=stage,
+            infer=False,
+        )
+        teacher_as_main = resolve_teacher_as_main(hp, stage=stage, infer=False)
+        reported_stage = str(output.get("rhythm_stage", "") or "").strip().lower()
+        if reported_stage and reported_stage != stage:
+            errors.append(
+                f"Model dry-run for split '{split}' reported rhythm_stage={reported_stage}, expected {stage}."
+            )
         offline_execution = output.get("rhythm_offline_execution")
+        teacher_as_main_runtime = bool(output.get("rhythm_teacher_as_main", 0.0))
+        if teacher_as_main and not teacher_as_main_runtime:
+            errors.append(
+                f"Model dry-run for split '{split}' expected rhythm_teacher_as_main=true in stage {stage}."
+            )
+        if not teacher_as_main and teacher_as_main_runtime:
+            errors.append(
+                f"Model dry-run for split '{split}' unexpectedly reported rhythm_teacher_as_main in stage {stage}."
+            )
+        if stage == "teacher_offline" and offline_execution is not None:
+            errors.append(
+                f"Model dry-run for split '{split}' should not emit rhythm_offline_execution in teacher_offline stage."
+            )
         if not dual_mode_enabled and offline_execution is not None:
             errors.append(
                 f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution while "
-                "rhythm_enable_dual_mode_teacher is false."
+                "runtime dual-mode teacher resolves disabled."
             )
         if dual_mode_enabled and offline_execution is None:
             errors.append(
@@ -842,7 +840,7 @@ def _run_dataset_and_model_dry_run(split: str, *, run_model: bool, hp: dict) -> 
                 f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution while "
                 "runtime offline teacher branch resolves disabled."
             )
-        if bool(hp.get("rhythm_schedule_only_stage", False)) and offline_execution is not None:
+        if stage == "legacy_schedule_only" and offline_execution is not None:
             errors.append(
                 f"Model dry-run for split '{split}' unexpectedly produced rhythm_offline_execution in schedule-only stage."
             )
@@ -938,9 +936,12 @@ def main():
         seen_versions = [name for name in counts if name.startswith("__cache_version__")]
         if seen_versions:
             print(f"  - cache_versions_seen={[name.replace('__cache_version__', '') for name in seen_versions]}")
-            if counts.get(f"__cache_version__{expected_version}", 0) < min(len(ds), args.inspect_items):
+            compatible_versions = compatible_rhythm_cache_versions(expected_version)
+            compatible_seen = sum(counts.get(f"__cache_version__{version}", 0) for version in compatible_versions)
+            if compatible_seen < min(len(ds), args.inspect_items):
                 errors.append(
-                    f"Split '{split}' has cache version mismatch against expected rhythm_cache_version={expected_version}."
+                    f"Split '{split}' has cache version mismatch against expected rhythm_cache_version={expected_version} "
+                    f"(accepted compatible versions: {compatible_versions})."
                 )
         errors.extend(_validate_inspected_items(items, hp, split=split))
         for mismatch in mismatches:

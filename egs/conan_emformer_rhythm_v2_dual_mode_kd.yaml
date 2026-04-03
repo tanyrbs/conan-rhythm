@@ -4,13 +4,16 @@ base_config: egs/conan_emformer_rhythm_v2_schedule_only.yaml
 # keep cached teacher surfaces as the offline floor,
 # and additionally enable the runtime shared-projector full-context branch.
 # Maintained train-ready chain should prefer:
-#   schedule_only -> teacher_student_kd -> retimed_train
+#   teacher_offline -> student_kd -> student_retimed
 # and only come here when you explicitly want runtime dual-mode experiments.
 rhythm_minimal_v1_profile: false
+rhythm_stage: legacy_dual_mode_kd
 rhythm_strict_mainline: false
 # Dual-mode KD emits runtime offline execution; keep this false so preflight
 # does not treat this stage as pure schedule-only.
 rhythm_schedule_only_stage: false
+rhythm_teacher_only_stage: false
+rhythm_teacher_as_main: false
 rhythm_optimize_module_only: true
 rhythm_fastpath_disable_acoustic_when_module_only: true
 rhythm_distill_surface: offline

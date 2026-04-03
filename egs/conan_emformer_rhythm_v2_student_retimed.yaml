@@ -1,0 +1,55 @@
+base_config: egs/conan_emformer_rhythm_v2_student_kd.yaml
+
+# Formal stage-3 maintained path:
+# keep runtime student-only, but close train/valid on the retimed acoustic canvas.
+rhythm_stage: student_retimed
+rhythm_strict_mainline: true
+rhythm_apply_train_override: true
+rhythm_apply_valid_override: true
+rhythm_train_render_start_steps: 0
+rhythm_valid_render_start_steps: 0
+rhythm_retimed_target_start_steps: 0
+rhythm_retimed_target_mode: hybrid
+rhythm_online_retimed_target_start_steps: 0
+rhythm_use_retimed_pitch_target: true
+rhythm_disable_pitch_loss_when_retimed: false
+rhythm_disable_mel_adv_when_retimed: true
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
+rhythm_compact_joint_loss: true
+rhythm_joint_budget_macro_weight: 0.35
+rhythm_joint_cumplan_macro_weight: 0.65
+
+rhythm_primary_target_surface: teacher
+rhythm_distill_surface: none
+rhythm_enable_dual_mode_teacher: false
+rhythm_enable_learned_offline_teacher: false
+rhythm_runtime_enable_learned_offline_teacher: false
+rhythm_binarize_teacher_targets: true
+rhythm_binarize_retimed_mel_targets: true
+rhythm_dataset_build_teacher_from_ref: false
+rhythm_dataset_build_guidance_from_ref: false
+rhythm_binarize_retimed_mel_source: teacher
+rhythm_use_retimed_target_if_available: true
+rhythm_require_retimed_cache: true
+rhythm_require_cached_teacher: true
+
+rhythm_optimize_module_only: false
+lambda_rhythm_exec_speech: 0.5
+lambda_rhythm_exec_pause: 0.5
+lambda_rhythm_budget: 0.10
+lambda_rhythm_cumplan: 0.10
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.0
+lambda_rhythm_teacher_aux: 0.0
+rhythm_pause_exec_boundary_boost: 0.75
+rhythm_pause_boundary_weight: 0.35
+rhythm_feasible_debt_weight: 0.05
+rhythm_distill_budget_weight: 0.0
+rhythm_distill_allocation_weight: 0.0
+rhythm_distill_prefix_weight: 0.0
+lambda_mel_adv: 0.0
+
+use_pitch_embed: true
+binarization_args:
+  with_f0: true

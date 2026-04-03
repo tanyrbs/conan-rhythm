@@ -21,6 +21,21 @@ from .frame_plan import (
     sample_tensor_by_frame_plan,
 )
 from .module import StreamingRhythmModule
+from .policy import (
+    RhythmHparamsPolicy,
+    build_rhythm_hparams_policy,
+    expected_cache_contract,
+    exports_streaming_offline_sidecars,
+    normalize_distill_surface,
+    normalize_primary_target_surface,
+    normalize_retimed_target_mode,
+    normalize_rhythm_target_mode,
+    parse_optional_bool,
+    resolve_apply_override,
+    resolve_cumplan_lambda,
+    resolve_pause_boundary_weight,
+    use_strict_mainline,
+)
 from .reference_descriptor import RefRhythmDescriptor
 from .reference_encoder import (
     REF_RHYTHM_STATS_KEYS,
@@ -35,6 +50,16 @@ from .renderer import (
     render_rhythm_sequence,
 )
 from .scheduler import MonotonicRhythmScheduler
+from .stages import (
+    detect_rhythm_stage,
+    is_formal_rhythm_stage,
+    is_legacy_rhythm_stage,
+    is_student_mainline_stage,
+    normalize_rhythm_stage,
+    resolve_runtime_dual_mode_teacher_enable,
+    resolve_runtime_offline_teacher_enable,
+    resolve_teacher_as_main,
+)
 from .source_boundary import build_source_boundary_cue
 from .supervision import (
     RHYTHM_CACHE_VERSION,
@@ -50,6 +75,7 @@ from .supervision import (
     RHYTHM_TRACE_HOP_MS,
     RHYTHM_UNIT_HOP_MS,
     build_item_rhythm_bundle,
+    build_learned_offline_teacher_export_bundle,
     build_learned_offline_teacher_bundle,
     build_online_retimed_bundle,
     build_reference_guided_targets,
@@ -92,6 +118,7 @@ __all__ = [
     'build_frame_plan',
     'build_frame_plan_from_execution',
     'build_frame_weight_from_plan',
+    'build_rhythm_hparams_policy',
     'build_online_retimed_bundle',
     'RHYTHM_CACHE_VERSION',
     'RHYTHM_GUIDANCE_SURFACE_NAME',
@@ -106,6 +133,7 @@ __all__ = [
     'RHYTHM_TRACE_HOP_MS',
     'RHYTHM_UNIT_HOP_MS',
     'build_item_rhythm_bundle',
+    'build_learned_offline_teacher_export_bundle',
     'build_learned_offline_teacher_bundle',
     'build_reference_guided_targets',
     'build_reference_rhythm_conditioning',
@@ -113,9 +141,19 @@ __all__ = [
     'build_reference_teacher_targets',
     'build_source_phrase_cache',
     'build_source_rhythm_cache',
+    'expected_cache_contract',
+    'exports_streaming_offline_sidecars',
+    'normalize_distill_surface',
+    'normalize_primary_target_surface',
+    'normalize_retimed_target_mode',
+    'normalize_rhythm_target_mode',
     'normalize_teacher_target_source',
+    'parse_optional_bool',
     'resolve_teacher_surface_name',
     'resolve_teacher_target_source_id',
+    'resolve_apply_override',
+    'resolve_cumplan_lambda',
+    'resolve_pause_boundary_weight',
     'build_algorithmic_teacher_targets',
     'build_interleaved_blank_slot_schedule',
     'sample_tensor_by_frame_plan',
@@ -129,6 +167,7 @@ __all__ = [
     'CompressedUnitSequence',
     'RhythmFramePlan',
     'RhythmExecution',
+    'RhythmHparamsPolicy',
     'RhythmPlannerOutputs',
     'RhythmPublicInputs',
     'RhythmTeacherTargets',
@@ -140,7 +179,16 @@ __all__ = [
     'StreamingRhythmState',
     'StreamingUnitizerState',
     'build_source_boundary_cue',
+    'detect_rhythm_stage',
     'build_compressed_sequence',
     'compress_token_sequence',
     'estimate_boundary_confidence',
+    'is_formal_rhythm_stage',
+    'is_legacy_rhythm_stage',
+    'is_student_mainline_stage',
+    'normalize_rhythm_stage',
+    'resolve_runtime_dual_mode_teacher_enable',
+    'resolve_runtime_offline_teacher_enable',
+    'resolve_teacher_as_main',
+    'use_strict_mainline',
 ]

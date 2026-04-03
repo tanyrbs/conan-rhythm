@@ -68,7 +68,7 @@ Maintained usage preference:
 - maintained stage-1/stage-3 configs now mark this contract explicitly with `rhythm_strict_mainline: true`
 - keep extra KD losses (`L_distill*`) optional, stage-specific, and off by default in the maintained chain
 - do not keep task-side surrogate pause execution in the maintained path; if pause gradients disappear, fix the projector branch itself
-- keep schedule-only runtime teacher branch off (`rhythm_enable_learned_offline_teacher: false`); stage-1 should not pay runtime teacher complexity
+- keep student-mainline runtime teacher branches off (`rhythm_enable_learned_offline_teacher: false` on `student_kd` / `student_retimed`); only `teacher_offline` and legacy dual-mode should pay runtime teacher complexity
 - dual-mode KD may enable the runtime learned teacher branch, but it remains an optional research/stage-2 branch rather than the default maintained chain
 - when streaming-prefix training exports a longer offline source sidecar, the runtime teacher should consume matching full-length offline cached teacher surfaces (`rhythm_offline_teacher_*`) for its own auxiliary supervision instead of reusing student-prefix-sliced teacher targets
 
@@ -135,7 +135,13 @@ Practical rule:
 - cached target surfaces may be prefix-adapted and retimed targets rebuilt for cropped views
 - cropped prefix adaptation should keep truncated tail units `open/unsealed` (instead of forcing all-visible units sealed)
 
-Current cache version: `4`
+Current maintained cache version: `5`
+
+Compatibility note:
+
+- loader/preflight now accept compatible `v4` cached rhythm metadata when the maintained hop/trace/reference contract still matches
+- missing `rhythm_teacher_target_source_id` / `rhythm_retimed_target_source_id` are backfilled from cached surface names during loading
+- this compatibility bridge is only a migration path; new caches should still be re-binarized as `v5`
 
 ---
 
@@ -175,7 +181,7 @@ State semantics note:
 - trace-window sampling should follow committed progress, not fluctuating visible-prefix ratios
 - projector should remain a thin contract layer on the strict mainline:
   - keep feasible-budget lifting
-  - default to simple pause allocation
+  - default to simple pause allocation, but keep boundary-aware bias active inside the simple path
   - disable boundary commit guard unless a research branch explicitly needs it
   - do not eagerly build slot/frame render artifacts on non-render stages
 
@@ -212,7 +218,7 @@ Current practical weighting in config:
 
 Maintained optimizer policy:
 
-- `schedule-only`: optimize exactly the 4 timing losses above
+- `teacher_offline` / `legacy_schedule_only`: optimize exactly the 4 timing losses above
 - `joint retimed`: optimize compact `3+1` objectives
   - required 3: `L_base`, `L_rhythm_exec`, `L_stream_state`
   - optional +1: `L_pitch` (only when retimed pitch targets are enabled/ready)
@@ -220,6 +226,7 @@ Maintained optimizer policy:
 - pause-boundary emphasis must stay absorbed inside `L_exec_pause`
 - projector feasibility debt must stay absorbed inside `L_budget`
 - do not grow either of those into standalone optimizer losses on the maintained path
+- offline-teacher confidence heads are not directly supervised on the maintained path, so they stay out of the optimizer by default; only opt in with `rhythm_train_offline_confidence_heads: true` if a real confidence objective is added
 
 ### Optional staged losses
 
@@ -243,17 +250,17 @@ Policy:
 
 Maintained default:
 
-- keep `L_distill*` disabled in the default stage-1 warm start; when enabled in the maintained chain, use the explicit cache-only step (`schedule_only -> teacher_student_kd -> retimed_train`)
+- keep `L_distill*` disabled in the default teacher-first stage; when enabled in the maintained chain, use the explicit cache-only path (`teacher_offline -> student_kd -> student_retimed`)
 - if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
 - strict-mainline fast path now builds rhythm loss targets directly from the primary cached surface when guidance/distill are both disabled, instead of routing through runtime teacher / algorithmic teacher branches
 
 Maintained chain note:
 
-- `egs/conan_emformer_rhythm_v2_offline_teacher.yaml` is the offline teacher asset-build entry (runtime learned teacher enabled, no student KD, no acoustic path)
-- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is the stage-1 formal student entry (runtime learned teacher disabled)
-- `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, distillation kept on cached execution/prefix surfaces)
+- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` is the offline teacher asset-build entry (runtime learned teacher enabled, no student KD, no acoustic path)
+- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is a legacy warm-start / ablation entry (runtime learned teacher disabled)
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, distillation kept on cached execution/prefix surfaces; `teacher_student_kd.yaml` is an alias)
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as an optional legacy runtime-teacher branch
-- `egs/conan_emformer_rhythm_v2_retimed_train.yaml` is the stage-3 formal joint entry
+- `egs/conan_emformer_rhythm_v2_student_retimed.yaml` is the stage-3 formal joint entry (`retimed_train.yaml` is an alias)
 - the formal stage-3 config now enables retimed train/valid closure from step 0; the older delayed-start behavior remains only on transitional configs
 
 ---

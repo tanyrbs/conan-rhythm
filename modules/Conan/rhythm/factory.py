@@ -2,19 +2,16 @@ from __future__ import annotations
 
 from .module import StreamingRhythmModule
 from .offline_teacher import OfflineTeacherConfig
+from .policy import (
+    resolve_runtime_offline_teacher_enable as resolve_runtime_offline_teacher_enable_from_policy,
+    use_strict_mainline,
+)
 from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
 
 
-def _use_strict_mainline(hparams) -> bool:
-    explicit = hparams.get('rhythm_strict_mainline', None)
-    if explicit is not None:
-        return bool(explicit)
-    return bool(hparams.get('rhythm_minimal_v1_profile', False))
-
-
 def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
-    strict_mainline = _use_strict_mainline(hparams)
+    strict_mainline = use_strict_mainline(hparams)
     pause_selection_mode = str(
         hparams.get(
             'rhythm_projector_pause_selection_mode',
@@ -44,18 +41,17 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
     )
 
 
-def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
-    # Explicit runtime override always wins for experiments/debug.
-    explicit_runtime = hparams.get('rhythm_runtime_enable_learned_offline_teacher', None)
-    if explicit_runtime is not None:
-        return bool(explicit_runtime)
-
-    # Maintained route keeps the offline teacher fully offline: it is a cache / target producer,
-    # not a default runtime branch. The only implicit runtime activation left is the explicit
-    # dual-mode research path; every other case must opt in via the override above.
-    return bool(hparams.get('rhythm_enable_dual_mode_teacher', False)) and bool(
-        hparams.get('rhythm_enable_learned_offline_teacher', False)
+def resolve_runtime_offline_teacher_enable(hparams, *, stage: str | None = None, config_path: str | None = None) -> bool:
+    return resolve_runtime_offline_teacher_enable_from_policy(
+        hparams,
+        stage=stage,
+        config_path=config_path,
     )
+
+
+def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
+    # Backward-compatible private alias for older call sites.
+    return resolve_runtime_offline_teacher_enable(hparams)
 
 
 def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
@@ -109,7 +105,7 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         pause_boundary_latent_weight=float(hparams.get('rhythm_pause_boundary_latent_weight', 0.25)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.10)),
         projector_config=build_projector_config_from_hparams(hparams),
-        enable_learned_offline_teacher=_resolve_runtime_offline_teacher_enable(hparams),
+        enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),
         teacher_config=AlgorithmicTeacherConfig(
             rate_scale_min=float(hparams.get('rhythm_teacher_rate_scale_min', 0.55)),

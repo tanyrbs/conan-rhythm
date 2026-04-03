@@ -109,6 +109,7 @@ def run_rhythm_frontend(
     enable_dual_mode_teacher: bool = False,
     enable_learned_offline_teacher: bool = True,
     enable_algorithmic_teacher: bool = False,
+    teacher_as_main: bool = False,
     projector_pause_topk_ratio_override: float | None = None,
     source_boundary_scale_override: float | None = None,
     teacher_source_boundary_scale_override: float | None = None,
@@ -117,6 +118,8 @@ def run_rhythm_frontend(
         return None
     if ref is None and rhythm_ref_conditioning is None:
         return None
+    runtime_dual_mode_teacher = bool(enable_dual_mode_teacher) and bool(enable_learned_offline_teacher) and not bool(infer)
+    runtime_teacher_as_main = bool(teacher_as_main) and bool(enable_learned_offline_teacher) and not bool(infer)
     if rhythm_source_cache is not None:
         unit_batch = rhythm_unit_frontend.from_precomputed(
             content_units=rhythm_source_cache["content_units"],
@@ -136,8 +139,31 @@ def run_rhythm_frontend(
         )
     if rhythm_ref_conditioning is None:
         rhythm_ref_conditioning = rhythm_module.encode_reference(ref)
+    if runtime_teacher_as_main:
+        execution, offline_confidence = rhythm_module.forward_teacher(
+            content_units=unit_batch.content_units,
+            dur_anchor_src=unit_batch.dur_anchor_src,
+            ref_conditioning=rhythm_ref_conditioning,
+            unit_mask=unit_batch.unit_mask,
+            open_run_mask=torch.zeros_like(unit_batch.content_units),
+            sealed_mask=torch.ones_like(unit_batch.unit_mask).float(),
+            sep_hint=unit_batch.sep_hint,
+            boundary_confidence=unit_batch.boundary_confidence,
+            projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            source_boundary_scale_override=teacher_source_boundary_scale_override,
+        )
+        return {
+            "unit_batch": unit_batch,
+            "execution": execution,
+            "ref_conditioning": rhythm_ref_conditioning,
+            "offline_execution": None,
+            "offline_confidence": offline_confidence,
+            "offline_unit_batch": None,
+            "algorithmic_teacher": None,
+            "teacher_as_main": True,
+        }
     offline_unit_batch = None
-    if rhythm_offline_source_cache is not None and enable_dual_mode_teacher and not infer:
+    if rhythm_offline_source_cache is not None and runtime_dual_mode_teacher:
         offline_unit_batch = rhythm_unit_frontend.from_precomputed(
             content_units=rhythm_offline_source_cache["content_units"],
             dur_anchor_src=rhythm_offline_source_cache["dur_anchor_src"],
@@ -152,7 +178,7 @@ def run_rhythm_frontend(
             "rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true "
             "in the maintained rhythm path."
         )
-    if enable_dual_mode_teacher and not infer:
+    if runtime_dual_mode_teacher:
         dual_outputs = rhythm_module.forward_dual(
             content_units=unit_batch.content_units,
             dur_anchor_src=unit_batch.dur_anchor_src,
@@ -215,6 +241,7 @@ def run_rhythm_frontend(
         "offline_confidence": offline_confidence,
         "offline_unit_batch": offline_unit_batch,
         "algorithmic_teacher": algorithmic_teacher,
+        "teacher_as_main": False,
     }
 
 
@@ -239,6 +266,7 @@ def attach_rhythm_outputs(
     ret["rhythm_unit_batch"] = unit_batch
     ret["rhythm_execution"] = execution
     ret["rhythm_state_next"] = execution.next_state
+    ret["rhythm_teacher_as_main"] = float(bool(rhythm_bundle.get("teacher_as_main", False)))
     ret["rhythm_ref_conditioning"] = ref_conditioning
     ret["ref_rhythm_stats"] = ref_conditioning["ref_rhythm_stats"]
     ret["ref_rhythm_trace"] = ref_conditioning["ref_rhythm_trace"]

@@ -1,0 +1,46 @@
+base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
+
+# Formal stage-2 maintained path:
+# student-only runtime, cache-backed learned_offline teacher supervision.
+rhythm_stage: student_kd
+rhythm_minimal_v1_profile: false
+rhythm_strict_mainline: true
+rhythm_schedule_only_stage: false
+rhythm_teacher_only_stage: false
+rhythm_teacher_as_main: false
+rhythm_optimize_module_only: true
+rhythm_fastpath_disable_acoustic_when_module_only: true
+rhythm_compact_joint_loss: false
+
+rhythm_dataset_target_mode: cached_only
+rhythm_primary_target_surface: teacher
+rhythm_teacher_target_source: learned_offline
+rhythm_distill_surface: cache
+rhythm_require_cached_teacher: true
+rhythm_enable_dual_mode_teacher: false
+rhythm_enable_learned_offline_teacher: false
+rhythm_runtime_enable_learned_offline_teacher: false
+rhythm_enable_algorithmic_teacher: false
+rhythm_dataset_build_teacher_from_ref: false
+rhythm_dataset_build_guidance_from_ref: false
+rhythm_binarize_teacher_targets: true
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
+
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.35
+rhythm_distill_budget_weight: 0.08
+rhythm_distill_allocation_weight: 0.0
+rhythm_distill_prefix_weight: 0.50
+lambda_rhythm_teacher_aux: 0.0
+
+lambda_rhythm_exec_speech: 1.0
+lambda_rhythm_exec_pause: 1.0
+lambda_rhythm_budget: 0.05
+lambda_rhythm_cumplan: 0.12
+lambda_rhythm_plan: 0.0
+lambda_mel_adv: 0.0
+
+use_pitch_embed: false
+binarization_args:
+  with_f0: false

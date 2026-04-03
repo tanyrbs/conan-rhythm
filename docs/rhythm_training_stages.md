@@ -32,15 +32,17 @@ Current state:
 - the bundled smoke cache may still need `--splits train` for structural checks; formal runs should pass both `train` and `valid`
 - projector state semantics now require monotonic committed-progress phase (`phase_ptr` no rollback on visible-prefix growth)
 - projector pause/speech projection now keeps zero-budget branches differentiable, which removes the need for the temporary task-side pause surrogate used during earlier debugging
-- strict maintained stage configs now set `rhythm_strict_mainline: true`, so schedule-only / teacher-student-KD / retimed-train paths hard-reject runtime teacher, guidance loss, and algorithmic-teacher branches; only cache-backed KD remains allowed on the maintained stage-2 config
-- strict mainline also keeps projector on a thinner contract by default (`pause_selection_mode=simple`, `use_boundary_commit_guard=false`, `build_render_plan=false`)
+- strict maintained student-stage configs now set `rhythm_strict_mainline: true`, so `student_kd` / `student_retimed` (and the legacy `schedule_only` warm-start) hard-reject runtime teacher, guidance loss, and algorithmic-teacher branches; only cache-backed KD remains allowed on the maintained stage-2 config
+- strict mainline also keeps projector on a thinner contract by default (`pause_selection_mode=simple`, `use_boundary_commit_guard=false`, `build_render_plan=false`), while preserving boundary-aware bias inside the simple pause path so strong pause placement does not get flattened
+- runtime learned-offline teacher enable resolution now comes from the shared stage helper in `modules/Conan/rhythm/stages.py`; task validation, preflight, and runtime no longer each maintain their own approximation
 - slot schedule / frame plan are now lazily materialized only when render / retimed closure actually needs them; strict non-render paths keep these fields absent
-- latest local train-ready checks passed on the smoke bundle for `py_compile`, `smoke_test`, train-only preflight dry-run, one-step `schedule_only`, one-step `teacher_student_kd`, and one-step `retimed_train`
-- latest local CPU probe also passed on the smoke bundle for `retimed_train` over 20 updates, with finite losses, finite clipped gradients, and non-zero parameter deltas on the content / rhythm-scheduler / decoder / pitch path
+- cached-only loading now accepts compatible `rhythm_cache_version: 4` metadata when the maintained `v5` hop/trace/reference contract still matches; missing teacher/retimed source ids are inferred from cached surface names during load/preflight
+- latest local checks passed for `py_compile`, `smoke_test`, `export_rhythm_teacher_targets.py --help`, real-data preflight dry-run on local `libritts_single_smoke_rhythm_v4` for `teacher_offline`, and a real-data CPU mini-train probe for `teacher_offline`
+- maintained `student_kd` / `student_retimed` still correctly reject that local smoke cache until learned-offline teacher assets are exported and re-binarized into cache
 
 ---
 
-## Stage 0.5: Offline teacher asset build
+## Stage 1: teacher_offline
 
 Goal:
 
@@ -49,10 +51,10 @@ Goal:
 
 Current recommendation:
 
-- use `egs/conan_emformer_rhythm_v2_offline_teacher.yaml`
+- use `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
 - keep this stage rhythm-only (`rhythm_teacher_only_stage: true`, no acoustic path)
 - bootstrap the teacher from cached guidance/self targets, not from teacher KD
-- export `{item_name}.teacher.npz` with `scripts/export_offline_teacher_assets.py`
+- export `{item_name}.teacher.npz` with `scripts/export_rhythm_teacher_targets.py` (`export_offline_teacher_assets.py` remains a wrapper)
 - point later student-stage binarization at that export directory via `rhythm_teacher_target_dir`
 
 Important contract:
@@ -64,7 +66,7 @@ Important contract:
 
 ---
 
-## Stage 1: Reference-guided warm start
+## Legacy warm-start: schedule_only
 
 Goal:
 
@@ -90,23 +92,23 @@ Current recommendation:
 - prefer cached/offline targets over unconditional runtime heuristic regeneration
 - use `rhythm_dataset_target_mode: cached_only` for formal experiments
 - keep `prefer_cache` only as a migration / debug stage while refreshing caches
-- for the first projector warm-start, prefer `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
-- that config now assumes cached teacher surfaces are already present and does not treat runtime teacher construction as the mainline
+- `egs/conan_emformer_rhythm_v2_schedule_only.yaml` remains available only for ablation / projector warm-start experiments
+- that config assumes cached teacher surfaces are already present, but it is no longer the maintained mainline
 - that config now also explicitly disables learned offline teacher runtime execution (`rhythm_enable_learned_offline_teacher: false`)
-- that config is now also a hard strict-mainline entry, so KD/guidance/runtime-teacher branches are rejected instead of being silently left available
-- stage-1 module-only config now also enables the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disables pitch/F0 requirements (`use_pitch_embed: false`, `binarization_args.with_f0: false`) so warm-start runs do not pay unnecessary decoder/pitch extraction cost
+- it stays useful when you explicitly want a cheap projector warm-start before the maintained chain, but docs/configs should treat it as legacy
+- this legacy module-only config also enables the acoustic fast path (`rhythm_fastpath_disable_acoustic_when_module_only: true`) and disables pitch/F0 requirements (`use_pitch_embed: false`, `binarization_args.with_f0: false`) so warm-start runs do not pay unnecessary decoder/pitch extraction cost
 - the module-only acoustic fast path is automatically gated off once train-time retimed rendering is active; formal retimed closure should still run the real decoder path instead of a fake zero-cost shortcut
-- stage-1 objective should stay minimal:
+- the legacy warm-start objective should stay minimal:
   - `L_exec_speech`
   - `L_exec_pause`
   - light `L_budget`
   - light `L_prefix_state`
-- no extra KD/guidance/proxy losses in the maintained stage-1 default
+- no extra KD/guidance/proxy losses in the legacy warm-start default
 - prefix-cropped training views should keep truncated tails open/unsealed for realistic streaming semantics
 
 ---
 
-## Stage 2: Latency-matched teacher distillation
+## Stage 2: student_kd
 
 Goal:
 
@@ -142,10 +144,10 @@ Important terminology note:
   - streaming branch = causal student scheduler + shared projector contract
   - offline branch = non-causal planner teacher + shared projector contract
   - algorithmic teacher = explicit bootstrap / fallback surface
-- `egs/conan_emformer_rhythm_v2_teacher_student_kd.yaml` is the maintained stage-2 cache-only KD config
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml` is the maintained stage-2 cache-only KD config (`teacher_student_kd.yaml` remains a compatibility alias)
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as a legacy runtime-teacher branch config
 - maintained stage-2 now distills purely from cached offline teacher surfaces; it does not keep a live runtime teacher branch in the training loop
-- the runtime-teacher auxiliary supervision path (`lambda_rhythm_teacher_aux`) and detached confidence weighting stay only on the legacy `dual_mode_kd` research branch
+- the runtime-teacher auxiliary supervision path (`lambda_rhythm_teacher_aux`) and detached confidence weighting stay only on the legacy `legacy_dual_mode_kd` research branch
 - when streaming prefix cropping is active on that legacy branch, runtime teacher auxiliary supervision prefers full-length offline cached teacher sidecars (`rhythm_offline_teacher_*`) when they exist, and otherwise slices the runtime teacher execution/state surface to the overlapping prefix instead of mixing a full-context teacher with student-prefix targets
 - stage-2 module-only runs also inherit the acoustic fast path and `with_f0: false`, so KD warm-start does not pay pitch/decoder cost unless you deliberately leave the rhythm-only route
 - docs and experiments should still keep the distinction explicit: learned offline teacher is stronger than student replay, but it is still a planner teacher, not a second acoustic model
@@ -153,7 +155,7 @@ Important terminology note:
 
 ---
 
-## Stage 3: Retimed decoder training
+## Stage 3: student_retimed
 
 Goal:
 
@@ -166,7 +168,7 @@ Current repository status:
   - `rhythm_apply_train_override: false`
   - `rhythm_apply_valid_override: false`
   - `rhythm_apply_test_override: true`
-- the formal stage-3 config `egs/conan_emformer_rhythm_v2_retimed_train.yaml` now explicitly sets:
+- the formal stage-3 config `egs/conan_emformer_rhythm_v2_student_retimed.yaml` now explicitly sets:
   - `rhythm_apply_train_override: true`
   - `rhythm_apply_valid_override: true`
   - `rhythm_strict_mainline: true`
@@ -193,13 +195,13 @@ Current bridge step already in repo:
 - the minimal rhythm route can disable the heavier local style/prosody adaptor and keep only global timbre conditioning
 - the rhythm config now uses `mel_losses: "l1:1.0"` to stay aligned with the minimal executed-surface objective
 - rhythm cache contract is now versioned at `rhythm_cache_version: 5`
-- one-step schedule-only / teacher-student-KD / retimed-joint checks are now passing after the projector-side pause differentiability fix; this is enough for train-ready status, but not yet evidence of long-run stability
+- smoke / preflight structure checks are passing after the projector-side pause differentiability fix; this is enough for train-ready staging semantics, but not yet evidence of long-run stability
 - smoke preflight is now confirmed on `--splits train`; the bundled smoke cache still does not include a populated `valid` split, so full train+valid preflight remains a real-data check
 - config now also exposes staged rollout knobs:
 - `rhythm_train_render_start_steps`
 - `rhythm_valid_render_start_steps`
 - `rhythm_retimed_target_start_steps`
-- a staged experiment config is now provided at `egs/conan_emformer_rhythm_v2_retimed_train.yaml`
+- the maintained stage-3 config is now provided at `egs/conan_emformer_rhythm_v2_student_retimed.yaml` (`retimed_train.yaml` remains a compatibility alias)
 - this is the maintained formal joint-training entry and does not require KD / learned offline runtime teacher to be enabled
 - a stricter cached-only warm-start config is now provided at `egs/conan_emformer_rhythm_v2_cached_only.yaml`
 
@@ -235,7 +237,7 @@ Need stronger evaluation around:
 As of 2026-04-02:
 
 - the rhythm branch is **ready for warm-start / structural training**
-- the branch is also **train-ready for short validation runs** across `schedule_only`, `teacher_student_kd`, and `retimed_train`
+- the branch is structurally ready for preflight / smoke validation across `teacher_offline`, `student_kd`, and `student_retimed`
 - it is **not yet ready to claim final strong-rhythm performance**
 
 The two biggest remaining milestones are:
@@ -248,7 +250,7 @@ The two biggest remaining milestones are:
 Right now the repository should focus on:
 
 1. projector-centric timing supervision
-2. schedule-only warm start before joint acoustic finetune
+2. teacher-first offline asset build followed by student-only KD / retimed closure
 3. cached-only reproducibility
 4. retimed train/infer closure
 5. streaming regression hardening

@@ -1,18 +1,21 @@
 base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 
-# Stage-1 rhythm bootstrap: train the timing stack first.
-# This keeps supervision close to executed speech/pause + light budget / cumulative-plan,
-# and avoids letting acoustic losses dominate before schedule learning stabilizes.
-# Requires precomputed learned_offline teacher assets during cache build.
+# Legacy student warm-start kept for compatibility / ablation.
+# Maintained mainline is now:
+#   teacher_offline -> student_kd -> student_retimed
 rhythm_minimal_v1_profile: false
+rhythm_stage: legacy_schedule_only
 rhythm_strict_mainline: true
 rhythm_schedule_only_stage: true
+rhythm_teacher_only_stage: false
+rhythm_teacher_as_main: false
 rhythm_optimize_module_only: true
 rhythm_optimize_pause_state: false
 rhythm_fastpath_disable_acoustic_when_module_only: true
 rhythm_compact_joint_loss: false
 
-# Stage-1 is the first maintained formal config in the chain.
+# This legacy warm-start remains useful for ablation / projector-only bootstraps,
+# but it is no longer part of the maintained formal chain.
 rhythm_streaming_prefix_train: true
 rhythm_streaming_prefix_min_ratio: 0.45
 rhythm_streaming_prefix_max_ratio: 0.75

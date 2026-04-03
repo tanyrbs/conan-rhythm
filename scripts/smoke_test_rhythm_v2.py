@@ -8,7 +8,20 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
-from modules.Conan.rhythm.projector import _project_pause_impl
+from modules.Conan.pitch_utils import (
+    apply_silent_content_to_uv,
+    f0_minmax_denorm,
+    f0_minmax_norm,
+    infer_uv_from_logits,
+    pack_flow_f0_target,
+)
+from modules.Conan.rhythm.projector import _project_pause_impl, _project_pause_simple_impl
+from modules.Conan.rhythm.stages import (
+    detect_rhythm_stage,
+    resolve_runtime_dual_mode_teacher_enable,
+    resolve_runtime_offline_teacher_enable,
+    resolve_teacher_as_main,
+)
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     RHYTHM_GUIDANCE_SURFACE_NAME,
@@ -22,6 +35,10 @@ from modules.Conan.rhythm.supervision import (
     build_reference_guided_targets,
     build_reference_teacher_targets,
     build_retimed_mel_target,
+    compatible_rhythm_cache_versions,
+    infer_teacher_target_source_id_from_surface_name,
+    is_rhythm_cache_version_compatible,
+    materialize_rhythm_cache_compat_fields,
 )
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from modules.Conan.rhythm.unitizer import StreamingRunLengthUnitizer
@@ -62,6 +79,22 @@ if __name__ == '__main__':
         'rhythm_enable_learned_offline_teacher': True,
         'rhythm_runtime_enable_learned_offline_teacher': True,
     }
+    base_f0 = torch.tensor([[6.5, 7.0, 8.0]], dtype=torch.float32)
+    base_uv = torch.tensor([[False, True, False]])
+    norm_f0 = f0_minmax_norm(base_f0, base_uv)
+    denorm_f0 = f0_minmax_denorm(norm_f0, base_uv)
+    assert torch.allclose(denorm_f0[base_uv == 0], base_f0[base_uv == 0], atol=1e-5)
+    assert float(denorm_f0[0, 1].item()) == 0.0
+    packed_flow = pack_flow_f0_target(norm_f0)
+    assert packed_flow.shape == (1, 1, 1, 3)
+    uv_logits = torch.tensor([[[1.0, 0.0], [-0.5, 0.0], [0.7, 0.0]]], dtype=torch.float32)
+    content = torch.tensor([[1, 57, 3]], dtype=torch.long)
+    inferred_uv = infer_uv_from_logits(uv_logits, content=content, silent_token=57)
+    assert inferred_uv.dtype == torch.bool
+    assert bool(inferred_uv[0, 0].item()) is True
+    assert bool(inferred_uv[0, 1].item()) is True
+    assert bool(apply_silent_content_to_uv(inferred_uv, content=content, silent_token=57)[0, 1].item()) is True
+
     frontend = RhythmUnitFrontend(silent_token=57, separator_aware=True)
     batch = frontend.from_token_lists([
         [1, 1, 1, 2, 2, 57, 3, 3, 4, 4, 5, 5],
@@ -102,9 +135,32 @@ if __name__ == '__main__':
     assert strict_model.projector.config.pause_selection_mode == 'simple'
     assert strict_model.projector.config.use_boundary_commit_guard is False
     assert strict_model.projector.config.build_render_plan is False
+    simple_pause = _project_pause_simple_impl(
+        pause_weight_unit=torch.full((1, 4), 0.25),
+        boundary_latent=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
+        unit_mask=torch.ones(1, 4),
+        pause_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+        previous_pause_exec=None,
+        commit_frontier=torch.zeros(1, dtype=torch.long),
+        reuse_prefix=False,
+        pause_min_boundary_weight=0.10,
+        pause_boundary_bias_weight=0.15,
+    )
+    assert float(simple_pause[0, 2].item()) > float(simple_pause[0, 0].item())
+    compat_item = materialize_rhythm_cache_compat_fields({
+        "rhythm_cache_version": np.asarray([4], dtype=np.int64),
+        "rhythm_teacher_surface_name": np.asarray([RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME], dtype=np.str_),
+        "rhythm_retimed_target_surface_name": np.asarray([RHYTHM_GUIDANCE_SURFACE_NAME], dtype=np.str_),
+    })
+    assert infer_teacher_target_source_id_from_surface_name(RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME) == RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC
+    assert int(np.asarray(compat_item["rhythm_teacher_target_source_id"]).reshape(-1)[0]) == RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC
+    assert int(np.asarray(compat_item["rhythm_retimed_target_source_id"]).reshape(-1)[0]) == 0
+    assert is_rhythm_cache_version_compatible(4, RHYTHM_CACHE_VERSION) is True
+    assert 4 in compatible_rhythm_cache_versions(RHYTHM_CACHE_VERSION)
 
     cache_kd_hparams = dict(strict_hparams)
     cache_kd_hparams.update({
+        'rhythm_stage': 'student_kd',
         'lambda_rhythm_distill': 0.35,
         'rhythm_distill_surface': 'cache',
         'rhythm_require_cached_teacher': True,
@@ -112,6 +168,44 @@ if __name__ == '__main__':
     })
     cache_kd_model = build_streaming_rhythm_module_from_hparams(cache_kd_hparams)
     assert bool(getattr(cache_kd_model, 'enable_learned_offline_teacher', True)) is False
+
+    teacher_offline_hparams = dict(hparams)
+    teacher_offline_hparams.update({
+        'rhythm_stage': 'teacher_offline',
+        'rhythm_enable_dual_mode_teacher': False,
+        'rhythm_teacher_as_main': True,
+        'rhythm_schedule_only_stage': False,
+    })
+    assert detect_rhythm_stage(teacher_offline_hparams) == 'teacher_offline'
+    assert resolve_runtime_offline_teacher_enable(teacher_offline_hparams, stage='teacher_offline') is True
+    assert resolve_runtime_dual_mode_teacher_enable(teacher_offline_hparams, stage='teacher_offline', infer=False) is False
+    assert resolve_teacher_as_main(teacher_offline_hparams, stage='teacher_offline', infer=False) is True
+
+    student_kd_hparams = dict(cache_kd_hparams)
+    assert detect_rhythm_stage(student_kd_hparams) == 'student_kd'
+    assert resolve_runtime_offline_teacher_enable(student_kd_hparams, stage='student_kd') is False
+    assert resolve_runtime_dual_mode_teacher_enable(student_kd_hparams, stage='student_kd', infer=False) is False
+    assert resolve_teacher_as_main(student_kd_hparams, stage='student_kd', infer=False) is False
+
+    student_retimed_hparams = dict(student_kd_hparams)
+    student_retimed_hparams.update({
+        'rhythm_stage': 'student_retimed',
+        'rhythm_use_retimed_target_if_available': True,
+        'rhythm_apply_train_override': True,
+        'rhythm_apply_valid_override': True,
+        'rhythm_require_retimed_cache': True,
+    })
+    assert detect_rhythm_stage(student_retimed_hparams) == 'student_retimed'
+    assert resolve_runtime_offline_teacher_enable(student_retimed_hparams, stage='student_retimed') is False
+    assert resolve_runtime_dual_mode_teacher_enable(student_retimed_hparams, stage='student_retimed', infer=False) is False
+    assert resolve_teacher_as_main(student_retimed_hparams, stage='student_retimed', infer=False) is False
+
+    legacy_dual_hparams = dict(hparams)
+    legacy_dual_hparams.update({'rhythm_stage': 'legacy_dual_mode_kd'})
+    assert detect_rhythm_stage(legacy_dual_hparams) == 'legacy_dual_mode_kd'
+    assert resolve_runtime_offline_teacher_enable(legacy_dual_hparams, stage='legacy_dual_mode_kd') is True
+    assert resolve_runtime_dual_mode_teacher_enable(legacy_dual_hparams, stage='legacy_dual_mode_kd', infer=False) is True
+    assert resolve_teacher_as_main(legacy_dual_hparams, stage='legacy_dual_mode_kd', infer=False) is False
 
     teacher_flag_only_hparams = dict(schedule_hparams)
     teacher_flag_only_hparams.pop('rhythm_runtime_enable_learned_offline_teacher', None)
