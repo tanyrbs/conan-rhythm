@@ -17,8 +17,8 @@ sort_by_len: true
 dl_pin_memory: true
 dl_persistent_workers: true
 dl_prefetch_factor: 2
-ddp_find_unused_parameters: true
-ddp_static_graph: false
+ddp_find_unused_parameters: auto
+ddp_static_graph: auto
 
 #########
 # train and eval

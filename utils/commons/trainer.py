@@ -23,6 +23,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from utils.commons.ckpt_utils import get_last_checkpoint, get_all_ckpts
+from utils.commons.ddp_config import load_ddp_logging_data, resolve_ddp_runtime_config, save_ddp_logging_data
 from utils.commons.ddp_utils import DDP
 from utils.commons.hparams import hparams
 from utils.commons.trainer_loop import TrainerLoopMixin
@@ -204,6 +205,7 @@ class Trainer(TrainerLoopMixin):
                 self.run_evaluation(test=True)
             else:
                 self.train()
+                self.maybe_save_ddp_logging_data()
         except KeyboardInterrupt as e:
             traceback.print_exc()
             task_ref.on_keyboard_interrupt()
@@ -287,6 +289,7 @@ class Trainer(TrainerLoopMixin):
         ckpt_path = f'{self.work_dir}/model_ckpt_steps_{self.global_step}.ckpt'
         logging.info(f'Epoch {epoch:05d}@{self.global_step}: saving model to {ckpt_path}')
         self._atomic_save(ckpt_path)
+        self.maybe_save_ddp_logging_data()
         for old_ckpt in get_all_ckpts(self.work_dir)[self.num_ckpt_keep:]:
             remove_file(old_ckpt)
             logging.info(f'Delete ckpt: {os.path.basename(old_ckpt)}')
@@ -326,15 +329,55 @@ class Trainer(TrainerLoopMixin):
     ####################
     # DDP
     ####################
+    def _ddp_logging_data_path(self):
+        return os.path.join(self.work_dir, 'ddp_logging_data.json')
+
+    def _load_ddp_logging_hint(self):
+        return load_ddp_logging_data(self._ddp_logging_data_path())
+
+    def maybe_save_ddp_logging_data(self):
+        if self.proc_rank != 0 or not isinstance(self.task, DDP):
+            return
+        if not hasattr(self.task, '_get_ddp_logging_data'):
+            return
+        try:
+            logging_data = self.task._get_ddp_logging_data()
+        except Exception as exc:  # pragma: no cover
+            logging.warning('Failed to query DDP logging data: %s', exc)
+            return
+        save_ddp_logging_data(
+            self._ddp_logging_data_path(),
+            logging_data,
+            global_step=self.global_step,
+            epoch=self.current_epoch,
+        )
+
     def configure_ddp(self, task):
-        find_unused = bool(hparams.get('ddp_find_unused_parameters', True))
-        static_graph = bool(hparams.get('ddp_static_graph', False))
+        ddp_logging_data = self._load_ddp_logging_hint()
+        find_unused, static_graph = resolve_ddp_runtime_config(
+            hparams.get('ddp_find_unused_parameters', 'auto'),
+            hparams.get('ddp_static_graph', 'auto'),
+            ddp_logging_data=ddp_logging_data,
+            default_find_unused=True,
+            default_static_graph=False,
+        )
         ddp_kwargs = {
             'device_ids': [self.root_gpu],
             'find_unused_parameters': find_unused,
         }
-        if 'static_graph' in inspect.signature(DDP.__init__).parameters:
+        supports_static_graph = 'static_graph' in inspect.signature(DDP.__init__).parameters
+        if supports_static_graph:
             ddp_kwargs['static_graph'] = static_graph
+        elif static_graph:
+            logging.warning(
+                'DDP static_graph resolved true but current DistributedDataParallel does not expose static_graph.'
+            )
+        logging.info(
+            'DDP config resolved: find_unused_parameters=%s, static_graph=%s, can_set_static_graph=%s',
+            find_unused,
+            static_graph,
+            bool(ddp_logging_data.get('can_set_static_graph', False)),
+        )
         task = DDP(task, **ddp_kwargs)
         random.seed(self.seed)
         np.random.seed(self.seed)
