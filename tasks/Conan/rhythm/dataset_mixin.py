@@ -11,25 +11,11 @@ from utils.commons.dataset_utils import collate_1d_or_2d
 import numpy as np
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
-from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_numpy
+from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
-    RHYTHM_GUIDANCE_SURFACE_NAME,
-    RHYTHM_REFERENCE_MODE_STATIC_REF_FULL,
-    RHYTHM_RETIMED_SOURCE_GUIDANCE,
-    RHYTHM_RETIMED_SOURCE_TEACHER,
-    RHYTHM_TEACHER_SURFACE_NAME,
-    RHYTHM_TRACE_HOP_MS,
-    RHYTHM_UNIT_HOP_MS,
-    build_reference_guided_targets,
     build_reference_rhythm_conditioning,
-    build_reference_teacher_targets,
-    build_retimed_mel_target,
     build_source_rhythm_cache,
-    compatible_rhythm_cache_versions,
-    is_rhythm_cache_version_compatible,
-    materialize_rhythm_cache_compat_fields,
-    with_blank_aliases,
 )
 from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
 from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
@@ -224,6 +210,13 @@ class RhythmConanDatasetMixin:
             assembler = RhythmDatasetSampleAssembler(self)
             self._cached_rhythm_sample_assembler = assembler
         return assembler
+
+    def _rhythm_target_builder(self) -> RhythmDatasetTargetBuilder:
+        builder = getattr(self, "_cached_rhythm_target_builder", None)
+        if builder is None:
+            builder = RhythmDatasetTargetBuilder(self)
+            self._cached_rhythm_target_builder = builder
+        return builder
 
     def _resolve_primary_target_surface(self) -> str:
         return self._rhythm_policy().primary_target_surface
@@ -606,112 +599,12 @@ class RhythmConanDatasetMixin:
         return target_mode != "runtime_only" and has_cached
 
     def _adapt_cached_targets_to_prefix(self, *, item, cached_targets, source_cache, sample):
-        visible_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
-        full_units = int(np.asarray(item["dur_anchor_src"]).reshape(-1).shape[0]) if "dur_anchor_src" in item else visible_units
-        if visible_units >= full_units:
-            return with_blank_aliases(dict(cached_targets))
-        adapted = with_blank_aliases(dict(cached_targets))
-        visible_anchor = np.asarray(source_cache["dur_anchor_src"]).reshape(-1).astype(np.float32)
-        full_anchor = (
-            np.asarray(item["dur_anchor_src"]).reshape(-1)[:visible_units].astype(np.float32)
-            if "dur_anchor_src" in item
-            else visible_anchor.copy()
+        return self._rhythm_target_builder().adapt_cached_targets_to_prefix(
+            item=item,
+            cached_targets=cached_targets,
+            source_cache=source_cache,
+            sample=sample,
         )
-        unit_keys = [
-            "rhythm_speech_exec_tgt",
-            "rhythm_pause_exec_tgt",
-            "rhythm_blank_exec_tgt",
-            "rhythm_guidance_speech_tgt",
-            "rhythm_guidance_pause_tgt",
-            "rhythm_guidance_blank_tgt",
-            "rhythm_teacher_speech_exec_tgt",
-            "rhythm_teacher_pause_exec_tgt",
-            "rhythm_teacher_blank_exec_tgt",
-            "rhythm_teacher_allocation_tgt",
-            "rhythm_teacher_prefix_clock_tgt",
-            "rhythm_teacher_prefix_backlog_tgt",
-        ]
-        for key in unit_keys:
-            if key in adapted:
-                adapted[key] = np.asarray(adapted[key]).reshape(-1)[:visible_units].astype(np.float32)
-        if visible_units > 0 and full_anchor.shape[0] >= visible_units:
-            tail_full = float(full_anchor[visible_units - 1])
-            tail_visible = float(visible_anchor[visible_units - 1])
-            tail_ratio = tail_visible / max(tail_full, 1e-6)
-            if tail_ratio < 0.999999:
-                for key in (
-                    "rhythm_speech_exec_tgt",
-                    "rhythm_pause_exec_tgt",
-                    "rhythm_blank_exec_tgt",
-                    "rhythm_guidance_speech_tgt",
-                    "rhythm_guidance_pause_tgt",
-                    "rhythm_guidance_blank_tgt",
-                    "rhythm_teacher_speech_exec_tgt",
-                    "rhythm_teacher_pause_exec_tgt",
-                    "rhythm_teacher_blank_exec_tgt",
-                ):
-                    if key in adapted:
-                        arr = np.asarray(adapted[key]).reshape(-1).astype(np.float32)
-                        arr[-1] *= float(tail_ratio)
-                        adapted[key] = arr
-        if "rhythm_teacher_allocation_tgt" in adapted:
-            if "rhythm_teacher_speech_exec_tgt" in adapted and "rhythm_teacher_pause_exec_tgt" in adapted:
-                alloc = (
-                    np.asarray(adapted["rhythm_teacher_speech_exec_tgt"]).reshape(-1).astype(np.float32)
-                    + np.asarray(adapted["rhythm_teacher_pause_exec_tgt"]).reshape(-1).astype(np.float32)
-                )
-            else:
-                alloc = np.asarray(adapted["rhythm_teacher_allocation_tgt"]).reshape(-1).astype(np.float32)
-            alloc = alloc * (visible_anchor > 0).astype(np.float32)
-            denom = float(np.maximum(alloc.sum(), 1e-6))
-            adapted["rhythm_teacher_allocation_tgt"] = alloc / denom
-        if "rhythm_speech_exec_tgt" in adapted:
-            adapted["rhythm_speech_budget_tgt"] = np.asarray(
-                [float(np.asarray(adapted["rhythm_speech_exec_tgt"]).sum())], dtype=np.float32
-            )
-        if "rhythm_pause_exec_tgt" in adapted:
-            adapted["rhythm_pause_budget_tgt"] = np.asarray(
-                [float(np.asarray(adapted["rhythm_pause_exec_tgt"]).sum())], dtype=np.float32
-            )
-            adapted["rhythm_blank_budget_tgt"] = adapted["rhythm_pause_budget_tgt"].copy()
-        if "rhythm_teacher_speech_exec_tgt" in adapted:
-            adapted["rhythm_teacher_speech_budget_tgt"] = np.asarray(
-                [float(np.asarray(adapted["rhythm_teacher_speech_exec_tgt"]).sum())], dtype=np.float32
-            )
-        if "rhythm_teacher_pause_exec_tgt" in adapted:
-            adapted["rhythm_teacher_pause_budget_tgt"] = np.asarray(
-                [float(np.asarray(adapted["rhythm_teacher_pause_exec_tgt"]).sum())], dtype=np.float32
-            )
-            adapted["rhythm_teacher_blank_budget_tgt"] = adapted["rhythm_teacher_pause_budget_tgt"].copy()
-        if "rhythm_teacher_speech_exec_tgt" in adapted and "rhythm_teacher_pause_exec_tgt" in adapted:
-            prefix_clock, prefix_backlog = build_prefix_state_from_exec_numpy(
-                speech_exec=adapted["rhythm_teacher_speech_exec_tgt"],
-                pause_exec=adapted["rhythm_teacher_pause_exec_tgt"],
-                dur_anchor_src=visible_anchor,
-                unit_mask=(visible_anchor > 0).astype(np.float32),
-            )
-            adapted["rhythm_teacher_prefix_clock_tgt"] = prefix_clock.astype(np.float32)
-            adapted["rhythm_teacher_prefix_backlog_tgt"] = prefix_backlog.astype(np.float32)
-        if "rhythm_retimed_mel_tgt" in adapted:
-            source_id = int(np.asarray(adapted.get("rhythm_retimed_target_source_id", [RHYTHM_RETIMED_SOURCE_GUIDANCE])).reshape(-1)[0])
-            if source_id == RHYTHM_RETIMED_SOURCE_TEACHER and "rhythm_teacher_speech_exec_tgt" in adapted:
-                speech_key = "rhythm_teacher_speech_exec_tgt"
-                pause_key = "rhythm_teacher_pause_exec_tgt"
-            else:
-                speech_key = "rhythm_speech_exec_tgt"
-                pause_key = "rhythm_pause_exec_tgt"
-            adapted.update(
-                build_retimed_mel_target(
-                    mel=sample["mel"].cpu().numpy(),
-                    dur_anchor_src=source_cache["dur_anchor_src"],
-                    speech_exec_tgt=adapted[speech_key],
-                    pause_exec_tgt=adapted[pause_key],
-                    unit_mask=(np.asarray(source_cache["dur_anchor_src"]) > 0).astype(np.float32),
-                    pause_frame_weight=float(self.hparams.get("rhythm_retimed_pause_frame_weight", 0.20)),
-                    stretch_weight_min=float(self.hparams.get("rhythm_retimed_stretch_weight_min", 0.35)),
-                )
-            )
-        return with_blank_aliases(adapted)
 
     def _get_source_rhythm_cache(self, item, visible_tokens, *, target_mode: str):
         cache_keys = self._RHYTHM_SOURCE_CACHE_KEYS
@@ -782,127 +675,15 @@ class RhythmConanDatasetMixin:
         return conditioning
 
     def _build_runtime_rhythm_targets(self, source_cache, ref_conditioning):
-        unit_mask = (np.asarray(source_cache["dur_anchor_src"]) > 0).astype(np.float32)
-        shared_kwargs = dict(
-            dur_anchor_src=source_cache["dur_anchor_src"],
-            unit_mask=unit_mask,
-            ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
-            ref_rhythm_trace=ref_conditioning["ref_rhythm_trace"],
-            rate_scale_min=float(self.hparams.get("rhythm_guidance_rate_scale_min", 0.60)),
-            rate_scale_max=float(self.hparams.get("rhythm_guidance_rate_scale_max", 1.80)),
-            local_rate_strength=float(self.hparams.get("rhythm_guidance_local_rate_strength", 0.35)),
-            segment_bias_strength=float(self.hparams.get("rhythm_guidance_segment_bias_strength", 0.25)),
-            pause_strength=float(self.hparams.get("rhythm_guidance_pause_strength", 1.00)),
-            boundary_strength=float(self.hparams.get("rhythm_guidance_boundary_strength", 1.25)),
-            pause_budget_ratio_cap=float(self.hparams.get("rhythm_guidance_pause_budget_ratio_cap", 0.75)),
-        )
-        teacher_kwargs = dict(
-            dur_anchor_src=source_cache["dur_anchor_src"],
-            unit_mask=unit_mask,
-            source_boundary_cue=source_cache.get("source_boundary_cue", source_cache.get("boundary_confidence")),
-            ref_rhythm_stats=ref_conditioning["ref_rhythm_stats"],
-            ref_rhythm_trace=ref_conditioning["ref_rhythm_trace"],
-            rate_scale_min=float(self.hparams.get("rhythm_teacher_rate_scale_min", 0.55)),
-            rate_scale_max=float(self.hparams.get("rhythm_teacher_rate_scale_max", 1.95)),
-            local_rate_strength=float(self.hparams.get("rhythm_teacher_local_rate_strength", 0.45)),
-            segment_bias_strength=float(self.hparams.get("rhythm_teacher_segment_bias_strength", 0.30)),
-            pause_strength=float(self.hparams.get("rhythm_teacher_pause_strength", 1.10)),
-            boundary_strength=float(self.hparams.get("rhythm_teacher_boundary_strength", 1.50)),
-            pause_budget_ratio_cap=float(self.hparams.get("rhythm_teacher_pause_budget_ratio_cap", 0.80)),
-            speech_smooth_kernel=int(self.hparams.get("rhythm_teacher_speech_smooth_kernel", 3)),
-            pause_topk_ratio=float(self.hparams.get("rhythm_teacher_pause_topk_ratio", 0.30)),
-        )
-        targets = {}
-        primary_surface = self._resolve_primary_target_surface()
-        distill_surface = self._resolve_distill_surface()
-        teacher_target_source = self._resolve_teacher_target_source()
-        need_guidance = primary_surface == "guidance" or float(self.hparams.get("lambda_rhythm_guidance", 0.0)) > 0
-        need_teacher = (
-            primary_surface == "teacher"
-            or bool(self.hparams.get("rhythm_require_cached_teacher", False))
-            or (float(self.hparams.get("lambda_rhythm_distill", 0.0)) > 0 and distill_surface == "algorithmic")
-            or (
-                bool(self.hparams.get("rhythm_use_retimed_target_if_available", False))
-                and str(self.hparams.get("rhythm_binarize_retimed_mel_source", "guidance")).strip().lower() == "teacher"
-            )
-        )
-        if self.hparams.get("rhythm_dataset_build_guidance_from_ref", True) or need_guidance:
-            targets.update(build_reference_guided_targets(**shared_kwargs))
-        if self.hparams.get("rhythm_dataset_build_teacher_from_ref", False) or need_teacher:
-            if teacher_target_source != "algorithmic":
-                if need_teacher:
-                    raise RuntimeError(
-                        "Rhythm runtime teacher synthesis only supports rhythm_teacher_target_source=algorithmic. "
-                        "Use cached_only with precomputed learned_offline teacher surfaces."
-                    )
-            else:
-                targets.update(build_reference_teacher_targets(**teacher_kwargs))
-        return targets
+        return self._rhythm_target_builder().build_runtime_rhythm_targets(source_cache, ref_conditioning)
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, sample):
-        target_mode = self._resolve_rhythm_target_mode()
-        cached_targets = {key: item[key] for key in self._RHYTHM_TARGET_KEYS if key in item}
-        cached_targets.update({key: item[key] for key in self._RHYTHM_META_KEYS if key in item})
-        if target_mode == "cached_only":
-            item_name = str(item.get("item_name", "<unknown-item>"))
-            self._validate_rhythm_cache_contract(item, item_name=item_name)
-            self._require_cached_keys(
-                item=item,
-                keys=self._required_cached_target_keys(),
-                item_name=item_name,
-                reason="rhythm targets/meta cache",
-            )
-            if "rhythm_teacher_surface_name" in item:
-                teacher_name = str(self._extract_scalar(item["rhythm_teacher_surface_name"]))
-                expected_teacher_name = self._resolve_expected_teacher_surface_name()
-                if teacher_name != expected_teacher_name:
-                    raise RuntimeError(
-                        f"Rhythm teacher surface mismatch in {item_name}: "
-                        f"found={teacher_name}, expected={expected_teacher_name}. Re-binarize the dataset."
-                    )
-            if "rhythm_teacher_target_source_id" in item:
-                found_source_id = int(self._extract_scalar(item["rhythm_teacher_target_source_id"]))
-                expected_source_id = self._resolve_expected_teacher_target_source_id()
-                if found_source_id != expected_source_id:
-                    raise RuntimeError(
-                        f"Rhythm teacher target source mismatch in {item_name}: "
-                        f"found={found_source_id}, expected={expected_source_id}. Re-binarize the dataset."
-                    )
-            if bool(self.hparams.get("rhythm_require_retimed_cache", False)):
-                self._validate_retimed_cache_contract(item, item_name=item_name)
-            cached_targets = self._adapt_cached_targets_to_prefix(
-                item=item,
-                cached_targets=cached_targets,
-                source_cache=source_cache,
-                sample=sample,
-            )
-            self._validate_target_shapes(
-                cached_targets,
-                item_name=item_name,
-                expected_units=int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0]),
-            )
-            return cached_targets
-
-        runtime_targets = self._build_runtime_rhythm_targets(source_cache, ref_conditioning)
-        if target_mode == "runtime_only":
-            return runtime_targets
-
-        merged = dict(cached_targets)
-        for key, value in runtime_targets.items():
-            merged.setdefault(key, value)
-        if "rhythm_speech_exec_tgt" in merged:
-            merged = self._adapt_cached_targets_to_prefix(
-                item=item,
-                cached_targets=merged,
-                source_cache=source_cache,
-                sample=sample,
-            )
-            self._validate_target_shapes(
-                merged,
-                item_name=str(item.get("item_name", "<unknown-item>")),
-                expected_units=int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0]),
-            )
-        return merged
+        return self._rhythm_target_builder().merge_rhythm_targets(
+            item=item,
+            source_cache=source_cache,
+            ref_conditioning=ref_conditioning,
+            sample=sample,
+        )
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)

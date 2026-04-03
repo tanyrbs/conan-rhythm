@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from tasks.Conan.base_gen_task import f0_to_figure
-from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
 from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
 from tasks.Conan.rhythm.distill_confidence import (
@@ -28,6 +27,7 @@ from tasks.Conan.rhythm.runtime_modes import (
     resolve_task_runtime_state,
 )
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
+from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 from tasks.Conan.rhythm.task_config import (
     parse_task_optional_bool,
     resolve_task_distill_surface,
@@ -61,6 +61,13 @@ from utils.nn.seq_utils import weights_nonzero_speech
 
 
 class RhythmConanTaskMixin:
+    def _task_runtime_support(self) -> RhythmTaskRuntimeSupport:
+        helper = getattr(self, "_cached_rhythm_task_runtime_support", None)
+        if helper is None:
+            helper = RhythmTaskRuntimeSupport(self)
+            self._cached_rhythm_task_runtime_support = helper
+        return helper
+
     @staticmethod
     def _validate_rhythm_training_hparams():
         validate_rhythm_training_hparams(hparams)
@@ -81,17 +88,7 @@ class RhythmConanTaskMixin:
             params.extend(list(self.model.rhythm_render_phase_mlp.parameters()))
         if optimize_render_params and getattr(self.model, "rhythm_render_phase_gain", None) is not None:
             params.append(self.model.rhythm_render_phase_gain)
-        dedup = []
-        seen = set()
-        for param in params:
-            if param is None or not getattr(param, "requires_grad", False):
-                continue
-            key = id(param)
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(param)
-        return dedup
+        return self._task_runtime_support().dedup_trainable_params(params)
 
     @staticmethod
     def _should_skip_rhythm_named_param(name: str) -> bool:
@@ -119,17 +116,7 @@ class RhythmConanTaskMixin:
                 if self._should_skip_rhythm_named_param(f"offline_teacher.{name}"):
                     continue
                 params.append(param)
-        dedup = []
-        seen = set()
-        for param in params:
-            if param is None or not getattr(param, "requires_grad", False):
-                continue
-            key = id(param)
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(param)
-        return dedup
+        return self._task_runtime_support().dedup_trainable_params(params)
 
     @staticmethod
     def _get_rhythm_prefix_state_lambda() -> float:
@@ -252,26 +239,8 @@ class RhythmConanTaskMixin:
             power=float(hparams.get("rhythm_distill_confidence_power", 1.0)),
         )
 
-    @staticmethod
-    def _build_rhythm_target_build_config() -> RhythmTargetBuildConfig:
-        plan_local_weight, plan_cum_weight = RhythmConanTaskMixin._resolve_rhythm_plan_weights()
-        return RhythmTargetBuildConfig(
-            primary_target_surface=RhythmConanTaskMixin._resolve_rhythm_primary_target_surface(),
-            distill_surface=RhythmConanTaskMixin._resolve_rhythm_distill_surface(),
-            lambda_guidance=float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0),
-            lambda_distill=float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0),
-            distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
-            distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
-            distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
-            distill_speech_shape_weight=float(hparams.get("rhythm_distill_speech_shape_weight", 0.0)),
-            distill_pause_shape_weight=float(hparams.get("rhythm_distill_pause_shape_weight", 0.0)),
-            plan_local_weight=plan_local_weight,
-            plan_cum_weight=plan_cum_weight,
-            pause_boundary_weight=RhythmConanTaskMixin._resolve_rhythm_pause_boundary_weight(),
-            budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
-            budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
-            feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
-        )
+    def _build_rhythm_target_build_config(self) -> RhythmTargetBuildConfig:
+        return self._task_runtime_support().build_rhythm_target_build_config()
 
     @staticmethod
     def _resolve_rhythm_plan_weights() -> tuple[float, float]:
@@ -467,25 +436,12 @@ class RhythmConanTaskMixin:
             "disable_acoustic_train_path": 1.0,
             "rhythm_schedule_only_stage": 0.0,
             "rhythm_teacher_only_stage": 1.0,
-            "rhythm_offline_confidence": confidence.get("overall") if isinstance(confidence, dict) else None,
-            "rhythm_offline_confidence_exec": confidence.get("exec") if isinstance(confidence, dict) else None,
-            "rhythm_offline_confidence_budget": confidence.get("budget") if isinstance(confidence, dict) else None,
-            "rhythm_offline_confidence_prefix": confidence.get("prefix") if isinstance(confidence, dict) else None,
-            "rhythm_offline_confidence_allocation": confidence.get("allocation") if isinstance(confidence, dict) else None,
-            "rhythm_offline_confidence_shape": (
-                confidence.get("shape", confidence.get("exec")) if isinstance(confidence, dict) else None
-            ),
+            **self._task_runtime_support().build_offline_confidence_outputs(confidence),
         }
         output.update(collect_planner_runtime_outputs(execution))
         losses = {}
         self.add_rhythm_loss(output, sample, losses)
-        route_conan_optimizer_losses(
-            losses,
-            mel_loss_names=tuple(self.mel_losses.keys()),
-            hparams=hparams,
-            schedule_only_stage=False,
-        )
-        update_public_loss_aliases(losses, mel_loss_names=tuple(self.mel_losses.keys()))
+        self._task_runtime_support().route_conan_losses(losses, schedule_only_stage=False)
         return losses, output
 
     def run_model(self, sample, infer=False, test=False, **kwargs):
@@ -493,10 +449,7 @@ class RhythmConanTaskMixin:
         # mel2ph = sample["mel2ph"]
         # spk_id = sample["spk_ids"]
         content = sample["content"]
-        if 'spk_embed' in sample:
-            spk_embed = sample["spk_embed"]
-        else:
-            spk_embed=None
+        spk_embed = sample.get("spk_embed")
         f0, uv = sample.get("f0", None), sample.get("uv", None)
         # notes, note_durs, note_types = sample["notes"], sample["note_durs"], sample["note_types"]
 
@@ -557,21 +510,27 @@ class RhythmConanTaskMixin:
         disable_source_pitch_supervision = bool(disable_source_pitch_supervision or disable_acoustic_train_path)
         if disable_acoustic_train_path and rhythm_ref_conditioning is not None:
             ref = None
-        runtime_offline_source_cache = None
-        if self._use_runtime_dual_mode_teacher() and not bool(infer):
-            runtime_offline_source_cache = self._collect_rhythm_source_cache(sample, prefix="rhythm_offline_")
-        output = self.model(content,spk_embed=spk_embed, target=target,ref=ref,
-                            f0=None if disable_source_pitch_supervision else f0,
-                            uv=None if disable_source_pitch_supervision else uv,
-                            infer=infer, global_steps=effective_global_step,
-                            content_lengths=sample.get("mel_lengths"),
-                            ref_lengths=sample.get("ref_mel_lengths"),
-                            rhythm_apply_override=rhythm_apply_override,
-                            rhythm_state=kwargs.get("rhythm_state"),
-                            rhythm_ref_conditioning=rhythm_ref_conditioning,
-                            rhythm_source_cache=self._collect_rhythm_source_cache(sample),
-                            rhythm_offline_source_cache=runtime_offline_source_cache,
-                            disable_acoustic_train_path=disable_acoustic_train_path)
+        runtime_helper = self._task_runtime_support()
+        runtime_offline_source_cache = runtime_helper.collect_runtime_offline_source_cache(sample, infer=infer)
+        output = self.model(
+            content,
+            **runtime_helper.build_model_forward_kwargs(
+                sample=sample,
+                spk_embed=spk_embed,
+                target=target,
+                ref=ref,
+                f0=f0,
+                uv=uv,
+                infer=infer,
+                effective_global_step=effective_global_step,
+                rhythm_apply_override=rhythm_apply_override,
+                rhythm_ref_conditioning=rhythm_ref_conditioning,
+                disable_source_pitch_supervision=disable_source_pitch_supervision,
+                disable_acoustic_train_path=disable_acoustic_train_path,
+                runtime_offline_source_cache=runtime_offline_source_cache,
+                rhythm_state=kwargs.get("rhythm_state"),
+            ),
+        )
         acoustic_target, acoustic_target_is_retimed, acoustic_weight, acoustic_target_source = self._resolve_acoustic_target_post_model(
             sample,
             output,
@@ -583,21 +542,15 @@ class RhythmConanTaskMixin:
         output.update(collect_planner_runtime_outputs(output.get("rhythm_execution")))
         
         losses = {}
-        output["acoustic_target_mel"] = acoustic_target
-        output["acoustic_target_is_retimed"] = bool(acoustic_target_is_retimed)
-        output["acoustic_target_weight"] = acoustic_weight
-        output["acoustic_target_source"] = acoustic_target_source
-        output["rhythm_pitch_supervision_disabled"] = float(disable_source_pitch_supervision)
-        output["disable_acoustic_train_path"] = float(disable_acoustic_train_path)
-        if acoustic_target_is_retimed:
-            mel_out_aligned, acoustic_target, acoustic_weight = self._align_acoustic_target_to_output(
-                output['mel_out'],
-                acoustic_target,
-                acoustic_weight,
-            )
-            output['mel_out'] = mel_out_aligned
-            output["acoustic_target_mel"] = acoustic_target
-            output["acoustic_target_weight"] = acoustic_weight
+        acoustic_target, acoustic_weight = runtime_helper.attach_acoustic_target_bundle(
+            output,
+            acoustic_target=acoustic_target,
+            acoustic_target_is_retimed=acoustic_target_is_retimed,
+            acoustic_weight=acoustic_weight,
+            acoustic_target_source=acoustic_target_source,
+            disable_source_pitch_supervision=disable_source_pitch_supervision,
+            disable_acoustic_train_path=disable_acoustic_train_path,
+        )
         
         if not test:
             schedule_only_stage = stage == "legacy_schedule_only"
@@ -608,27 +561,8 @@ class RhythmConanTaskMixin:
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
                 self.add_pitch_loss(output, sample, losses)
             self.add_rhythm_loss(output, sample, losses)
-            if (
-                hparams['style']
-                and not schedule_only_stage
-                and not getattr(self.model, "rhythm_minimal_style_only", False)
-            ):
-                if (
-                    self.global_step > hparams['forcing']
-                    and self.global_step < hparams['random_speaker_steps']
-                    and 'gloss' in output
-                ):
-                    losses['gloss'] = output['gloss']
-                if self.global_step > hparams['vq_start'] and 'vq_loss' in output and 'ppl' in output:
-                    losses['vq_loss'] = output['vq_loss']
-                    losses['ppl'] = output['ppl']
-            route_conan_optimizer_losses(
-                losses,
-                mel_loss_names=tuple(self.mel_losses.keys()),
-                hparams=hparams,
-                schedule_only_stage=schedule_only_stage,
-            )
-            update_public_loss_aliases(losses, mel_loss_names=tuple(self.mel_losses.keys()))
+            runtime_helper.add_style_losses(output, losses, schedule_only_stage=schedule_only_stage)
+            runtime_helper.route_conan_losses(losses, schedule_only_stage=schedule_only_stage)
         
         return losses, output
 

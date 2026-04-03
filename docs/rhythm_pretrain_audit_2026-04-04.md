@@ -64,6 +64,15 @@ Six parallel code-path audits were used to re-check:
     - `rhythm_metric_budget_repair_ratio_mean`
     - `rhythm_metric_budget_repair_active_rate`
 
+### 2.5. Runtime teacher auxiliary slicing
+
+- `tasks/Conan/rhythm/runtime_teacher_supervision.py`
+  - sliced runtime teacher views no longer collapse raw/effective budgets into truncated exec sums
+  - prefix slicing now preserves raw-vs-exec / feasible-repair semantics proportionally instead of zeroing feasible deltas
+
+- `tests/rhythm/test_runtime_teacher_supervision.py`
+  - adds regression coverage for proportional prefix slicing and no-slice passthrough
+
 ### 3. Docs
 
 - `docs/rhythm_training_stages.md`
@@ -71,6 +80,14 @@ Six parallel code-path audits were used to re-check:
 
 - `docs/rhythm_train_runbook.md`
   - added the maintained pre-train runbook
+
+### 4. File-boundary cleanup
+
+- `tasks/Conan/rhythm/task_runtime_support.py`
+  - pulls runtime forwarding / acoustic target bundling / loss routing / offline-confidence packaging out of `task_mixin.py`
+
+- `tasks/Conan/rhythm/dataset_target_builder.py`
+  - pulls cached-prefix adaptation and runtime-target merge logic out of `dataset_mixin.py`
 
 ## Current hard blockers for formal training
 
@@ -91,19 +108,15 @@ These are real blockers, not style issues:
 
 These need another focused pass before claiming “fully train-ready mainline”:
 
-1. `runtime_teacher_supervision.py`
-   - sliced runtime teacher views rebuild budget surfaces from truncated exec sums
-   - this can blur teacher raw-vs-exec / repair semantics under `lambda_rhythm_teacher_aux > 0`
-
-2. `targets.py` / `config_contract_stage_rules.py`
+1. `targets.py` / `config_contract_stage_rules.py`
    - `student_kd` can still reuse the same cached teacher surface for both primary supervision and KD
    - current contract only warns; it does not force a cleaner separation
 
-3. dataset/runtime planner sidecar path
+2. dataset/runtime planner sidecar path
    - planner slow-rhythm sidecars are accepted by runtime conditioning
    - but dataset/collate/contract export is still incomplete, so sidecars can silently disappear
 
-4. projector derived-state contract
+3. projector derived-state contract
    - `phase_ptr` vs `phase_progress_ratio` semantics still deserve stronger regression coverage
 
 ## Validation run in this audit
