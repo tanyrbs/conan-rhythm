@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import torch
@@ -216,6 +216,313 @@ def _normalize_distill_confidences(
     )
 
 
+@dataclass(frozen=True)
+class DistillSurfaceBundle:
+    speech: Optional[torch.Tensor] = None
+    pause: Optional[torch.Tensor] = None
+    speech_budget: Optional[torch.Tensor] = None
+    pause_budget: Optional[torch.Tensor] = None
+    allocation: Optional[torch.Tensor] = None
+    prefix_clock: Optional[torch.Tensor] = None
+    prefix_backlog: Optional[torch.Tensor] = None
+    confidences: DistillConfidenceBundle = field(default_factory=DistillConfidenceBundle)
+
+    @property
+    def is_complete(self) -> bool:
+        return self.speech is not None and self.pause is not None
+
+
+def _required_rhythm_target_keys_present(sample: dict, keys: RhythmSampleKeyBundle) -> bool:
+    required_keys = (
+        keys.target_speech_key,
+        keys.target_pause_key,
+        keys.target_speech_budget_key,
+        keys.target_pause_budget_key,
+    )
+    return all(key in sample for key in required_keys)
+
+
+def _build_guidance_targets(
+    sample: dict,
+    keys: RhythmSampleKeyBundle,
+    config: RhythmTargetBuildConfig,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    if not config.use_guidance:
+        return None, None
+    return sample.get("rhythm_guidance_speech_tgt"), sample.get(keys.guidance_pause_key)
+
+
+def _build_cached_distill_surface(
+    sample: dict,
+    keys: RhythmSampleKeyBundle,
+    config: RhythmTargetBuildConfig,
+) -> DistillSurfaceBundle:
+    return DistillSurfaceBundle(
+        speech=sample.get("rhythm_teacher_speech_exec_tgt"),
+        pause=sample.get(keys.teacher_pause_key),
+        speech_budget=sample.get("rhythm_teacher_speech_budget_tgt") if config.use_distill_budget else None,
+        pause_budget=sample.get(keys.teacher_pause_budget_key) if config.use_distill_budget else None,
+        allocation=sample.get("rhythm_teacher_allocation_tgt") if config.use_distill_allocation else None,
+        prefix_clock=sample.get("rhythm_teacher_prefix_clock_tgt") if config.use_distill_prefix else None,
+        prefix_backlog=sample.get("rhythm_teacher_prefix_backlog_tgt") if config.use_distill_prefix else None,
+        confidences=DistillConfidenceBundle(
+            shared=_detach_optional(sample.get("rhythm_teacher_confidence")),
+            exec=_detach_optional(sample.get("rhythm_teacher_confidence_exec")),
+            budget=_detach_optional(sample.get("rhythm_teacher_confidence_budget")),
+            prefix=_detach_optional(sample.get("rhythm_teacher_confidence_prefix")),
+            allocation=_detach_optional(sample.get("rhythm_teacher_confidence_allocation")),
+            shape=_detach_optional(sample.get("rhythm_teacher_confidence_shape")),
+        ),
+    )
+
+
+def _build_offline_distill_confidences(
+    offline_confidences: DistillConfidenceBundle | None,
+    reference_speech: torch.Tensor,
+) -> DistillConfidenceBundle:
+    offline_confidences = offline_confidences or DistillConfidenceBundle()
+    confidences = DistillConfidenceBundle(
+        shared=_detach_optional(offline_confidences.shared),
+        exec=_detach_optional(offline_confidences.exec),
+        budget=_detach_optional(offline_confidences.budget),
+        prefix=_detach_optional(offline_confidences.prefix),
+        allocation=_detach_optional(offline_confidences.allocation),
+        shape=_detach_optional(offline_confidences.shape),
+    )
+    if confidences.shared is not None:
+        return confidences
+    return DistillConfidenceBundle(
+        shared=reference_speech.new_ones((reference_speech.size(0), 1)),
+        exec=confidences.exec,
+        budget=confidences.budget,
+        prefix=confidences.prefix,
+        allocation=confidences.allocation,
+        shape=confidences.shape,
+    )
+
+
+def _build_runtime_offline_distill_surface(
+    runtime_teacher,
+    *,
+    unit_batch,
+    config: RhythmTargetBuildConfig,
+    offline_confidences: DistillConfidenceBundle | None,
+    slice_rhythm_surface_to_student: SliceSurfaceFn,
+) -> DistillSurfaceBundle:
+    speech = runtime_teacher.speech_duration_exec.detach()
+    pause = getattr(runtime_teacher, "blank_duration_exec", runtime_teacher.pause_after_exec).detach()
+    (
+        speech,
+        pause,
+        speech_budget,
+        pause_budget,
+        allocation,
+        prefix_clock,
+        prefix_backlog,
+    ) = slice_rhythm_surface_to_student(
+        speech_exec=speech,
+        pause_exec=pause,
+        student_units=unit_batch.dur_anchor_src.size(1),
+        dur_anchor_src=unit_batch.dur_anchor_src,
+        unit_mask=unit_batch.unit_mask,
+    )
+    if not config.use_distill_budget:
+        speech_budget = None
+        pause_budget = None
+    if not config.use_distill_allocation:
+        allocation = None
+    if not config.use_distill_prefix:
+        prefix_clock = None
+        prefix_backlog = None
+    return DistillSurfaceBundle(
+        speech=speech,
+        pause=pause,
+        speech_budget=speech_budget,
+        pause_budget=pause_budget,
+        allocation=allocation,
+        prefix_clock=prefix_clock,
+        prefix_backlog=prefix_backlog,
+        confidences=_build_offline_distill_confidences(offline_confidences, speech),
+    )
+
+
+def _build_algorithmic_distill_surface(
+    algorithmic_teacher,
+    config: RhythmTargetBuildConfig,
+) -> DistillSurfaceBundle:
+    return DistillSurfaceBundle(
+        speech=algorithmic_teacher.speech_exec_tgt.detach(),
+        pause=algorithmic_teacher.pause_exec_tgt.detach(),
+        speech_budget=algorithmic_teacher.speech_budget_tgt.detach() if config.use_distill_budget else None,
+        pause_budget=algorithmic_teacher.pause_budget_tgt.detach() if config.use_distill_budget else None,
+        allocation=algorithmic_teacher.allocation_tgt.detach() if config.use_distill_allocation else None,
+        prefix_clock=algorithmic_teacher.prefix_clock_tgt.detach() if config.use_distill_prefix else None,
+        prefix_backlog=algorithmic_teacher.prefix_backlog_tgt.detach() if config.use_distill_prefix else None,
+        confidences=DistillConfidenceBundle(shared=algorithmic_teacher.confidence.detach()),
+    )
+
+
+def _maybe_slice_distill_surface_to_student(
+    bundle: DistillSurfaceBundle,
+    *,
+    unit_batch,
+    slice_rhythm_surface_to_student: SliceSurfaceFn,
+) -> DistillSurfaceBundle:
+    if not bundle.is_complete or bundle.speech.size(1) == unit_batch.dur_anchor_src.size(1):
+        return bundle
+    (
+        speech,
+        pause,
+        speech_budget,
+        pause_budget,
+        allocation,
+        prefix_clock,
+        prefix_backlog,
+    ) = slice_rhythm_surface_to_student(
+        speech_exec=bundle.speech,
+        pause_exec=bundle.pause,
+        student_units=unit_batch.dur_anchor_src.size(1),
+        dur_anchor_src=unit_batch.dur_anchor_src,
+        unit_mask=unit_batch.unit_mask,
+    )
+    return replace(
+        bundle,
+        speech=speech,
+        pause=pause,
+        speech_budget=speech_budget,
+        pause_budget=pause_budget,
+        allocation=allocation,
+        prefix_clock=prefix_clock,
+        prefix_backlog=prefix_backlog,
+    )
+
+
+def _populate_distill_surface_fields(
+    bundle: DistillSurfaceBundle,
+    *,
+    unit_batch,
+    config: RhythmTargetBuildConfig,
+    build_prefix_carry_from_exec: BuildPrefixCarryFn,
+) -> DistillSurfaceBundle:
+    if not bundle.is_complete:
+        return bundle
+    allocation = bundle.allocation
+    prefix_clock = bundle.prefix_clock
+    prefix_backlog = bundle.prefix_backlog
+    if config.use_distill_allocation and allocation is None:
+        allocation = (bundle.speech.float() + bundle.pause.float()) * unit_batch.unit_mask.float()
+    if config.use_distill_prefix and (prefix_clock is None or prefix_backlog is None):
+        prefix_clock, prefix_backlog = build_prefix_carry_from_exec(
+            bundle.speech,
+            bundle.pause,
+            unit_batch.dur_anchor_src,
+            unit_batch.unit_mask,
+        )
+    return replace(bundle, allocation=allocation, prefix_clock=prefix_clock, prefix_backlog=prefix_backlog)
+
+
+def _normalize_distill_surface_confidences(
+    bundle: DistillSurfaceBundle,
+    *,
+    unit_batch,
+    normalize_distill_confidence: NormalizeConfidenceFn,
+    normalize_component_confidence: NormalizeConfidenceFn,
+) -> DistillSurfaceBundle:
+    normalized_confidences = _normalize_distill_confidences(
+        confidence_bundle=bundle.confidences,
+        batch_size=unit_batch.dur_anchor_src.size(0),
+        device=unit_batch.dur_anchor_src.device,
+        normalize_distill_confidence=normalize_distill_confidence,
+        normalize_component_confidence=normalize_component_confidence,
+    )
+    return replace(bundle, confidences=normalized_confidences)
+
+
+def _resolve_distill_surface_bundle(
+    *,
+    sample: dict,
+    keys: RhythmSampleKeyBundle,
+    unit_batch,
+    config: RhythmTargetBuildConfig,
+    runtime_teacher=None,
+    algorithmic_teacher=None,
+    offline_confidences: DistillConfidenceBundle | None = None,
+    normalize_distill_confidence: NormalizeConfidenceFn,
+    normalize_component_confidence: NormalizeConfidenceFn,
+    build_prefix_carry_from_exec: BuildPrefixCarryFn,
+    slice_rhythm_surface_to_student: SliceSurfaceFn,
+) -> DistillSurfaceBundle:
+    bundle = DistillSurfaceBundle()
+    if config.use_distill and config.distill_surface in {"auto", "cache"}:
+        bundle = _build_cached_distill_surface(sample, keys, config)
+    if (
+        config.use_distill
+        and bundle.speech is None
+        and config.distill_surface in {"auto", "offline"}
+        and runtime_teacher is not None
+    ):
+        bundle = _build_runtime_offline_distill_surface(
+            runtime_teacher,
+            unit_batch=unit_batch,
+            config=config,
+            offline_confidences=offline_confidences,
+            slice_rhythm_surface_to_student=slice_rhythm_surface_to_student,
+        )
+    if (
+        config.use_distill
+        and bundle.speech is None
+        and config.distill_surface in {"auto", "algorithmic"}
+        and algorithmic_teacher is not None
+    ):
+        bundle = _build_algorithmic_distill_surface(algorithmic_teacher, config)
+    if not config.use_distill or not bundle.is_complete:
+        return DistillSurfaceBundle()
+    bundle = _maybe_slice_distill_surface_to_student(
+        bundle,
+        unit_batch=unit_batch,
+        slice_rhythm_surface_to_student=slice_rhythm_surface_to_student,
+    )
+    bundle = _populate_distill_surface_fields(
+        bundle,
+        unit_batch=unit_batch,
+        config=config,
+        build_prefix_carry_from_exec=build_prefix_carry_from_exec,
+    )
+    return _normalize_distill_surface_confidences(
+        bundle,
+        unit_batch=unit_batch,
+        normalize_distill_confidence=normalize_distill_confidence,
+        normalize_component_confidence=normalize_component_confidence,
+    )
+
+
+def _build_sample_and_guidance_confidences(
+    sample: dict,
+    *,
+    config: RhythmTargetBuildConfig,
+    unit_batch,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    batch_size = unit_batch.dur_anchor_src.size(0)
+    device = unit_batch.dur_anchor_src.device
+    sample_confidence = _normalize_optional_confidence(
+        _resolve_sample_confidence(
+            sample,
+            primary_target_surface=config.primary_target_surface,
+        ),
+        batch_size=batch_size,
+        device=device,
+    )
+    guidance_confidence = None
+    if config.use_guidance:
+        guidance_confidence = _normalize_optional_confidence(
+            sample.get("rhythm_guidance_confidence"),
+            batch_size=batch_size,
+            device=device,
+            fallback_confidence=sample_confidence,
+        )
+    return sample_confidence, guidance_confidence
+
+
 def build_rhythm_loss_targets_from_sample(
     *,
     sample: dict,
@@ -230,154 +537,28 @@ def build_rhythm_loss_targets_from_sample(
     slice_rhythm_surface_to_student: SliceSurfaceFn,
 ) -> RhythmLossTargets | None:
     keys = resolve_rhythm_sample_keys(sample, primary_target_surface=config.primary_target_surface)
-    required_keys = (
-        keys.target_speech_key,
-        keys.target_pause_key,
-        keys.target_speech_budget_key,
-        keys.target_pause_budget_key,
-    )
-    if not all(key in sample for key in required_keys):
+    if not _required_rhythm_target_keys_present(sample, keys):
         return None
 
-    guidance_speech = sample.get("rhythm_guidance_speech_tgt") if config.use_guidance else None
-    guidance_pause = sample.get(keys.guidance_pause_key) if config.use_guidance else None
-
-    distill_speech = None
-    distill_pause = None
-    distill_speech_budget = None
-    distill_pause_budget = None
-    distill_allocation = None
-    distill_prefix_clock = None
-    distill_prefix_backlog = None
-    distill_confidences = DistillConfidenceBundle()
-
-    if config.use_distill and config.distill_surface in {"auto", "cache"}:
-        distill_speech = sample.get("rhythm_teacher_speech_exec_tgt")
-        distill_pause = sample.get(keys.teacher_pause_key)
-        distill_speech_budget = sample.get("rhythm_teacher_speech_budget_tgt") if config.use_distill_budget else None
-        distill_pause_budget = sample.get(keys.teacher_pause_budget_key) if config.use_distill_budget else None
-        distill_allocation = sample.get("rhythm_teacher_allocation_tgt") if config.use_distill_allocation else None
-        distill_prefix_clock = sample.get("rhythm_teacher_prefix_clock_tgt") if config.use_distill_prefix else None
-        distill_prefix_backlog = sample.get("rhythm_teacher_prefix_backlog_tgt") if config.use_distill_prefix else None
-        distill_confidences = DistillConfidenceBundle(
-            shared=_detach_optional(sample.get("rhythm_teacher_confidence")),
-            exec=_detach_optional(sample.get("rhythm_teacher_confidence_exec")),
-            budget=_detach_optional(sample.get("rhythm_teacher_confidence_budget")),
-            prefix=_detach_optional(sample.get("rhythm_teacher_confidence_prefix")),
-            allocation=_detach_optional(sample.get("rhythm_teacher_confidence_allocation")),
-            shape=_detach_optional(sample.get("rhythm_teacher_confidence_shape")),
-        )
-
-    if (
-        config.use_distill
-        and distill_speech is None
-        and config.distill_surface in {"auto", "offline"}
-        and runtime_teacher is not None
-    ):
-        distill_speech = runtime_teacher.speech_duration_exec.detach()
-        distill_pause = getattr(runtime_teacher, "blank_duration_exec", runtime_teacher.pause_after_exec).detach()
-        (
-            distill_speech,
-            distill_pause,
-            distill_speech_budget,
-            distill_pause_budget,
-            distill_allocation,
-            distill_prefix_clock,
-            distill_prefix_backlog,
-        ) = slice_rhythm_surface_to_student(
-            speech_exec=distill_speech,
-            pause_exec=distill_pause,
-            student_units=unit_batch.dur_anchor_src.size(1),
-            dur_anchor_src=unit_batch.dur_anchor_src,
-            unit_mask=unit_batch.unit_mask,
-        )
-        if not config.use_distill_budget:
-            distill_speech_budget = None
-            distill_pause_budget = None
-        if not config.use_distill_allocation:
-            distill_allocation = None
-        if not config.use_distill_prefix:
-            distill_prefix_clock = None
-            distill_prefix_backlog = None
-        offline_confidences = offline_confidences or DistillConfidenceBundle()
-        distill_confidences = DistillConfidenceBundle(
-            shared=_detach_optional(offline_confidences.shared),
-            exec=_detach_optional(offline_confidences.exec),
-            budget=_detach_optional(offline_confidences.budget),
-            prefix=_detach_optional(offline_confidences.prefix),
-            allocation=_detach_optional(offline_confidences.allocation),
-            shape=_detach_optional(offline_confidences.shape),
-        )
-        if distill_confidences.shared is None:
-            distill_confidences = DistillConfidenceBundle(
-                shared=distill_speech.new_ones((distill_speech.size(0), 1)),
-                exec=distill_confidences.exec,
-                budget=distill_confidences.budget,
-                prefix=distill_confidences.prefix,
-                allocation=distill_confidences.allocation,
-                shape=distill_confidences.shape,
-            )
-
-    if (
-        config.use_distill
-        and distill_speech is None
-        and config.distill_surface in {"auto", "algorithmic"}
-        and algorithmic_teacher is not None
-    ):
-        distill_speech = algorithmic_teacher.speech_exec_tgt.detach()
-        distill_pause = algorithmic_teacher.pause_exec_tgt.detach()
-        distill_speech_budget = algorithmic_teacher.speech_budget_tgt.detach() if config.use_distill_budget else None
-        distill_pause_budget = algorithmic_teacher.pause_budget_tgt.detach() if config.use_distill_budget else None
-        distill_allocation = algorithmic_teacher.allocation_tgt.detach() if config.use_distill_allocation else None
-        distill_prefix_clock = algorithmic_teacher.prefix_clock_tgt.detach() if config.use_distill_prefix else None
-        distill_prefix_backlog = algorithmic_teacher.prefix_backlog_tgt.detach() if config.use_distill_prefix else None
-        distill_confidences = DistillConfidenceBundle(shared=algorithmic_teacher.confidence.detach())
-
-    if config.use_distill and (distill_speech is None or distill_pause is None):
-        distill_speech = None
-        distill_pause = None
-        distill_speech_budget = None
-        distill_pause_budget = None
-        distill_allocation = None
-        distill_prefix_clock = None
-        distill_prefix_backlog = None
-        distill_confidences = DistillConfidenceBundle()
-
-    if distill_speech is not None and distill_pause is not None:
-        if distill_speech.size(1) != unit_batch.dur_anchor_src.size(1):
-            (
-                distill_speech,
-                distill_pause,
-                distill_speech_budget,
-                distill_pause_budget,
-                distill_allocation,
-                distill_prefix_clock,
-                distill_prefix_backlog,
-            ) = slice_rhythm_surface_to_student(
-                speech_exec=distill_speech,
-                pause_exec=distill_pause,
-                student_units=unit_batch.dur_anchor_src.size(1),
-                dur_anchor_src=unit_batch.dur_anchor_src,
-                unit_mask=unit_batch.unit_mask,
-            )
-        if config.use_distill_allocation and distill_allocation is None:
-            distill_allocation = (distill_speech.float() + distill_pause.float()) * unit_batch.unit_mask.float()
-        if config.use_distill_prefix and (distill_prefix_clock is None or distill_prefix_backlog is None):
-            distill_prefix_clock, distill_prefix_backlog = build_prefix_carry_from_exec(
-                distill_speech,
-                distill_pause,
-                unit_batch.dur_anchor_src,
-                unit_batch.unit_mask,
-            )
-
-    if config.use_distill:
-        distill_confidences = _normalize_distill_confidences(
-            confidence_bundle=distill_confidences,
-            batch_size=unit_batch.dur_anchor_src.size(0),
-            device=unit_batch.dur_anchor_src.device,
-            normalize_distill_confidence=normalize_distill_confidence,
-            normalize_component_confidence=normalize_component_confidence,
-        )
+    guidance_speech, guidance_pause = _build_guidance_targets(sample, keys, config)
+    distill_bundle = _resolve_distill_surface_bundle(
+        sample=sample,
+        keys=keys,
+        unit_batch=unit_batch,
+        config=config,
+        runtime_teacher=runtime_teacher,
+        algorithmic_teacher=algorithmic_teacher,
+        offline_confidences=offline_confidences,
+        normalize_distill_confidence=normalize_distill_confidence,
+        normalize_component_confidence=normalize_component_confidence,
+        build_prefix_carry_from_exec=build_prefix_carry_from_exec,
+        slice_rhythm_surface_to_student=slice_rhythm_surface_to_student,
+    )
+    sample_confidence, guidance_confidence = _build_sample_and_guidance_confidences(
+        sample,
+        config=config,
+        unit_batch=unit_batch,
+    )
 
     return RhythmLossTargets(
         speech_exec_tgt=sample[keys.target_speech_key],
@@ -388,46 +569,23 @@ def build_rhythm_loss_targets_from_sample(
         dur_anchor_src=unit_batch.dur_anchor_src,
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
-        sample_confidence=_normalize_optional_confidence(
-            _resolve_sample_confidence(
-                sample,
-                primary_target_surface=config.primary_target_surface,
-            ),
-            batch_size=unit_batch.dur_anchor_src.size(0),
-            device=unit_batch.dur_anchor_src.device,
-        ),
+        sample_confidence=sample_confidence,
         guidance_speech_tgt=guidance_speech,
         guidance_pause_tgt=guidance_pause,
-        guidance_confidence=(
-            _normalize_optional_confidence(
-                sample.get("rhythm_guidance_confidence"),
-                batch_size=unit_batch.dur_anchor_src.size(0),
-                device=unit_batch.dur_anchor_src.device,
-                fallback_confidence=_normalize_optional_confidence(
-                    _resolve_sample_confidence(
-                        sample,
-                        primary_target_surface=config.primary_target_surface,
-                    ),
-                    batch_size=unit_batch.dur_anchor_src.size(0),
-                    device=unit_batch.dur_anchor_src.device,
-                ),
-            )
-            if config.use_guidance
-            else None
-        ),
-        distill_speech_tgt=distill_speech,
-        distill_pause_tgt=distill_pause,
-        distill_speech_budget_tgt=distill_speech_budget,
-        distill_pause_budget_tgt=distill_pause_budget,
-        distill_allocation_tgt=distill_allocation,
-        distill_prefix_clock_tgt=distill_prefix_clock,
-        distill_prefix_backlog_tgt=distill_prefix_backlog,
-        distill_confidence=distill_confidences.shared,
-        distill_exec_confidence=distill_confidences.exec,
-        distill_budget_confidence=distill_confidences.budget,
-        distill_prefix_confidence=distill_confidences.prefix,
-        distill_allocation_confidence=distill_confidences.allocation,
-        distill_shape_confidence=distill_confidences.shape,
+        guidance_confidence=guidance_confidence,
+        distill_speech_tgt=distill_bundle.speech,
+        distill_pause_tgt=distill_bundle.pause,
+        distill_speech_budget_tgt=distill_bundle.speech_budget,
+        distill_pause_budget_tgt=distill_bundle.pause_budget,
+        distill_allocation_tgt=distill_bundle.allocation,
+        distill_prefix_clock_tgt=distill_bundle.prefix_clock,
+        distill_prefix_backlog_tgt=distill_bundle.prefix_backlog,
+        distill_confidence=distill_bundle.confidences.shared,
+        distill_exec_confidence=distill_bundle.confidences.exec,
+        distill_budget_confidence=distill_bundle.confidences.budget,
+        distill_prefix_confidence=distill_bundle.confidences.prefix,
+        distill_allocation_confidence=distill_bundle.confidences.allocation,
+        distill_shape_confidence=distill_bundle.confidences.shape,
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),
