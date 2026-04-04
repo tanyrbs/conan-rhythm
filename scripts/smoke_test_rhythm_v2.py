@@ -14,6 +14,8 @@ apply_single_thread_env()
 import torch
 
 maybe_limit_torch_cpu_threads()
+torch.manual_seed(1234)
+np.random.seed(1234)
 
 from modules.Conan.rhythm.contracts import RhythmPlannerOutputs
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams

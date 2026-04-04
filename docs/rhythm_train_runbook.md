@@ -147,3 +147,14 @@ Start formal training only when all of the following are true:
 - CPU probe passes on the same real dataset
 - teacher export + re-binarize has been completed before `student_kd` / `student_retimed`
 - you understand whether `student_kd` is still running same-source cache-backed KD and have checked the `L_kd_same_source*` diagnostics
+
+## 10. Repository validation parity
+
+Before pushing branch-level changes, it is reasonable to run the same lightweight checks as the rhythm CI lane:
+
+```bash
+python -m compileall -q modules tasks scripts tests utils data_gen
+python -m unittest discover -s tests/rhythm -p "test_*.py"
+python -u scripts/smoke_test_rhythm_v2.py
+python scripts/preflight_rhythm_v2.py --help
+```

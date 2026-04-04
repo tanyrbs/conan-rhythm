@@ -3,6 +3,7 @@ import random
 import sys
 import traceback
 import types
+from contextlib import contextmanager
 from functools import wraps
 from itertools import chain
 import numpy as np
@@ -176,6 +177,23 @@ def shard_batches_for_ddp(batches, num_replicas, rank, pad_to_divisible=True):
     return sharded
 
 
+@contextmanager
+def _temporary_random_seed(seed):
+    if seed is None:
+        yield
+        return
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    bounded_seed = int(seed) % (2 ** 32)
+    np.random.seed(bounded_seed)
+    random.seed(bounded_seed)
+    try:
+        yield
+    finally:
+        np.random.set_state(np_state)
+        random.setstate(py_state)
+
+
 def _seed_dataloader_worker(worker_id):
     worker_seed = torch.initial_seed() % (2 ** 32)
     np.random.seed(worker_seed)
@@ -321,6 +339,101 @@ class BaseConcatDataset(ConcatDataset):
     def num_workers(self):
         return self.datasets[0].num_workers
 
+
+class _DynamicBatchSampler:
+    def __init__(
+        self,
+        dataset,
+        *,
+        shuffle,
+        max_tokens,
+        max_sentences,
+        required_batch_size_multiple,
+        endless,
+        apply_batch_by_size,
+        use_ddp,
+        num_replicas,
+        rank,
+        pad_to_divisible,
+        seed,
+    ):
+        self.dataset = dataset
+        self.shuffle = bool(shuffle)
+        self.max_tokens = max_tokens
+        self.max_sentences = max_sentences
+        self.required_batch_size_multiple = required_batch_size_multiple
+        self.endless = bool(endless)
+        self.apply_batch_by_size = bool(apply_batch_by_size)
+        self.use_ddp = bool(use_ddp)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.pad_to_divisible = bool(pad_to_divisible)
+        self.seed = int(seed)
+        self.epoch = 0
+        self._cached_epoch = None
+        self._cached_batches = None
+
+    def set_epoch(self, epoch):
+        epoch = int(epoch)
+        if epoch != self.epoch:
+            self.epoch = epoch
+            self._cached_epoch = None
+            self._cached_batches = None
+
+    def _epoch_seed(self, epoch):
+        return self.seed + self.rank * 100003 + int(epoch) * 9973 + (17 if self.shuffle else 0)
+
+    def _build_batches(self, epoch=None):
+        epoch = self.epoch if epoch is None else int(epoch)
+        if self._cached_epoch == epoch and self._cached_batches is not None:
+            return self._cached_batches
+
+        with _temporary_random_seed(self._epoch_seed(epoch)):
+            indices = self.dataset.ordered_indices()
+        if self.apply_batch_by_size:
+            batches = batch_by_size(
+                indices,
+                self.dataset.num_tokens,
+                max_tokens=self.max_tokens,
+                max_sentences=self.max_sentences,
+                required_batch_size_multiple=self.required_batch_size_multiple,
+            )
+        else:
+            step = self.max_sentences
+            if step is None or step <= 0:
+                raise ValueError("max_sentences must be a positive integer when apply_batch_by_size=False.")
+            batches = [indices[i:i + step] for i in range(0, len(indices), step)]
+        batches = [list(batch) for batch in batches if len(batch) > 0]
+        if self.shuffle and len(batches) > 1:
+            rng = np.random.RandomState((self._epoch_seed(epoch) + 1) % (2 ** 32))
+            rng.shuffle(batches)
+        if self.use_ddp:
+            batches = shard_batches_for_ddp(
+                batches,
+                num_replicas=self.num_replicas,
+                rank=self.rank,
+                pad_to_divisible=self.pad_to_divisible,
+            )
+        self._cached_epoch = epoch
+        self._cached_batches = batches
+        return batches
+
+    def __iter__(self):
+        epoch = self.epoch
+        while True:
+            batches = self._build_batches(epoch)
+            if len(batches) <= 0:
+                return
+            for batch in batches:
+                yield batch
+            if not self.endless:
+                break
+            epoch += 1
+
+    def __len__(self):
+        return len(self._build_batches(self.epoch))
+
+
 def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
                      required_batch_size_multiple=-1, endless=False, apply_batch_by_size=True, pin_memory=None, use_ddp=False):
     import torch.distributed as dist
@@ -338,43 +451,26 @@ def build_dataloader(dataset, shuffle, max_tokens=None, max_sentences=None,
     if required_batch_size_multiple == -1:
         required_batch_size_multiple = devices_cnt
 
-    def shuffle_batches(batches):
-        np.random.shuffle(batches)
-        return batches
-
     if max_tokens is not None:
         max_tokens *= devices_cnt
     if max_sentences is not None:
         max_sentences *= devices_cnt
-    indices = dataset.ordered_indices()
-    if apply_batch_by_size:
-        batch_sampler = batch_by_size(
-            indices, dataset.num_tokens, max_tokens=max_tokens, max_sentences=max_sentences,
-            required_batch_size_multiple=required_batch_size_multiple,
-        )
-    else:
-        batch_sampler = []
-        for i in range(0, len(indices), max_sentences):
-            batch_sampler.append(indices[i:i + max_sentences])
-
-    if shuffle:
-        batches = shuffle_batches(list(batch_sampler))
-        if endless:
-            batches = [b for _ in range(1000) for b in shuffle_batches(list(batch_sampler))]
-    else:
-        batches = batch_sampler
-        if endless:
-            batches = [b for _ in range(1000) for b in batches]
     num_workers = dataset.num_workers
-    if use_ddp:
-        num_replicas = dist.get_world_size()
-        # Keep every sample reachable under DDP, including short tail batches.
-        batches = shard_batches_for_ddp(
-            (x for x in batches if len(x) > 0),
-            num_replicas=num_replicas,
-            rank=rank,
-            pad_to_divisible=bool(shuffle),
-        )
+    num_replicas = dist.get_world_size() if use_ddp else 1
+    batches = _DynamicBatchSampler(
+        dataset,
+        shuffle=shuffle,
+        max_tokens=max_tokens,
+        max_sentences=max_sentences,
+        required_batch_size_multiple=required_batch_size_multiple,
+        endless=endless,
+        apply_batch_by_size=apply_batch_by_size,
+        use_ddp=use_ddp,
+        num_replicas=num_replicas,
+        rank=rank,
+        pad_to_divisible=bool(shuffle),
+        seed=int(hparams.get('seed', 1234)),
+    )
     resolved_pin_memory = hparams.get('dl_pin_memory', pin_memory)
     if resolved_pin_memory is None:
         resolved_pin_memory = torch.cuda.is_available()

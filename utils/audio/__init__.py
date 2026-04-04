@@ -13,10 +13,28 @@ except Exception:
     pyln = None
 
 
+_MEL_BASIS_CACHE = {}
+
+
 def _trim_long_silences(*args, **kwargs):
     from utils.audio.vad import trim_long_silences
 
     return trim_long_silences(*args, **kwargs)
+
+
+def _get_mel_basis(*, sample_rate, fft_size, num_mels, fmin, fmax):
+    key = (int(sample_rate), int(fft_size), int(num_mels), float(fmin), float(fmax))
+    mel_basis = _MEL_BASIS_CACHE.get(key)
+    if mel_basis is None:
+        mel_basis = librosa.filters.mel(
+            sr=sample_rate,
+            n_fft=fft_size,
+            n_mels=num_mels,
+            fmin=fmin,
+            fmax=fmax,
+        )
+        _MEL_BASIS_CACHE[key] = mel_basis
+    return mel_basis
 
 
 def librosa_pad_lr(x, fsize, fshift, pad_sides=1):
@@ -87,7 +105,13 @@ def librosa_wav2spec(wav_path,
     # get mel basis
     fmin = 0 if fmin == -1 else fmin
     fmax = sample_rate / 2 if fmax == -1 else fmax
-    mel_basis = librosa.filters.mel(sr=sample_rate, n_fft=fft_size, n_mels=num_mels, fmin=fmin, fmax=fmax)
+    mel_basis = _get_mel_basis(
+        sample_rate=sample_rate,
+        fft_size=fft_size,
+        num_mels=num_mels,
+        fmin=fmin,
+        fmax=fmax,
+    )
 
     # calculate mel spec
     mel = mel_basis @ linear_spc

@@ -14,7 +14,10 @@ if str(ROOT) not in sys.path:
 class SingleThreadEnvTests(unittest.TestCase):
     def test_import_has_no_side_effect_without_env_toggle(self) -> None:
         module_name = "utils.commons.single_thread_env"
-        original = {key: os.environ.get(key) for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS")}
+        original = {
+            key: os.environ.get(key)
+            for key in ("CONAN_SINGLE_THREAD_ENV", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+        }
         os.environ.pop("CONAN_SINGLE_THREAD_ENV", None)
         os.environ.pop("OMP_NUM_THREADS", None)
         os.environ.pop("MKL_NUM_THREADS", None)
