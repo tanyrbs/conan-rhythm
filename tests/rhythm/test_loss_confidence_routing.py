@@ -20,6 +20,19 @@ from tasks.Conan.rhythm.targets import DistillConfidenceBundle, _normalize_disti
 
 
 class RhythmLossConfidenceRoutingTests(unittest.TestCase):
+    def test_shared_distill_confidence_keeps_floor_semantics_when_zero_and_preserve_zeros_disabled(self) -> None:
+        normalized = normalize_distill_confidence(
+            torch.tensor([[0.00], [0.01]], dtype=torch.float32),
+            batch_size=2,
+            device=torch.device("cpu"),
+            floor=0.05,
+            power=1.0,
+            preserve_zeros=False,
+        )
+
+        self.assertTrue(torch.allclose(normalized[0:1], torch.tensor([[0.05]])))
+        self.assertTrue(torch.allclose(normalized[1:2], torch.tensor([[0.05]])))
+
     def test_shape_distill_uses_dedicated_shape_confidence(self) -> None:
         execution = SimpleNamespace(
             speech_duration_exec=torch.tensor([[2.0, 0.0]], dtype=torch.float32),

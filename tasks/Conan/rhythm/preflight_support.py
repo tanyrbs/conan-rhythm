@@ -6,6 +6,8 @@ import argparse
 import os
 import sys
 from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -26,6 +28,32 @@ from tasks.Conan.rhythm.config_contract import (
 )
 from utils.commons.hparams import set_hparams
 from utils.commons.indexed_datasets import IndexedDataset
+
+
+@dataclass
+class SplitInspectionReport:
+    split: str
+    split_path: str
+    dataset_len: int = 0
+    inspected_items: int = 0
+    dataset_ready: bool = False
+    field_group_hits: list[tuple[tuple[str, ...], int]] = field(default_factory=list)
+    cache_versions_seen: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PreflightRunContext:
+    args: argparse.Namespace
+    hparams: dict[str, Any]
+    context: Any
+    required_groups: list[tuple[str, ...]]
+    binary_dir: str
+    processed_dir: str
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    split_reports: list[SplitInspectionReport] = field(default_factory=list)
 
 
 def _open_dataset(path_prefix: str):
@@ -287,120 +315,207 @@ def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> l
     return errors
 
 
-def main():
+def _parse_preflight_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Preflight check for Rhythm V2 staged training.")
     parser.add_argument("--config", required=True, help="YAML config to validate.")
     parser.add_argument("--exp_name", default="", help="Optional temporary exp name for hparams loading.")
     parser.add_argument("--hparams", default="", help="Extra hparam overrides.")
     parser.add_argument("--binary_data_dir", default="", help="Optional override for binary_data_dir.")
+    parser.add_argument("--processed_data_dir", default="", help="Optional override for processed_data_dir.")
     parser.add_argument("--inspect_items", type=int, default=8, help="How many items to inspect per split.")
     parser.add_argument("--splits", nargs="*", default=["train", "valid"], help="Dataset prefixes to inspect.")
-    parser.add_argument("--model_dry_run", action="store_true", help="Also build ConanDataset/ConanTask and run one no-grad batch.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--model_dry_run",
+        action="store_true",
+        help="Also build ConanDataset/ConanTask and run one no-grad batch.",
+    )
+    return parser.parse_args(argv)
 
-    hparams_str = args.hparams
+
+def _compose_hparams_override(args: argparse.Namespace) -> str:
+    overrides: list[str] = []
     if args.binary_data_dir:
-        override = f"binary_data_dir='{args.binary_data_dir}'"
-        hparams_str = override if not hparams_str else f"{hparams_str},{override}"
+        overrides.append(f"binary_data_dir='{args.binary_data_dir}'")
+    if args.processed_data_dir:
+        overrides.append(f"processed_data_dir='{args.processed_data_dir}'")
+    if not args.hparams:
+        return ",".join(overrides)
+    if not overrides:
+        return args.hparams
+    return f"{args.hparams},{','.join(overrides)}"
+
+
+def _prepare_preflight_runtime(args: argparse.Namespace) -> PreflightRunContext:
     hp = set_hparams(
         config=args.config,
         exp_name=args.exp_name,
-        hparams_str=hparams_str,
+        hparams_str=_compose_hparams_override(args),
         global_hparams=True,
         print_hparams=False,
         reset=True,
     )
-
     evaluation = collect_config_contract_evaluation(
         hp,
         config_path=args.config,
         model_dry_run=args.model_dry_run,
     )
-    context = evaluation.context
     contract_report = evaluation.report
-    required_groups = contract_report.required_field_groups
-    errors = list(contract_report.errors)
-    warnings = list(contract_report.warnings)
+    return PreflightRunContext(
+        args=args,
+        hparams=hp,
+        context=evaluation.context,
+        required_groups=[tuple(group) for group in contract_report.required_field_groups],
+        binary_dir=hp.get("binary_data_dir", ""),
+        processed_dir=hp.get("processed_data_dir", ""),
+        errors=list(contract_report.errors),
+        warnings=list(contract_report.warnings),
+    )
 
-    binary_dir = hp.get("binary_data_dir", "")
-    if not binary_dir:
-        errors.append("binary_data_dir is empty.")
-    elif not os.path.isdir(binary_dir):
-        errors.append(f"binary_data_dir does not exist: {binary_dir}")
-    processed_dir = hp.get("processed_data_dir", "")
-    warnings.extend(_inspect_processed_data_dir(processed_dir))
 
-    print(f"[preflight] config={args.config}")
-    print(f"[preflight] profile={context.profile}")
-    print(f"[preflight] stage={context.stage}")
-    print(f"[preflight] binary_data_dir={binary_dir}")
-    print(f"[preflight] processed_data_dir={processed_dir}")
-    printable_groups = [" | ".join(group) for group in required_groups]
-    print(f"[preflight] required_field_group_count={len(required_groups)}")
+def _inspect_split_data_staging(run_ctx: PreflightRunContext, split: str) -> SplitInspectionReport:
+    report = SplitInspectionReport(
+        split=split,
+        split_path=os.path.join(run_ctx.binary_dir, split),
+    )
+    report.errors.extend(_inspect_indexed_split_files(report.split_path))
+    ds = _open_dataset(report.split_path)
+    if ds is None:
+        report.errors.append(
+            f"Missing indexed dataset for split '{split}' at {report.split_path}.data/.idx"
+        )
+        return report
+    report.dataset_len = len(ds)
+    if report.dataset_len <= 0:
+        report.errors.append(f"Indexed dataset for split '{split}' is empty at {report.split_path}.")
+        return report
+    report.dataset_ready = True
+    report.errors.extend(_inspect_indexed_split_arrays(report.split_path, dataset_len=report.dataset_len))
+
+    items, counts, mismatches = _collect_presence(ds, run_ctx.args.inspect_items)
+    report.inspected_items = min(report.dataset_len, run_ctx.args.inspect_items)
+    report.field_group_hits = [
+        (group, sum(1 for item in items if any(key in item for key in group)))
+        for group in run_ctx.required_groups
+    ]
+
+    expected_version = int(run_ctx.hparams.get("rhythm_cache_version", -1))
+    report.cache_versions_seen = [
+        name.replace("__cache_version__", "")
+        for name in counts
+        if name.startswith("__cache_version__")
+    ]
+    if report.cache_versions_seen:
+        compatible_versions = compatible_rhythm_cache_versions(expected_version)
+        compatible_seen = sum(
+            counts.get(f"__cache_version__{version}", 0) for version in compatible_versions
+        )
+        if compatible_seen < report.inspected_items:
+            report.errors.append(
+                f"Split '{split}' has cache version mismatch against expected rhythm_cache_version={expected_version} "
+                f"(accepted compatible versions: {compatible_versions})."
+            )
+
+    split_contract = collect_cache_contract_report(run_ctx.context, items, split=split)
+    report.errors.extend(split_contract.errors)
+    report.warnings.extend(split_contract.warnings)
+    report.errors.extend(mismatches)
+    report.errors.extend(_validate_item_shape_contracts(items, context=run_ctx.context, split=split))
+    report.errors.extend(
+        _inspect_pitch_feature_readiness(
+            items,
+            split=split,
+            use_pitch_embed=bool(run_ctx.hparams.get("use_pitch_embed", False)),
+        )
+    )
+    return report
+
+
+def _collect_data_staging_checks(run_ctx: PreflightRunContext) -> None:
+    if not run_ctx.binary_dir:
+        run_ctx.errors.append("binary_data_dir is empty.")
+    elif not os.path.isdir(run_ctx.binary_dir):
+        run_ctx.errors.append(f"binary_data_dir does not exist: {run_ctx.binary_dir}")
+    run_ctx.warnings.extend(_inspect_processed_data_dir(run_ctx.processed_dir))
+
+    for split in run_ctx.args.splits:
+        report = _inspect_split_data_staging(run_ctx, split)
+        run_ctx.split_reports.append(report)
+        run_ctx.errors.extend(report.errors)
+        run_ctx.warnings.extend(report.warnings)
+
+
+def _collect_control_preview_checks(run_ctx: PreflightRunContext) -> None:
+    if not run_ctx.args.model_dry_run:
+        return
+    for report in run_ctx.split_reports:
+        if not report.dataset_ready:
+            continue
+        preview_errors = _run_dataset_and_model_dry_run(
+            report.split,
+            context=run_ctx.context,
+            run_model=True,
+        )
+        report.errors.extend(preview_errors)
+        run_ctx.errors.extend(preview_errors)
+
+
+def run_preflight(args: argparse.Namespace) -> PreflightRunContext:
+    run_ctx = _prepare_preflight_runtime(args)
+    _collect_data_staging_checks(run_ctx)
+    _collect_control_preview_checks(run_ctx)
+    return run_ctx
+
+
+def _emit_preflight_header(run_ctx: PreflightRunContext) -> None:
+    printable_groups = [" | ".join(group) for group in run_ctx.required_groups]
+    print(f"[preflight] config={run_ctx.args.config}")
+    print(f"[preflight] profile={run_ctx.context.profile}")
+    print(f"[preflight] stage={run_ctx.context.stage}")
+    print(f"[preflight] binary_data_dir={run_ctx.binary_dir}")
+    print(f"[preflight] processed_data_dir={run_ctx.processed_dir}")
+    print(f"[preflight] required_field_group_count={len(run_ctx.required_groups)}")
     print(f"[preflight] required_field_groups={printable_groups}")
 
-    for split in args.splits:
-        split_path = os.path.join(binary_dir, split)
-        errors.extend(_inspect_indexed_split_files(split_path))
-        ds = _open_dataset(split_path)
-        if ds is None:
-            errors.append(f"Missing indexed dataset for split '{split}' at {split_path}.data/.idx")
-            continue
-        if len(ds) <= 0:
-            errors.append(f"Indexed dataset for split '{split}' is empty at {split_path}.")
-            continue
-        errors.extend(_inspect_indexed_split_arrays(split_path, dataset_len=len(ds)))
 
-        items, counts, mismatches = _collect_presence(ds, args.inspect_items)
-        inspected = min(len(ds), args.inspect_items)
-        print(f"[preflight] split={split} items={len(ds)} inspected={inspected}")
-        for group in required_groups:
-            have = sum(1 for item in items if any(key in item for key in group))
-            print(f"  - {' | '.join(group)}: {have}/{inspected}")
+def _emit_split_report(report: SplitInspectionReport) -> None:
+    if report.dataset_len <= 0:
+        return
+    print(f"[preflight] split={report.split} items={report.dataset_len} inspected={report.inspected_items}")
+    for group, have in report.field_group_hits:
+        print(f"  - {' | '.join(group)}: {have}/{report.inspected_items}")
+    if report.cache_versions_seen:
+        print(f"  - cache_versions_seen={report.cache_versions_seen}")
 
-        expected_version = int(hp.get("rhythm_cache_version", -1))
-        seen_versions = [name for name in counts if name.startswith("__cache_version__")]
-        if seen_versions:
-            print(f"  - cache_versions_seen={[name.replace('__cache_version__', '') for name in seen_versions]}")
-            compatible_versions = compatible_rhythm_cache_versions(expected_version)
-            compatible_seen = sum(
-                counts.get(f"__cache_version__{version}", 0) for version in compatible_versions
-            )
-            if compatible_seen < inspected:
-                errors.append(
-                    f"Split '{split}' has cache version mismatch against expected rhythm_cache_version={expected_version} "
-                    f"(accepted compatible versions: {compatible_versions})."
-                )
 
-        split_contract = collect_cache_contract_report(context, items, split=split)
-        errors.extend(split_contract.errors)
-        warnings.extend(split_contract.warnings)
-        errors.extend(mismatches)
-        errors.extend(_validate_item_shape_contracts(items, context=context, split=split))
-        errors.extend(
-            _inspect_pitch_feature_readiness(
-                items,
-                split=split,
-                use_pitch_embed=bool(hp.get("use_pitch_embed", False)),
-            )
-        )
+def _dedupe_findings(findings: list[str]) -> list[str]:
+    return list(dict.fromkeys(findings))
 
-        if args.model_dry_run:
-            errors.extend(_run_dataset_and_model_dry_run(split, context=context, run_model=True))
 
-    dedup_warnings = list(dict.fromkeys(warnings))
-    dedup_errors = list(dict.fromkeys(errors))
+def _emit_preflight_summary(run_ctx: PreflightRunContext) -> None:
+    dedup_warnings = _dedupe_findings(run_ctx.warnings)
+    dedup_errors = _dedupe_findings(run_ctx.errors)
     if dedup_warnings:
         print("[preflight] warnings:")
         for warning in dedup_warnings:
             print(f"  - {warning}")
-
     if dedup_errors:
         print("[preflight] FAILED")
         for error in dedup_errors:
             print(f"  - {error}")
-        sys.exit(1)
+        return
     print("[preflight] OK")
+
+
+def main(argv: list[str] | None = None):
+    run_ctx = _prepare_preflight_runtime(_parse_preflight_args(argv))
+    _emit_preflight_header(run_ctx)
+    _collect_data_staging_checks(run_ctx)
+    for report in run_ctx.split_reports:
+        _emit_split_report(report)
+    _collect_control_preview_checks(run_ctx)
+    _emit_preflight_summary(run_ctx)
+    if _dedupe_findings(run_ctx.errors):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

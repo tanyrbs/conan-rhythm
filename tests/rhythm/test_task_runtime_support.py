@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tasks.Conan.rhythm.runtime_modes import merge_retimed_weight
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 
 
@@ -109,6 +110,22 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             config = support.build_rhythm_target_build_config()
         self.assertTrue(config.dedupe_primary_teacher_cache_distill)
         self.assertEqual(config.distill_exec_weight, 0.0)
+
+    def test_merge_retimed_weight_preserves_explicit_zero_confidence(self) -> None:
+        merged = merge_retimed_weight(
+            torch.ones((1, 3), dtype=torch.float32),
+            torch.tensor([[0.0]], dtype=torch.float32),
+            confidence_floor=0.05,
+        )
+        self.assertTrue(torch.allclose(merged, torch.zeros((1, 3), dtype=torch.float32)))
+
+    def test_merge_retimed_weight_still_floors_positive_confidence(self) -> None:
+        merged = merge_retimed_weight(
+            torch.ones((1, 2), dtype=torch.float32),
+            torch.tensor([[0.01]], dtype=torch.float32),
+            confidence_floor=0.05,
+        )
+        self.assertTrue(torch.allclose(merged, torch.full((1, 2), 0.05, dtype=torch.float32)))
 
 
 if __name__ == "__main__":

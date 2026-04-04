@@ -274,6 +274,31 @@ def _resolve_exec_total_budget_gate(
     return gate.detach().clamp(min=0.0, max=1.0)
 
 
+def _resolve_exec_pause_share_gate(
+    execution,
+    *,
+    tgt_speech_budget: torch.Tensor,
+    tgt_pause_budget: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    planner = getattr(execution, "planner", None)
+    if planner is None:
+        return None
+    repair_mass = compute_budget_projection_repair_stats(planner).repair_mass.detach().float()
+    if repair_mass.dim() == 0:
+        repair_mass = repair_mass.view(1, 1)
+    else:
+        repair_mass = repair_mass.reshape(repair_mass.size(0), -1)[:, :1]
+    repair_mass = repair_mass.clamp_min(0.0)
+    tgt_total_budget, _ = _budget_surfaces_from_speech_pause(
+        tgt_speech_budget,
+        tgt_pause_budget,
+    )
+    gate = tgt_total_budget.float().clamp_min(0.0) / (
+        tgt_total_budget.float().clamp_min(0.0) + repair_mass
+    ).clamp_min(1e-6)
+    return gate.detach().clamp(min=0.0, max=1.0)
+
+
 def _compute_budget_supervision(
     execution,
     *,
@@ -288,6 +313,12 @@ def _compute_budget_supervision(
     `rhythm_budget_raw_surface` / `rhythm_budget_exec_surface` should match the
     actual optimizer contribution of each budget view, not the unweighted
     diagnostic loss. This keeps the logged surfaces additive with `L_budget`.
+
+    The executed pause-share branch is also soft-gated by projection repair
+    mass. When feasibility repair materially changes the speech/pause split,
+    the executed pause share becomes projection-constrained rather than a pure
+    teacher/control target; the raw-view budget surface and feasible-debt term
+    stay as the authoritative correction signal in that regime.
     """
     raw_speech, raw_pause, exec_speech, exec_pause = _resolve_budget_views(execution)
     raw_loss, raw_total_loss, raw_pause_share_loss = _budget_surface_loss(
@@ -307,6 +338,11 @@ def _compute_budget_supervision(
         tgt_speech_budget=speech_budget_tgt,
         tgt_pause_budget=pause_budget_tgt,
     )
+    exec_pause_share_gate = _resolve_exec_pause_share_gate(
+        execution,
+        tgt_speech_budget=speech_budget_tgt,
+        tgt_pause_budget=pause_budget_tgt,
+    )
     exec_total_loss_vec = F.l1_loss(
         torch.log1p(exec_speech + exec_pause),
         torch.log1p(tgt_total_budget),
@@ -319,10 +355,17 @@ def _compute_budget_supervision(
         batch_weight=batch_weight,
         loss_scale=exec_total_gate,
     )
-    exec_pause_share_loss = _batch_l1(
+    exec_pause_share_loss_vec = F.l1_loss(
         exec_pause_share,
         tgt_pause_share,
+        reduction='none',
+    )
+    if exec_pause_share_loss_vec.dim() > 1:
+        exec_pause_share_loss_vec = exec_pause_share_loss_vec.reshape(exec_pause_share_loss_vec.size(0), -1).mean(dim=1)
+    exec_pause_share_loss = _reduce_batch_loss_with_scale(
+        exec_pause_share_loss_vec,
         batch_weight=batch_weight,
+        loss_scale=exec_pause_share_gate,
     )
     exec_loss = exec_total_loss + exec_pause_share_loss
     raw_contrib = float(raw_weight) * raw_loss

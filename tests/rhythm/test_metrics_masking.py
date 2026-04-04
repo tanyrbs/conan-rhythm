@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
+from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
 
 
 class RhythmMetricMaskingTests(unittest.TestCase):
@@ -155,6 +155,46 @@ class RhythmMetricMaskingTests(unittest.TestCase):
         self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_exec"], torch.tensor(1.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_budget"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_prefix"], torch.tensor(1.0)))
+
+    def test_metric_sections_flatten_without_loss(self) -> None:
+        unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
+        dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            dur_shape_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_shape_unit=torch.tensor([[1.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 1, 3), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[1.0]], dtype=torch.float32),
+            blank_duration_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            planner=planner,
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+        output = {
+            "rhythm_execution": execution,
+            "rhythm_unit_batch": SimpleNamespace(unit_mask=unit_mask, dur_anchor_src=dur_anchor),
+            "L_kd_same_source": torch.tensor(1.0),
+        }
+
+        sections = build_rhythm_metric_sections(output)
+        flattened = build_rhythm_metric_dict(output)
+
+        self.assertEqual(
+            list(sections.keys()),
+            ["plan_surfaces", "runtime_state", "teacher_targets", "observability"],
+        )
+        merged: dict[str, torch.Tensor] = {}
+        for section_metrics in sections.values():
+            merged.update(section_metrics)
+        self.assertEqual(set(flattened.keys()), set(merged.keys()))
+        for key, expected in merged.items():
+            self.assertTrue(torch.allclose(flattened[key], expected), key)
 
 
 if __name__ == "__main__":

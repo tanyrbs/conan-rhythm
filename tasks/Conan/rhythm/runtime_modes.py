@@ -7,6 +7,7 @@ import torch
 from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
 from modules.Conan.rhythm.policy import resolve_apply_override
 from modules.Conan.rhythm.stages import detect_rhythm_stage, resolve_teacher_as_main
+from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
 from tasks.Conan.rhythm.task_config import (
     resolve_task_retimed_target_mode,
     resolve_task_target_mode,
@@ -176,7 +177,10 @@ def merge_retimed_weight(frame_weight, confidence, *, confidence_floor: float = 
     if frame_weight is None and confidence is None:
         return None
     if confidence is not None:
-        confidence = confidence.float().clamp_min(float(confidence_floor))
+        confidence = clamp_confidence_preserve_zero(
+            confidence.float(),
+            floor=float(confidence_floor),
+        )
     if frame_weight is None:
         return confidence
     frame_weight = frame_weight.float()

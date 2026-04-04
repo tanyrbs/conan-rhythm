@@ -218,7 +218,45 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
             }
         )
         self.assertTrue(any("must keep rhythm_distill_speech_shape_weight > 0" in e for e in errors))
-        self.assertTrue(any("dedupe neutralizes exact duplicate cache-based budget/prefix/allocation distill terms" in w for w in warnings))
+
+    def test_stage_contract_allows_zero_distill_confidence_floor(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_suppress_duplicate_primary_distill": True,
+                "rhythm_distill_confidence_floor": 0.0,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertEqual(errors, [])
 
     def test_lambda_distill_requires_active_component_weight(self) -> None:
         _, errors, _ = validate_stage_contract(

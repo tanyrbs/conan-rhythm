@@ -20,7 +20,7 @@ def kaiming_init(layer):
 class CausalConv1d(nn.Module):
     """
     1-D dilated convolution with padding only on the left side:
-    Output frame t only depends on input ≤t.
+    Output frame t only depends on input up to time t.
     """
     def __init__(self,
                  in_channels: int,
@@ -110,9 +110,11 @@ def Conv1d(*args, **kwargs):
     return layer
 
 
-@torch.jit.script
 def silu(x):
-    return x * torch.sigmoid(x)
+    # Keep this as a plain eager helper. PyTorch now marks TorchScript as
+    # deprecated in favor of torch.export, and this activation never needed a
+    # scripted wrapper.
+    return F.silu(x)
 
 
 class ResidualBlock(nn.Module):
@@ -455,4 +457,3 @@ class MDiffNet(nn.Module):
         x = F.relu(x)
         x = self.output_projection(x)  # [B, 80, T]
         return x * nonpadding[:, None, :]
-

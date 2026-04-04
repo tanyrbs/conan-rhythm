@@ -188,8 +188,8 @@ def main():
     parser.add_argument("--profile_json", type=str, default="")
     args = parser.parse_args()
 
-    if args.steps <= 0 or args.steps > 500:
-        raise ValueError("--steps must be in [1, 500].")
+    if args.steps <= 0 or args.steps > 5000:
+        raise ValueError("--steps must be in [1, 5000].")
     if args.warmup_steps is None:
         args.warmup_steps = max(0, min(2, args.steps - 1))
     if args.warmup_steps < 0 or args.warmup_steps >= args.steps:

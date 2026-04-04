@@ -731,22 +731,78 @@ def _update_sample_supervision_metrics(
         metrics["rhythm_metric_stream_full_units"] = _safe_mean(sample["rhythm_stream_full_units"].float())
 
 
-def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
+def _collect_plan_surface_metrics(
+    output: dict[str, Any],
+    ctx: RhythmMetricContext,
+) -> dict[str, torch.Tensor]:
+    metrics = _build_core_rhythm_metric_dict(ctx)
+    _update_render_frame_plan_metrics(metrics, output, ctx)
+    _update_trace_and_boundary_metrics(metrics, output, ctx)
+    return metrics
+
+
+def _collect_runtime_state_metrics(
+    output: dict[str, Any],
+    ctx: RhythmMetricContext,
+) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    _update_state_metrics(metrics, output, ctx)
+    _update_reference_conditioning_metrics(metrics, output)
+    return metrics
+
+
+def _collect_teacher_target_metrics(
+    output: dict[str, Any],
+    ctx: RhythmMetricContext,
+) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    _update_teacher_alignment_metrics(metrics, output, ctx)
+    _update_acoustic_target_metrics(metrics, output, ctx)
+    return metrics
+
+
+def _collect_observability_metrics(
+    output: dict[str, Any],
+    ctx: RhythmMetricContext,
+) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    _update_confidence_metrics(metrics, output, ctx)
+    _update_alias_metrics(metrics, output, ctx)
+    return metrics
+
+
+def _collect_sample_supervision_metric_dict(
+    sample: dict[str, Any],
+    ctx: RhythmMetricContext,
+) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    _update_sample_supervision_metrics(metrics, sample, ctx)
+    return metrics
+
+
+def build_rhythm_metric_sections(
+    output: dict[str, Any],
+    sample: dict[str, Any] | None = None,
+) -> dict[str, dict[str, torch.Tensor]]:
     execution = output.get("rhythm_execution")
     if execution is None:
         return {}
     ctx = _build_rhythm_metric_context(output, execution)
-    metrics = _build_core_rhythm_metric_dict(ctx)
-    _update_render_frame_plan_metrics(metrics, output, ctx)
-    _update_trace_and_boundary_metrics(metrics, output, ctx)
-    _update_state_metrics(metrics, output, ctx)
-    _update_reference_conditioning_metrics(metrics, output)
-    _update_teacher_alignment_metrics(metrics, output, ctx)
-    _update_acoustic_target_metrics(metrics, output, ctx)
-    _update_confidence_metrics(metrics, output, ctx)
-    _update_alias_metrics(metrics, output, ctx)
+    sections = {
+        "plan_surfaces": _collect_plan_surface_metrics(output, ctx),
+        "runtime_state": _collect_runtime_state_metrics(output, ctx),
+        "teacher_targets": _collect_teacher_target_metrics(output, ctx),
+        "observability": _collect_observability_metrics(output, ctx),
+    }
     if sample is not None:
-        _update_sample_supervision_metrics(metrics, sample, ctx)
+        sections["sample_supervision"] = _collect_sample_supervision_metric_dict(sample, ctx)
+    return sections
+
+
+def build_rhythm_metric_dict(output: dict[str, Any], sample: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
+    metrics: dict[str, torch.Tensor] = {}
+    for section_metrics in build_rhythm_metric_sections(output, sample=sample).values():
+        metrics.update(section_metrics)
     return metrics
 
 

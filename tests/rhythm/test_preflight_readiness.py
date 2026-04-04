@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -20,6 +21,7 @@ from modules.Conan.rhythm.stages import normalize_rhythm_stage
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.config_contract_stage_rules import detect_rhythm_profile
 from tasks.Conan.rhythm.preflight_support import (
+    _compose_hparams_override,
     _inspect_indexed_split_arrays,
     _inspect_indexed_split_files,
     _inspect_pitch_feature_readiness,
@@ -79,6 +81,18 @@ class PreflightReadinessTests(unittest.TestCase):
         issues = _inspect_processed_data_dir("")
         self.assertEqual(len(issues), 1)
         self.assertIn("cached-only preflight mainly validates binary cache readiness", issues[0])
+
+    def test_preflight_compose_hparams_override_accepts_binary_and_processed_dirs(self) -> None:
+        args = SimpleNamespace(
+            hparams="foo=1",
+            binary_data_dir="data/binary/demo",
+            processed_data_dir="data/processed/demo",
+        )
+        override = _compose_hparams_override(args)
+        self.assertEqual(
+            override,
+            "foo=1,binary_data_dir='data/binary/demo',processed_data_dir='data/processed/demo'",
+        )
 
     def test_rhythm_cache_scalar_contract_rejects_vectors(self) -> None:
         with self.assertRaises(RuntimeError):

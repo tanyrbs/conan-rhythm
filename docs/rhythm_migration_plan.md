@@ -1,137 +1,97 @@
 # Rhythm Migration Plan (2026-04-04)
 
-This file tracks the current maintained migration state of the rhythm branch.
+This is the only maintained document under `docs/`. Together with `README.md`, it defines the current training path, what changed recently, and what is still blocked.
 
-See also:
+## 1. Maintained path and code boundaries
 
-- `docs/rhythm_training_stages.md`
-- `docs/rhythm_supervision_policy.md`
-- `docs/rhythm_train_runbook.md`
-- `docs/rhythm_pretrain_audit_2026-04-04.md`
+The maintained rhythm path remains:
 
-## 1. What is already migrated
+1. `teacher_offline`
+2. export teacher targets / rebuild student cache
+3. `student_kd`
+4. prepare retimed cache + F0 side files
+5. `student_retimed`
 
-The branch has already moved away from the old “rhythm mixed into style / decoder heuristics” path.
+Critical code ownership is intentionally narrow:
 
-### Core rhythm modules now in the maintained path
+- timing / feasibility / projector logic: `modules/Conan/rhythm/`
+- stage contracts, targets, losses, metrics, preflight: `tasks/Conan/rhythm/`
+- maintained validation entrypoints:
+  - `scripts/smoke_test_rhythm_v2.py`
+  - `scripts/preflight_rhythm_v2.py`
+  - `scripts/cpu_probe_rhythm_train.py`
 
-- `modules/Conan/rhythm/unitizer.py`
-- `modules/Conan/rhythm/unit_frontend.py`
-- `modules/Conan/rhythm/reference_descriptor.py`
-- `modules/Conan/rhythm/reference_encoder.py`
-- `modules/Conan/rhythm/scheduler.py`
-- `modules/Conan/rhythm/projector.py`
-- `modules/Conan/rhythm/renderer.py`
-- `modules/Conan/rhythm/frame_plan.py`
-- `modules/Conan/rhythm/offline_teacher.py`
-- `modules/Conan/rhythm/runtime_adapter.py`
-- `modules/Conan/rhythm/policy.py`
-- `modules/Conan/rhythm/stages.py`
-- `modules/Conan/rhythm/surface_metadata.py`
-- `modules/Conan/rhythm/supervision.py`
-- `modules/Conan/rhythm/module.py`
-- `modules/Conan/rhythm/factory.py`
+## 2. Critical-thinking mapping from the style review to this repo
 
-### Task / data / validation integration already migrated
+The style-branch names from the external review do **not** map 1:1 into this repo, so they were not copied blindly.
 
-- `tasks/Conan/dataset.py`
-- `tasks/Conan/Conan.py`
-- `tasks/Conan/rhythm/dataset_contracts.py`
-- `tasks/Conan/rhythm/dataset_target_builder.py`
-- `tasks/Conan/rhythm/task_runtime_support.py`
-- `tasks/Conan/rhythm/loss_routing.py`
-- `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/metrics.py`
-- `tasks/Conan/rhythm/preflight_support.py`
-- `tasks/Conan/rhythm/streaming_eval.py`
+What *does* map here:
 
-## 2. Current stage split
+- style-branch `mainline_train_prep.run_prep` -> this repo's `tasks/Conan/rhythm/preflight_support.py`
+- style-branch `collect_control_diagnostics` -> this repo's `tasks/Conan/rhythm/metrics.py`
+- local `@torch.jit.script` risk -> `modules/Conan/diff/net.py`
 
-### Structurally completed
+What does **not** exist here as a maintained rhythm feature:
 
-- cache-backed rhythm supervision
-- cached-only contract validation
-- stateful scheduler / projector path
-- learned offline teacher stage (`teacher_offline`)
-- cache-only student KD stage (`student_kd`)
-- retimed acoustic training stage (`student_retimed`)
-- chunkwise streaming evaluation
-- local rhythm unit / loss / projector / preflight tests
-- CI lane for compile + unit + smoke coverage
+- proxy-negative / style-success batch-composition logic from the style branch
 
-### Still needs empirical proof / real-data closure
+So the safe rule for this repo is: improve the maintained rhythm chain where the local code has a real analogue, and do not invent cross-branch control logic that the rhythm path does not actually use.
 
-- real dataset readiness instead of smoke-only structure checks
-- teacher export -> re-binarize -> student run closure on maintained corpora
-- long-run training stability
-- stronger streaming latency / quality benchmarks
-- richer regression coverage for runtime / renderer / cache interactions
+## 3. What was absorbed into the local mainline
 
-### Still future work
+Recent local changes that matter for correctness and training prep:
 
-- progressive streaming reference updates
-- stronger benchmark suite for long-utterance continuity and latency ceilings
-- any re-expansion of legacy runtime dual-mode branches as default behavior
+- explicit zero-confidence now stays hard-off for component KD / retimed weighting instead of being revived by the confidence floor
+- budget supervision now tracks projector repair more honestly and exposes repair / redistribution metrics
+- preflight is split into context building, data-staging checks, control preview checks, and summary emission
+- rhythm metrics are split into section collectors instead of growing one monolithic diagnostics function
+- `scripts/preflight_rhythm_v2.py` now accepts both `--binary_data_dir` and `--processed_data_dir`
+- `scripts/cpu_probe_rhythm_train.py` now allows up to 5000 probe steps, which enabled the 2000-step validation run
+- `modules/Conan/diff/net.py` no longer depends on a local TorchScript helper for `silu`
 
-## 3. Current blockers for formal training claims
+## 4. Validation actually run on this checkout
 
-These are the real blockers in a clean checkout:
+The following checks were completed locally on April 4, 2026:
 
-1. checked-in default `data/binary/vc_6layer` is absent
-2. bundled smoke caches are structural sanity assets, not maintained formal training data
-3. student stages require teacher export plus cache rebuild before they are meaningful
-4. `student_retimed` still needs real F0 side files when `with_f0: true`
-5. Windows binarization throughput remains lower than Linux / WSL due worker constraints
+- `python -m unittest discover -s tests/rhythm -p "test_*.py"`
+- `python -u scripts/smoke_test_rhythm_v2.py`
+- `conda run -n conan python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 --processed_data_dir data/processed/libritts_local_real_smoke --splits train --inspect_items 2 --model_dry_run`
+- `conda run -n conan python scripts/cpu_probe_rhythm_train.py --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 --processed_data_dir data/processed/libritts_local_real_smoke --steps 2000 --warmup_steps 10 --device cpu --profile_json artifacts/probe/teacher_offline_cpu_probe_2000.json`
 
-## 4. Current task focus
+Observed smoke/probe outcome:
 
-The current branch should keep focusing on:
+- preflight on smoke assets passed
+- CPU probe completed 2000 / 2000 steps
+- `total_loss`: `0.3854 -> 0.1044`
+- mean step time: about `240.71 ms`
+- throughput: about `4.154 steps/s`
+- peak CPU RSS: about `1159.91 MB`
 
-1. projector-centric timing authority
-2. cache reproducibility and fail-fast validation
-3. teacher-first target generation followed by student-only KD / retimed closure
-4. retimed train/infer consistency
-5. streaming no-rollback / carry / budget regression hardening
-6. performance work in data loading, item reuse, and batch transfer efficiency
+These results mean the code path is structurally trainable in the local `conan` environment. They do **not** mean the formal maintained dataset is ready.
 
-This means:
+## 5. Remaining blockers before formal training
 
-- do not expand the style path first
-- do not reintroduce runtime heuristics as the maintained mainline
-- do not treat legacy dual-mode branches as the default branch ceiling
+This shared checkout is still missing the real maintained training assets:
 
-## 5. Validation evidence available right now
+- `data/binary/vc_6layer/{train,valid}.{data,idx}`
+- a real `data/processed/vc`
+- exported `data/teacher_targets/...`
+- retimed cache / side files for `student_retimed`
+- F0 side files when `with_f0=true`
 
-Current local validation evidence on the maintained branch includes:
+So the current state is:
 
-- rhythm unit test suite passing
-- compile checks passing
-- `scripts/smoke_test_rhythm_v2.py` passing
-- `scripts/preflight_rhythm_v2.py --help` / CLI path alive
-- CPU probe / preflight tooling checked into the repo
-- GitHub Actions rhythm CI workflow for Ubuntu + Windows
+- code readiness: **yes**
+- smoke/probe readiness in `conda` env: **yes**
+- formal maintained training readiness on this checkout: **no, blocked by data assets**
 
-This is enough to claim structural readiness, not enough to claim final strong-rhythm performance.
+## 6. Training rule of thumb
 
-## 6. Near-term performance priorities
+Keep maintenance effort focused on changes that improve one of these four things:
 
-The highest-value performance headroom remains in:
+- projector trust / feasible execution
+- cache reproducibility / fail-fast validation
+- retimed supervision consistency
+- streaming stability / prefix consistency
 
-- dynamic batch sampling without huge endless list materialization
-- reducing repeated dataset item deserialization
-- avoiding repeated H2D transfer for multi-optimizer training
-- keeping training / binarization entrypoints off forced single-thread mode by default
-- continuing to reduce Python-heavy frame-plan / retimed-target work
-
-## 7. Migration rule of thumb
-
-If a new change does not strengthen one of these:
-
-- schedule quality
-- cache reproducibility
-- retimed training consistency
-- streaming stability
-- maintained-path throughput
-
-then it is probably not the next thing to migrate.
+If a proposed change only exists in another branch's research path and does not have a real local analogue, do not port it by default.

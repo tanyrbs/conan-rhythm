@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
 from tasks.Conan.rhythm.targets import DistillConfidenceBundle
 
 
@@ -33,14 +34,17 @@ def normalize_distill_confidence(
             batch_size=batch_size,
             device=device,
         )
-    hard_zero = confidence <= 0.0
-    confidence = confidence.clamp(min=0.0, max=1.0)
-    positive = confidence > 0.0
-    confidence = torch.where(positive, confidence.clamp(min=float(floor), max=1.0), confidence)
+    confidence = clamp_confidence_preserve_zero(
+        confidence,
+        floor=float(floor),
+        preserve_zeros=preserve_zeros,
+    )
     if abs(float(power) - 1.0) > 1e-8:
-        confidence = torch.where(positive, confidence.pow(float(power)), confidence)
-    if preserve_zeros:
-        confidence = torch.where(hard_zero, torch.zeros_like(confidence), confidence)
+        positive = confidence > 0.0 if preserve_zeros else None
+        if preserve_zeros:
+            confidence = torch.where(positive, confidence.pow(float(power)), confidence)
+        else:
+            confidence = confidence.pow(float(power))
     return confidence
 
 

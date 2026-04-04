@@ -105,7 +105,7 @@ class BudgetSurfaceTests(unittest.TestCase):
         ungated_exec_total = torch.abs(torch.log1p(torch.tensor(8.0)) - torch.log1p(torch.tensor(6.0)))
         expected_gate = torch.tensor(6.0 / 8.0)
         expected_exec_total = 0.25 * ungated_exec_total * expected_gate
-        expected_pause_share = 0.25 * torch.tensor(abs((2.0 / 8.0) - (2.0 / 6.0)))
+        expected_pause_share = 0.25 * torch.tensor(abs((2.0 / 8.0) - (2.0 / 6.0))) * expected_gate
         self.assertTrue(torch.allclose(raw_surface, torch.tensor(0.0)))
         self.assertTrue(torch.allclose(total_surface, expected_exec_total, atol=1e-6))
         self.assertTrue(torch.allclose(pause_share_surface, expected_pause_share, atol=1e-6))
@@ -119,6 +119,31 @@ class BudgetSurfaceTests(unittest.TestCase):
         loss = _batch_kl_div(pred, tgt, mask)
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.allclose(loss, torch.tensor(0.0)))
+
+    def test_budget_supervision_soft_gates_exec_pause_share_when_repair_only_redistributes_budget(self) -> None:
+        execution = SimpleNamespace(
+            planner=SimpleNamespace(
+                raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+                raw_pause_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+                speech_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+                pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+                feasible_total_budget_delta=torch.tensor([[0.0]], dtype=torch.float32),
+            )
+        )
+        total_loss, raw_surface, exec_surface, total_surface, pause_share_surface = _compute_budget_supervision(
+            execution,
+            speech_budget_tgt=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_tgt=torch.tensor([[4.0]], dtype=torch.float32),
+            raw_weight=1.0,
+            exec_weight=0.25,
+        )
+        expected_gate = torch.tensor(5.0 / 8.0)
+        expected_exec_pause_share = 0.25 * torch.tensor(abs((1.0 / 5.0) - (4.0 / 5.0))) * expected_gate
+        self.assertTrue(torch.allclose(raw_surface, torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(total_surface, torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(pause_share_surface, expected_exec_pause_share, atol=1e-6))
+        self.assertTrue(torch.allclose(exec_surface, expected_exec_pause_share, atol=1e-6))
+        self.assertTrue(torch.allclose(total_loss, pause_share_surface, atol=1e-6))
 
 
 if __name__ == "__main__":

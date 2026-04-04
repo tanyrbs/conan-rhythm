@@ -315,8 +315,8 @@ def _validate_general_stage_rules(
         errors.append("rhythm_projector_pause_topk_ratio_warmup_steps must be >= 0.")
     if pause_topk_ratio_train_start < pause_topk_ratio_train_end:
         warnings.append("pause top-k anneal is configured sparse->dense; maintained path usually uses dense->sparse.")
-    if not (0.0 < distill_conf_floor <= 1.0):
-        errors.append("rhythm_distill_confidence_floor must be in (0, 1].")
+    if not (0.0 <= distill_conf_floor <= 1.0):
+        errors.append("rhythm_distill_confidence_floor must be in [0, 1].")
     if distill_conf_power <= 0.0:
         errors.append("rhythm_distill_confidence_power must be > 0.")
     if distill_allocation_weight > 0.0 and (distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0):
