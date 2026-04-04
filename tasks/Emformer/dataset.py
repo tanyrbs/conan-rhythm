@@ -13,10 +13,12 @@ class EmformerDataset(FastSpeechDataset):
     def __getitem__(self, index):
         hparams=self.hparams
         sample = super(EmformerDataset, self).__getitem__(index)
-        item = self._get_item(index)
+        item = sample.get('_raw_item')
+        if item is None:
+            item = self._get_item(index)
         final_mel_length = min(item['mel'].shape[0], hparams['max_frames'])
 
-        sample["content"] = torch.LongTensor(item['hubert'][:final_mel_length])
+        sample["content"] = torch.as_tensor(item['hubert'][:final_mel_length], dtype=torch.long)
 
         # sample['content'] = torch.LongTensor(item['hubert'])
         # note = torch.LongTensor(item['ep_pitches'][:hparams['max_input_tokens']])

@@ -16,13 +16,15 @@ class FastSpeech2OrigDataset(FastSpeechDataset):
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)
-        item = self._get_item(index)
+        item = sample.get('_raw_item')
+        if item is None:
+            item = self._get_item(index)
         hparams = self.hparams
         mel = sample['mel']
         T = mel.shape[0]
         sample['energy'] = (mel.exp() ** 2).sum(-1).sqrt()
         if hparams['use_pitch_embed'] and self.pitch_type == 'cwt':
-            cwt_spec = torch.Tensor(item['cwt_spec'])[:T]
+            cwt_spec = torch.as_tensor(item['cwt_spec'], dtype=torch.float32)[:T]
             f0_mean = item.get('f0_mean', item.get('cwt_mean'))
             f0_std = item.get('f0_std', item.get('cwt_std'))
             sample.update({"cwt_spec": cwt_spec, "f0_mean": f0_mean, "f0_std": f0_std})

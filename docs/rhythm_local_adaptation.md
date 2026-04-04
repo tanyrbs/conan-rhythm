@@ -1,4 +1,4 @@
-﻿# Rhythm Local Adaptation Notes (2026-04-04)
+# Rhythm Local Adaptation Notes (2026-04-04)
 
 This note records what the repository is doing **right now** for local rhythm adaptation.
 

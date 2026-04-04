@@ -700,16 +700,23 @@ class RhythmConanDatasetMixin:
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)
-        raw_item = self._get_item(index)
+        raw_item = sample.pop("_raw_item", None)
+        if raw_item is None:
+            raw_item = self._get_item(index)
         item_name = str(raw_item.get("item_name", "<unknown-item>"))
         item = self._materialize_rhythm_cache_compat(raw_item, item_name=item_name)
         ref_item = None
-        if "ref_item_id" in sample:
-            raw_ref_item = self._get_item(int(sample["ref_item_id"]))
+        target_mode = self._resolve_rhythm_target_mode()
+        if "ref_item_id" in sample and not self._should_use_self_rhythm_reference(item, target_mode=target_mode):
+            raw_ref_item = sample.pop("_raw_ref_item", None)
+            if raw_ref_item is None:
+                raw_ref_item = self._get_item(int(sample["ref_item_id"]))
             ref_item = self._materialize_rhythm_cache_compat(
                 raw_ref_item,
                 item_name=str(raw_ref_item.get("item_name", "<unknown-ref-item>")),
             )
+        else:
+            sample.pop("_raw_ref_item", None)
         return self._rhythm_sample_assembler().assemble(
             sample=sample,
             item=item,

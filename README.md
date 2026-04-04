@@ -1,392 +1,260 @@
-
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-310/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.51+-red.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.5.1+-red.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-This repository is **our Conan-based engineering fork / modified branch**, focused on the current Rhythm V2 / Minimal Strong-Rhythm path.
+# Conan Rhythm Branch
 
-> **Repository scope**
->
-> - this is **not** presented here as the official Conan release
-> - this README documents **our local redesign and maintained training path**, not the original paper packaging
-> - if historical Conan descriptions disagree with the current code, **the current code and docs in this repo take precedence**
->
-> Current maintained focus:
->
-> - explicit reference rhythm conditioning via `RefRhythmDescriptor`
-> - explicit `descriptor -> scheduler -> projector -> renderer` timing chain
-> - projector execution as the only binding timing authority
-> - teacher-first / student-only rhythm training chain:
->   - `teacher_offline`
->   - `student_kd`
->   - `student_retimed`
-> - cache-backed reproducibility and preflight checks
->
-> Key paths:
->
-> - `modules/Conan/rhythm/`
-> - `tasks/Conan/rhythm/`
-> - `docs/rhythm_module_vision.md`
-> - `docs/rhythm_migration_plan.md`
-> - `docs/rhythm_repo_audit_2026-04-04.md`
-> - `docs/rhythm_training_stages.md`
-> - `docs/rhythm_supervision_policy.md`
->
-> Current note (2026-04-04):
->
-> - the repo has been heavily reworked around explicit rhythm planning, projector feasibility, cache-backed KD, and retimed training closure
-> - several legacy Conan / schedule-only / dual-mode branches are kept only for compatibility or research migration
-> - maintained `student_kd` is now explicitly **teacher-main + shape-only KD**, and its cache contract only requires teacher core + shape-confidence sidecars by default
-> - stage-3 retimed sampling has been tightened around the shared frame-plan path, including batched frame-plan gathering to reduce Python-loop overhead in retimed target construction
-> - README content below should be read as **project-specific implementation notes for this modified branch**, not as an official Conan introduction
+This repository is a Conan-based engineering fork focused on the maintained Rhythm V2 / minimal strong-rhythm path.
 
-## Requirements
+> This README describes the current maintained branch behavior, not the original upstream Conan packaging.
 
-### System Requirements
-- Python 3.10+
+## Maintained focus
 
-## 🚀 Installation
+Current maintained priorities:
 
-1. **Clone the repository**:
+- explicit `descriptor -> scheduler -> projector -> renderer` timing chain
+- projector execution as the binding timing authority
+- teacher-first rhythm training chain:
+  - `teacher_offline`
+  - `student_kd`
+  - `student_retimed`
+- cache-backed reproducibility, preflight checks, and retimed closure
+
+Primary implementation paths:
+
+- `modules/Conan/rhythm/`
+- `tasks/Conan/rhythm/`
+- `docs/rhythm_training_stages.md`
+- `docs/rhythm_supervision_policy.md`
+- `docs/rhythm_train_runbook.md`
+- `docs/rhythm_migration_plan.md`
+
+## Quickstart: maintained Rhythm V2 path
+
+Recommended stage order:
+
+1. prepare and verify a real binary cache
+2. run `teacher_offline`
+3. export learned-offline teacher targets
+4. rebuild student-facing cache from exported teacher assets
+5. run `student_kd`
+6. run `student_retimed`
+
+See:
+
+- `docs/rhythm_train_runbook.md`
+- `docs/rhythm_training_stages.md`
+- `docs/rhythm_migration_plan.md`
+
+## Installation
+
 ```bash
 git clone https://github.com/tanyrbs/conan-rhythm.git
 cd conan-rhythm
-```
-
-2. **Create a virtual environment**:
-```bash
 conda create -n conan python=3.10
 conda activate conan
-```
-
-3. **Install dependencies**:
-```bash
 pip install -r requirements.txt
 ```
-## 📊 Data Preparation
 
-### Dataset Structure
-For the current Conan / Rhythm V2 path, `metadata.json` alone is **not** enough.
+Optional / path-specific dependencies:
 
-At minimum, prepare:
+- `resemblyzer`: speaker embedding extraction
+- `pyworld`: `pe=pw` or RMVPE audio-refinement path
+- `pretty_midi`, `mir_eval`: MIDI export / evaluation helpers
 
-- `metadata_vctk_librittsr_gt.json` for the current VC binarizer path
+## Data preparation
+
+For the maintained Rhythm V2 path, `metadata.json` alone is not enough.
+
+Typical required inputs:
+
+- processed metadata for the Conan VC binarizer path
 - `spker_set.json`
 - raw wav paths referenced by metadata
 - HuBERT token sequences in metadata entries
-- RMVPE F0 files for main-model training
+- F0 side files for stages with `with_f0: true`
+- exported teacher target bundles before formal student-stage cache rebuild
 
-If rhythm cache generation is enabled, the binarizer can additionally cache:
+### Important cache rule
 
-- source unit cache: `content_units`, `dur_anchor_src`, `open_run_mask`, `sealed_mask`, `boundary_confidence`
-- source phrase cache: `source_boundary_cue`, `phrase_group_index`, `phrase_group_pos`, `phrase_final_mask`
-- reference rhythm cache: `ref_rhythm_stats`, `ref_rhythm_trace`, `slow_rhythm_memory`, `slow_rhythm_summary`
-- selector metadata: `selector_meta_indices`, `selector_meta_scores`, `selector_meta_starts`, `selector_meta_ends`
-- cached guidance / teacher targets; note that maintained stage-2 shape-only KD only needs teacher core targets + teacher shape confidence by default, while allocation / prefix sidecars remain research/optional
-- cached retimed mel targets
+`egs/conan_emformer_rhythm_v2_cached_only.yaml` is now only a compatibility alias to `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`.
 
-Keep the cache / batch schema layered:
+For new maintained work, prefer:
 
-- runtime-minimal contract: `content_units`, `dur_anchor_src`, `ref_rhythm_stats`, `ref_rhythm_trace`
-- runtime-target contract: executed speech/pause targets, light budget targets, stage-needed confidence / teacher / retimed targets
-- streaming/offline sidecars: offline source-cache views plus streaming prefix counters, only when dual-mode / prefix sampling actually needs them
-- debug/cache appendix: source phrase cues, selector spans, cache version, hop/trace contract, retimed source metadata
-
-Example:
-```text
-data/
-`-- processed/
-    |-- metadata_vctk_librittsr_gt.json
-    `-- spker_set.json
-```
-### Metadata Format
-There is an example "example_metadata.json" file in the `data/processed/vc/` directory.
-The metadata file should contain entries like:
-```json
-[
-  {
-    "item_name": "speaker1_audio1",
-    "wav_fn": "data/raw/speaker1/audio1.wav", // Path to the raw audio file
-    "spk_embed": "0.1 0.2 0.3 ...", // Speaker embedding vector
-    "duration": 3.5, // Duration in seconds
-    "hubert": "12 34 56 ..." // HuBERT features as space-separated string
-  }
-]
-```
-
-### Data Preprocessing Steps
-
-1. **Extract F0 features using RMVPE (needed only for main model training)**:
-```bash
-export PYTHONPATH=/storage/baotong/workspace/Conan:$PYTHONPATH # (optional) you may need to set the PYTHONPATH for import dependencies
-python utils/extract_f0_rmvpe.py \
-    --config egs/conan_emformer_rhythm_v2_cached_only.yaml \
-    --batch-size 80 \
-    --save-dir /path/to/audio  
-```
-F0 will be saved to the same level folder as the audio folder.
-File structure: (an example below)
-```data/
-└── audio/
-    ├── p225_001.wav
-    ├── ...
-└── audio_f0/
-    ├── p225_001.npy
-    ├── ...
-```
-2. **Binarize the dataset**:
-```bash
-python data_gen/tts/runs/binarize.py --config egs/conan_emformer_rhythm_v2_cached_only.yaml
-```
-
-For formal Rhythm V2 experiments:
-
-- use the cached-only config for binarization
-- prefer the maintained `minimal_v1` base when starting a new formal training chain
-- train/export the offline planner teacher first when you want `learned_offline` teacher assets
-- keep `rhythm_binarize_teacher_targets: true`
-- set `rhythm_teacher_target_source: learned_offline` and provide precomputed offline teacher bundles when building formal teacher-backed caches
-- use `scripts/export_rhythm_teacher_targets.py` to write `{split}/{item_name}.teacher.npz` assets into `rhythm_teacher_target_dir` by default (`--flat_output` keeps the old flat layout; `scripts/export_offline_teacher_assets.py` remains a compatibility wrapper)
-- treat teacher surfaces as the preferred **target source**; maintained `student_kd` now uses teacher-main supervision plus a small shape-only KD regularizer
-- re-binarize whenever `rhythm_cache_version` changes
-- treat `prefer_cache` only as a migration/debug mode
-
-For formal Rhythm V2 experiments, binarization should be re-run with rhythm cache enabled so training can use offline cached targets instead of runtime heuristics.
-### Configuration
-Update the configuration files in `egs/` directory to match your dataset:
-- `egs/conan_emformer_rhythm_v2.yaml`: transitional rhythm config (`prefer_cache`)
-- `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`: maintained formal base config
-- `egs/conan_emformer_rhythm_v2_cached_only.yaml`: legacy alias to the maintained formal base
-- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`: maintained offline teacher asset-build stage
-- `egs/conan_emformer_rhythm_v2_schedule_only.yaml`: legacy schedule warm-start / ablation config
-- `egs/conan_emformer_rhythm_v2_student_kd.yaml`: maintained stage-2 cache-only teacher-main supervision + small shape-only KD regularization
-- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: legacy stage-2 runtime dual-mode KD branch
-- `egs/conan_emformer_rhythm_v2_student_retimed.yaml`: maintained retimed acoustic training stage
-- `egs/conan_emformer.yaml`: legacy / baseline main training configuration
-- `egs/emformer.yaml`: Emformer training configuration
-- `egs/hifi_16k320_shuffle.yaml`: Vocoder training configuration
-
-Key parameters to adjust:
-```yaml
-# Dataset paths
-binary_data_dir: '<YOUR_REAL_BINARY_DATA_DIR>'
-processed_data_dir: '<YOUR_REAL_PROCESSED_DATA_DIR>'
-```
-## 🎯 Training
-
-### Stage 1: Train Emformer
-We first prepare the data and HuBERT tokens from the s3prl package using ```s3prl.nn.S3PRLUpstream("hubert")```.
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/emformer.yaml \
-    --exp_name emformer_training \
-    --reset
-```
-
-### Stage 2: Train Main Conan Model
-We fix the Emformer and Vocoder components, and prepare hubert entries of the data by applying the trained Emformer through the datasets (extracted chunk-wise).
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer.yaml \
-    --exp_name conan_training \
-    --reset
-```
-
-### Stage 3: Train HiFi-GAN Vocoder
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/hifi_16k320_shuffle.yaml \
-    --exp_name hifigan_training \
-    --reset
-```
-
-### Rhythm V2 warm-start / retimed training
-
-Before starting any formal Rhythm V2 run, do a cache/config preflight:
-```bash
-python scripts/preflight_rhythm_v2.py \
-    --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-    --binary_data_dir data/binary/your_dataset \
-    --model_dry_run
-```
-
-Formal expectation:
-
-- the checked-in default path `data/binary/vc_6layer` is **not** bundled in a clean checkout; override `binary_data_dir` to a real local dataset before treating preflight as actionable
-- `train` and `valid` must both pass raw cache inspection **and** survive `ConanDataset` filtering
-- preflight now also checks split-array consistency (`_lengths.npy` / `_spk_ids.npy` when present) and inspected-item shape contracts for cached rhythm/reference/retimed fields
-- repeat preflight with the exact config for each stage
-- the bundled smoke cache is only for structural sanity checks; if its `valid` split is intentionally filtered empty, use `--splits train` for smoke-only checks, but do not treat that as formal training readiness
-
-After stage-1 teacher export and student-cache rebuild, rerun preflight on:
-
+- `egs/conan_emformer_rhythm_v2_minimal_v1.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
 - `egs/conan_emformer_rhythm_v2_student_kd.yaml`
 - `egs/conan_emformer_rhythm_v2_student_retimed.yaml`
 
-Before a real long run, you can also do a CPU mini-train probe on the same config:
+### First-pass vs student-pass binarization
+
+There are two different cache moments:
+
+1. **teacher build preparation**
+   - prepare the dataset
+   - run preflight
+   - train `teacher_offline`
+2. **student cache rebuild**
+   - export learned-offline teacher targets
+   - point binarization at `rhythm_teacher_target_dir`
+   - rebuild cache so student configs see maintained teacher fields
+
+That second rebuild is required before treating `student_kd` / `student_retimed` as formal runs.
+
+### F0 extraction
+
+Use RMVPE only when the target stage actually needs F0:
+
+```bash
+python utils/extract_f0_rmvpe.py \
+  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
+  --batch-size 80
+```
+
+### Binarization
+
+```bash
+python data_gen/tts/runs/binarize.py \
+  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml
+```
+
+After teacher export, rebuild student cache with the student-facing config / overrides that point to exported teacher assets.
+
+## Config matrix
+
+| Config | Status | Purpose | Needs teacher cache | Needs retimed cache | Needs F0 |
+|---|---|---|---:|---:|---:|
+| `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | formal minimal base | yes | no | stage-dependent |
+| `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | learned offline teacher stage | no | no | usually no |
+| `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | cache-only teacher-main + shape-only KD | yes | no | no |
+| `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
+| `conan_emformer_rhythm_v2_cached_only.yaml` | alias | compatibility alias to `minimal_v1` | same as base | same as base | same as base |
+| `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | warm-start / ablation only | optional | no | no |
+| `conan_emformer_rhythm_v2_dual_mode_kd.yaml` | legacy | runtime dual-mode teacher research branch | optional | no | no |
+| `conan_emformer_rhythm_v2.yaml` | transitional | migration / debug path | optional | optional | stage-dependent |
+
+## Preflight and validation
+
+Run preflight before probe or training:
+
+```bash
+python scripts/preflight_rhythm_v2.py \
+  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
+  --binary_data_dir data/binary/your_dataset \
+  --splits train valid \
+  --inspect_items 2 \
+  --model_dry_run
+```
+
+Useful local verification commands:
+
+```bash
+python -m compileall -q modules tasks scripts tests utils data_gen
+python -m unittest discover -s tests/rhythm -p "test_*.py"
+python -u scripts/smoke_test_rhythm_v2.py
+python scripts/preflight_rhythm_v2.py --help
+```
+
+CPU mini-train probe:
+
 ```bash
 python scripts/cpu_probe_rhythm_train.py \
-    --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-    --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 \
-    --processed_data_dir data/processed/libritts_single \
-    --steps 20
+  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
+  --binary_data_dir <REAL_BINARY_DATA_DIR> \
+  --processed_data_dir <REAL_PROCESSED_DATA_DIR> \
+  --steps 5 \
+  --warmup_steps 1 \
+  --device cpu
 ```
 
-What this probe checks:
+Normal `python tasks/run.py ...` launches no longer force `OMP/MKL/...=1`. If you need a low-noise debug run, set `CONAN_SINGLE_THREAD_ENV=1` (or a numeric thread count) explicitly.
 
-- real dataset collation + model forward/backward on CPU
-- loss decomposition (`L_base`, `L_rhythm_exec`, `L_stream_state`, `L_pitch`)
-- gradient finiteness and clipped gradient norm
-- whether representative parameters actually move
+## Training
 
-Performance note:
+### Maintained path
 
-- `tasks/run.py` no longer auto-clamps the whole training job to a single CPU thread
-- the explicit single-thread clamp is still used by smoke / preflight / CPU probe utilities where low-noise diagnostics are more important than peak throughput
-- if you need the old clamp for a launcher, set `CONAN_SINGLE_THREAD_ENV=1` (or a numeric thread count such as `CONAN_SINGLE_THREAD_ENV=4`) before `python tasks/run.py`
+Teacher stage:
 
-Recommended formal path:
-
-0. `teacher_offline` + export `learned_offline` teacher assets
-1. rebuild student-facing cached teacher surfaces
-2. `student_kd` (teacher-main supervision + small shape-only KD)
-3. `student_retimed`
-
-Optional legacy ablations:
-
-- `legacy_schedule_only`
-- `legacy_dual_mode_kd`
-
-Optional branch:
-
-- use `legacy_dual_mode_kd` only when explicitly running legacy runtime-teacher experiments
-
-Transitional warm-start:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2.yaml \
-    --exp_name conan_rhythm_v2 \
-    --reset
+  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
+  --exp_name conan_rhythm_v2_teacher_offline \
+  --reset
 ```
 
-Strict cached-only warm-start:
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_cached_only.yaml \
-    --exp_name conan_rhythm_v2_cached \
-    --reset
-```
+Export teacher targets:
 
-Offline teacher asset build:
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-    --exp_name conan_rhythm_v2_teacher_offline \
-    --reset
-```
-
-Export learned offline teacher assets:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/export_rhythm_teacher_targets.py \
-    --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-    --ckpt checkpoints/conan_rhythm_v2_teacher_offline \
-    --output_dir data/teacher_targets/conan_rhythm_v2 \
-    --splits train valid
+  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
+  --ckpt checkpoints/conan_rhythm_v2_teacher_offline \
+  --output_dir data/teacher_targets/conan_rhythm_v2 \
+  --splits train valid
 ```
 
-Legacy schedule-only warm-start (optional ablation):
+Student KD:
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_schedule_only.yaml \
-    --exp_name conan_rhythm_v2_sched \
-    --reset
+  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
+  --exp_name conan_rhythm_v2_teacher_kd \
+  --reset
 ```
 
-Formal stage-2 cache-only teacher->student KD:
+Student retimed:
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
-    --exp_name conan_rhythm_v2_teacher_kd \
-    --reset
+  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
+  --exp_name conan_rhythm_v2_retimed \
+  --reset
 ```
 
-Legacy stage-2 dual-mode schedule KD:
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml \
-    --exp_name conan_rhythm_v2_dual_kd \
-    --reset
-```
+### Legacy / upstream-style baselines
 
-Strict cached-only student retimed-train experiment:
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-    --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-    --exp_name conan_rhythm_v2_retimed \
-    --reset
-```
+These configs are kept for compatibility or comparison, not as the maintained branch default:
 
-## 🔮 Inference
+- `egs/emformer.yaml`
+- `egs/conan_emformer.yaml`
+- `egs/hifi_16k320_shuffle.yaml`
+- `egs/conan_emformer_rhythm_v2_schedule_only.yaml`
+- `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`
 
-### Streaming Voice Conversion
-```bash
-CUDA_VISIBLE_DEVICES=0 python inference/Conan.py \
-    --config egs/conan_emformer_rhythm_v2.yaml \
-    --exp_name conan
-```
-Use the exp_name that contains the trained main model checkpoints, and update your config with the trained Emformer checkpoint and HifiGAN checkpoint.
+## Inference boundary
 
-## Checkpoints
-You can download pre-trained model checkpoints from [Google Drive](https://drive.google.com/drive/folders/1QhnECo2L4xfXDgdrnM6L1xpsH7u3iRvj?usp=sharing).
+Current checked-in inference is best treated as a streaming-oriented evaluation path, not a polished native low-latency production deployment.
 
-Main system checkpoint folders: Emformer, Conan, hifigan_vc
+See:
 
-Fast system checkpoint folders: Emformer_fast, Conan_fast, hifigan_vc (you may need to change the "right_context" in the config file to 0 instead of 2)
+- `inference/README.md`
+- `docs/streaming_low_latency_mainline_note_20260403.md`
 
-Note: As we previous developed the Emformer training branch on another codebase, we provided another inference script for it `inference/Conan_previous.py`.
-## 📁 Project Structure
+If historical notes mention fixed latency numbers or SOTA-style claims, read them as upstream / historical context, not as a fresh claim for this branch state.
 
-```
-Conan/
-├── modules/                    # Core model implementations
-│   ├── Conan/                 # Main Conan model
-│   ├── Emformer/              # Emformer feature extractor
-│   ├── vocoder/               # HiFi-GAN vocoder
-│   └── ...
-├── tasks/                     # Training and evaluation tasks
-│   ├── Conan/                 # Conan training task
-│   └── ...
-├── inference/                 # Inference scripts
-│   ├── Conan.py              # Main inference script
-│   ├── run_voice_conversion.py
-│   └── ...
-├── data_gen/                  # Data preprocessing
-│   ├── conan_binarizer.py    # Data binarization
-│   └── ...
-├── egs/                       # Configuration files
-│   ├── conan_emformer_rhythm_v2.yaml
-│   ├── conan_emformer_rhythm_v2_cached_only.yaml
-│   ├── conan_emformer_rhythm_v2_teacher_offline.yaml
-│   ├── conan_emformer_rhythm_v2_schedule_only.yaml
-│   ├── conan_emformer_rhythm_v2_student_kd.yaml
-│   ├── conan_emformer_rhythm_v2_student_retimed.yaml
-│   ├── conan_emformer_rhythm_v2_dual_mode_kd.yaml
-│   ├── emformer.yaml         # Emformer config
-│   └── ...
-├── utils/                     # Utility functions
-└── checkpoints/              # Model checkpoints
-```
-## 📈 Performance
+## Performance notes
 
-The Conan system achieves state-of-the-art performance on voice conversion tasks:
+Recent branch work improved the maintained path around:
 
-- **Latency**: ~80ms streaming latency (37ms latency for fast system)
-- **Quality**: High-quality voice conversion with natural prosody
-- **Robustness**: Robust to different speaking styles and content
+- shared frame-plan sampling for retimed targets
+- cache-contract hardening and fail-fast preflight
+- reduced duplicate Python work in the maintained student path
 
-## 📄 Citation
+Current performance headroom is still mostly in:
 
-If you use Conan in your research, please cite our work:
+- data loading / item reuse
+- batch transfer efficiency
+- binarization throughput
+- Windows-vs-Linux preprocessing throughput
+
+## Repository hygiene
+
+- generated `artifacts/` should stay untracked except curated patch files
+- `.gitattributes` pins text files to LF to reduce Windows CRLF noise
+- the rhythm CI lane should cover both Ubuntu and Windows
+
+## Citation
+
+If you use the upstream Conan work, cite the original paper/reference:
 
 ```bibtex
 @article{zhang2025conan,
@@ -397,12 +265,12 @@ If you use Conan in your research, please cite our work:
 }
 ```
 
-## 📜 License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
-- [FastSpeech2](https://github.com/ming024/FastSpeech2) for the codebase and base TTS architectures
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) for the neural vocoder
-- [Emformer](https://github.com/pytorch/audio) for efficient transformer implementation
+- [FastSpeech2](https://github.com/ming024/FastSpeech2)
+- [HiFi-GAN](https://github.com/jik876/hifi-gan)
+- [Emformer](https://github.com/pytorch/audio)
