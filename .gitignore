@@ -60,6 +60,13 @@ checkpoints/
 infer_out/
 infer_out_demo/
 
+# Generated review / experiment artifacts (keep curated patch drops)
+artifacts/**
+!artifacts/
+!artifacts/patches/
+!artifacts/patches/**/
+!artifacts/patches/**/*.patch
+
 # Model weights and large arrays (global)
 *.pt
 *.pth

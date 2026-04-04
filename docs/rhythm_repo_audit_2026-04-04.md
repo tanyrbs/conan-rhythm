@@ -180,6 +180,58 @@ Why it matters:
 
 - it keeps optional-dependency failures out of unrelated import paths and makes setup/debug workflows more robust
 
+## Follow-up hardening applied after the initial audit
+
+### 1. Widen the rhythm CI lane to Ubuntu + Windows and exercise the preflight CLI
+
+File:
+
+- `.github/workflows/rhythm-ci.yml`
+
+Change:
+
+- run the same lightweight rhythm lane on both `ubuntu-latest` and `windows-latest`
+- add pip caching and a job timeout
+- verify `python scripts/preflight_rhythm_v2.py --help` before compile / unit / smoke steps
+
+Why it matters:
+
+- it catches cross-platform drift earlier and keeps the maintained entrypoint alive in CI instead of only through local smoke runs
+
+### 2. Broaden optional-dependency guards around RMVPE / VAD / NSF vocoder imports
+
+Files:
+
+- `modules/pe/rmvpe/inference.py`
+- `tasks/tts/vocoder_infer/__init__.py`
+- `tests/rhythm/test_optional_dependency_guards.py`
+
+Change:
+
+- move RMVPE's `pyworld` import fully behind the deprecated audio-refinement branch
+- add regression coverage proving RMVPE import works even when `pyworld` is absent
+- add a `webrtcvad` missing-path test
+- tolerate broader optional NSF vocoder import failures such as ABI / loader errors
+
+Why it matters:
+
+- optional extras should fail only on use, not at import time for unrelated debugging, training, or inspection workflows
+
+### 3. Keep generated `artifacts/` output untracked by default
+
+Files:
+
+- `.gitignore`
+
+Change:
+
+- ignore generated `artifacts/**` output
+- keep curated patch drops under `artifacts/patches/**/*.patch` trackable
+
+Why it matters:
+
+- it prevents large generated review / export side-products from leaking into the maintained branch while still preserving small reproducible patch artifacts when they are intentionally curated
+
 ## Remaining high-value opportunities
 
 These were not changed yet, but remain the best next targets for throughput work:

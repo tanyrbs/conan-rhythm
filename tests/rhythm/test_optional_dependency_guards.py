@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 import unittest
 from pathlib import Path
@@ -18,6 +19,21 @@ from utils.audio import cwt as audio_cwt
 from utils.audio import vad as audio_vad
 from utils.audio import pitch_utils
 from utils.extract_f0_rmvpe import F0Extractor, _require_pyworld, _require_rmvpe_cls
+
+
+def _pop_modules(prefix: str) -> dict[str, object]:
+    removed = {}
+    for name in list(sys.modules):
+        if name == prefix or name.startswith(f"{prefix}."):
+            removed[name] = sys.modules.pop(name)
+    return removed
+
+
+def _restore_modules(prefix: str, removed: dict[str, object]) -> None:
+    for name in list(sys.modules):
+        if name == prefix or name.startswith(f"{prefix}."):
+            sys.modules.pop(name, None)
+    sys.modules.update(removed)
 
 
 class OptionalDependencyGuardTests(unittest.TestCase):
@@ -71,12 +87,37 @@ class OptionalDependencyGuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(ImportError, "pyworld is required"):
                     _require_pyworld()
 
+    def test_require_rmvpe_cls_does_not_require_pyworld_at_import_time(self) -> None:
+        removed = _pop_modules("modules.pe.rmvpe")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "pyworld":
+                raise ModuleNotFoundError("No module named 'pyworld'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                with mock.patch("utils.extract_f0_rmvpe._RMVPE_CLS", None):
+                    cls = _require_rmvpe_cls()
+            self.assertEqual(cls.__name__, "RMVPE")
+        finally:
+            _restore_modules("modules.pe.rmvpe", removed)
+
     def test_to_lf0_does_not_modify_numpy_input(self) -> None:
         source = np.asarray([0.0, 100.0], dtype=np.float32)
         source_copy = source.copy()
         result = pitch_utils.to_lf0(source)
         self.assertTrue(np.allclose(source, source_copy))
         self.assertLess(result[0], -1.0e9)
+
+    def test_trim_long_silences_requires_webrtcvad_only_on_use(self) -> None:
+        waveform = np.zeros(4800, dtype=np.float32)
+        with mock.patch.object(audio_vad, "webrtcvad", None):
+            with mock.patch.object(audio_vad.librosa.core, "load", return_value=(waveform, 16000)):
+                with mock.patch.object(audio_vad.librosa, "resample", side_effect=lambda wav, *args, **kwargs: wav):
+                    with self.assertRaisesRegex(ImportError, "webrtcvad is required"):
+                        audio_vad.trim_long_silences("dummy.wav", sr=16000, norm=False)
 
     def test_trim_long_silences_requires_scipy_skimage_only_on_use(self) -> None:
         real_import = __import__
@@ -91,8 +132,27 @@ class OptionalDependencyGuardTests(unittest.TestCase):
                 audio_vad.trim_long_silences("dummy.wav")
 
     def test_generate_batch_requires_pe_ckpt_for_rmvpe(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "requires hparams\\['pe_ckpt'\\]"):
-            F0Extractor.generate_batch({}, {"pe": "rmvpe"}, {}, device="cpu")
+            with self.assertRaisesRegex(RuntimeError, "requires hparams\\['pe_ckpt'\\]"):
+                F0Extractor.generate_batch({}, {"pe": "rmvpe"}, {}, device="cpu")
+
+    def test_vocoder_infer_tolerates_optional_nsf_binary_failures(self) -> None:
+        removed = _pop_modules("tasks.tts.vocoder_infer")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tasks.tts.vocoder_infer.hifigan_nsf":
+                raise OSError("bad native extension")
+            if level == 1 and fromlist and "hifigan_nsf" in fromlist:
+                raise OSError("bad native extension")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                module = importlib.import_module("tasks.tts.vocoder_infer")
+            self.assertIsNone(module.hifigan_nsf)
+            self.assertIsInstance(module._HIFIGAN_NSF_IMPORT_ERROR, OSError)
+        finally:
+            _restore_modules("tasks.tts.vocoder_infer", removed)
 
 
 if __name__ == "__main__":

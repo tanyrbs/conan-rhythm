@@ -1,16 +1,32 @@
+import importlib
 import math
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torchaudio.transforms import Resample
-import pyworld as pw
 
 from utils.audio.pitch_utils import interp_f0, resample_align_curve
 from .constants import *
 from .model import E2E0
 from .spec import MelSpectrogram
 from .utils import to_local_average_f0, to_viterbi_f0
+
+_PYWORLD = None
+
+
+def _require_pyworld():
+    global _PYWORLD
+    if _PYWORLD is not None:
+        return _PYWORLD
+    try:
+        _PYWORLD = importlib.import_module("pyworld")
+    except Exception as exc:
+        raise ImportError(
+            "pyworld is required only for RMVPE audio refinement "
+            "(postprocess(..., audio=...)). Install pyworld or call postprocess without audio."
+        ) from exc
+    return _PYWORLD
 
 
 class RMVPE:
@@ -45,6 +61,7 @@ class RMVPE:
     def postprocess(self, f0, fmin=50, fmax=1000, audio=None, min_gap=2):
         if audio is not None:
             # this doesn't work. deprecated
+            pw = _require_pyworld()
             t = np.arange(0, f0.shape[0] * self.hop_length / 16000, self.hop_length / 16000)
             f0 = pw.stonemask(audio.astype(np.float64), f0.astype(np.float64), t, 16000).astype(float)
         f0[f0 < fmin] = 0
