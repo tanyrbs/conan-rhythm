@@ -21,6 +21,8 @@ Six parallel code-path audits were used to re-check:
 - KD and runtime teacher auxiliary loss are already split
 - masked KL / plan / distill numerics are stable
 - projector feasibility math has invariant coverage
+- planner sidecar now survives dataset/cache/collate/runtime paths
+- phase pointer drift diagnostics are now centralized through a derived `phase_ptr_gap`
 - main maintained configs currently pass contract evaluation:
   - `minimal_v1`
   - `teacher_offline`
@@ -67,11 +69,27 @@ Six parallel code-path audits were used to re-check:
 ### 2.5. Runtime teacher auxiliary slicing
 
 - `tasks/Conan/rhythm/runtime_teacher_supervision.py`
-  - sliced runtime teacher views no longer collapse raw/effective budgets into truncated exec sums
-  - prefix slicing now preserves raw-vs-exec / feasible-repair semantics proportionally instead of zeroing feasible deltas
+  - sliced runtime teacher views are now explicitly marked as `auxiliary_proxy`
+  - the slice exports full raw/effective/repair surfaces alongside prefix-proportional proxy budgets
+  - prefix slicing keeps repair semantics observable without pretending it is a faithful full-teacher semantic view
 
 - `tests/rhythm/test_runtime_teacher_supervision.py`
-  - adds regression coverage for proportional prefix slicing and no-slice passthrough
+  - covers proportional prefix slicing, retained full-budget surfaces, and no-slice passthrough
+
+### 2.6. Same-source KD observability
+
+- `tasks/Conan/rhythm/targets.py`
+- `tasks/Conan/rhythm/losses.py`
+- `tasks/Conan/rhythm/loss_routing.py`
+  - `student_kd` now exports explicit same-source KD diagnostics instead of leaving cache-primary/cache-distill overlap implicit
+  - detached observability keys now include:
+    - `L_kd_same_source`
+    - `L_kd_same_source_exec`
+    - `L_kd_same_source_budget`
+    - `L_kd_same_source_prefix`
+
+- `tasks/Conan/rhythm/config_contract_stage_rules.py`
+  - the stage-2 warning now names the active overlapping components instead of only warning in the abstract
 
 ### 3. Docs
 
@@ -110,28 +128,27 @@ These need another focused pass before claiming “fully train-ready mainline”
 
 1. `targets.py` / `config_contract_stage_rules.py`
    - `student_kd` can still reuse the same cached teacher surface for both primary supervision and KD
-   - current contract only warns; it does not force a cleaner separation
-
-2. dataset/runtime planner sidecar path
-   - planner slow-rhythm sidecars are accepted by runtime conditioning
-   - but dataset/collate/contract export is still incomplete, so sidecars can silently disappear
-
-3. projector derived-state contract
-   - `phase_ptr` vs `phase_progress_ratio` semantics still deserve stronger regression coverage
+   - current code now makes that overlap observable, but still does not hard-separate the supervision path
 
 ## Validation run in this audit
 
 ### Tests
 
-- `python -m unittest tests.rhythm.test_preflight_readiness tests.rhythm.test_policy_contract_and_loss_routing tests.rhythm.test_loss_components tests.rhythm.test_loss_confidence_routing tests.rhythm.test_loss_dict_numerics tests.rhythm.test_metrics_masking tests.rhythm.test_budget_surfaces tests.rhythm.test_projector_invariants tests.rhythm.test_reference_sidecar tests.rhythm.test_target_builder`
-  - result: `35 tests` passed
+- `python -m unittest discover -s tests/rhythm -p "test_*.py"`
+  - result: `50 tests` passed
 
 ### Compile / smoke
 
-- `python -m compileall -q modules tasks scripts tests utils data_gen`
+- `python -m compileall -q modules tasks tests`
   - passed
 
 - `python scripts/smoke_test_rhythm_v2.py`
+  - passed
+
+- `python scripts/export_rhythm_teacher_targets.py --help`
+  - passed
+
+- `python scripts/cpu_probe_rhythm_train.py --help`
   - passed
 
 ### Contract / preflight
@@ -145,10 +162,13 @@ These need another focused pass before claiming “fully train-ready mainline”
 - `python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_minimal_v1.yaml --splits train valid --inspect_items 2`
   - fails correctly because `data/binary/vc_6layer` is absent
 
-- `python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_minimal_v1.yaml --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 --splits train valid --inspect_items 2`
-  - now fails explicitly on:
-    - stale teacher source/surface metadata
-    - empty `valid.data`
+- rerun on:
+  - `teacher_offline`
+  - `student_kd`
+  - `student_retimed`
+  - `minimal_v1`
+  - all now fail for the same expected reason in a clean checkout: `data/binary/vc_6layer` is absent
+  - `student_kd` additionally emits the explicit same-source KD warning, which is expected under the current maintained stage-2 design
 
 ## Recommended next action order
 

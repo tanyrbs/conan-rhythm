@@ -201,16 +201,22 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
 Before starting any formal Rhythm V2 run, do a cache/config preflight:
 ```bash
 python scripts/preflight_rhythm_v2.py \
-    --config egs/conan_emformer_rhythm_v2_schedule_only.yaml \
+    --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
     --binary_data_dir data/binary/your_dataset \
     --model_dry_run
 ```
 
 Formal expectation:
 
+- the checked-in default path `data/binary/vc_6layer` is **not** bundled in a clean checkout; override `binary_data_dir` to a real local dataset before treating preflight as actionable
 - `train` and `valid` must both pass raw cache inspection **and** survive `ConanDataset` filtering
 - repeat preflight with the exact config for each stage
 - the bundled smoke cache is only for structural sanity checks; if its `valid` split is intentionally filtered empty, use `--splits train` for smoke-only checks, but do not treat that as formal training readiness
+
+After stage-1 teacher export and student-cache rebuild, rerun preflight on:
+
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml`
+- `egs/conan_emformer_rhythm_v2_student_retimed.yaml`
 
 Before a real long run, you can also do a CPU mini-train probe on the same config:
 ```bash
@@ -231,8 +237,9 @@ What this probe checks:
 Recommended formal path:
 
 0. `teacher_offline` + export `learned_offline` teacher assets
-1. `student_kd`
-2. `student_retimed`
+1. rebuild student-facing cached teacher surfaces
+2. `student_kd`
+3. `student_retimed`
 
 Optional legacy ablations:
 

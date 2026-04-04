@@ -94,6 +94,19 @@ python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_stud
 python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_student_retimed.yaml --splits train valid --inspect_items 2 --model_dry_run
 ```
 
+During `student_kd`, keep an eye on the new KD diagnostics:
+
+- `L_kd_same_source`
+- `L_kd_same_source_exec`
+- `L_kd_same_source_budget`
+- `L_kd_same_source_prefix`
+
+Interpretation:
+
+- if `primary=teacher` and `distill=cache`, KD is still partly same-source teacher reweighting by design
+- these diagnostics do **not** fail training by themselves
+- they are there to stop you from misreading stage-2 as a fully independent KD branch
+
 ## 7. Run a small CPU probe before long training
 
 Only after preflight passes:
@@ -128,3 +141,4 @@ Start formal training only when all of the following are true:
 - model dry-run passes
 - CPU probe passes on the same real dataset
 - teacher export + re-binarize has been completed before `student_kd` / `student_retimed`
+- you understand whether `student_kd` is still running same-source cache-backed KD and have checked the `L_kd_same_source*` diagnostics
