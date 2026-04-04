@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.runtime_teacher_supervision import slice_runtime_teacher_execution
+from tasks.Conan.rhythm.runtime_teacher_supervision import (
+    build_runtime_teacher_supervision_targets,
+    slice_runtime_teacher_execution,
+)
 
 
 class RuntimeTeacherSupervisionTests(unittest.TestCase):
@@ -102,6 +105,58 @@ class RuntimeTeacherSupervisionTests(unittest.TestCase):
             planner=SimpleNamespace(),
         )
         self.assertIs(slice_runtime_teacher_execution(execution, teacher_units=2), execution)
+
+    def test_build_targets_scales_budget_targets_to_prefix_proxy(self) -> None:
+        runtime_teacher = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[2.0, 3.0, 5.0]], dtype=torch.float32),
+            blank_duration_exec=torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32),
+            planner=SimpleNamespace(
+                speech_budget_win=torch.tensor([[10.0]], dtype=torch.float32),
+                pause_budget_win=torch.tensor([[6.0]], dtype=torch.float32),
+                raw_speech_budget_win=torch.tensor([[8.0]], dtype=torch.float32),
+                raw_pause_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+                effective_speech_budget_win=torch.tensor([[10.0]], dtype=torch.float32),
+                effective_pause_budget_win=torch.tensor([[6.0]], dtype=torch.float32),
+                feasible_speech_budget_delta=torch.tensor([[2.0]], dtype=torch.float32),
+                feasible_pause_budget_delta=torch.tensor([[2.0]], dtype=torch.float32),
+                boundary_score_unit=torch.zeros((1, 3), dtype=torch.float32),
+                source_boundary_cue=torch.zeros((1, 3), dtype=torch.float32),
+            ),
+        )
+        output = {
+            "rhythm_offline_execution": runtime_teacher,
+            "rhythm_offline_unit_batch": SimpleNamespace(
+                dur_anchor_src=torch.ones((1, 2), dtype=torch.float32),
+                unit_mask=torch.ones((1, 2), dtype=torch.float32),
+            ),
+            "rhythm_unit_batch": SimpleNamespace(
+                dur_anchor_src=torch.ones((1, 2), dtype=torch.float32),
+                unit_mask=torch.ones((1, 2), dtype=torch.float32),
+            ),
+        }
+        sample = {
+            "rhythm_offline_teacher_speech_exec_tgt": torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+            "rhythm_offline_teacher_pause_exec_tgt": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            "rhythm_offline_teacher_speech_budget_tgt": torch.tensor([[10.0]], dtype=torch.float32),
+            "rhythm_offline_teacher_pause_budget_tgt": torch.tensor([[6.0]], dtype=torch.float32),
+        }
+
+        teacher_execution, targets = build_runtime_teacher_supervision_targets(
+            output=output,
+            sample=sample,
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            pause_boundary_weight=0.35,
+            budget_raw_weight=1.0,
+            budget_exec_weight=0.25,
+            feasible_debt_weight=0.05,
+        )
+
+        self.assertTrue(torch.allclose(teacher_execution.planner.runtime_budget_slice_ratio_speech, torch.tensor([[0.5]])))
+        self.assertTrue(torch.allclose(teacher_execution.planner.runtime_budget_slice_ratio_pause, torch.tensor([[0.5]])))
+        self.assertTrue(torch.allclose(targets.speech_budget_tgt, torch.tensor([[5.0]])))
+        self.assertTrue(torch.allclose(targets.pause_budget_tgt, torch.tensor([[3.0]])))
 
 
 if __name__ == "__main__":

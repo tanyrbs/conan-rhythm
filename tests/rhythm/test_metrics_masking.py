@@ -106,6 +106,41 @@ class RhythmMetricMaskingTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(metrics["rhythm_metric_budget_repair_active_rate"], torch.tensor(1.0)))
 
+    def test_alias_metrics_export_same_source_kd_diagnostics(self) -> None:
+        unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
+        dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            dur_shape_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_shape_unit=torch.tensor([[1.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 1, 3), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[1.0]], dtype=torch.float32),
+            blank_duration_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            planner=planner,
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+        metrics = build_rhythm_metric_dict(
+            {
+                "rhythm_execution": execution,
+                "rhythm_unit_batch": SimpleNamespace(unit_mask=unit_mask, dur_anchor_src=dur_anchor),
+                "L_kd_same_source": torch.tensor(1.0),
+                "L_kd_same_source_exec": torch.tensor(1.0),
+                "L_kd_same_source_budget": torch.tensor(0.0),
+                "L_kd_same_source_prefix": torch.tensor(1.0),
+            }
+        )
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_exec"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_budget"], torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_prefix"], torch.tensor(1.0)))
+
 
 if __name__ == "__main__":
     unittest.main()

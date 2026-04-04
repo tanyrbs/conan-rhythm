@@ -110,6 +110,13 @@ class BinarizationError(Exception):
     pass
 
 class BaseBinarizer:
+    @staticmethod
+    def _cleanup_split_outputs(*, data_dir: str, prefix: str, suffixes: tuple[str, ...]) -> None:
+        for suffix in suffixes:
+            path = f"{data_dir}/{prefix}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+
     def __init__(self, processed_data_dir=None):
         if processed_data_dir is None:
             processed_data_dir = hparams['processed_data_dir']
@@ -330,10 +337,11 @@ class VCBinarizer(BaseBinarizer):
             builder.out_file.close()
         except Exception:
             pass
-        for suffix in (".data", ".idx", "_lengths.npy", "_spk_ids.npy"):
-            path = f"{data_dir}/{prefix}{suffix}"
-            if os.path.exists(path):
-                os.remove(path)
+        BaseBinarizer._cleanup_split_outputs(
+            data_dir=data_dir,
+            prefix=prefix,
+            suffixes=(".data", ".idx", "_lengths.npy", "_spk_ids.npy"),
+        )
         raise RuntimeError(f"Binarization produced no valid items for split '{prefix}': {reason}")
 
     def __init__(self, processed_data_dir=None):
@@ -468,9 +476,19 @@ class VCBinarizer(BaseBinarizer):
                 reason="all items failed during item processing",
             )
 
-        builder.finalize()
-        np.save(f'{data_dir}/{prefix}_lengths.npy', np.array(lengths,  np.int32))
-        np.save(f'{data_dir}/{prefix}_spk_ids.npy', np.array(spk_ids, np.int32))  # ✅ newly added
+        try:
+            builder.finalize()
+            np.save(f'{data_dir}/{prefix}_lengths.npy', np.array(lengths,  np.int32))
+            np.save(f'{data_dir}/{prefix}_spk_ids.npy', np.array(spk_ids, np.int32))  # ✅ newly added
+        except Exception as exc:
+            BaseBinarizer._cleanup_split_outputs(
+                data_dir=data_dir,
+                prefix=prefix,
+                suffixes=(".data", ".idx", "_lengths.npy", "_spk_ids.npy"),
+            )
+            raise RuntimeError(
+                f"Binarization failed while finalizing split '{prefix}': {exc}"
+            ) from exc
         print(f"| {prefix} total duration: {total_sec:.2f}s, #items: {len(lengths)}")
 
 

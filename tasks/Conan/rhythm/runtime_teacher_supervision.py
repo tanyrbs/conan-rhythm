@@ -28,6 +28,25 @@ def _coerce_batch_scalar(value, *, batch_size: int, device: torch.device, fallba
     return tensor
 
 
+def _resolve_runtime_budget_ratio(
+    execution,
+    *,
+    attr_name: str,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    fallback = torch.ones((batch_size, 1), dtype=torch.float32, device=device)
+    if planner is None:
+        return fallback
+    return _coerce_batch_scalar(
+        getattr(planner, attr_name, None),
+        batch_size=batch_size,
+        device=device,
+        fallback=fallback,
+    ).clamp_(0.0, 1.0)
+
+
 def _prefix_budget_ratio(
     prefix_mass: torch.Tensor,
     full_mass: torch.Tensor,
@@ -245,16 +264,39 @@ def build_runtime_teacher_supervision_targets(
         unit_mask = batch_for_targets.dur_anchor_src.gt(0).float()
     speech_exec_tgt = sample[speech_exec_key][:, :teacher_units].float()
     pause_exec_tgt = sample[pause_exec_key][:, :teacher_units].float()
+    teacher_execution = slice_runtime_teacher_execution(runtime_teacher, teacher_units=teacher_units)
+    speech_budget_ratio = _resolve_runtime_budget_ratio(
+        teacher_execution,
+        attr_name="runtime_budget_slice_ratio_speech",
+        batch_size=speech_exec_tgt.size(0),
+        device=speech_exec_tgt.device,
+    )
+    pause_budget_ratio = _resolve_runtime_budget_ratio(
+        teacher_execution,
+        attr_name="runtime_budget_slice_ratio_pause",
+        batch_size=speech_exec_tgt.size(0),
+        device=speech_exec_tgt.device,
+    )
     speech_budget_tgt = sample.get(speech_budget_key)
     pause_budget_tgt = sample.get(pause_budget_key)
     if speech_budget_tgt is None:
         speech_budget_tgt = speech_exec_tgt.sum(dim=1, keepdim=True)
     else:
-        speech_budget_tgt = speech_budget_tgt[:, :1].float()
+        speech_budget_tgt = _coerce_batch_scalar(
+            speech_budget_tgt,
+            batch_size=speech_exec_tgt.size(0),
+            device=speech_exec_tgt.device,
+            fallback=speech_exec_tgt.sum(dim=1, keepdim=True),
+        ) * speech_budget_ratio
     if pause_budget_tgt is None:
         pause_budget_tgt = pause_exec_tgt.sum(dim=1, keepdim=True)
     else:
-        pause_budget_tgt = pause_budget_tgt[:, :1].float()
+        pause_budget_tgt = _coerce_batch_scalar(
+            pause_budget_tgt,
+            batch_size=pause_exec_tgt.size(0),
+            device=pause_exec_tgt.device,
+            fallback=pause_exec_tgt.sum(dim=1, keepdim=True),
+        ) * pause_budget_ratio
     sample_confidence = sample.get(
         "rhythm_offline_teacher_confidence",
         sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence")),
@@ -264,7 +306,6 @@ def build_runtime_teacher_supervision_targets(
         batch_size=speech_exec_tgt.size(0),
         device=speech_exec_tgt.device,
     )
-    teacher_execution = slice_runtime_teacher_execution(runtime_teacher, teacher_units=teacher_units)
     targets = RhythmLossTargets(
         speech_exec_tgt=speech_exec_tgt,
         pause_exec_tgt=pause_exec_tgt,

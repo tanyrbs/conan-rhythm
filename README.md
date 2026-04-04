@@ -210,6 +210,7 @@ Formal expectation:
 
 - the checked-in default path `data/binary/vc_6layer` is **not** bundled in a clean checkout; override `binary_data_dir` to a real local dataset before treating preflight as actionable
 - `train` and `valid` must both pass raw cache inspection **and** survive `ConanDataset` filtering
+- preflight now also checks split-array consistency (`_lengths.npy` / `_spk_ids.npy` when present) and inspected-item shape contracts for cached rhythm/reference/retimed fields
 - repeat preflight with the exact config for each stage
 - the bundled smoke cache is only for structural sanity checks; if its `valid` split is intentionally filtered empty, use `--splits train` for smoke-only checks, but do not treat that as formal training readiness
 

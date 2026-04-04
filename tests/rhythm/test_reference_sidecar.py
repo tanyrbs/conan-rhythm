@@ -97,6 +97,44 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_summary"], explicit_summary))
         self.assertIn("slow_rhythm_memory", conditioning)
 
+    def test_build_reference_conditioning_tags_summary_provenance(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_emit_reference_sidecar": False,
+            }
+        )
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        conditioning = module.build_reference_conditioning(
+            ref_conditioning={
+                "ref_rhythm_stats": stats,
+                "ref_rhythm_trace": trace,
+            }
+        )
+        self.assertEqual(conditioning["slow_rhythm_summary_source"], "absent")
+        self.assertEqual(conditioning["planner_slow_rhythm_summary_source"], "planner_ref_trace_mean")
+
+    def test_build_reference_conditioning_rejects_malformed_planner_memory(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_emit_reference_sidecar": True,
+            }
+        )
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        with self.assertRaises(ValueError):
+            module.build_reference_conditioning(
+                ref_conditioning={
+                    "ref_rhythm_stats": stats,
+                    "ref_rhythm_trace": trace,
+                    "planner_slow_rhythm_memory": torch.randn(1, 6, 2, 1),
+                }
+            )
+
     def test_runtime_ref_conditioning_keeps_planner_sidecars(self) -> None:
         stats, trace = self._dummy_inputs(trace_bins=8)
         planner_memory = torch.randn(1, 6, 2)
@@ -105,13 +143,36 @@ class ReferenceSidecarTests(unittest.TestCase):
             {
                 "ref_rhythm_stats": stats,
                 "ref_rhythm_trace": trace,
+                "global_rate": torch.tensor([[0.25]], dtype=torch.float32),
+                "pause_ratio": torch.tensor([[0.20]], dtype=torch.float32),
+                "local_rate_trace": trace[:, :, 1:2],
+                "boundary_trace": trace[:, :, 2:3],
+                "planner_ref_stats": torch.tensor([[0.25, 0.20]], dtype=torch.float32),
+                "planner_ref_trace": torch.cat([trace[:, :, 1:2], trace[:, :, 2:3]], dim=-1),
                 "planner_slow_rhythm_memory": planner_memory,
                 "planner_slow_rhythm_summary": planner_summary,
             }
         )
+        self.assertIn("global_rate", conditioning)
+        self.assertIn("pause_ratio", conditioning)
+        self.assertIn("planner_ref_stats", conditioning)
+        self.assertIn("planner_ref_trace", conditioning)
         self.assertIn("planner_slow_rhythm_memory", conditioning)
         self.assertIn("planner_slow_rhythm_summary", conditioning)
         self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_summary"], planner_summary))
+
+    def test_dataset_contract_rejects_partial_planner_sidecar(self) -> None:
+        dataset = self._DummyDataset()
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        with self.assertRaises(RuntimeError):
+            dataset._rhythm_cache_contract().validate_reference_conditioning_shapes(
+                {
+                    "ref_rhythm_stats": stats.numpy()[0],
+                    "ref_rhythm_trace": trace.numpy()[0],
+                    "planner_slow_rhythm_memory": torch.randn(6, 5, dtype=torch.float32).numpy(),
+                },
+                item_name="broken-ref",
+            )
 
     def test_dataset_cached_reference_keeps_planner_sidecars(self) -> None:
         dataset = self._DummyDataset()

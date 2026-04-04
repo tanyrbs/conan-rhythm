@@ -728,7 +728,13 @@ class RhythmConanDatasetMixin:
             if key not in optional_collate:
                 continue
             dtype_name, pad_value = optional_collate[key]
-            if all(key in s for s in samples):
+            present_count = sum(1 for s in samples if key in s)
+            if 0 < present_count < len(samples):
+                raise RuntimeError(
+                    f"Rhythm batch contains partial optional field '{key}' "
+                    f"({present_count}/{len(samples)} samples). Re-binarize or fix the cache contract."
+                )
+            if present_count == len(samples):
                 value = collate_1d_or_2d([s[key] for s in samples], pad_value)
                 if dtype_name == "long":
                     value = value.long()

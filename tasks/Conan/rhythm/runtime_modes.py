@@ -126,6 +126,12 @@ def build_rhythm_ref_conditioning(sample, *, explicit=None):
         "ref_rhythm_trace": ref_trace,
     }
     for extra_key in (
+        "global_rate",
+        "pause_ratio",
+        "local_rate_trace",
+        "boundary_trace",
+        "planner_ref_stats",
+        "planner_ref_trace",
         "slow_rhythm_memory",
         "slow_rhythm_summary",
         "planner_slow_rhythm_memory",

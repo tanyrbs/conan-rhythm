@@ -588,6 +588,10 @@ if __name__ == '__main__':
             "L_budget": torch.tensor(0.03),
             "L_cumplan": torch.tensor(0.05),
             "L_prefix_state": torch.tensor(0.05),
+            "L_kd_same_source": torch.tensor(1.0),
+            "L_kd_same_source_exec": torch.tensor(1.0),
+            "L_kd_same_source_budget": torch.tensor(0.0),
+            "L_kd_same_source_prefix": torch.tensor(1.0),
             "L_rhythm_exec": torch.tensor(0.2),
             "L_stream_state": torch.tensor(0.1),
             "L_base": torch.tensor(1.4),
@@ -703,6 +707,10 @@ if __name__ == '__main__':
     assert "rhythm_metric_alias_L_stream_state" in metrics
     assert "rhythm_metric_alias_L_base" in metrics
     assert "rhythm_metric_alias_L_pitch" in metrics
+    assert "rhythm_metric_alias_L_kd_same_source" in metrics
+    assert "rhythm_metric_alias_L_kd_same_source_exec" in metrics
+    assert "rhythm_metric_alias_L_kd_same_source_budget" in metrics
+    assert "rhythm_metric_alias_L_kd_same_source_prefix" in metrics
     assert "rhythm_metric_compact_rhythm_exec" in metrics
     assert "rhythm_metric_compact_stream_state" in metrics
     assert "rhythm_metric_compact_base" in metrics

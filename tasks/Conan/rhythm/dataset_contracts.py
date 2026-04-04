@@ -54,6 +54,10 @@ class RhythmDatasetCacheContract:
         arr = np.asarray(value)
         if arr.size <= 0:
             raise RuntimeError("Rhythm cache metadata contains an empty scalar field.")
+        if arr.size != 1:
+            raise RuntimeError(
+                f"Rhythm cache metadata expected scalar/[1], found shape={tuple(arr.shape)}."
+            )
         return arr.reshape(-1)[0]
 
     @staticmethod
@@ -290,8 +294,17 @@ class RhythmDatasetCacheContract:
                 )
             return int(slow_memory.shape[0])
 
+        def _require_complete_optional_group(group, *, label: str) -> bool:
+            present = [key for key in group if key in conditioning]
+            if present and len(present) != len(group):
+                missing = [key for key in group if key not in conditioning]
+                raise RuntimeError(
+                    f"{label} sidecar incomplete in {item_name}: present={present}, missing={missing}."
+                )
+            return len(present) == len(group)
+
         base_sidecar_keys = self.owner._RHYTHM_REF_DEBUG_CACHE_KEYS
-        if all(key in conditioning for key in base_sidecar_keys):
+        if _require_complete_optional_group(base_sidecar_keys, label="Reference"):
             selector_len = _validate_slow_sidecar(
                 "slow_rhythm_memory",
                 "slow_rhythm_summary",
@@ -322,7 +335,7 @@ class RhythmDatasetCacheContract:
                     )
 
         planner_sidecar_keys = getattr(self.owner, "_RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS", ())
-        if planner_sidecar_keys and all(key in conditioning for key in planner_sidecar_keys):
+        if planner_sidecar_keys and _require_complete_optional_group(planner_sidecar_keys, label="Planner reference"):
             _validate_slow_sidecar(
                 "planner_slow_rhythm_memory",
                 "planner_slow_rhythm_summary",

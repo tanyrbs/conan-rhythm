@@ -27,15 +27,23 @@ class BinarizationError(Exception):
 
 class BaseBinarizer:
     @staticmethod
+    def _cleanup_split_outputs(*, data_dir: str, prefix: str, suffixes: tuple[str, ...]) -> None:
+        for suffix in suffixes:
+            path = f"{data_dir}/{prefix}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+
+    @staticmethod
     def _abort_empty_split(builder, *, data_dir: str, prefix: str, reason: str) -> None:
         try:
             builder.out_file.close()
         except Exception:
             pass
-        for suffix in (".data", ".idx", "_lengths.npy", "_ph_lengths.npy"):
-            path = f"{data_dir}/{prefix}{suffix}"
-            if os.path.exists(path):
-                os.remove(path)
+        BaseBinarizer._cleanup_split_outputs(
+            data_dir=data_dir,
+            prefix=prefix,
+            suffixes=(".data", ".idx", "_lengths.npy", "_ph_lengths.npy"),
+        )
         raise RuntimeError(f"Binarization produced no valid items for split '{prefix}': {reason}")
 
     def __init__(self, processed_data_dir=None):
@@ -115,7 +123,7 @@ class BaseBinarizer:
             args = [{'wav': item['wav']} for item in items]
             for item_id, spk_embed in multiprocess_run_tqdm(
                     self.get_spk_embed, args,
-                    init_ctx_func=lambda wid: {'voice_encoder': VoiceEncoder().cuda()}, num_workers=4,
+                    init_ctx_func=lambda wid: {'voice_encoder': VoiceEncoder().cuda()}, num_workers=self.num_workers,
                     desc='Extracting spk embed'):
                 items[item_id]['spk_embed'] = spk_embed
         if len(items) <= 0:
@@ -142,10 +150,20 @@ class BaseBinarizer:
                 prefix=prefix,
                 reason="no valid lengths were collected",
             )
-        builder.finalize()
-        np.save(f'{data_dir}/{prefix}_lengths.npy', mel_lengths)
-        if len(ph_lengths) > 0:
-            np.save(f'{data_dir}/{prefix}_ph_lengths.npy', ph_lengths)
+        try:
+            builder.finalize()
+            np.save(f'{data_dir}/{prefix}_lengths.npy', mel_lengths)
+            if len(ph_lengths) > 0:
+                np.save(f'{data_dir}/{prefix}_ph_lengths.npy', ph_lengths)
+        except Exception as exc:
+            self._cleanup_split_outputs(
+                data_dir=data_dir,
+                prefix=prefix,
+                suffixes=(".data", ".idx", "_lengths.npy", "_ph_lengths.npy"),
+            )
+            raise RuntimeError(
+                f"Binarization failed while finalizing split '{prefix}': {exc}"
+            ) from exc
         print(f"| {prefix} total duration: {total_sec:.3f}s")
 
     @classmethod

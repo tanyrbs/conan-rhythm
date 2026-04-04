@@ -86,6 +86,18 @@ _RETIMED_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
     ("rhythm_retimed_target_source_id",),
     ("rhythm_retimed_target_surface_name",),
 )
+_REFERENCE_SIDECAR_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("slow_rhythm_memory",),
+    ("slow_rhythm_summary",),
+    ("selector_meta_indices",),
+    ("selector_meta_scores",),
+    ("selector_meta_starts",),
+    ("selector_meta_ends",),
+)
+_PLANNER_REFERENCE_SIDECAR_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("planner_slow_rhythm_memory",),
+    ("planner_slow_rhythm_summary",),
+)
 
 
 def validate_cache_field_contract(
@@ -124,6 +136,9 @@ def validate_cache_field_contract(
         or bool(hp.get("rhythm_apply_valid_override", False))
     ):
         expected_groups.extend(_RETIMED_FIELD_GROUPS)
+    if bool(hp.get("rhythm_export_debug_sidecars", False)):
+        expected_groups.extend(_REFERENCE_SIDECAR_FIELD_GROUPS)
+        expected_groups.extend(_PLANNER_REFERENCE_SIDECAR_FIELD_GROUPS)
 
     if float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0:
         if distill == "none":
@@ -199,6 +214,10 @@ def _extract_scalar(value: Any):
     arr = np.asarray(value)
     if arr.size <= 0:
         raise RuntimeError("Encountered empty scalar field while validating rhythm cache metadata.")
+    if arr.size != 1:
+        raise RuntimeError(
+            f"Encountered non-scalar field while validating rhythm cache metadata: shape={tuple(arr.shape)}."
+        )
     return arr.reshape(-1)[0]
 
 
@@ -221,6 +240,13 @@ def validate_inspected_cache_items(
         )
         == "teacher"
         or bool(hp.get("rhythm_require_cached_teacher", False))
+        or (
+            float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0
+            and normalize_distill_surface(
+                str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
+            )
+            == "cache"
+        )
         or str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower() == "teacher"
     )
     need_retimed = bool(hp.get("rhythm_require_retimed_cache", False)) or bool(

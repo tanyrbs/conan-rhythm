@@ -206,7 +206,59 @@ class StreamingRhythmModule(nn.Module):
         return trace_context, planner_trace_context
 
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
-        return self.reference_descriptor(ref_mel)
+        return self._finalize_reference_conditioning(self.reference_descriptor(ref_mel))
+
+    @staticmethod
+    def _finalize_reference_summary(
+        enriched: dict[str, torch.Tensor],
+        *,
+        summary_key: str,
+        memory_key: str,
+        fallback_trace_key: str | None = None,
+    ) -> None:
+        source_key = f"{summary_key}_source"
+        memory = enriched.get(memory_key)
+        if memory is not None and memory.dim() != 3:
+            raise ValueError(
+                f"{memory_key} must be rank-3 [B, K, D], got {tuple(memory.shape)}."
+            )
+        summary = enriched.get(summary_key)
+        if summary is not None:
+            if source_key not in enriched:
+                enriched[source_key] = "sidecar" if memory is not None else "provided"
+            return
+        if memory is not None:
+            enriched[summary_key] = memory.mean(dim=1)
+            enriched[source_key] = f"{memory_key}_mean"
+            return
+        if fallback_trace_key is not None:
+            trace = enriched.get(fallback_trace_key)
+            if trace is not None:
+                if trace.dim() != 3:
+                    raise ValueError(
+                        f"{fallback_trace_key} must be rank-3 [B, T, D], got {tuple(trace.shape)}."
+                    )
+                enriched[summary_key] = trace.mean(dim=1)
+                enriched[source_key] = f"{fallback_trace_key}_mean"
+                return
+        enriched[source_key] = "absent"
+
+    def _finalize_reference_conditioning(
+        self,
+        enriched: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        self._finalize_reference_summary(
+            enriched,
+            summary_key="slow_rhythm_summary",
+            memory_key="slow_rhythm_memory",
+        )
+        self._finalize_reference_summary(
+            enriched,
+            summary_key="planner_slow_rhythm_summary",
+            memory_key="planner_slow_rhythm_memory",
+            fallback_trace_key="planner_ref_trace",
+        )
+        return enriched
 
     def build_reference_conditioning(
         self,
@@ -226,23 +278,15 @@ class StreamingRhythmModule(nn.Module):
                 include_sidecar=self.reference_descriptor.emit_reference_sidecar,
             )
             enriched.update({k: v for k, v in ref_conditioning.items() if v is not None})
-            if "slow_rhythm_summary" not in enriched and "slow_rhythm_memory" in enriched:
-                slow_memory = enriched["slow_rhythm_memory"]
-                if slow_memory.dim() == 3:
-                    enriched["slow_rhythm_summary"] = slow_memory.mean(dim=1)
-            if "planner_slow_rhythm_summary" not in enriched and "planner_slow_rhythm_memory" in enriched:
-                planner_slow_memory = enriched["planner_slow_rhythm_memory"]
-                if planner_slow_memory.dim() == 3:
-                    enriched["planner_slow_rhythm_summary"] = planner_slow_memory.mean(dim=1)
-            elif "planner_slow_rhythm_summary" not in enriched and "planner_ref_trace" in enriched:
-                enriched["planner_slow_rhythm_summary"] = enriched["planner_ref_trace"].mean(dim=1)
-            return enriched
+            return self._finalize_reference_conditioning(enriched)
         if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
-            return self.reference_descriptor.from_stats_trace(
-                ref_rhythm_stats,
-                ref_rhythm_trace,
-                selector=self.reference_descriptor.selector,
-                include_sidecar=self.reference_descriptor.emit_reference_sidecar,
+            return self._finalize_reference_conditioning(
+                self.reference_descriptor.from_stats_trace(
+                    ref_rhythm_stats,
+                    ref_rhythm_trace,
+                    selector=self.reference_descriptor.selector,
+                    include_sidecar=self.reference_descriptor.emit_reference_sidecar,
+                )
             )
         if ref_mel is None:
             raise ValueError('Need either (ref_rhythm_stats, ref_rhythm_trace) or ref_mel.')

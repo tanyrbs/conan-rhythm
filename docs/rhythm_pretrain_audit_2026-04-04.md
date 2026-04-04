@@ -33,6 +33,14 @@ Six parallel code-path audits were used to re-check:
 
 ### 1. Training-prep correctness / guardrails
 
+- `tasks/Conan/rhythm/runtime_teacher_supervision.py`
+  - runtime teacher auxiliary budget targets now scale with the same proportional prefix ratios used by the sliced execution/proxy planner view
+  - this removes the previous full-budget-vs-prefix-exec mismatch on teacher aux supervision
+
+- `modules/Conan/rhythm/module.py`
+  - cached/runtime reference conditioning now tags slow-summary provenance
+  - malformed planner/slow sidecar tensors now fail fast instead of silently falling through to a fallback path
+
 - `modules/Conan/rhythm/stages.py`
   - add `cached_only -> minimal_v1` stage alias
   - detect `cached_only` config names as `minimal_v1`
@@ -45,6 +53,12 @@ Six parallel code-path audits were used to re-check:
     - zero-byte `.data` shells
     - zero-byte `.idx`
     - missing `_lengths.npy`
+    - `_lengths.npy` / `_spk_ids.npy` length mismatches against the indexed dataset
+    - inspected-item source/reference/target shape-contract violations
+
+- `tasks/Conan/rhythm/dataset_contracts.py`
+  - scalar metadata now rejects non-scalar arrays instead of silently taking the first element
+  - partial reference/planner sidecar groups now fail fast instead of being skipped
 
 - `utils/commons/hparams.py`
   - programmatic `set_hparams(..., reset=True)` is now supported
@@ -52,7 +66,9 @@ Six parallel code-path audits were used to re-check:
 - `data_gen/tts/base_binarizer.py`
 - `data_gen/conan_binarizer.py`
   - Windows binarization is clamped to single-process by default
+  - speaker-embedding extraction now follows the same worker policy as the main item-processing path
   - empty splits fail fast and clean partial files
+  - finalize/save failures now clean partial split artifacts instead of leaving `.data/.idx/.npy` half-products
 
 ### 2. Observability
 
@@ -135,7 +151,7 @@ These need another focused pass before claiming “fully train-ready mainline”
 ### Tests
 
 - `python -m unittest discover -s tests/rhythm -p "test_*.py"`
-  - result: `50 tests` passed
+  - result: `57 tests` passed
 
 ### Compile / smoke
 
@@ -154,10 +170,14 @@ These need another focused pass before claiming “fully train-ready mainline”
 ### Contract / preflight
 
 - maintained config contract evaluation:
-  - `minimal_v1`: `0 error / 0 warning`
+  - `minimal_v1`: `0 error / 1 warning`
   - `teacher_offline`: `0 error / 0 warning`
-  - `student_kd`: `0 error / 0 warning`
+  - `student_kd`: `0 error / 1 warning`
   - `student_retimed`: `0 error / 0 warning`
+
+- current warnings:
+  - `minimal_v1`: asks for `--model_dry_run` before treating preflight as train-ready
+  - `student_kd`: explicit same-source cache-teacher warning remains expected under the current maintained stage-2 definition
 
 - `python scripts/preflight_rhythm_v2.py --config egs/conan_emformer_rhythm_v2_minimal_v1.yaml --splits train valid --inspect_items 2`
   - fails correctly because `data/binary/vc_6layer` is absent

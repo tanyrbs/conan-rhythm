@@ -58,6 +58,8 @@ Preflight should be treated as failed if any of the following happens:
 - `train/valid` indexed dataset missing
 - `.data` shell exists but size is zero
 - `_lengths.npy` is missing
+- `_lengths.npy` / `_spk_ids.npy` count disagrees with the indexed dataset
+- inspected cache items fail rhythm source/reference/target shape validation
 - dataset filtering empties a split
 - model dry-run fails
 

@@ -7,6 +7,8 @@ import os
 import sys
 from collections import Counter
 
+import numpy as np
+
 from modules.Conan.rhythm.policy import (
     resolve_runtime_offline_teacher_enable as resolve_policy_runtime_offline_teacher_enable,
 )
@@ -50,6 +52,69 @@ def _inspect_indexed_split_files(path_prefix: str) -> list[str]:
     return issues
 
 
+def _inspect_indexed_split_arrays(path_prefix: str, *, dataset_len: int) -> list[str]:
+    issues: list[str] = []
+    lengths_path = f"{path_prefix}_lengths.npy"
+    if os.path.exists(lengths_path):
+        try:
+            lengths = np.load(lengths_path, allow_pickle=False)
+            found = int(np.asarray(lengths).reshape(-1).shape[0])
+            if found != int(dataset_len):
+                issues.append(
+                    f"Indexed dataset lengths mismatch at {lengths_path}: found={found}, expected={int(dataset_len)}."
+                )
+        except Exception as exc:
+            issues.append(f"Failed to read lengths file at {lengths_path}: {exc}")
+    spk_ids_path = f"{path_prefix}_spk_ids.npy"
+    if os.path.exists(spk_ids_path):
+        try:
+            spk_ids = np.load(spk_ids_path, allow_pickle=False)
+            found = int(np.asarray(spk_ids).reshape(-1).shape[0])
+            if found != int(dataset_len):
+                issues.append(
+                    f"Indexed dataset speaker-id mismatch at {spk_ids_path}: found={found}, expected={int(dataset_len)}."
+                )
+        except Exception as exc:
+            issues.append(f"Failed to read speaker-id file at {spk_ids_path}: {exc}")
+    return issues
+
+
+def _build_cache_shape_contract(hparams):
+    from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
+    from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+
+    owner = type(
+        "_PreflightRhythmCacheOwner",
+        (),
+        {
+            "hparams": hparams,
+            "_RHYTHM_SOURCE_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_SOURCE_CACHE_KEYS,
+            "_RHYTHM_REF_DEBUG_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_REF_DEBUG_CACHE_KEYS,
+            "_RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS,
+        },
+    )()
+    return RhythmDatasetCacheContract(owner)
+
+
+def _validate_item_shape_contracts(items: list[dict], *, context, split: str) -> list[str]:
+    errors: list[str] = []
+    contract = _build_cache_shape_contract(context.hparams)
+    source_keys = tuple(contract.owner._RHYTHM_SOURCE_CACHE_KEYS)
+    for idx, item in enumerate(items):
+        item_name = str(item.get("item_name", f"{split}[{idx}]"))
+        try:
+            if all(key in item for key in source_keys):
+                contract.validate_source_cache_shapes(item, item_name=item_name)
+            if "ref_rhythm_stats" in item and "ref_rhythm_trace" in item:
+                contract.validate_reference_conditioning_shapes(item, item_name=item_name)
+            if "dur_anchor_src" in item:
+                expected_units = int(np.asarray(item["dur_anchor_src"]).reshape(-1).shape[0])
+                contract.validate_target_shapes(item, item_name=item_name, expected_units=expected_units)
+        except Exception as exc:
+            errors.append(str(exc))
+    return errors
+
+
 def _collect_presence(ds: IndexedDataset, limit: int) -> tuple[list[dict], Counter, list[str]]:
     items: list[dict] = []
     counts: Counter[str] = Counter()
@@ -85,7 +150,7 @@ def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> l
     if filtered_len <= 0:
         return [f"Split '{split}' is empty after ConanDataset filtering."]
     try:
-        batch = ds.collater([ds[0]])
+        batch = ds.collater([ds[idx] for idx in range(min(len(ds), 4))])
     except Exception as exc:
         return [f"Failed to collate split '{split}' sample: {exc}"]
     if not run_model:
@@ -241,6 +306,7 @@ def main():
         if len(ds) <= 0:
             errors.append(f"Indexed dataset for split '{split}' is empty at {split_path}.")
             continue
+        errors.extend(_inspect_indexed_split_arrays(split_path, dataset_len=len(ds)))
 
         items, counts, mismatches = _collect_presence(ds, args.inspect_items)
         inspected = min(len(ds), args.inspect_items)
@@ -267,6 +333,7 @@ def main():
         errors.extend(split_contract.errors)
         warnings.extend(split_contract.warnings)
         errors.extend(mismatches)
+        errors.extend(_validate_item_shape_contracts(items, context=context, split=split))
 
         if args.model_dry_run:
             errors.extend(_run_dataset_and_model_dry_run(split, context=context, run_model=True))
