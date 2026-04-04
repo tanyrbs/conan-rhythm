@@ -77,7 +77,9 @@ rhythm_retimed_target_start_steps: 0
 rhythm_retimed_pause_frame_weight: 0.20
 rhythm_retimed_stretch_weight_min: 0.35
 # Transitional setting:
-# use cached targets first, but still allow runtime fallback while refreshing caches.
+# use cached targets first, but do not assume missing learned-offline teacher/retimed
+# surfaces can be rebuilt at runtime. In this checkout, "prefer_cache" only stays
+# conservative when the learned-offline cache path already exists.
 # Maintained experiments should move through:
 #   teacher_offline -> export learned_offline teacher assets
 #   student_kd -> student_retimed

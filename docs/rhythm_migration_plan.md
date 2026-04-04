@@ -1,6 +1,6 @@
-# Rhythm Migration Plan (2026-04-04)
+# Rhythm Migration Plan (2026-04-05)
 
-This is the only maintained document under `docs/`. Together with `README.md`, it defines the current training path, the April 4 audit outcome, and what is still blocked.
+This is the only maintained document under `docs/`. Together with `README.md`, it defines the current training path, the April 4-5 audit outcome, and what is still blocked.
 
 ## 1. Maintained path and code boundaries
 
@@ -24,7 +24,7 @@ Critical code ownership is intentionally narrow:
 
 ## 2. What the 6-agent training-prep audit actually covered
 
-The April 4 audit was split across six concrete surfaces:
+The April 4-5 audit was split across six concrete surfaces:
 
 - parameter / contract defaults
 - inference / runtime edge cases
@@ -77,7 +77,10 @@ The following were run locally in the `conda` `conan` environment:
 - `conda run -n conan python -m unittest discover -s tests/rhythm -p "test_*.py"`
 - `conda run -n conan python -u scripts/smoke_test_rhythm_v2.py`
 - teacher-offline smoke preflight / dry-run on `train`
+- teacher-offline smoke preflight / dry-run on `train valid` to confirm the known empty-split failure
 - teacher export -> student KD integration smoke
+- 1-step `student_retimed` CPU probe with default `use_pitch_embed=true`
+- 1-step `student_retimed` CPU probe with `--hparams use_pitch_embed=False`
 - 2000-step CPU probe for `teacher_offline`
 - 2000-step CPU probe for `student_kd`
 - 2000-step CPU smoke probe for `student_retimed`
@@ -89,6 +92,8 @@ Observed result summary:
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
+- fresh stage-3 spot-check: default `student_retimed` probe fails immediately on missing `f0` in the smoke `student_binary`
+- fresh stage-3 spot-check with `use_pitch_embed=False`: runs, but still shows large one-step gradient pressure (`grad_norm_before_clip ~= 274`)
 
 The newest rerun extended regression coverage specifically around:
 
@@ -99,9 +104,24 @@ The newest rerun extended regression coverage specifically around:
 
 Important asset-level caveats from the same audit:
 
-- `data/binary/libritts_single_smoke_rhythm_v4/valid.data` is empty, so teacher-offline smoke validation is trustworthy on `train` only
+- `data/binary/libritts_single_smoke_rhythm_v4` is train-only in practice:
+  - `valid.data` is empty
+  - `test.data` is empty
+- the checked-in LibriTTS smoke binary is rhythm-cache **v4 compatibility smoke**, not maintained v5 training data
 - the current teacher->student KD integration artifact under `artifacts/rhythm_teacher_export_student_kd/...` is smoke-only because its teacher ckpt mode is `bootstrap_random_init`
-- formal stage-3 still needs real retimed cache plus real F0 side files; the smoke probe used `--hparams use_pitch_embed=False` to avoid claiming a false formal pass
+- the generated stage-2 smoke `student_binary` already contains learned-offline teacher + retimed targets, but it still does **not** include F0
+- formal stage-3 still needs real F0 side files; the smoke probe used `--hparams use_pitch_embed=False` only to avoid claiming a false formal pass
+
+## 4.1 Training-prep audit notes that matter before you launch
+
+- `scripts/preflight_rhythm_v2.py` is only a thin wrapper; the real validation lives in `tasks/Conan/rhythm/preflight_support.py`
+- preflight is **binary-cache-first**, not a full processed-corpus validator:
+  - it strongly checks indexed cache fields / contracts
+  - it only weakly checks `processed_data_dir` existence
+  - so a placeholder processed directory can still look “green”
+- `scripts/cpu_probe_rhythm_train.py` is a throughput / gradient probe, not a full cache-contract validator
+- `scripts/integration_teacher_export_student_kd.py` exports `train/valid/test`, but the post-export smoke assertions are still centered on `train/valid`
+- on the checked-in LibriTTS smoke corpus, integration split inference relies on the generated `build_summary.json`
 
 ## 5. Training-readiness conclusion by stage
 
@@ -117,6 +137,7 @@ Important asset-level caveats from the same audit:
 - teacher-export integration chain: **ready as smoke**
 - formal run from this checkout: **blocked by missing real learned teacher export / rebuilt cache**
 - experimental branch available: `conan_emformer_rhythm_v2_student_kd_context_match.yaml`
+- maintained KD reminder: the real maintained signal is `teacher-main + shape-only KD`; exec/budget/prefix/allocation KD stay disabled in the default stage-2 config
 
 ### `student_retimed`
 
@@ -128,6 +149,7 @@ Important asset-level caveats from the same audit:
 Why stage-3 is still guarded:
 
 - smoke requires `use_pitch_embed=False`
+- the smoke binary already has retimed targets, but default stage-3 still fails because it lacks F0
 - `L_base` dominates the current smoke objective
 - `grad_norm_before_clip` stays very high for long stretches
 - the real F0 / retimed asset contract is not present in this shared checkout
@@ -139,7 +161,7 @@ This shared checkout is still missing the real maintained training assets:
 - `data/binary/vc_6layer/{train,valid}.{data,idx}`
 - a real `data/processed/vc`
 - exported `data/teacher_targets/...`
-- retimed cache / side files for `student_retimed`
+- dedicated formal retimed cache / side files for `student_retimed`
 - F0 side files when `with_f0=true`
 
 So the current state is:
@@ -149,6 +171,20 @@ So the current state is:
 - formal maintained training readiness on this checkout: **no**
 
 The main blocker is still assets, not the control-loss hot path.
+
+## 6.1 Gradient / control audit notes
+
+- maintained optimization is still centered on the composite rhythm losses:
+  - execution
+  - budget
+  - prefix-state / carry
+- many logged subterms are reporting surfaces after scaling, not independent optimizer-driving objectives
+- projector / frame-plan behavior is intentionally discrete:
+  - rounding
+  - top-k / thresholding
+  - monotonic commit frontiers
+  - detached prefix reuse
+- so retimed acoustic targets do **not** backprop through frame-plan/control decisions; the explicit rhythm losses remain the control-learning path
 
 ## 7. Remaining engineering gaps after this audit
 

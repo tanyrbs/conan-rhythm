@@ -15,7 +15,8 @@ rhythm_fastpath_disable_acoustic_when_module_only: true
 rhythm_compact_joint_loss: false
 
 # This legacy warm-start remains useful for ablation / projector-only bootstraps,
-# but it is no longer part of the maintained formal chain.
+# but it is no longer part of the maintained formal chain. Test/infer still inherit
+# the retimed apply path when compatible cache assets are present.
 rhythm_streaming_prefix_train: true
 rhythm_streaming_prefix_min_ratio: 0.45
 rhythm_streaming_prefix_max_ratio: 0.75

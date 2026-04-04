@@ -79,7 +79,7 @@ This shared checkout still does **not** contain the maintained formal dataset as
 - `data/binary/vc_6layer/{train,valid}.{data,idx}` are missing
 - `data/processed/vc` is only a placeholder/example path, not a real processed corpus
 - `data/teacher_targets/...` is absent
-- retimed cache / F0 side files for `student_retimed` are absent
+- dedicated formal retimed cache / F0 side files for `student_retimed` are absent
 
 So formal `teacher_offline -> student_kd -> student_retimed` runs are still blocked by data, not by code.
 
@@ -89,7 +89,7 @@ This repo does contain lightweight smoke assets that are good enough for structu
 
 - `data/binary/libritts_single_smoke_rhythm_v4`
 - `data/processed/libritts_local_real_smoke`
-- `artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/...`:
+- `artifacts/rhythm_teacher_export_student_kd/<run-id>/...`:
   - bootstrap teacher checkpoint
   - teacher export for `train/valid/test`
   - rebuilt student binary for stage-2 smoke
@@ -99,7 +99,20 @@ They are for probe/smoke validation only, not for formal maintained training cla
 Important caveats:
 
 - the `artifacts/rhythm_teacher_export_student_kd/...` teacher checkpoint is `bootstrap_random_init`, so that chain is an integration smoke, not a real learned teacher asset
-- `data/binary/libritts_single_smoke_rhythm_v4/valid.data` is currently empty, so teacher-offline smoke preflight is reliable on `train` only unless you rebuild the smoke valid split
+- `data/binary/libritts_single_smoke_rhythm_v4` is train-only in practice:
+  - `valid.data` is empty
+  - `test.data` is empty
+- the checked-in `libritts_single_smoke_rhythm_v4` items are rhythm-cache **v4 compatibility smoke**, not maintained v5 training assets
+- the generated stage-2 `student_binary` smoke assets already contain learned-offline teacher + retimed targets, but they still **do not include F0**, so default `student_retimed` smoke remains blocked when `use_pitch_embed=true`
+
+### Runnable now vs blocked now
+
+| Surface | Current smoke checkout status |
+|---|---|
+| `teacher_offline` preflight / probe | runnable on `data/binary/libritts_single_smoke_rhythm_v4` **train only** |
+| `student_kd` preflight / smoke | runnable on `artifacts/rhythm_teacher_export_student_kd/<run-id>/student_binary` |
+| `student_retimed` default smoke | blocked on this checkout by missing F0 in the smoke `student_binary` |
+| `student_retimed --hparams use_pitch_embed=False` | structurally runnable only; not a formal stage-3 pass |
 
 ## Preflight and validation
 
@@ -108,6 +121,8 @@ Run preflight before probe or training. The script accepts both binary and proce
 ```bash
 python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/your_dataset   --processed_data_dir data/processed/your_dataset   --splits train valid   --inspect_items 2   --model_dry_run
 ```
+
+Preflight is intentionally **binary-cache-first**. It validates indexed rhythm/cache fields and stage contracts, but `processed_data_dir` is only weakly checked for existence. A placeholder processed directory can still look “green”, so always override both binary and processed paths for real runs.
 
 Useful local verification commands:
 
@@ -121,7 +136,7 @@ python scripts/preflight_rhythm_v2.py --help
 
 ## Conda `conan` environment validation actually run
 
-The following checks were run in the `conan` environment on April 4, 2026.
+The following checks were run in the `conan` environment on April 4-5, 2026.
 
 ### 1) Compile / unit / maintained smoke checks
 
@@ -173,8 +188,9 @@ Result: **passed**.
 Integration notes:
 
 - export coverage now includes `train/valid/test`
-- summary artifact: `artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/summary.json`
+- summary artifact is written under `artifacts/rhythm_teacher_export_student_kd/<run-id>/summary.json`
 - this is still smoke-only because the teacher ckpt mode is `bootstrap_random_init`
+- on the checked-in LibriTTS smoke corpus, split inference relies on the generated `build_summary.json`
 
 ### 4) 2000-step CPU probe: `teacher_offline`
 
@@ -224,29 +240,43 @@ Result summary:
 
 ## Training commands
 
-Teacher stage:
+Teacher stage template:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --exp_name conan_rhythm_v2_teacher_offline   --reset
 ```
 
-Export teacher targets:
+For real runs, also override the actual dataset roots, for example:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/export_rhythm_teacher_targets.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --ckpt checkpoints/conan_rhythm_v2_teacher_offline   --output_dir data/teacher_targets/conan_rhythm_v2   --splits train valid
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --exp_name conan_rhythm_v2_teacher_offline   --reset   -hp "binary_data_dir='data/binary/your_dataset',processed_data_dir='data/processed/your_dataset'"
 ```
 
-Student KD:
+Export teacher targets template:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/export_rhythm_teacher_targets.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --ckpt checkpoints/conan_rhythm_v2_teacher_offline   --output_dir data/teacher_targets/conan_rhythm_v2   --splits train valid test
+```
+
+Student KD template:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --exp_name conan_rhythm_v2_teacher_kd   --reset
 ```
 
-Student retimed:
+Example with required overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --exp_name conan_rhythm_v2_teacher_kd   --reset   -hp "binary_data_dir='data/binary/your_stage2_binary',processed_data_dir='data/processed/your_dataset',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2'"
+```
+
+Student retimed template:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_retimed.yaml   --exp_name conan_rhythm_v2_retimed   --reset
 ```
+
+Real stage-3 runs additionally require a binary cache that already contains retimed targets plus valid F0 side data. The checked-in smoke `student_binary` does not satisfy that default `use_pitch_embed=true` contract.
 
 ## Config matrix
 
@@ -268,7 +298,7 @@ Current branch conclusion after code review, probes, and smoke integration:
 
 - `teacher_offline`: **code-ready**, but the checked-in smoke `valid` split is defective
 - `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
-- `student_retimed`: **not formally ready to bless** from this checkout; smoke runs only after disabling pitch embed and still show high gradient pressure
+- `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
 
 So the next formal sequence should be:
 
@@ -292,6 +322,8 @@ Current checked-in inference is best treated as a streaming-oriented evaluation 
 See `inference/README.md` for that separate boundary.
 
 If historical notes mention fixed latency numbers or SOTA-style claims, read them as upstream / historical context, not as a fresh claim for this branch state.
+
+Also note that the legacy `inference/run_voice_conversion*.py` runners are not maintained branch-quality entrypoints for this rhythm fork; use the latency-report helper and training/preflight scripts as the maintained surface.
 
 ## Performance notes
 

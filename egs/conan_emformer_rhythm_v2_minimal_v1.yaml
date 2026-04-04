@@ -24,6 +24,8 @@ rhythm_dataset_build_guidance_from_ref: false
 rhythm_dataset_build_teacher_from_ref: false
 
 # Main maintained timing objective stays minimal.
+# Keep the core lambdas explicit here so contract validation and runtime loss
+# scaling cannot drift apart through inherited defaults.
 lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.15

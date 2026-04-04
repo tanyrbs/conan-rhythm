@@ -21,7 +21,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Report theoretical streaming latency / recompute budget without loading checkpoints."
     )
-    parser.add_argument("--config", default="egs/conan_emformer.yaml", help="Config YAML to inspect.")
+    parser.add_argument(
+        "--config",
+        default="egs/conan_emformer_rhythm_v2_student_kd.yaml",
+        help="Config YAML to inspect.",
+    )
     parser.add_argument("--exp_name", default="", help="Optional exp name if config is omitted.")
     parser.add_argument("--hparams", default="", help="Optional hparam overrides.")
     parser.add_argument(

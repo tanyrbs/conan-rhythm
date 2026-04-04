@@ -1,5 +1,7 @@
 # Streaming inference notes
 
+This file is a helper note for runtime/eval utilities. It is **not** the maintained training-prep source of truth; use root `README.md` and `docs/rhythm_migration_plan.md` for current training readiness.
+
 This directory now exposes a small runtime utility layer for the Conan streaming path.
 
 ## What is safe in mainline
@@ -23,8 +25,19 @@ So the current mainline is suitable for **streaming-oriented evaluation**, not f
 
 ```bash
 python inference/run_streaming_latency_report.py
-python inference/run_streaming_latency_report.py --config egs/conan_emformer.yaml --duration_seconds 5
+python inference/run_streaming_latency_report.py --config egs/conan_emformer_rhythm_v2_student_kd.yaml --duration_seconds 5
 ```
+
+For maintained branch checks, prefer the Rhythm V2 config family:
+
+- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml`
+- `egs/conan_emformer_rhythm_v2_student_retimed.yaml`
+
+Current caveats:
+
+- the latency-report helper is maintained, but the older `run_voice_conversion*.py` runners are legacy helpers rather than branch-quality maintained entrypoints
+- current streaming/eval audio helpers are not the authoritative validation path for stage-3 F0 readiness; use rhythm preflight/probe scripts for that
 
 ## Vocoder capability surface
 

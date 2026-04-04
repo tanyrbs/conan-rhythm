@@ -37,6 +37,9 @@ rhythm_retimed_target_mode: cached
 rhythm_export_debug_sidecars: false
 rhythm_export_cache_audit_to_sample: false
 lambda_rhythm_distill: 0.35
+# Keep exec KD explicit in this legacy branch; otherwise it would stay enabled
+# only through the implicit runtime default.
+rhythm_distill_exec_weight: 1.0
 rhythm_distill_budget_weight: 0.10
 rhythm_distill_allocation_weight: 0.0
 rhythm_distill_prefix_weight: 0.50
