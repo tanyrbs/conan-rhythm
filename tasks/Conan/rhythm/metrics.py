@@ -348,12 +348,12 @@ def _update_state_metrics(
             }
         )
         progress_ratio = getattr(state_next, "phase_progress_ratio", None)
-        if progress_ratio is not None:
-            phase_ptr = state_next.phase_ptr.float()
+        phase_gap = getattr(state_next, "phase_ptr_gap", None)
+        if progress_ratio is not None and phase_gap is not None:
             metrics["rhythm_metric_phase_progress_ratio_mean"] = _safe_mean(progress_ratio)
-            metrics["rhythm_metric_phase_ptr_vs_progress_l1"] = _safe_mean((phase_ptr - progress_ratio).abs())
+            metrics["rhythm_metric_phase_ptr_vs_progress_l1"] = _safe_mean(phase_gap.abs())
             metrics["rhythm_metric_phase_ptr_below_progress_ratio"] = _safe_mean(
-                (phase_ptr + 1e-6 < progress_ratio).float()
+                (phase_gap < -1e-6).float()
             )
     state_prev = output.get("rhythm_state_prev")
     if state_prev is not None and state_next is not None:

@@ -179,6 +179,26 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     losses["L_distill_prefix"] = losses.get("rhythm_distill_prefix", zero).detach() if isinstance(losses.get("rhythm_distill_prefix"), torch.Tensor) else zero
     losses["L_distill_speech_shape"] = losses.get("rhythm_distill_speech_shape", zero).detach() if isinstance(losses.get("rhythm_distill_speech_shape"), torch.Tensor) else zero
     losses["L_distill_pause_shape"] = losses.get("rhythm_distill_pause_shape", zero).detach() if isinstance(losses.get("rhythm_distill_pause_shape"), torch.Tensor) else zero
+    losses["L_kd_same_source"] = (
+        losses.get("rhythm_distill_same_source_any", zero).detach()
+        if isinstance(losses.get("rhythm_distill_same_source_any"), torch.Tensor)
+        else zero
+    )
+    losses["L_kd_same_source_exec"] = (
+        losses.get("rhythm_distill_same_source_exec", zero).detach()
+        if isinstance(losses.get("rhythm_distill_same_source_exec"), torch.Tensor)
+        else zero
+    )
+    losses["L_kd_same_source_budget"] = (
+        losses.get("rhythm_distill_same_source_budget", zero).detach()
+        if isinstance(losses.get("rhythm_distill_same_source_budget"), torch.Tensor)
+        else zero
+    )
+    losses["L_kd_same_source_prefix"] = (
+        losses.get("rhythm_distill_same_source_prefix", zero).detach()
+        if isinstance(losses.get("rhythm_distill_same_source_prefix"), torch.Tensor)
+        else zero
+    )
     base_value = losses.get("base")
     if isinstance(base_value, torch.Tensor):
         base = base_value.detach()

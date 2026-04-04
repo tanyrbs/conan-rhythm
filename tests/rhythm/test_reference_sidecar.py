@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
+from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.runtime_modes import build_rhythm_ref_conditioning
 
 
@@ -28,6 +29,20 @@ class ReferenceSidecarTests(unittest.TestCase):
         trace[:, :, 3] = torch.linspace(-0.2, 0.2, trace_bins)
         trace[:, :, 4] = 1.0
         return stats, trace
+
+    class _DummyDataset(RhythmConanDatasetMixin):
+        def __init__(self):
+            self.hparams = {
+                "rhythm_enable_v2": True,
+                "rhythm_export_debug_sidecars": True,
+                "rhythm_trace_bins": 8,
+                "rhythm_trace_dim": 5,
+                "rhythm_slow_topk": 6,
+                "rhythm_selector_cell_size": 3,
+                "rhythm_source_phrase_threshold": 0.55,
+                "rhythm_reference_mode_id": 0,
+            }
+            self.prefix = "train"
 
     def test_factory_can_enable_reference_sidecar(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
@@ -97,6 +112,36 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertIn("planner_slow_rhythm_memory", conditioning)
         self.assertIn("planner_slow_rhythm_summary", conditioning)
         self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_summary"], planner_summary))
+
+    def test_dataset_cached_reference_keeps_planner_sidecars(self) -> None:
+        dataset = self._DummyDataset()
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        ref_item = {
+            "ref_rhythm_stats": stats.numpy()[0],
+            "ref_rhythm_trace": trace.numpy()[0],
+            "slow_rhythm_memory": torch.randn(6, 5, dtype=torch.float32).numpy(),
+            "slow_rhythm_summary": torch.randn(5, dtype=torch.float32).numpy(),
+            "planner_slow_rhythm_memory": torch.randn(6, 5, dtype=torch.float32).numpy(),
+            "planner_slow_rhythm_summary": torch.randn(5, dtype=torch.float32).numpy(),
+            "selector_meta_indices": torch.arange(6, dtype=torch.long).numpy(),
+            "selector_meta_scores": torch.ones(6, dtype=torch.float32).numpy(),
+            "selector_meta_starts": torch.arange(6, dtype=torch.long).numpy(),
+            "selector_meta_ends": torch.arange(6, dtype=torch.long).numpy(),
+        }
+        conditioning = dataset._get_reference_rhythm_conditioning(
+            ref_item,
+            sample={"ref_mel": torch.zeros((10, 80), dtype=torch.float32)},
+            target_mode="runtime_only",
+        )
+        self.assertIn("planner_slow_rhythm_memory", conditioning)
+        self.assertIn("planner_slow_rhythm_summary", conditioning)
+        self.assertIn("planner_slow_rhythm_memory", dataset._resolve_optional_sample_keys())
+        self.assertIn("planner_slow_rhythm_summary", dataset._build_optional_collate_spec())
+        planner_memory = dataset._rhythm_sample_assembler()._tensorize_optional_value(
+            "planner_slow_rhythm_memory",
+            ref_item["planner_slow_rhythm_memory"],
+        )
+        self.assertEqual(planner_memory.dtype, torch.float32)
 
 
 if __name__ == "__main__":

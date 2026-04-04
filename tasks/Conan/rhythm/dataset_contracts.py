@@ -271,48 +271,63 @@ class RhythmDatasetCacheContract:
             raise RuntimeError(
                 f"Rhythm trace shape mismatch in {item_name}: found={tuple(trace.shape)}, expected=({trace_bins}, {trace_dim})."
             )
-        sidecar_keys = self.owner._RHYTHM_REF_DEBUG_CACHE_KEYS
-        if not all(key in conditioning for key in sidecar_keys):
-            return
-        slow_memory = np.asarray(conditioning["slow_rhythm_memory"])
-        slow_summary = np.asarray(conditioning["slow_rhythm_summary"])
-        selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
-        selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
-        selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
-        selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
         slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
-        if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
-            raise RuntimeError(
-                f"Slow rhythm memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
-            )
-        if slow_memory.shape[0] > slow_topk:
-            raise RuntimeError(
-                f"Slow rhythm memory count mismatch in {item_name}: found={slow_memory.shape[0]}, expected<= {slow_topk}."
-            )
-        if slow_summary.reshape(-1).shape[0] != trace_dim:
-            raise RuntimeError(
-                f"Slow rhythm summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={trace_dim}."
-            )
-        selector_len = int(slow_memory.shape[0])
-        selector_lengths = {
-            "selector_meta_indices": int(selector_indices.shape[0]),
-            "selector_meta_scores": int(selector_scores.shape[0]),
-            "selector_meta_starts": int(selector_starts.shape[0]),
-            "selector_meta_ends": int(selector_ends.shape[0]),
-        }
-        if len(set(selector_lengths.values()) | {selector_len}) != 1:
-            raise RuntimeError(
-                f"Selector metadata shape mismatch in {item_name}: slow_memory={selector_len}, meta={selector_lengths}."
-            )
-        if selector_len > 0:
-            if selector_indices.min() < 0 or selector_indices.max() >= trace_bins:
+
+        def _validate_slow_sidecar(memory_key: str, summary_key: str, *, label: str) -> int:
+            slow_memory = np.asarray(conditioning[memory_key])
+            slow_summary = np.asarray(conditioning[summary_key])
+            if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
                 raise RuntimeError(
-                    f"Selector indices out of range in {item_name}: min={selector_indices.min()}, max={selector_indices.max()}, trace_bins={trace_bins}."
+                    f"{label} memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
                 )
-            if selector_starts.min() < 0 or selector_ends.max() >= trace_bins or np.any(selector_starts > selector_ends):
+            if slow_memory.shape[0] > slow_topk:
                 raise RuntimeError(
-                    f"Selector cell spans invalid in {item_name}: starts={selector_starts.tolist()}, ends={selector_ends.tolist()}, trace_bins={trace_bins}."
+                    f"{label} memory count mismatch in {item_name}: found={slow_memory.shape[0]}, expected<= {slow_topk}."
                 )
+            if slow_summary.reshape(-1).shape[0] != trace_dim:
+                raise RuntimeError(
+                    f"{label} summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={trace_dim}."
+                )
+            return int(slow_memory.shape[0])
+
+        base_sidecar_keys = self.owner._RHYTHM_REF_DEBUG_CACHE_KEYS
+        if all(key in conditioning for key in base_sidecar_keys):
+            selector_len = _validate_slow_sidecar(
+                "slow_rhythm_memory",
+                "slow_rhythm_summary",
+                label="Slow rhythm",
+            )
+            selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
+            selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
+            selector_starts = np.asarray(conditioning["selector_meta_starts"]).reshape(-1)
+            selector_ends = np.asarray(conditioning["selector_meta_ends"]).reshape(-1)
+            selector_lengths = {
+                "selector_meta_indices": int(selector_indices.shape[0]),
+                "selector_meta_scores": int(selector_scores.shape[0]),
+                "selector_meta_starts": int(selector_starts.shape[0]),
+                "selector_meta_ends": int(selector_ends.shape[0]),
+            }
+            if len(set(selector_lengths.values()) | {selector_len}) != 1:
+                raise RuntimeError(
+                    f"Selector metadata shape mismatch in {item_name}: slow_memory={selector_len}, meta={selector_lengths}."
+                )
+            if selector_len > 0:
+                if selector_indices.min() < 0 or selector_indices.max() >= trace_bins:
+                    raise RuntimeError(
+                        f"Selector indices out of range in {item_name}: min={selector_indices.min()}, max={selector_indices.max()}, trace_bins={trace_bins}."
+                    )
+                if selector_starts.min() < 0 or selector_ends.max() >= trace_bins or np.any(selector_starts > selector_ends):
+                    raise RuntimeError(
+                        f"Selector cell spans invalid in {item_name}: starts={selector_starts.tolist()}, ends={selector_ends.tolist()}, trace_bins={trace_bins}."
+                    )
+
+        planner_sidecar_keys = getattr(self.owner, "_RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS", ())
+        if planner_sidecar_keys and all(key in conditioning for key in planner_sidecar_keys):
+            _validate_slow_sidecar(
+                "planner_slow_rhythm_memory",
+                "planner_slow_rhythm_summary",
+                label="Planner slow rhythm",
+            )
 
     def validate_target_shapes(self, targets, *, item_name: str, expected_units: int):
         unit_keys = [

@@ -104,6 +104,10 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_distill_speech_shape": torch.tensor(2.2),
                 "rhythm_distill_pause_shape": torch.tensor(2.3),
                 "rhythm_distill_allocation": torch.tensor(2.4),
+                "rhythm_distill_same_source_exec": torch.tensor(1.0),
+                "rhythm_distill_same_source_budget": torch.tensor(1.0),
+                "rhythm_distill_same_source_prefix": torch.tensor(1.0),
+                "rhythm_distill_same_source_any": torch.tensor(1.0),
             },
             hparams={
                 "lambda_rhythm_exec_speech": 1.0,
@@ -126,9 +130,11 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertIn("rhythm_plan_local", scaled)
         self.assertIn("rhythm_plan_cum", scaled)
         self.assertIn("rhythm_distill_student", scaled)
+        self.assertIn("rhythm_distill_same_source_any", scaled)
         self.assertTrue(torch.allclose(scaled["rhythm_plan_local"], torch.tensor(0.6)))
         self.assertTrue(torch.allclose(scaled["rhythm_plan_cum"], torch.tensor(1.4)))
         self.assertTrue(torch.allclose(scaled["rhythm_distill_student"], torch.tensor(3.6)))
+        self.assertTrue(torch.allclose(scaled["rhythm_distill_same_source_any"], torch.tensor(1.0)))
 
     def test_public_aliases_expose_plan_and_teacher_aux(self) -> None:
         losses = {
@@ -139,6 +145,10 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
             "rhythm_distill": torch.tensor(0.7, requires_grad=True),
             "rhythm_distill_student": torch.tensor(0.5),
             "rhythm_teacher_aux": torch.tensor(0.2),
+            "rhythm_distill_same_source_any": torch.tensor(1.0),
+            "rhythm_distill_same_source_exec": torch.tensor(1.0),
+            "rhythm_distill_same_source_budget": torch.tensor(1.0),
+            "rhythm_distill_same_source_prefix": torch.tensor(1.0),
         }
         update_public_loss_aliases(losses, mel_loss_names=())
         self.assertTrue(torch.allclose(losses["L_plan"], torch.tensor(1.2)))
@@ -147,6 +157,40 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["L_guidance"], torch.tensor(0.3)))
         self.assertTrue(torch.allclose(losses["L_kd_student"], torch.tensor(0.5)))
         self.assertTrue(torch.allclose(losses["L_teacher_aux"], torch.tensor(0.2)))
+        self.assertTrue(torch.allclose(losses["L_kd_same_source"], torch.tensor(1.0)))
+
+    def test_student_kd_warning_mentions_active_same_source_components(self) -> None:
+        _, _, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_budget_weight": 0.1,
+                "rhythm_distill_prefix_weight": 0.5,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+            }
+        )
+        self.assertTrue(any("active same-source components=['exec', 'budget', 'prefix', 'shape']" in w for w in warnings))
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Profile/stage validation rules for rhythm config contracts."""
 
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from modules.Conan.rhythm.policy import (
@@ -109,16 +110,57 @@ def validate_profile_contract(
     return profile, errors, warnings
 
 
-def validate_stage_contract(
+@dataclass(frozen=True)
+class RhythmStageValidationContext:
+    hparams: Mapping[str, Any]
+    policy: Any
+    stage: str
+    profile: str
+
+
+def _build_stage_validation_context(
     hparams: Mapping[str, Any],
     *,
     config_path: str | None = None,
-) -> tuple[str, list[str], list[str]]:
-    errors: list[str] = []
-    warnings: list[str] = []
+) -> RhythmStageValidationContext:
     policy = build_rhythm_hparams_policy(hparams, config_path=config_path)
-    stage = policy.stage
-    profile = detect_rhythm_profile(hparams, config_path)
+    return RhythmStageValidationContext(
+        hparams=hparams,
+        policy=policy,
+        stage=policy.stage,
+        profile=detect_rhythm_profile(hparams, config_path),
+    )
+
+
+def _active_same_source_distill_components(
+    *,
+    distill_budget_weight: float,
+    distill_prefix_weight: float,
+    distill_allocation_weight: float,
+    distill_speech_shape_weight: float,
+    distill_pause_shape_weight: float,
+) -> list[str]:
+    components = ["exec"]
+    if distill_budget_weight > 0.0:
+        components.append("budget")
+    if distill_prefix_weight > 0.0:
+        components.append("prefix")
+    if distill_allocation_weight > 0.0:
+        components.append("allocation")
+    if distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0:
+        components.append("shape")
+    return components
+
+
+def _validate_general_stage_rules(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    hparams = ctx.hparams
+    policy = ctx.policy
+    stage = ctx.stage
+    profile = ctx.profile
     target_mode = policy.target_mode
     primary = policy.primary_target_surface
     distill = policy.distill_surface
@@ -353,6 +395,47 @@ def validate_stage_contract(
             f"{stage} usually keeps lambda_rhythm_plan: 0; treat rhythm_plan as an ablation/debug term rather than the maintained objective."
         )
 
+
+
+
+def _validate_stage_specific_rules(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    hparams = ctx.hparams
+    policy = ctx.policy
+    stage = ctx.stage
+    target_mode = policy.target_mode
+    primary = policy.primary_target_surface
+    distill = policy.distill_surface
+    require_cached_teacher = policy.require_cached_teacher
+    require_retimed_cache = policy.require_retimed_cache
+    enable_dual = bool(hparams.get("rhythm_enable_dual_mode_teacher", False))
+    enable_learned_offline_teacher = bool(hparams.get("rhythm_enable_learned_offline_teacher", True))
+    runtime_offline_teacher_enable = policy.runtime_offline_teacher_enabled
+    runtime_dual_mode_teacher_enable = resolve_runtime_dual_mode_teacher_enable(hparams, stage=stage, infer=False)
+    legacy_schedule_flag = bool(hparams.get("rhythm_schedule_only_stage", False))
+    strict_mainline = policy.strict_mainline
+    optimize_module_only = bool(hparams.get("rhythm_optimize_module_only", False))
+    lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0))
+    lambda_teacher_aux = float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)
+    teacher_as_main = policy.teacher_as_main
+    apply_train = bool(hparams.get("rhythm_apply_train_override", False))
+    apply_valid = bool(hparams.get("rhythm_apply_valid_override", False))
+    use_retimed_target = bool(hparams.get("rhythm_use_retimed_target_if_available", False))
+    retimed_target_mode = policy.retimed_target_mode
+    retimed_target_start = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
+    lambda_mel_adv = float(hparams.get("lambda_mel_adv", 0.0))
+    lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
+    lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
+    distill_allocation_weight = float(hparams.get("rhythm_distill_allocation_weight", 0.5))
+    distill_prefix_weight = float(hparams.get("rhythm_distill_prefix_weight", 0.25))
+    distill_speech_shape_weight = float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
+    distill_pause_shape_weight = float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
+    compact_joint_loss = bool(hparams.get("rhythm_compact_joint_loss", True))
+    disable_mel_adv_when_retimed = bool(hparams.get("rhythm_disable_mel_adv_when_retimed", True))
     if stage == "teacher_offline":
         if strict_mainline:
             warnings.append("teacher_offline is a teacher-asset build path; keep rhythm_strict_mainline=false for the maintained student mainline.")
@@ -439,9 +522,17 @@ def validate_stage_contract(
             warnings.append("student_kd usually keeps rhythm_distill_prefix_weight > 0.")
         if distill_allocation_weight > 0.0 and (distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0):
             warnings.append("student_kd maintained path should not enable allocation distill together with shape distill.")
-        if primary == "teacher" and distill == "cache" and lambda_distill > 0.0 and not strict_mainline:
+        if primary == "teacher" and distill == "cache" and lambda_distill > 0.0:
+            overlap_components = _active_same_source_distill_components(
+                distill_budget_weight=distill_budget_weight,
+                distill_prefix_weight=distill_prefix_weight,
+                distill_allocation_weight=distill_allocation_weight,
+                distill_speech_shape_weight=distill_speech_shape_weight,
+                distill_pause_shape_weight=distill_pause_shape_weight,
+            )
             warnings.append(
                 "student_kd reuses cached teacher surfaces for both primary supervision and distillation; "
+                f"active same-source components={overlap_components}. "
                 "lambda_rhythm_distill therefore acts partly as extra teacher reweighting, not a fully independent KD branch."
             )
         if lambda_teacher_aux > 0.0:
@@ -522,6 +613,15 @@ def validate_stage_contract(
         if lambda_mel_adv > 0.0 and not disable_mel_adv_when_retimed:
             warnings.append("student_retimed usually disables mel-adversarial loss on retimed targets.")
 
+
+
+
+def _validate_stage_post_rules(
+    ctx: RhythmStageValidationContext,
+    warnings: list[str],
+) -> None:
+    hparams = ctx.hparams
+    profile = ctx.profile
     if profile != "minimal_v1" and bool(hparams.get("rhythm_minimal_v1_profile", False)):
         warnings.append("rhythm_minimal_v1_profile=true no longer implies the maintained chain; prefer explicit rhythm_stage={teacher_offline,student_kd,student_retimed}.")
     contract = build_expected_cache_contract(hparams)
@@ -530,7 +630,20 @@ def validate_stage_contract(
             f"expected_cache_contract resolved rhythm_cache_version={int(contract['rhythm_cache_version'])} "
             f"while maintained cache version is {int(RHYTHM_CACHE_VERSION)}."
         )
-    return stage, errors, warnings
+
+
+def validate_stage_contract(
+    hparams: Mapping[str, Any],
+    *,
+    config_path: str | None = None,
+) -> tuple[str, list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    ctx = _build_stage_validation_context(hparams, config_path=config_path)
+    _validate_general_stage_rules(ctx, errors, warnings)
+    _validate_stage_specific_rules(ctx, errors, warnings)
+    _validate_stage_post_rules(ctx, warnings)
+    return ctx.stage, errors, warnings
 
 
 def collect_rhythm_contract_issues(

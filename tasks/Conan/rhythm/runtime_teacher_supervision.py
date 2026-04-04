@@ -75,19 +75,19 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
             teacher_units=teacher_units,
             current_units=current_units,
         )
-        speech_budget = _coerce_batch_scalar(
+        full_effective_speech_budget = _coerce_batch_scalar(
             getattr(planner, "effective_speech_budget_win", getattr(planner, "speech_budget_win", None)),
             batch_size=batch_size,
             device=device,
             fallback=speech_exec_prefix,
-        ) * speech_ratio
-        pause_budget = _coerce_batch_scalar(
+        )
+        full_effective_pause_budget = _coerce_batch_scalar(
             getattr(planner, "effective_pause_budget_win", getattr(planner, "pause_budget_win", None)),
             batch_size=batch_size,
             device=device,
             fallback=pause_exec_prefix,
-        ) * pause_ratio
-        raw_speech_budget = _coerce_batch_scalar(
+        )
+        full_raw_speech_budget = _coerce_batch_scalar(
             getattr(planner, "raw_speech_budget_win", getattr(planner, "speech_budget_win", None)),
             batch_size=batch_size,
             device=device,
@@ -97,8 +97,8 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
                 device=device,
                 fallback=speech_exec_prefix,
             ),
-        ) * speech_ratio
-        raw_pause_budget = _coerce_batch_scalar(
+        )
+        full_raw_pause_budget = _coerce_batch_scalar(
             getattr(planner, "raw_pause_budget_win", getattr(planner, "pause_budget_win", None)),
             batch_size=batch_size,
             device=device,
@@ -108,20 +108,27 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
                 device=device,
                 fallback=pause_exec_prefix,
             ),
-        ) * pause_ratio
-        feasible_speech_delta = _coerce_batch_scalar(
+        )
+        full_feasible_speech_delta = _coerce_batch_scalar(
             getattr(planner, "feasible_speech_budget_delta", None),
             batch_size=batch_size,
             device=device,
-            fallback=speech_budget.new_zeros(speech_budget.shape),
-        ) * speech_ratio
-        feasible_pause_delta = _coerce_batch_scalar(
+            fallback=full_effective_speech_budget.new_zeros(full_effective_speech_budget.shape),
+        )
+        full_feasible_pause_delta = _coerce_batch_scalar(
             getattr(planner, "feasible_pause_budget_delta", None),
             batch_size=batch_size,
             device=device,
-            fallback=pause_budget.new_zeros(pause_budget.shape),
-        ) * pause_ratio
+            fallback=full_effective_pause_budget.new_zeros(full_effective_pause_budget.shape),
+        )
+        speech_budget = full_effective_speech_budget * speech_ratio
+        pause_budget = full_effective_pause_budget * pause_ratio
+        raw_speech_budget = full_raw_speech_budget * speech_ratio
+        raw_pause_budget = full_raw_pause_budget * pause_ratio
+        feasible_speech_delta = full_feasible_speech_delta * speech_ratio
+        feasible_pause_delta = full_feasible_pause_delta * pause_ratio
         feasible_total_delta = feasible_speech_delta + feasible_pause_delta
+        full_feasible_total_delta = full_feasible_speech_delta + full_feasible_pause_delta
     else:
         speech_budget = speech_exec_prefix
         pause_budget = pause_exec_prefix
@@ -130,6 +137,13 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
         feasible_speech_delta = speech_budget.new_zeros(speech_budget.shape)
         feasible_pause_delta = pause_budget.new_zeros(pause_budget.shape)
         feasible_total_delta = speech_budget.new_zeros(speech_budget.shape)
+        full_effective_speech_budget = speech_budget
+        full_effective_pause_budget = pause_budget
+        full_raw_speech_budget = raw_speech_budget
+        full_raw_pause_budget = raw_pause_budget
+        full_feasible_speech_delta = feasible_speech_delta
+        full_feasible_pause_delta = feasible_pause_delta
+        full_feasible_total_delta = feasible_total_delta
     boundary_score = resolve_boundary_score_unit(planner, fallback=speech_exec.new_zeros(speech_exec.shape))
     if torch.is_tensor(boundary_score):
         boundary_score = boundary_score[:, :teacher_units]
@@ -154,6 +168,17 @@ def slice_runtime_teacher_execution(execution, *, teacher_units: int):
         feasible_pause_budget_delta=feasible_pause_delta,
         feasible_total_budget_delta=feasible_total_delta,
         runtime_budget_slice_mode="proportional_prefix",
+        runtime_budget_slice_semantics="auxiliary_proxy",
+        runtime_budget_slice_preserves_raw_exec_semantics=False,
+        runtime_budget_slice_ratio_speech=speech_ratio if planner is not None else speech_budget.new_ones(speech_budget.shape),
+        runtime_budget_slice_ratio_pause=pause_ratio if planner is not None else pause_budget.new_ones(pause_budget.shape),
+        full_effective_speech_budget_win=full_effective_speech_budget,
+        full_effective_pause_budget_win=full_effective_pause_budget,
+        full_raw_speech_budget_win=full_raw_speech_budget,
+        full_raw_pause_budget_win=full_raw_pause_budget,
+        full_feasible_speech_budget_delta=full_feasible_speech_delta,
+        full_feasible_pause_budget_delta=full_feasible_pause_delta,
+        full_feasible_total_budget_delta=full_feasible_total_delta,
     )
     return SimpleNamespace(
         speech_duration_exec=speech_exec,

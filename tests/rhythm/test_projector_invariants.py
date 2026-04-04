@@ -28,6 +28,16 @@ class ProjectorInvariantTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(state.backlog, torch.tensor([1.5, 0.0], dtype=torch.float32)))
 
+    def test_phase_ptr_gap_is_derived_from_anchor_progress_ratio(self) -> None:
+        state = StreamingRhythmState(
+            phase_ptr=torch.tensor([0.60], dtype=torch.float32),
+            clock_delta=torch.tensor([0.0], dtype=torch.float32),
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            phase_anchor=torch.tensor([[3.0, 10.0]], dtype=torch.float32),
+        )
+        self.assertTrue(torch.allclose(state.phase_progress_ratio, torch.tensor([0.30], dtype=torch.float32)))
+        self.assertTrue(torch.allclose(state.phase_ptr_gap, torch.tensor([0.30], dtype=torch.float32)))
+
     def test_total_budget_and_pause_share_are_derived_surfaces(self) -> None:
         planner = RhythmPlannerOutputs(
             speech_budget_win=torch.tensor([[2.0], [3.0]], dtype=torch.float32),

@@ -226,6 +226,12 @@ class DistillSurfaceBundle:
     prefix_clock: Optional[torch.Tensor] = None
     prefix_backlog: Optional[torch.Tensor] = None
     confidences: DistillConfidenceBundle = field(default_factory=DistillConfidenceBundle)
+    source_kind: str = "none"
+    same_source_primary_exec: bool = False
+    same_source_primary_budget: bool = False
+    same_source_primary_prefix: bool = False
+    same_source_primary_allocation: bool = False
+    same_source_primary_shape: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -273,6 +279,7 @@ def _build_cached_distill_surface(
             allocation=_detach_optional(sample.get("rhythm_teacher_confidence_allocation")),
             shape=_detach_optional(sample.get("rhythm_teacher_confidence_shape")),
         ),
+        source_kind="cache",
     )
 
 
@@ -343,6 +350,7 @@ def _build_runtime_offline_distill_surface(
         prefix_clock=prefix_clock,
         prefix_backlog=prefix_backlog,
         confidences=_build_offline_distill_confidences(offline_confidences, speech),
+        source_kind="offline",
     )
 
 
@@ -359,6 +367,7 @@ def _build_algorithmic_distill_surface(
         prefix_clock=algorithmic_teacher.prefix_clock_tgt.detach() if config.use_distill_prefix else None,
         prefix_backlog=algorithmic_teacher.prefix_backlog_tgt.detach() if config.use_distill_prefix else None,
         confidences=DistillConfidenceBundle(shared=algorithmic_teacher.confidence.detach()),
+        source_kind="algorithmic",
     )
 
 
@@ -438,6 +447,41 @@ def _normalize_distill_surface_confidences(
     return replace(bundle, confidences=normalized_confidences)
 
 
+def _annotate_distill_same_source_overlap(
+    bundle: DistillSurfaceBundle,
+    *,
+    config: RhythmTargetBuildConfig,
+) -> DistillSurfaceBundle:
+    same_cached_teacher = (
+        bundle.is_complete
+        and config.primary_target_surface == "teacher"
+        and bundle.source_kind == "cache"
+    )
+    if not same_cached_teacher:
+        return bundle
+    return replace(
+        bundle,
+        same_source_primary_exec=True,
+        same_source_primary_budget=(
+            config.use_distill_budget
+            and bundle.speech_budget is not None
+            and bundle.pause_budget is not None
+        ),
+        same_source_primary_prefix=(
+            config.use_distill_prefix
+            and (bundle.prefix_clock is not None or bundle.prefix_backlog is not None)
+        ),
+        same_source_primary_allocation=(
+            config.use_distill_allocation
+            and bundle.allocation is not None
+        ),
+        same_source_primary_shape=(
+            (config.use_distill_speech_shape and bundle.speech is not None)
+            or (config.use_distill_pause_shape and bundle.pause is not None)
+        ),
+    )
+
+
 def _resolve_distill_surface_bundle(
     *,
     sample: dict,
@@ -488,6 +532,7 @@ def _resolve_distill_surface_bundle(
         config=config,
         build_prefix_carry_from_exec=build_prefix_carry_from_exec,
     )
+    bundle = _annotate_distill_same_source_overlap(bundle, config=config)
     return _normalize_distill_surface_confidences(
         bundle,
         unit_batch=unit_batch,
@@ -591,6 +636,11 @@ def build_rhythm_loss_targets_from_sample(
         distill_prefix_weight=float(config.distill_prefix_weight),
         distill_speech_shape_weight=float(config.distill_speech_shape_weight),
         distill_pause_shape_weight=float(config.distill_pause_shape_weight),
+        distill_same_source_exec=bool(distill_bundle.same_source_primary_exec),
+        distill_same_source_budget=bool(distill_bundle.same_source_primary_budget),
+        distill_same_source_prefix=bool(distill_bundle.same_source_primary_prefix),
+        distill_same_source_allocation=bool(distill_bundle.same_source_primary_allocation),
+        distill_same_source_shape=bool(distill_bundle.same_source_primary_shape),
         budget_raw_weight=float(config.budget_raw_weight),
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
@@ -646,7 +696,7 @@ def scale_rhythm_loss_terms(
     )
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
-    return {
+    scaled = {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25),
@@ -751,3 +801,15 @@ def scale_rhythm_loss_terms(
             * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
         ).detach(),
     }
+    for key in (
+        "rhythm_distill_same_source_exec",
+        "rhythm_distill_same_source_budget",
+        "rhythm_distill_same_source_prefix",
+        "rhythm_distill_same_source_allocation",
+        "rhythm_distill_same_source_shape",
+        "rhythm_distill_same_source_any",
+    ):
+        value = rhythm_losses.get(key)
+        if isinstance(value, torch.Tensor):
+            scaled[key] = value.detach()
+    return scaled

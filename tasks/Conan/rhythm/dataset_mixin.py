@@ -47,6 +47,10 @@ class RhythmConanDatasetMixin:
         "selector_meta_starts",
         "selector_meta_ends",
     )
+    _RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS = (
+        "planner_slow_rhythm_memory",
+        "planner_slow_rhythm_summary",
+    )
     _RHYTHM_TARGET_KEYS = (
         "rhythm_speech_exec_tgt",
         "rhythm_pause_exec_tgt",
@@ -142,6 +146,8 @@ class RhythmConanDatasetMixin:
         "rhythm_offline_phrase_final_mask",
         "slow_rhythm_memory",
         "slow_rhythm_summary",
+        "planner_slow_rhythm_memory",
+        "planner_slow_rhythm_summary",
         "selector_meta_indices",
         "selector_meta_scores",
         "selector_meta_starts",
@@ -346,6 +352,8 @@ class RhythmConanDatasetMixin:
             "ref_rhythm_trace": ("float", 0.0),
             "slow_rhythm_memory": ("float", 0.0),
             "slow_rhythm_summary": ("float", 0.0),
+            "planner_slow_rhythm_memory": ("float", 0.0),
+            "planner_slow_rhythm_summary": ("float", 0.0),
             "selector_meta_indices": ("long", 0),
             "selector_meta_scores": ("float", 0.0),
             "selector_meta_starts": ("long", 0),
@@ -642,6 +650,9 @@ class RhythmConanDatasetMixin:
         cache_keys = self._RHYTHM_REF_CACHE_KEYS
         if ref_item is not None and all(key in ref_item for key in cache_keys):
             conditioning = {key: ref_item[key] for key in cache_keys}
+            for debug_key in self._RHYTHM_REF_DEBUG_CACHE_KEYS + self._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS:
+                if debug_key in ref_item:
+                    conditioning[debug_key] = ref_item[debug_key]
             if target_mode == "cached_only":
                 item_name = str(ref_item.get("item_name", "<unknown-ref-item>"))
                 self._validate_rhythm_cache_contract(ref_item, item_name=item_name)

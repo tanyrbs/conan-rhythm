@@ -13,13 +13,14 @@ class RhythmDatasetSampleAssembler:
         return self.owner.hparams
 
     def _tensorize_optional_value(self, key, value):
-        if key in {"ref_rhythm_trace", "slow_rhythm_memory"}:
+        if key in {"ref_rhythm_trace", "slow_rhythm_memory", "planner_slow_rhythm_memory"}:
             return torch.tensor(value, dtype=torch.float32)
         if key in {
             "source_boundary_cue",
             "phrase_group_pos",
             "phrase_final_mask",
             "slow_rhythm_summary",
+            "planner_slow_rhythm_summary",
             "selector_meta_scores",
             "rhythm_teacher_allocation_tgt",
             "rhythm_teacher_prefix_clock_tgt",

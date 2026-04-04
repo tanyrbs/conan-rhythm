@@ -52,6 +52,13 @@ class StreamingRhythmState:
         return progress / total
 
     @property
+    def phase_ptr_gap(self) -> Optional[torch.Tensor]:
+        progress_ratio = self.phase_progress_ratio
+        if progress_ratio is None:
+            return None
+        return self.phase_ptr.float() - progress_ratio
+
+    @property
     def previous_blank_exec(self) -> Optional[torch.Tensor]:
         return self.previous_pause_exec
 

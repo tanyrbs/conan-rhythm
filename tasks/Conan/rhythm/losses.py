@@ -45,6 +45,11 @@ class RhythmLossTargets:
     distill_prefix_weight: float = 1.0
     distill_speech_shape_weight: float = 0.0
     distill_pause_shape_weight: float = 0.0
+    distill_same_source_exec: bool = False
+    distill_same_source_budget: bool = False
+    distill_same_source_prefix: bool = False
+    distill_same_source_allocation: bool = False
+    distill_same_source_shape: bool = False
     budget_raw_weight: float = 1.0
     budget_exec_weight: float = 0.25
     pause_boundary_weight: float = 0.35
@@ -338,6 +343,10 @@ def _compute_feasible_debt_penalty(
     return _reduce_batch_loss(debt, batch_weight)
 
 
+def _scalar_flag(ref: torch.Tensor, enabled: bool) -> torch.Tensor:
+    return ref.new_tensor(1.0 if enabled else 0.0)
+
+
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
     unit_mask = targets.unit_mask.float()
     blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)
@@ -597,6 +606,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     # Maintained compatibility alias: public cumplan/prefix_state supervision maps
     # to prefix carry/backlog alignment, while `rhythm_plan_cum` is the separate
     # cumulative execution proxy loss.
+    kd_same_source_exec = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_exec)
+    kd_same_source_budget = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_budget)
+    kd_same_source_prefix = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_prefix)
+    kd_same_source_allocation = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_allocation)
+    kd_same_source_shape = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_shape)
     return {
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
@@ -625,6 +639,18 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_distill_speech_shape': l_distill_speech_shape,
         'rhythm_distill_pause_shape': l_distill_pause_shape,
         'rhythm_distill_allocation': l_distill_allocation,
+        'rhythm_distill_same_source_exec': kd_same_source_exec,
+        'rhythm_distill_same_source_budget': kd_same_source_budget,
+        'rhythm_distill_same_source_prefix': kd_same_source_prefix,
+        'rhythm_distill_same_source_allocation': kd_same_source_allocation,
+        'rhythm_distill_same_source_shape': kd_same_source_shape,
+        'rhythm_distill_same_source_any': torch.maximum(
+            torch.maximum(kd_same_source_exec, kd_same_source_budget),
+            torch.maximum(
+                kd_same_source_prefix,
+                torch.maximum(kd_same_source_allocation, kd_same_source_shape),
+            ),
+        ),
         'rhythm_distill': l_distill,
         'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + l_distill,
     }

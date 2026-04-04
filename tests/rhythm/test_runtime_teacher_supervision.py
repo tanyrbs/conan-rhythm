@@ -75,6 +75,8 @@ class RuntimeTeacherSupervisionTests(unittest.TestCase):
 
         sliced = slice_runtime_teacher_execution(execution, teacher_units=2)
         self.assertEqual(sliced.planner.runtime_budget_slice_mode, "proportional_prefix")
+        self.assertEqual(sliced.planner.runtime_budget_slice_semantics, "auxiliary_proxy")
+        self.assertFalse(sliced.planner.runtime_budget_slice_preserves_raw_exec_semantics)
         self.assertTrue(torch.allclose(sliced.planner.speech_budget_win, torch.tensor([[5.0]])))
         self.assertTrue(torch.allclose(sliced.planner.pause_budget_win, torch.tensor([[3.0]])))
         self.assertTrue(torch.allclose(sliced.planner.raw_speech_budget_win, torch.tensor([[4.0]])))
@@ -82,6 +84,13 @@ class RuntimeTeacherSupervisionTests(unittest.TestCase):
         self.assertTrue(torch.allclose(sliced.planner.feasible_speech_budget_delta, torch.tensor([[1.0]])))
         self.assertTrue(torch.allclose(sliced.planner.feasible_pause_budget_delta, torch.tensor([[1.0]])))
         self.assertTrue(torch.allclose(sliced.planner.feasible_total_budget_delta, torch.tensor([[2.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.full_effective_speech_budget_win, torch.tensor([[10.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.full_effective_pause_budget_win, torch.tensor([[6.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.full_raw_speech_budget_win, torch.tensor([[8.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.full_raw_pause_budget_win, torch.tensor([[4.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.full_feasible_total_budget_delta, torch.tensor([[4.0]])))
+        self.assertTrue(torch.allclose(sliced.planner.runtime_budget_slice_ratio_speech, torch.tensor([[0.5]])))
+        self.assertTrue(torch.allclose(sliced.planner.runtime_budget_slice_ratio_pause, torch.tensor([[0.5]])))
         self.assertTrue(torch.allclose(sliced.planner.boundary_score_unit, torch.tensor([[0.1, 0.2]])))
         self.assertTrue(torch.allclose(sliced.planner.source_boundary_cue, torch.tensor([[0.4, 0.5]])))
 
