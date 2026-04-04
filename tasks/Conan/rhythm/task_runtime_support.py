@@ -1,14 +1,11 @@
 from __future__ import annotations
 
+from tasks.Conan.rhythm.config_contract_rules.compat import (
+    resolve_duplicate_primary_distill_dedupe_flag as _resolve_duplicate_primary_distill_dedupe_flag,
+)
 from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
 from tasks.Conan.rhythm.targets import RhythmTargetBuildConfig
 from utils.commons.hparams import hparams
-
-
-def _resolve_duplicate_primary_distill_dedupe_flag(config) -> bool:
-    if "rhythm_dedupe_teacher_primary_cache_distill" in config:
-        return bool(config.get("rhythm_dedupe_teacher_primary_cache_distill", True))
-    return bool(config.get("rhythm_suppress_duplicate_primary_distill", True))
 
 
 class RhythmTaskRuntimeSupport:
