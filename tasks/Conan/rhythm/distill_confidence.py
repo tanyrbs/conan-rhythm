@@ -5,6 +5,15 @@ import torch
 from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
 from tasks.Conan.rhythm.targets import DistillConfidenceBundle
 
+_DISTILL_CONFIDENCE_OUTPUT_KEYS = {
+    "shared": "rhythm_offline_confidence",
+    "exec": "rhythm_offline_confidence_exec",
+    "budget": "rhythm_offline_confidence_budget",
+    "prefix": "rhythm_offline_confidence_prefix",
+    "allocation": "rhythm_offline_confidence_allocation",
+    "shape": "rhythm_offline_confidence_shape",
+}
+
 
 def _as_confidence_tensor(
     confidence,
@@ -71,14 +80,13 @@ def normalize_component_distill_confidence(
 
 
 def build_runtime_distill_confidence_bundle(output) -> DistillConfidenceBundle:
-    return DistillConfidenceBundle(
-        shared=output.get("rhythm_offline_confidence"),
-        exec=output.get("rhythm_offline_confidence_exec"),
-        budget=output.get("rhythm_offline_confidence_budget"),
-        prefix=output.get("rhythm_offline_confidence_prefix"),
-        allocation=output.get("rhythm_offline_confidence_allocation"),
-        shape=output.get("rhythm_offline_confidence_shape", output.get("rhythm_offline_confidence_exec")),
-    )
+    values = {
+        name: output.get(key)
+        for name, key in _DISTILL_CONFIDENCE_OUTPUT_KEYS.items()
+    }
+    if values["shape"] is None:
+        values["shape"] = values["exec"]
+    return DistillConfidenceBundle(**values)
 
 
 __all__ = [

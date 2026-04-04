@@ -76,20 +76,34 @@ def clone_reference_conditioning(ref_conditioning: dict[str, Any]) -> dict[str, 
     return {key: _clone_value(value) for key, value in ref_conditioning.items()}
 
 
+def _refresh_compact_reference_aliases(ref_conditioning: dict[str, Any]) -> dict[str, Any]:
+    if {"global_rate", "pause_ratio"} <= ref_conditioning.keys():
+        ref_conditioning["planner_ref_stats"] = torch.cat(
+            [ref_conditioning["global_rate"], ref_conditioning["pause_ratio"]],
+            dim=-1,
+        )
+    elif "planner_ref_stats" in ref_conditioning and not isinstance(ref_conditioning["planner_ref_stats"], torch.Tensor):
+        ref_conditioning.pop("planner_ref_stats", None)
+    if {"local_rate_trace", "boundary_trace"} <= ref_conditioning.keys():
+        ref_conditioning["planner_ref_trace"] = torch.cat(
+            [ref_conditioning["local_rate_trace"], ref_conditioning["boundary_trace"]],
+            dim=-1,
+        )
+    elif "planner_ref_trace" in ref_conditioning and not isinstance(ref_conditioning["planner_ref_trace"], torch.Tensor):
+        ref_conditioning.pop("planner_ref_trace", None)
+    return ref_conditioning
+
+
 def extract_compact_reference_contract(ref_conditioning: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    compact = {}
-    for key in COMPACT_REFERENCE_KEYS:
-        if key in ref_conditioning and isinstance(ref_conditioning[key], torch.Tensor):
+    compact = {
+        key: ref_conditioning[key]
+        for key in COMPACT_REFERENCE_KEYS
+        if key in ref_conditioning and isinstance(ref_conditioning[key], torch.Tensor)
+    }
+    for key in COMPACT_REFERENCE_ALIAS_KEYS:
+        if key not in compact and isinstance(ref_conditioning.get(key), torch.Tensor):
             compact[key] = ref_conditioning[key]
-    if {"global_rate", "pause_ratio"} <= compact.keys():
-        compact["planner_ref_stats"] = torch.cat([compact["global_rate"], compact["pause_ratio"]], dim=-1)
-    elif "planner_ref_stats" in ref_conditioning and isinstance(ref_conditioning["planner_ref_stats"], torch.Tensor):
-        compact["planner_ref_stats"] = ref_conditioning["planner_ref_stats"]
-    if {"local_rate_trace", "boundary_trace"} <= compact.keys():
-        compact["planner_ref_trace"] = torch.cat([compact["local_rate_trace"], compact["boundary_trace"]], dim=-1)
-    elif "planner_ref_trace" in ref_conditioning and isinstance(ref_conditioning["planner_ref_trace"], torch.Tensor):
-        compact["planner_ref_trace"] = ref_conditioning["planner_ref_trace"]
-    return compact
+    return _refresh_compact_reference_aliases(compact)
 
 
 def _scale_centered_trace(trace: torch.Tensor, scale: float, bias: float = 0.0) -> torch.Tensor:
@@ -174,10 +188,7 @@ def apply_compact_reference_intervention(
             compact["boundary_trace"].float() * float(intervention.boundary_trace_scale)
             + float(intervention.boundary_trace_bias)
         ).clamp(0.0, 1.0)
-    if {"global_rate", "pause_ratio"} <= compact.keys():
-        compact["planner_ref_stats"] = torch.cat([compact["global_rate"], compact["pause_ratio"]], dim=-1)
-    if {"local_rate_trace", "boundary_trace"} <= compact.keys():
-        compact["planner_ref_trace"] = torch.cat([compact["local_rate_trace"], compact["boundary_trace"]], dim=-1)
+    _refresh_compact_reference_aliases(compact)
     _sync_raw_reference_contract(compact)
     _drop_stale_intervention_sidecars(compact)
     return compact
@@ -187,13 +198,15 @@ def collect_planner_surface_bundle(execution) -> dict[str, torch.Tensor]:
     planner = execution.planner
     boundary_score_unit = resolve_boundary_score_unit(planner)
     if boundary_score_unit is None:
-        raise ValueError("Planner surface bundle requires boundary_score_unit or boundary_latent.")
+        boundary_score_unit = planner.pause_shape_unit.detach().new_zeros(planner.pause_shape_unit.shape)
+    else:
+        boundary_score_unit = boundary_score_unit.detach()
     return {
         "speech_budget_win": planner.speech_budget_win.detach(),
         "pause_budget_win": planner.pause_budget_win.detach(),
         "dur_shape_unit": planner.dur_shape_unit.detach(),
         "pause_shape_unit": planner.pause_shape_unit.detach(),
-        "boundary_score_unit": boundary_score_unit.detach(),
+        "boundary_score_unit": boundary_score_unit,
         "speech_exec": execution.speech_duration_exec.detach(),
         "pause_exec": getattr(execution, "blank_duration_exec", execution.pause_after_exec).detach(),
         "commit_frontier": execution.commit_frontier.detach().float().unsqueeze(-1),

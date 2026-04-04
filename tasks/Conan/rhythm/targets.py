@@ -91,6 +91,15 @@ BuildPrefixCarryFn = Callable[
 ]
 SliceSurfaceFn = Callable[..., tuple[torch.Tensor, ...]]
 
+_DISTILL_COMPONENT_FIELDS = ("exec", "budget", "prefix", "allocation")
+_DISTILL_COMPONENT_SAMPLE_KEYS = {
+    "exec": "rhythm_teacher_confidence_exec",
+    "budget": "rhythm_teacher_confidence_budget",
+    "prefix": "rhythm_teacher_confidence_prefix",
+    "allocation": "rhythm_teacher_confidence_allocation",
+    "shape": "rhythm_teacher_confidence_shape",
+}
+
 
 def _detach_optional(value):
     if isinstance(value, torch.Tensor):
@@ -182,44 +191,23 @@ def _normalize_distill_confidences(
         batch_size=batch_size,
         device=device,
     )
-    return DistillConfidenceBundle(
-        shared=shared,
-        exec=normalize_component_confidence(
-            confidence_bundle.exec,
+    normalized_components = {
+        name: normalize_component_confidence(
+            getattr(confidence_bundle, name),
             fallback_confidence=shared,
             batch_size=batch_size,
             device=device,
-        ),
-        budget=normalize_component_confidence(
-            confidence_bundle.budget,
-            fallback_confidence=shared,
-            batch_size=batch_size,
-            device=device,
-        ),
-        prefix=normalize_component_confidence(
-            confidence_bundle.prefix,
-            fallback_confidence=shared,
-            batch_size=batch_size,
-            device=device,
-        ),
-        allocation=normalize_component_confidence(
-            confidence_bundle.allocation,
-            fallback_confidence=shared,
-            batch_size=batch_size,
-            device=device,
-        ),
-        shape=normalize_component_confidence(
-            confidence_bundle.shape,
-            fallback_confidence=normalize_component_confidence(
-                confidence_bundle.exec,
-                fallback_confidence=shared,
-                batch_size=batch_size,
-                device=device,
-            ),
-            batch_size=batch_size,
-            device=device,
-        ),
+        )
+        for name in _DISTILL_COMPONENT_FIELDS
+    }
+    exec_confidence = normalized_components["exec"]
+    shape_confidence = normalize_component_confidence(
+        confidence_bundle.shape,
+        fallback_confidence=exec_confidence,
+        batch_size=batch_size,
+        device=device,
     )
+    return DistillConfidenceBundle(shared=shared, shape=shape_confidence, **normalized_components)
 
 
 @dataclass(frozen=True)
@@ -279,11 +267,10 @@ def _build_cached_distill_surface(
         prefix_backlog=sample.get("rhythm_teacher_prefix_backlog_tgt") if config.use_distill_prefix else None,
         confidences=DistillConfidenceBundle(
             shared=_detach_optional(sample.get("rhythm_teacher_confidence")),
-            exec=_detach_optional(sample.get("rhythm_teacher_confidence_exec")),
-            budget=_detach_optional(sample.get("rhythm_teacher_confidence_budget")),
-            prefix=_detach_optional(sample.get("rhythm_teacher_confidence_prefix")),
-            allocation=_detach_optional(sample.get("rhythm_teacher_confidence_allocation")),
-            shape=_detach_optional(sample.get("rhythm_teacher_confidence_shape")),
+            **{
+                name: _detach_optional(sample.get(key))
+                for name, key in _DISTILL_COMPONENT_SAMPLE_KEYS.items()
+            },
         ),
         source_kind="cache",
     )
@@ -754,120 +741,130 @@ def scale_rhythm_loss_terms(
     hparams,
     cumplan_lambda: float,
 ) -> dict[str, torch.Tensor]:
+    def _resolve_prefix_state_loss() -> torch.Tensor:
+        prefix_state = rhythm_losses.get("rhythm_prefix_state")
+        if isinstance(prefix_state, torch.Tensor):
+            return prefix_state
+        cumplan = rhythm_losses.get("rhythm_cumplan")
+        if isinstance(cumplan, torch.Tensor):
+            return cumplan
+        return rhythm_losses["rhythm_carry"]
+
+    def _scaled_detached(
+        key: str,
+        scale: float,
+        *,
+        fallback_key: str | None = None,
+    ) -> torch.Tensor:
+        value = rhythm_losses.get(key)
+        if not isinstance(value, torch.Tensor):
+            if fallback_key is None:
+                raise KeyError(key)
+            fallback = rhythm_losses.get(fallback_key)
+            if not isinstance(fallback, torch.Tensor) and fallback_key == "rhythm_prefix_state":
+                fallback = _resolve_prefix_state_loss()
+            value = fallback
+        return (value * float(scale)).detach()
+
+    lambda_budget = float(hparams.get("lambda_rhythm_budget", 0.25))
     lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0)
     lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0)
     plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
     plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
-    prefix_state = rhythm_losses.get(
-        "rhythm_prefix_state",
-        rhythm_losses.get("rhythm_cumplan", rhythm_losses["rhythm_carry"]),
-    )
+    distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
+    prefix_state = _resolve_prefix_state_loss()
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
     scaled = {
-        "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0),
-        "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0),
-        "rhythm_budget": rhythm_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25),
-        "rhythm_budget_raw_surface": (
-            rhythm_losses.get("rhythm_budget_raw_surface", rhythm_losses["rhythm_budget"])
-            * hparams.get("lambda_rhythm_budget", 0.25)
-        ).detach(),
-        "rhythm_budget_exec_surface": (
-            rhythm_losses.get("rhythm_budget_exec_surface", rhythm_losses["rhythm_budget"])
-            * hparams.get("lambda_rhythm_budget", 0.25)
-        ).detach(),
-        "rhythm_budget_total_surface": (
-            rhythm_losses.get(
-                "rhythm_budget_total_surface",
-                rhythm_losses.get("rhythm_budget_raw_surface", rhythm_losses["rhythm_budget"]),
-            )
-            * hparams.get("lambda_rhythm_budget", 0.25)
-        ).detach(),
-        "rhythm_budget_pause_share_surface": (
-            rhythm_losses.get(
-                "rhythm_budget_pause_share_surface",
-                rhythm_losses.get("rhythm_budget_exec_surface", rhythm_losses["rhythm_budget"]),
-            )
-            * hparams.get("lambda_rhythm_budget", 0.25)
-        ).detach(),
+        "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+        "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+        "rhythm_budget": rhythm_losses["rhythm_budget"] * lambda_budget,
+        "rhythm_budget_raw_surface": _scaled_detached(
+            "rhythm_budget_raw_surface",
+            lambda_budget,
+            fallback_key="rhythm_budget",
+        ),
+        "rhythm_budget_exec_surface": _scaled_detached(
+            "rhythm_budget_exec_surface",
+            lambda_budget,
+            fallback_key="rhythm_budget",
+        ),
+        "rhythm_budget_total_surface": _scaled_detached(
+            "rhythm_budget_total_surface",
+            lambda_budget,
+            fallback_key="rhythm_budget_raw_surface",
+        ),
+        "rhythm_budget_pause_share_surface": _scaled_detached(
+            "rhythm_budget_pause_share_surface",
+            lambda_budget,
+            fallback_key="rhythm_budget_exec_surface",
+        ),
         "rhythm_feasible_debt": (
             rhythm_losses["rhythm_feasible_debt"]
-            * hparams.get("lambda_rhythm_budget", 0.25)
+            * lambda_budget
             * float(hparams.get("rhythm_feasible_debt_weight", 0.05))
         ).detach(),
-        "rhythm_prefix_clock": (
-            rhythm_losses.get("rhythm_prefix_clock", rhythm_losses["rhythm_prefix_state"])
-            * float(cumplan_lambda)
-        ).detach(),
-        "rhythm_prefix_backlog": (
-            rhythm_losses.get("rhythm_prefix_backlog", rhythm_losses["rhythm_prefix_state"])
-            * float(cumplan_lambda)
-        ).detach(),
+        "rhythm_prefix_clock": _scaled_detached(
+            "rhythm_prefix_clock",
+            cumplan_lambda,
+            fallback_key="rhythm_prefix_state",
+        ),
+        "rhythm_prefix_backlog": _scaled_detached(
+            "rhythm_prefix_backlog",
+            cumplan_lambda,
+            fallback_key="rhythm_prefix_state",
+        ),
         "rhythm_prefix_state": scaled_prefix_state,
         "rhythm_cumplan": scaled_prefix_state.detach(),
         "rhythm_carry": scaled_prefix_state.detach(),
         "rhythm_plan": rhythm_losses["rhythm_plan"] * lambda_plan,
-        "rhythm_plan_local": (
-            rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight
-        ).detach(),
-        "rhythm_plan_cum": (
-            rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight
-        ).detach(),
-        "rhythm_guidance": rhythm_losses["rhythm_guidance"] * hparams.get("lambda_rhythm_guidance", 0.0),
+        "rhythm_plan_local": (rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight).detach(),
+        "rhythm_plan_cum": (rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight).detach(),
+        "rhythm_guidance": rhythm_losses["rhythm_guidance"] * lambda_guidance,
         "rhythm_distill": scaled_distill,
         "rhythm_distill_student": scaled_distill.detach(),
-        "rhythm_distill_exec": (rhythm_losses["rhythm_distill_exec"] * lambda_distill).detach(),
-        "rhythm_distill_budget": (
-            rhythm_losses["rhythm_distill_budget"]
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
-        ).detach(),
-        "rhythm_distill_budget_raw_surface": (
-            rhythm_losses.get("rhythm_distill_budget_raw_surface", rhythm_losses["rhythm_distill_budget"])
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
-        ).detach(),
-        "rhythm_distill_budget_exec_surface": (
-            rhythm_losses.get("rhythm_distill_budget_exec_surface", rhythm_losses["rhythm_distill_budget"])
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
-        ).detach(),
-        "rhythm_distill_budget_total_surface": (
-            rhythm_losses.get(
-                "rhythm_distill_budget_total_surface",
-                rhythm_losses.get("rhythm_distill_budget_raw_surface", rhythm_losses["rhythm_distill_budget"]),
-            )
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
-        ).detach(),
-        "rhythm_distill_budget_pause_share_surface": (
-            rhythm_losses.get(
-                "rhythm_distill_budget_pause_share_surface",
-                rhythm_losses.get("rhythm_distill_budget_exec_surface", rhythm_losses["rhythm_distill_budget"]),
-            )
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_budget_weight", 0.5))
-        ).detach(),
-        "rhythm_distill_prefix": (
-            rhythm_losses["rhythm_distill_prefix"]
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_prefix_weight", 0.25))
-        ).detach(),
-        "rhythm_distill_speech_shape": (
-            rhythm_losses["rhythm_distill_speech_shape"]
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
-        ).detach(),
-        "rhythm_distill_pause_shape": (
-            rhythm_losses["rhythm_distill_pause_shape"]
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
-        ).detach(),
-        "rhythm_distill_allocation": (
-            rhythm_losses["rhythm_distill_allocation"]
-            * lambda_distill
-            * float(hparams.get("rhythm_distill_allocation_weight", 0.5))
-        ).detach(),
+        "rhythm_distill_exec": _scaled_detached("rhythm_distill_exec", lambda_distill),
+        "rhythm_distill_budget": _scaled_detached(
+            "rhythm_distill_budget",
+            lambda_distill * distill_budget_weight,
+        ),
+        "rhythm_distill_budget_raw_surface": _scaled_detached(
+            "rhythm_distill_budget_raw_surface",
+            lambda_distill * distill_budget_weight,
+            fallback_key="rhythm_distill_budget",
+        ),
+        "rhythm_distill_budget_exec_surface": _scaled_detached(
+            "rhythm_distill_budget_exec_surface",
+            lambda_distill * distill_budget_weight,
+            fallback_key="rhythm_distill_budget",
+        ),
+        "rhythm_distill_budget_total_surface": _scaled_detached(
+            "rhythm_distill_budget_total_surface",
+            lambda_distill * distill_budget_weight,
+            fallback_key="rhythm_distill_budget_raw_surface",
+        ),
+        "rhythm_distill_budget_pause_share_surface": _scaled_detached(
+            "rhythm_distill_budget_pause_share_surface",
+            lambda_distill * distill_budget_weight,
+            fallback_key="rhythm_distill_budget_exec_surface",
+        ),
+        "rhythm_distill_prefix": _scaled_detached(
+            "rhythm_distill_prefix",
+            lambda_distill * float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
+        ),
+        "rhythm_distill_speech_shape": _scaled_detached(
+            "rhythm_distill_speech_shape",
+            lambda_distill * float(hparams.get("rhythm_distill_speech_shape_weight", 0.0)),
+        ),
+        "rhythm_distill_pause_shape": _scaled_detached(
+            "rhythm_distill_pause_shape",
+            lambda_distill * float(hparams.get("rhythm_distill_pause_shape_weight", 0.0)),
+        ),
+        "rhythm_distill_allocation": _scaled_detached(
+            "rhythm_distill_allocation",
+            lambda_distill * float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
+        ),
     }
     for key in (
         "rhythm_distill_same_source_exec",

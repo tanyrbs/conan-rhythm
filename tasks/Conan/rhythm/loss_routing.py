@@ -4,6 +4,13 @@ import torch
 
 _PITCH_LOSS_KEYS = ("fdiff", "uv", "pflow", "gdiff", "mdiff")
 _STYLE_LOSS_KEYS = ("gloss", "vq_loss")
+_PREFIX_STATE_KEYS = ("rhythm_prefix_state", "rhythm_cumplan", "rhythm_carry")
+_AUX_REPORTING_KEYS = {
+    "rhythm_plan": "lambda_rhythm_plan",
+    "rhythm_guidance": "lambda_rhythm_guidance",
+    "rhythm_distill": "lambda_rhythm_distill",
+    "rhythm_teacher_aux_loss": "lambda_rhythm_teacher_aux",
+}
 
 
 def _detach_loss_value(losses, key):
@@ -30,10 +37,24 @@ def _append_reporting_key(keys, seen, losses, key):
 
 
 def _resolve_reporting_prefix_state_key(losses):
-    for key in ("rhythm_prefix_state", "rhythm_cumplan", "rhythm_carry"):
+    for key in _PREFIX_STATE_KEYS:
         if isinstance(losses.get(key), torch.Tensor):
             return key
     return None
+
+
+def _resolve_prefix_state_value(losses):
+    key = _resolve_reporting_prefix_state_key(losses)
+    return losses.get(key) if key is not None else None
+
+
+def _resolve_aux_optimizer_policy(hparams) -> dict[str, bool]:
+    hparams = hparams or {}
+    keep_aux = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
+    return {
+        loss_key: keep_aux or float(hparams.get(lambda_key, 0.0) or 0.0) > 0.0
+        for loss_key, lambda_key in _AUX_REPORTING_KEYS.items()
+    }
 
 
 def _collect_reporting_total_keys(
@@ -47,11 +68,7 @@ def _collect_reporting_total_keys(
     keys = []
     seen = set()
     compact_joint = not schedule_only_stage and bool(hparams.get("rhythm_compact_joint_loss", True))
-    keep_aux = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
-    keep_plan = keep_aux or float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0) > 0.0
-    keep_guidance = keep_aux or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
-    keep_distill = keep_aux or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
-    keep_teacher_aux = keep_aux or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
+    aux_policy = _resolve_aux_optimizer_policy(hparams)
 
     if compact_joint and isinstance(losses.get("base"), torch.Tensor):
         _append_reporting_key(keys, seen, losses, "base")
@@ -82,19 +99,18 @@ def _collect_reporting_total_keys(
         if prefix_state_key is not None:
             _append_reporting_key(keys, seen, losses, prefix_state_key)
 
-    if keep_plan:
-        _append_reporting_key(keys, seen, losses, "rhythm_plan")
-    if keep_guidance:
-        _append_reporting_key(keys, seen, losses, "rhythm_guidance")
-    if keep_distill:
-        _append_reporting_key(keys, seen, losses, "rhythm_distill")
-    if keep_teacher_aux:
-        teacher_aux_key = (
-            "rhythm_teacher_aux_loss"
-            if isinstance(losses.get("rhythm_teacher_aux_loss"), torch.Tensor)
-            else "rhythm_teacher_aux"
-        )
-        _append_reporting_key(keys, seen, losses, teacher_aux_key)
+    for loss_key, enabled in aux_policy.items():
+        if not enabled:
+            continue
+        if loss_key == "rhythm_teacher_aux_loss":
+            teacher_aux_key = (
+                "rhythm_teacher_aux_loss"
+                if isinstance(losses.get("rhythm_teacher_aux_loss"), torch.Tensor)
+                else "rhythm_teacher_aux"
+            )
+            _append_reporting_key(keys, seen, losses, teacher_aux_key)
+            continue
+        _append_reporting_key(keys, seen, losses, loss_key)
 
     return keys
 
@@ -175,20 +191,10 @@ def _compact_pitch_optimizer_losses(losses, *, hparams, schedule_only_stage: boo
 
 
 def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bool):
-    lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
-    keep_aux = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
-    keep_plan = keep_aux or lambda_plan > 0.0
-    keep_guidance = keep_aux or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
-    keep_distill = keep_aux or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
-    keep_teacher_aux = keep_aux or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
-    if not keep_plan:
-        _detach_loss_value(losses, "rhythm_plan")
-    if not keep_guidance:
-        _detach_loss_value(losses, "rhythm_guidance")
-    if not keep_distill:
-        _detach_loss_value(losses, "rhythm_distill")
-    if not keep_teacher_aux:
-        _detach_loss_value(losses, "rhythm_teacher_aux_loss")
+    aux_policy = _resolve_aux_optimizer_policy(hparams)
+    for loss_key, enabled in aux_policy.items():
+        if not enabled:
+            _detach_loss_value(losses, loss_key)
     if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
         return
     exec_terms = []
@@ -204,7 +210,7 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
         for key in exec_keys:
             _detach_loss_value(losses, key)
     budget = losses.get("rhythm_budget")
-    prefix_state = losses.get("rhythm_prefix_state", losses.get("rhythm_cumplan", losses.get("rhythm_carry")))
+    prefix_state = _resolve_prefix_state_value(losses)
     state_terms = []
     if isinstance(budget, torch.Tensor) and budget.requires_grad:
         state_terms.append(float(hparams.get("rhythm_joint_budget_macro_weight", 0.35)) * budget)
@@ -213,12 +219,9 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
     if state_terms:
         losses["rhythm_stream_state"] = sum(state_terms)
     _detach_loss_value(losses, "rhythm_budget")
-    if "rhythm_prefix_state" in losses:
-        _detach_loss_value(losses, "rhythm_prefix_state")
-    if "rhythm_cumplan" in losses:
-        _detach_loss_value(losses, "rhythm_cumplan")
-    if "rhythm_carry" in losses:
-        _detach_loss_value(losses, "rhythm_carry")
+    for key in _PREFIX_STATE_KEYS:
+        if key in losses:
+            _detach_loss_value(losses, key)
 
 
 def route_conan_optimizer_losses(losses, *, mel_loss_names, hparams, schedule_only_stage: bool):
@@ -252,7 +255,7 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     if "rhythm_exec_pause" in losses:
         losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
-    prefix_state = losses.get("rhythm_prefix_state", losses.get("rhythm_cumplan", losses.get("rhythm_carry")))
+    prefix_state = _resolve_prefix_state_value(losses)
     losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero
     losses["L_prefix_state"] = losses["L_cumplan"]
     losses["L_plan"] = losses.get("rhythm_plan", zero).detach() if isinstance(losses.get("rhythm_plan"), torch.Tensor) else zero

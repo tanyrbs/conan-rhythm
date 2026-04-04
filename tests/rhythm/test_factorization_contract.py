@@ -142,6 +142,28 @@ class FactorizationContractTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(bundle["boundary_score_unit"], execution.planner.boundary_latent))
 
+    def test_collect_planner_surface_bundle_uses_zero_boundary_when_surface_missing(self) -> None:
+        execution = SimpleNamespace(
+            planner=SimpleNamespace(
+                speech_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+                pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+                dur_shape_unit=torch.tensor([[0.6, 0.4]], dtype=torch.float32),
+                pause_shape_unit=torch.tensor([[0.2, 0.8]], dtype=torch.float32),
+            ),
+            speech_duration_exec=torch.tensor([[2.0, 0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+
+        bundle = collect_planner_surface_bundle(execution)
+
+        self.assertTrue(
+            torch.allclose(
+                bundle["boundary_score_unit"],
+                torch.zeros_like(execution.planner.pause_shape_unit),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
