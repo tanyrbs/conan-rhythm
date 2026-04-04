@@ -11,7 +11,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tasks.Conan.rhythm.distill_confidence import (
+    normalize_component_distill_confidence,
+    normalize_distill_confidence,
+)
 from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.targets import DistillConfidenceBundle, _normalize_distill_confidences
 
 
 class RhythmLossConfidenceRoutingTests(unittest.TestCase):
@@ -52,6 +57,35 @@ class RhythmLossConfidenceRoutingTests(unittest.TestCase):
         self.assertGreater(float(losses["rhythm_distill_exec"].item()), 0.0)
         self.assertTrue(torch.allclose(losses["rhythm_distill_speech_shape"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_distill"], losses["rhythm_distill_exec"]))
+
+    def test_component_distill_confidence_preserves_explicit_zero_gate(self) -> None:
+        normalized = _normalize_distill_confidences(
+            confidence_bundle=DistillConfidenceBundle(
+                shared=torch.tensor([[0.80], [0.60]], dtype=torch.float32),
+                exec=torch.tensor([[0.00], [0.01]], dtype=torch.float32),
+                shape=torch.tensor([[0.00], [0.02]], dtype=torch.float32),
+            ),
+            batch_size=2,
+            device=torch.device("cpu"),
+            normalize_distill_confidence=lambda confidence, **kwargs: normalize_distill_confidence(
+                confidence,
+                floor=0.05,
+                power=1.0,
+                **kwargs,
+            ),
+            normalize_component_confidence=lambda confidence, **kwargs: normalize_component_distill_confidence(
+                confidence,
+                floor=0.05,
+                power=1.0,
+                preserve_zeros=True,
+                **kwargs,
+            ),
+        )
+
+        self.assertTrue(torch.allclose(normalized.exec[0:1], torch.tensor([[0.0]])))
+        self.assertTrue(torch.allclose(normalized.shape[0:1], torch.tensor([[0.0]])))
+        self.assertTrue(torch.allclose(normalized.exec[1:2], torch.tensor([[0.05]])))
+        self.assertTrue(torch.allclose(normalized.shape[1:2], torch.tensor([[0.05]])))
 
 
 if __name__ == "__main__":

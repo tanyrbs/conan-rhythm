@@ -248,6 +248,23 @@ def _validate_general_stage_rules(
         errors.append(
             "lambda_rhythm_distill > 0 requires at least one active distillation component weight."
         )
+    explicit_inactive_distill_weights = [
+        float(hparams[key])
+        for key in (
+            "rhythm_distill_exec_weight",
+            "rhythm_distill_budget_weight",
+            "rhythm_distill_allocation_weight",
+            "rhythm_distill_prefix_weight",
+            "rhythm_distill_speech_shape_weight",
+            "rhythm_distill_pause_shape_weight",
+        )
+        if key in hparams
+    ]
+    if lambda_distill <= 0.0 and any(value > 0.0 for value in explicit_inactive_distill_weights):
+        warnings.append(
+            "lambda_rhythm_distill <= 0 while distill component weights remain nonzero; "
+            "this is inactive KD config clutter and usually indicates a stale stage setting."
+        )
     if has_legacy_pause_boundary_weight and has_public_pause_boundary_weight:
         legacy_pause_boundary = float(hparams.get("rhythm_pause_exec_boundary_boost", 0.75))
         public_pause_boundary = float(hparams.get("rhythm_pause_boundary_weight", 0.35))

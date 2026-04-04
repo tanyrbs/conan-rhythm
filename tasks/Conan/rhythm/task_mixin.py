@@ -238,6 +238,7 @@ class RhythmConanTaskMixin:
             device=device,
             floor=float(hparams.get("rhythm_distill_confidence_floor", 0.05)),
             power=float(hparams.get("rhythm_distill_confidence_power", 1.0)),
+            preserve_zeros=True,
         )
 
     def _build_rhythm_target_build_config(self) -> RhythmTargetBuildConfig:

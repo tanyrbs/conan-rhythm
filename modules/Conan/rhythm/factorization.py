@@ -5,6 +5,8 @@ from typing import Any
 
 import torch
 
+from .source_boundary import resolve_boundary_score_unit
+
 
 COMPACT_REFERENCE_KEYS = (
     "global_rate",
@@ -30,6 +32,25 @@ PLANNER_SURFACE_KEYS = (
     "pause_exec",
     "commit_frontier",
 )
+
+
+INTERVENTION_REBUILD_KEYS = (
+    "slow_rhythm_memory",
+    "slow_rhythm_summary",
+    "slow_rhythm_summary_source",
+    "planner_slow_rhythm_memory",
+    "planner_slow_rhythm_summary",
+    "planner_slow_rhythm_summary_source",
+    "selector_meta_indices",
+    "selector_meta_scores",
+    "selector_meta_starts",
+    "selector_meta_ends",
+)
+
+_REF_STATS_PAUSE_IDX = 0
+_REF_STATS_MEAN_SPEECH_IDX = 2
+_REF_TRACE_LOCAL_RATE_IDX = 1
+_REF_TRACE_BOUNDARY_IDX = 2
 
 
 @dataclass(frozen=True)
@@ -80,6 +101,57 @@ def _scale_centered_trace(trace: torch.Tensor, scale: float, bias: float = 0.0) 
     return adjusted
 
 
+def _ensure_channel_last(value: torch.Tensor) -> torch.Tensor:
+    if value.dim() == 2:
+        return value.unsqueeze(-1)
+    return value
+
+
+def _sync_raw_reference_contract(ref_conditioning: dict[str, Any]) -> None:
+    stats = ref_conditioning.get("ref_rhythm_stats")
+    if isinstance(stats, torch.Tensor) and stats.dim() == 2 and stats.size(-1) > _REF_STATS_MEAN_SPEECH_IDX:
+        synced_stats = stats.clone()
+        batch_size = synced_stats.size(0)
+        pause_ratio = ref_conditioning.get("pause_ratio")
+        if isinstance(pause_ratio, torch.Tensor):
+            synced_stats[:, _REF_STATS_PAUSE_IDX:_REF_STATS_PAUSE_IDX + 1] = pause_ratio.float().reshape(
+                batch_size, -1
+            )[:, :1].to(device=synced_stats.device, dtype=synced_stats.dtype)
+        global_rate = ref_conditioning.get("global_rate")
+        if isinstance(global_rate, torch.Tensor):
+            mean_speech = torch.reciprocal(global_rate.float().clamp_min(1e-6)).reshape(batch_size, -1)[:, :1]
+            synced_stats[:, _REF_STATS_MEAN_SPEECH_IDX:_REF_STATS_MEAN_SPEECH_IDX + 1] = mean_speech.to(
+                device=synced_stats.device,
+                dtype=synced_stats.dtype,
+            )
+        ref_conditioning["ref_rhythm_stats"] = synced_stats
+
+    trace = ref_conditioning.get("ref_rhythm_trace")
+    if isinstance(trace, torch.Tensor) and trace.dim() == 3 and trace.size(-1) > _REF_TRACE_BOUNDARY_IDX:
+        synced_trace = trace.clone()
+        batch_size, trace_bins = synced_trace.size(0), synced_trace.size(1)
+        local_rate_trace = ref_conditioning.get("local_rate_trace")
+        if isinstance(local_rate_trace, torch.Tensor):
+            local_rate_trace = _ensure_channel_last(local_rate_trace).float().reshape(batch_size, trace_bins, -1)[:, :, :1]
+            synced_trace[:, :, _REF_TRACE_LOCAL_RATE_IDX:_REF_TRACE_LOCAL_RATE_IDX + 1] = local_rate_trace.to(
+                device=synced_trace.device,
+                dtype=synced_trace.dtype,
+            )
+        boundary_trace = ref_conditioning.get("boundary_trace")
+        if isinstance(boundary_trace, torch.Tensor):
+            boundary_trace = _ensure_channel_last(boundary_trace).float().reshape(batch_size, trace_bins, -1)[:, :, :1]
+            synced_trace[:, :, _REF_TRACE_BOUNDARY_IDX:_REF_TRACE_BOUNDARY_IDX + 1] = boundary_trace.to(
+                device=synced_trace.device,
+                dtype=synced_trace.dtype,
+            )
+        ref_conditioning["ref_rhythm_trace"] = synced_trace
+
+
+def _drop_stale_intervention_sidecars(ref_conditioning: dict[str, Any]) -> None:
+    for key in INTERVENTION_REBUILD_KEYS:
+        ref_conditioning.pop(key, None)
+
+
 def apply_compact_reference_intervention(
     ref_conditioning: dict[str, Any],
     intervention: CompactPlannerIntervention,
@@ -106,17 +178,22 @@ def apply_compact_reference_intervention(
         compact["planner_ref_stats"] = torch.cat([compact["global_rate"], compact["pause_ratio"]], dim=-1)
     if {"local_rate_trace", "boundary_trace"} <= compact.keys():
         compact["planner_ref_trace"] = torch.cat([compact["local_rate_trace"], compact["boundary_trace"]], dim=-1)
+    _sync_raw_reference_contract(compact)
+    _drop_stale_intervention_sidecars(compact)
     return compact
 
 
 def collect_planner_surface_bundle(execution) -> dict[str, torch.Tensor]:
     planner = execution.planner
+    boundary_score_unit = resolve_boundary_score_unit(planner)
+    if boundary_score_unit is None:
+        raise ValueError("Planner surface bundle requires boundary_score_unit or boundary_latent.")
     return {
         "speech_budget_win": planner.speech_budget_win.detach(),
         "pause_budget_win": planner.pause_budget_win.detach(),
         "dur_shape_unit": planner.dur_shape_unit.detach(),
         "pause_shape_unit": planner.pause_shape_unit.detach(),
-        "boundary_score_unit": planner.boundary_score_unit.detach(),
+        "boundary_score_unit": boundary_score_unit.detach(),
         "speech_exec": execution.speech_duration_exec.detach(),
         "pause_exec": getattr(execution, "blank_duration_exec", execution.pause_after_exec).detach(),
         "commit_frontier": execution.commit_frontier.detach().float().unsqueeze(-1),

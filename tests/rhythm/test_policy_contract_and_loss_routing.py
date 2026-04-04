@@ -501,6 +501,40 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(warnings, [])
 
+    def test_inactive_kd_weights_emit_cleanup_warning(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_retimed",
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": False,
+                "rhythm_apply_train_override": True,
+                "rhythm_apply_valid_override": True,
+                "rhythm_require_retimed_cache": True,
+                "rhythm_use_retimed_target_if_available": True,
+                "rhythm_use_retimed_pitch_target": True,
+                "rhythm_compact_joint_loss": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_prefix_weight": 0.25,
+                "rhythm_distill_speech_shape_weight": 0.10,
+            }
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(any("inactive KD config clutter" in w for w in warnings))
+
 
 if __name__ == "__main__":
     unittest.main()
