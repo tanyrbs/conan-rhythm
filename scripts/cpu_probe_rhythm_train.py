@@ -171,6 +171,7 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--binary_data_dir", required=True)
     parser.add_argument("--processed_data_dir", required=True)
+    parser.add_argument("--hparams", type=str, default="")
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--warmup_steps", type=int, default=None)
     parser.add_argument("--split", type=str, default="train")
@@ -214,16 +215,20 @@ def main():
     from utils.commons.hparams import hparams, set_hparams  # type: ignore[no-redef]
 
     torch.manual_seed(1234)
+    hparams_override = (
+        f"binary_data_dir='{args.binary_data_dir}',"
+        f"processed_data_dir='{args.processed_data_dir}',"
+        f"ds_workers=0,max_sentences={args.max_sentences},max_tokens={args.max_tokens},"
+        f"num_sanity_val_steps=0,val_check_interval=999999,max_updates={args.steps},"
+        "save_gt=False,style=True,rhythm_minimal_style_only=True"
+    )
+    if args.hparams:
+        hparams_override = f"{hparams_override},{args.hparams}"
+
     set_hparams(
         config=args.config,
         exp_name=args.exp_name,
-        hparams_str=(
-            f"binary_data_dir='{args.binary_data_dir}',"
-            f"processed_data_dir='{args.processed_data_dir}',"
-            f"ds_workers=0,max_sentences={args.max_sentences},max_tokens={args.max_tokens},"
-            f"num_sanity_val_steps=0,val_check_interval=999999,max_updates={args.steps},"
-            "save_gt=False,style=True,rhythm_minimal_style_only=True"
-        ),
+        hparams_str=hparams_override,
     )
 
     if args.device == "auto":

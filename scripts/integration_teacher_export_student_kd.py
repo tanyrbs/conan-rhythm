@@ -88,6 +88,31 @@ def _load_split_prefixes(processed_data_dir: Path) -> tuple[list[str], list[str]
     )
 
 
+def _normalize_export_splits(
+    export_splits: list[str] | tuple[str, ...],
+    *,
+    include_valid: bool,
+    include_test: bool,
+) -> list[str]:
+    alias = {
+        "dev": "valid",
+        "val": "valid",
+        "validation": "valid",
+    }
+    normalized: list[str] = []
+    for split in export_splits:
+        value = alias.get(str(split).strip().lower(), str(split).strip().lower())
+        if value and value not in normalized:
+            normalized.append(value)
+    if "train" not in normalized:
+        normalized.insert(0, "train")
+    if include_valid and "valid" not in normalized:
+        normalized.append("valid")
+    if include_test and "test" not in normalized:
+        normalized.append("test")
+    return normalized
+
+
 def _create_bootstrap_teacher_ckpt(
     *,
     teacher_config: str,
@@ -191,7 +216,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher_ckpt", default="", help="Optional trained teacher_offline checkpoint. If empty, a bootstrap random checkpoint is created for structural integration.")
     parser.add_argument("--work_root", default="artifacts/rhythm_teacher_export_student_kd")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="cpu")
-    parser.add_argument("--export_splits", nargs="+", default=["train", "valid"])
+    parser.add_argument(
+        "--export_splits",
+        nargs="+",
+        default=["train", "valid", "test"],
+        help="Teacher target export splits. Missing valid/test will be auto-added when the processed corpus exposes those splits.",
+    )
     parser.add_argument("--max_export_items", type=int, default=-1)
     parser.add_argument("--inspect_items", type=int, default=4)
     parser.add_argument("--skip_model_dry_run", action="store_true")
@@ -206,6 +236,11 @@ def main() -> None:
         raise FileNotFoundError(f"processed_data_dir does not exist: {processed_data_dir}")
 
     valid_prefixes, test_prefixes = _load_split_prefixes(processed_data_dir)
+    export_splits = _normalize_export_splits(
+        args.export_splits,
+        include_valid=bool(valid_prefixes),
+        include_test=bool(test_prefixes),
+    )
     run_dir = ((REPO_ROOT / args.work_root) if not Path(args.work_root).is_absolute() else Path(args.work_root)).resolve() / uuid.uuid4().hex[:10]
     teacher_binary_dir = run_dir / "teacher_binary"
     export_dir = run_dir / "teacher_export"
@@ -304,7 +339,7 @@ def main() -> None:
             str(args.max_export_items),
             "--overwrite",
             "--splits",
-            *args.export_splits,
+            *export_splits,
         ],
         env=env,
     )
@@ -359,6 +394,7 @@ def main() -> None:
         "student_binary_dir": _as_posix(student_binary_dir),
         "valid_prefixes": valid_prefixes,
         "test_prefixes": test_prefixes,
+        "export_splits": export_splits,
         "teacher_field_report": field_report,
         "student_kd_smoke": smoke_report,
     }

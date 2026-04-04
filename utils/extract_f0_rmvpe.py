@@ -21,6 +21,12 @@ _RMVPE_CLS = None
 _PYWORLD = None
 
 
+def _to_numpy_f0(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
 def _require_rmvpe_cls():
     global _RMVPE_CLS
     if _RMVPE_CLS is not None:
@@ -131,7 +137,12 @@ class F0Extractor:
     @staticmethod
     def generate_batch(items, hparams, binarization_args, device=None, task_id=-1, bsz=1, max_tokens=100000, our_save_dir='/work/hdd/bcza/usertian/vctk-controlvc16k/wav16_silence_trimmed_padded_f0/'):
         # f0_dict = {}
-        # pe = hparams.get('pe', 'pw')
+        pe = str(hparams.get('pe', 'pw') or 'pw').strip().lower()
+        if pe != 'rmvpe':
+            raise RuntimeError(
+                "generate_batch() currently supports only pe=rmvpe. "
+                "Use batch_size=1 or switch pe=rmvpe for batched extraction."
+            )
         pe_ckpt = str(hparams.get("pe_ckpt", "") or "").strip()
         if not pe_ckpt:
             raise RuntimeError(
@@ -139,15 +150,14 @@ class F0Extractor:
                 "Set pe_ckpt to a valid RMVPE checkpoint path."
             )
         rmvpe = _require_rmvpe_cls()(pe_ckpt, device=device)
-        bad=0
+        bad = 0
 
         item_names = list(items.keys())
-        print(len(item_names))
         id_and_sizes = []
         for item_name in item_names:
             try:
-                total_durs=items[item_name]['duration']
-            except:
+                total_durs = items[item_name]['duration']
+            except Exception:
                 total_durs = np.sum(items[item_name]['ph_durs'])
             total_frames = math.ceil(total_durs * hparams['audio_sample_rate'] / hparams['hop_size'])
             id_and_sizes.append((item_name, total_frames))
@@ -158,7 +168,7 @@ class F0Extractor:
 
         for batch in tqdm(bs, total=len(bs),
                               desc='Extracting' + (f' {task_id}' if task_id >= 0 else '')):
-            wavs, mel_lengths, lengths,npy_fns = [], [], [],[]
+            wavs, lengths, npy_fns = [], [], []
             for item_name in batch:
                 item = items[item_name]
                 wav_fn = item['wav_fn']
@@ -167,7 +177,6 @@ class F0Extractor:
                 # npy_fn = os.path.join(our_save_dir, f"{base}_f0.npy")
                 # 修改：创建新的文件保存路径
                 dir_name = os.path.dirname(wav_fn)  # 获取文件所在目录
-                parent_dir = os.path.dirname(dir_name)  # 获取上一级目录
                 base_name = os.path.splitext(os.path.basename(wav_fn))[0]  # 获取不带扩展名的文件名
                 # 在上一级目录创建_f0文件夹
                 f0_dir = dir_name + '_f0'
@@ -177,34 +186,30 @@ class F0Extractor:
                 npy_fn = os.path.join(f0_dir, f"{base_name}_f0.npy")
                 
                 if os.path.exists(npy_fn):
-                    bad+=1
+                    bad += 1
                     continue
                 # (wav, _), mel = BaseBinarizer.process_audio(wav_fn, item, binarization_args)
                 wav, _ = librosa.core.load(wav_fn, sr=hparams['audio_sample_rate'])
                 # wav = pad_or_cut_xd(torch.Tensor(wav), math.ceil(wav.shape[0] / hparams['hop_size']) * hparams['hop_size']).numpy()
                 wavs.append(wav)
-                mel_lengths.append(math.ceil((wav.shape[0] + 1) / hparams['hop_size']))
                 # lengths.append((wav.shape[0] + rmvpe.mel_extractor.hop_length - 1) // rmvpe.mel_extractor.hop_length)
                 lengths.append((wav.shape[0] + hparams['hop_size'] - 1) // hparams['hop_size'])
                 npy_fns.append(npy_fn)
-            if len(lengths)==0:
+            if len(lengths) == 0:
                 continue
 
             with torch.no_grad():
-                rmvpe.get_pitch_batch(
+                f0s, _ = rmvpe.get_pitch_batch(
                     wavs, sample_rate=hparams['audio_sample_rate'],
                     hop_size=hparams['hop_size'],
-                    lengths=lengths, npy_fns=npy_fns,
+                    lengths=lengths,
                     fmax=hparams['f0_max'],
                     fmin=hparams['f0_min']
                 )
-                # np.save(wav_fn.replace(".wav", ".npy"),f0s)
-                # print(wav_fn.replace(".wav", ".npy"))
-            # for idx in range(len(f0s)):
-            #     f0_dict[batch[idx]] = f0s[idx]
-        print(bad,'bad')
-
-        # return f0_dict
+            for f0, npy_fn in zip(f0s, npy_fns):
+                np.save(npy_fn, _to_numpy_f0(f0), allow_pickle=False)
+        if bad > 0:
+            print(f'Skipped {bad} files that already have F0 data')
 
     def process(self, a):
         self.load_meta_data()

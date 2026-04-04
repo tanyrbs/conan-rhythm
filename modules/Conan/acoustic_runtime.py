@@ -111,7 +111,11 @@ def run_acoustic_path(
     )
     if infer:
         f0, uv = None, None
-    pitch_embed_out = model.forward_pitch(pitch_inp, f0, uv, ret, **forward_kwargs)
+    if bool(model.hparams.get("use_pitch_embed", False)):
+        pitch_embed_out = model.forward_pitch(pitch_inp, f0, uv, ret, **forward_kwargs)
+    else:
+        ret["rhythm_pitch_embed_disabled"] = 1.0
+        pitch_embed_out = torch.zeros_like(pitch_inp)
     ret["decoder_inp"] = decoder_inp = pitch_inp + pitch_embed_out
     ret["mel_out"] = model.forward_decoder(
         decoder_inp,

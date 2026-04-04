@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -104,6 +105,23 @@ class OptionalDependencyGuardTests(unittest.TestCase):
         finally:
             _restore_modules("modules.pe.rmvpe", removed)
 
+    def test_require_rmvpe_cls_does_not_require_torchaudio_at_import_time(self) -> None:
+        removed = _pop_modules("modules.pe.rmvpe")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torchaudio.transforms" or name.startswith("torchaudio"):
+                raise OSError("bad torchaudio native extension")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                with mock.patch("utils.extract_f0_rmvpe._RMVPE_CLS", None):
+                    cls = _require_rmvpe_cls()
+            self.assertEqual(cls.__name__, "RMVPE")
+        finally:
+            _restore_modules("modules.pe.rmvpe", removed)
+
     def test_to_lf0_does_not_modify_numpy_input(self) -> None:
         source = np.asarray([0.0, 100.0], dtype=np.float32)
         source_copy = source.copy()
@@ -132,8 +150,62 @@ class OptionalDependencyGuardTests(unittest.TestCase):
                 audio_vad.trim_long_silences("dummy.wav")
 
     def test_generate_batch_requires_pe_ckpt_for_rmvpe(self) -> None:
-            with self.assertRaisesRegex(RuntimeError, "requires hparams\\['pe_ckpt'\\]"):
-                F0Extractor.generate_batch({}, {"pe": "rmvpe"}, {}, device="cpu")
+        with self.assertRaisesRegex(RuntimeError, "requires hparams\\['pe_ckpt'\\]"):
+            F0Extractor.generate_batch({}, {"pe": "rmvpe"}, {}, device="cpu")
+
+    def test_generate_batch_saves_returned_f0_files_without_private_rmvpe_kwargs(self) -> None:
+        class FakeRMVPE:
+            def __init__(self, model_path, device=None):
+                self.model_path = model_path
+                self.device = device
+
+            def get_pitch_batch(
+                self,
+                audios,
+                sample_rate,
+                hop_size,
+                lengths,
+                interp_uv=False,
+                fmin=50,
+                fmax=1000,
+            ):
+                f0s = [np.linspace(100.0, 120.0, num=length, dtype=np.float32) for length in lengths]
+                uvs = [np.zeros(length, dtype=np.bool_) for length in lengths]
+                return f0s, uvs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_dir = Path(tmp) / "speaker"
+            wav_dir.mkdir(parents=True, exist_ok=True)
+            wav_fn = wav_dir / "demo.wav"
+            items = {
+                "demo": {
+                    "wav_fn": str(wav_fn),
+                    "duration": 0.04,
+                }
+            }
+            hparams = {
+                "pe": "rmvpe",
+                "pe_ckpt": "dummy.ckpt",
+                "audio_sample_rate": 16000,
+                "hop_size": 160,
+                "f0_max": 800,
+                "f0_min": 50,
+            }
+            wav = np.zeros(640, dtype=np.float32)
+            expected_path = Path(str(wav_dir) + "_f0") / "demo_f0.npy"
+
+            with mock.patch("utils.extract_f0_rmvpe._require_rmvpe_cls", return_value=FakeRMVPE):
+                with mock.patch("utils.extract_f0_rmvpe.librosa.core.load", return_value=(wav, 16000)):
+                    F0Extractor.generate_batch(items, hparams, {}, device="cpu", bsz=1, max_tokens=1000)
+
+            self.assertTrue(expected_path.exists())
+            saved = np.load(expected_path, allow_pickle=False)
+            self.assertEqual(saved.shape[0], 4)
+            self.assertTrue(np.allclose(saved, np.linspace(100.0, 120.0, num=4, dtype=np.float32)))
+
+    def test_generate_batch_rejects_non_rmvpe_batch_mode(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "supports only pe=rmvpe"):
+            F0Extractor.generate_batch({}, {"pe": "pw"}, {}, device="cpu")
 
     def test_vocoder_infer_tolerates_optional_nsf_binary_failures(self) -> None:
         removed = _pop_modules("tasks.tts.vocoder_infer")

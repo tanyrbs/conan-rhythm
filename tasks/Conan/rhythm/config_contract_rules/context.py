@@ -147,7 +147,7 @@ def build_stage_validation_context(
             require_retimed_cache=policy.require_retimed_cache,
             enable_dual_mode_teacher=bool(hparams.get("rhythm_enable_dual_mode_teacher", False)),
             enable_learned_offline_teacher=bool(
-                hparams.get("rhythm_enable_learned_offline_teacher", True)
+                hparams.get("rhythm_enable_learned_offline_teacher", False)
             ),
             explicit_runtime_teacher_enable=hparams.get(
                 "rhythm_runtime_enable_learned_offline_teacher", None
@@ -173,7 +173,7 @@ def build_stage_validation_context(
                 hparams.get("rhythm_use_retimed_pitch_target", False)
             ),
             disable_pitch_when_retimed=bool(
-                hparams.get("rhythm_disable_pitch_loss_when_retimed", True)
+                hparams.get("rhythm_disable_pitch_loss_when_retimed", False)
             ),
             retimed_mel_source=str(
                 hparams.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance"

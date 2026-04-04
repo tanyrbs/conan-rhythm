@@ -4,7 +4,6 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torchaudio.transforms import Resample
 
 from utils.audio.pitch_utils import interp_f0, resample_align_curve
 from .constants import *
@@ -13,6 +12,7 @@ from .spec import MelSpectrogram
 from .utils import to_local_average_f0, to_viterbi_f0
 
 _PYWORLD = None
+_RESAMPLE_CLS = None
 
 
 def _require_pyworld():
@@ -27,6 +27,21 @@ def _require_pyworld():
             "(postprocess(..., audio=...)). Install pyworld or call postprocess without audio."
         ) from exc
     return _PYWORLD
+
+
+def _require_resample_cls():
+    global _RESAMPLE_CLS
+    if _RESAMPLE_CLS is not None:
+        return _RESAMPLE_CLS
+    try:
+        transforms = importlib.import_module("torchaudio.transforms")
+        _RESAMPLE_CLS = transforms.Resample
+    except Exception as exc:
+        raise ImportError(
+            "torchaudio is required only when RMVPE needs waveform resampling "
+            "(sample_rate != 16000). Install a working torchaudio build or provide 16 kHz audio."
+        ) from exc
+    return _RESAMPLE_CLS
 
 
 class RMVPE:
@@ -81,7 +96,11 @@ class RMVPE:
         else:
             key_str = str(sample_rate)
             if key_str not in self.resample_kernel:
-                self.resample_kernel[key_str] = Resample(sample_rate, 16000, lowpass_filter_width=128)
+                self.resample_kernel[key_str] = _require_resample_cls()(
+                    sample_rate,
+                    16000,
+                    lowpass_filter_width=128,
+                )
             self.resample_kernel[key_str] = self.resample_kernel[key_str].to(self.device)
             audio_res = self.resample_kernel[key_str](audio)
         mel = self.mel_extractor(audio_res, center=True)
@@ -117,7 +136,11 @@ class RMVPE:
         else:
             key_str = str(sample_rate)
             if key_str not in self.resample_kernel:
-                self.resample_kernel[key_str] = Resample(sample_rate, 16000, lowpass_filter_width=128)
+                self.resample_kernel[key_str] = _require_resample_cls()(
+                    sample_rate,
+                    16000,
+                    lowpass_filter_width=128,
+                )
             self.resample_kernel[key_str] = self.resample_kernel[key_str].to(self.device)
             audios_res = self.resample_kernel[key_str](audios)
         mels = self.mel_extractor(audios_res, center=True)

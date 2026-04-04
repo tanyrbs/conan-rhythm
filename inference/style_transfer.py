@@ -28,6 +28,13 @@ def process_align(ph_durs, mel, item, hop_size ,audio_sample_rate):
     return mel2ph
 
 
+def _vocode_with_optional_f0(vocoder, mel_out: torch.Tensor, output: dict):
+    pred_f0 = output.get('f0_denorm_pred')
+    if pred_f0 is None:
+        return vocoder.spec2wav(mel_out.cpu())
+    return vocoder.spec2wav(mel_out.cpu(), f0=pred_f0[0].cpu())
+
+
 class StyleTransfer(BaseTTSInfer):
     def build_model(self):
         dict_size = len(self.ph_encoder)
@@ -75,8 +82,7 @@ class StyleTransfer(BaseTTSInfer):
 
             # Get gen mel
             mel_out =  output['mel_out'][0]
-            pred_f0 = output.get('f0_denorm_pred')[0]
-            wav_out = self.vocoder.spec2wav(mel_out.cpu(),f0=pred_f0.cpu())
+            wav_out = _vocode_with_optional_f0(self.vocoder, mel_out, output)
 
         wav_out = wav_out
         return wav_out, mel_out

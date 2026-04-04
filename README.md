@@ -89,8 +89,17 @@ This repo does contain lightweight smoke assets that are good enough for structu
 
 - `data/binary/libritts_single_smoke_rhythm_v4`
 - `data/processed/libritts_local_real_smoke`
+- `artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/...`:
+  - bootstrap teacher checkpoint
+  - teacher export for `train/valid/test`
+  - rebuilt student binary for stage-2 smoke
 
 They are for probe/smoke validation only, not for formal maintained training claims.
+
+Important caveats:
+
+- the `artifacts/rhythm_teacher_export_student_kd/...` teacher checkpoint is `bootstrap_random_init`, so that chain is an integration smoke, not a real learned teacher asset
+- `data/binary/libritts_single_smoke_rhythm_v4/valid.data` is currently empty, so teacher-offline smoke preflight is reliable on `train` only unless you rebuild the smoke valid split
 
 ## Preflight and validation
 
@@ -106,6 +115,7 @@ Useful local verification commands:
 python -m compileall -q modules tasks scripts tests utils data_gen
 python -m unittest discover -s tests/rhythm -p "test_*.py"
 python -u scripts/smoke_test_rhythm_v2.py
+python scripts/integration_teacher_export_student_kd.py --help
 python scripts/preflight_rhythm_v2.py --help
 ```
 
@@ -113,18 +123,54 @@ python scripts/preflight_rhythm_v2.py --help
 
 The following checks were run in the `conan` environment on April 4, 2026.
 
-### 1) Teacher-offline preflight + model dry-run on smoke assets
+### 1) Compile / unit / maintained smoke checks
+
+```bash
+conda run -n conan python -m compileall -q modules tasks scripts tests utils data_gen
+conda run -n conan python -m unittest discover -s tests/rhythm -p "test_*.py"
+conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
+```
+
+Result:
+
+- compileall: **passed**
+- rhythm unittests: **151 passed**
+- maintained smoke test: **passed**
+
+### 2) Teacher-offline preflight + model dry-run on smoke assets
 
 ```bash
 conda run -n conan python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --splits train   --inspect_items 2   --model_dry_run
 ```
 
-Result: **passed**.
+Result: **passed on `train`**.
 
-### 2) 2000-step CPU mini-train probe
+Counter-check:
 
 ```bash
-conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/teacher_offline_cpu_probe_2000.json
+conda run -n conan python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --splits train valid   --inspect_items 2   --model_dry_run
+```
+
+Result: **fails on `valid`** because `data/binary/libritts_single_smoke_rhythm_v4/valid.data` is empty. That is a smoke-asset defect, not a stage-contract or model-logic failure.
+
+### 3) Teacher export -> student KD integration smoke
+
+```bash
+conda run -n conan python scripts/integration_teacher_export_student_kd.py   --teacher_config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --student_config egs/conan_emformer_rhythm_v2_student_kd.yaml   --processed_data_dir data/processed/libritts_local_real_smoke
+```
+
+Result: **passed**.
+
+Integration notes:
+
+- export coverage now includes `train/valid/test`
+- summary artifact: `artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/summary.json`
+- this is still smoke-only because the teacher ckpt mode is `bootstrap_random_init`
+
+### 4) 2000-step CPU probe: `teacher_offline`
+
+```bash
+conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/teacher_offline_cpu_probe_2000_clean.json
 ```
 
 Result summary:
@@ -137,7 +183,35 @@ Result summary:
 - throughput: `4.154 steps/s`
 - peak CPU RSS: `1159.91 MB`
 
-One real issue showed up during this validation: `scripts/cpu_probe_rhythm_train.py` had an unnecessary `--steps <= 500` hard cap. That cap was lifted to `5000`, so 2000-step verification is now supported directly.
+### 5) 2000-step CPU probe: `student_kd`
+
+```bash
+conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary   --processed_data_dir data/processed/libritts_local_real_smoke   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/student_kd_cpu_probe_2000_default_chain.json
+```
+
+Result summary:
+
+- completed **2000/2000** steps
+- `total_loss`: `0.0154 -> 0.0111`
+- `L_rhythm_exec`: `0.0070 -> 0.0069`
+- `L_stream_state`: `0.0075 -> 0.00018`
+- mean step time: `46.53 ms`
+- throughput: about `21.49 steps/s`
+- peak CPU RSS: about `977.65 MB`
+
+### 6) 2000-step CPU probe: `student_retimed` smoke
+
+```bash
+conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_student_retimed.yaml   --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary   --processed_data_dir data/processed/libritts_local_real_smoke   --hparams use_pitch_embed=False   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/student_retimed_cpu_probe_2000_smoke.json
+```
+
+Result summary:
+
+- completed **2000/2000** steps
+- `total_loss`: `48.41 -> 2.67`
+- `L_base` dominates the objective
+- `grad_norm_before_clip`: mean about `158.86`, max about `275.92`
+- this is a structural smoke pass only, **not** a clean stage-3 readiness signal
 
 ## Training commands
 
@@ -170,12 +244,29 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_
 | Config | Status | Purpose | Needs teacher cache | Needs retimed cache | Needs F0 |
 |---|---|---|---:|---:|---:|
 | `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | learned offline teacher stage | no | no | usually no |
-| `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | cache-only teacher-main + shape-only KD | yes | no | no |
+| `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | student runtime + cached teacher supervision; maintained path usually keeps KD shape-only | yes | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
-| `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | formal minimal base | yes | no | stage-dependent |
+| `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
 | `conan_emformer_rhythm_v2.yaml` | transitional | migration / debug path | optional | optional | stage-dependent |
-| `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | ablation only | optional | no | no |
-| `conan_emformer_rhythm_v2_dual_mode_kd.yaml` | legacy | runtime dual-mode teacher research | optional | no | no |
+| `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | schedule-only ablation; not part of maintained training prep | optional | no | no |
+| `conan_emformer_rhythm_v2_dual_mode_kd.yaml` | legacy | runtime dual-mode teacher research / ablation | optional | no | no |
+
+## Training-prep conclusion
+
+Current branch conclusion after code review, probes, and smoke integration:
+
+- `teacher_offline`: **code-ready**, but the checked-in smoke `valid` split is defective
+- `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
+- `student_retimed`: **not formally ready to bless** from this checkout; smoke runs only after disabling pitch embed and still show high gradient pressure
+
+So the next formal sequence should be:
+
+1. train a real `teacher_offline` checkpoint
+2. export teacher targets for `train/valid/test`
+3. rebuild stage-2 binary from that export
+4. validate `student_kd`
+5. prepare dedicated retimed cache + F0 side files
+6. re-check `student_retimed` with real assets before long training
 
 ## Inference boundary
 
