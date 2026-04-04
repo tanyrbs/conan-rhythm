@@ -3,7 +3,9 @@
 > Historical snapshot: parts of this audit are outdated after the later
 > teacher-main + shape-only KD cleanup. Prefer
 > `docs/rhythm_training_stages.md`, `docs/rhythm_supervision_policy.md`, and
-> `docs/rhythm_train_runbook.md` for the current maintained state.
+> `docs/rhythm_train_runbook.md` for the current maintained state. For the
+> latest repo-wide implementation audit, also see
+> `docs/rhythm_repo_audit_2026-04-04.md`.
 
 This audit was run on the local checkout at:
 

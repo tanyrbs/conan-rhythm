@@ -27,6 +27,8 @@ This repository is **our Conan-based engineering fork / modified branch**, focus
 > - `modules/Conan/rhythm/`
 > - `tasks/Conan/rhythm/`
 > - `docs/rhythm_module_vision.md`
+> - `docs/rhythm_migration_plan.md`
+> - `docs/rhythm_repo_audit_2026-04-04.md`
 > - `docs/rhythm_training_stages.md`
 > - `docs/rhythm_supervision_policy.md`
 >

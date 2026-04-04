@@ -10,7 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from modules.Conan.rhythm.frame_plan import build_frame_plan_from_execution, sample_tensor_by_frame_plan
+from modules.Conan.rhythm.frame_plan import (
+    build_frame_plan,
+    build_frame_plan_from_execution,
+    sample_tensor_by_frame_plan,
+)
 
 
 class RhythmFramePlanTests(unittest.TestCase):
@@ -46,6 +50,21 @@ class RhythmFramePlanTests(unittest.TestCase):
         self.assertTrue(torch.allclose(gathered[0, 2], torch.tensor([0.5, 0.25])))
         self.assertTrue(torch.allclose(gathered[1, 0], torch.tensor([4.0, 40.0])))
         self.assertTrue(torch.allclose(gathered[1, 3], torch.tensor([0.75, 0.5])))
+
+    def test_build_frame_plan_uses_explicit_active_slot_positions(self) -> None:
+        plan = build_frame_plan(
+            dur_anchor_src=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+            slot_duration_exec=torch.tensor([[2.0, 5.0, 2.0, 1.0]], dtype=torch.float32),
+            slot_mask=torch.tensor([[1.0, 0.0, 1.0, 1.0]], dtype=torch.float32),
+            slot_is_blank=torch.tensor([[0, 1, 0, 1]], dtype=torch.long),
+            slot_unit_index=torch.tensor([[0, 0, 1, 1]], dtype=torch.long),
+        )
+
+        self.assertEqual(plan.frame_src_index[0, :5].tolist(), [0, 1, 2, 3, -1])
+        self.assertEqual(plan.frame_is_blank[0, :5].tolist(), [0, 0, 0, 0, 1])
+        self.assertEqual(plan.frame_slot_index[0, :5].tolist(), [0, 0, 2, 2, 3])
+        self.assertEqual(plan.total_mask[0, :5].tolist(), [1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertTrue(torch.all(plan.total_mask[0, 5:] == 0.0))
 
 
 if __name__ == "__main__":

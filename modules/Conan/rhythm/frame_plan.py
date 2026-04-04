@@ -35,13 +35,17 @@ def _pad_sequences(
     if len(sequences) <= 0:
         return torch.zeros((0, 0), dtype=dtype or torch.float32)
     max_len = max(int(seq.size(0)) for seq in sequences)
-    tail_shape = tuple(sequences[0].shape[1:])
-    out = sequences[0].new_full((len(sequences), max_len, *tail_shape), pad_value)
-    if dtype is not None:
-        out = out.to(dtype=dtype)
+    ref = sequences[0]
+    tail_shape = tuple(ref.shape[1:])
+    out = torch.full(
+        (len(sequences), max_len, *tail_shape),
+        pad_value,
+        dtype=dtype or ref.dtype,
+        device=ref.device,
+    )
     for idx, seq in enumerate(sequences):
         if seq.numel() > 0:
-            out[idx, : seq.size(0)] = seq.to(dtype=out.dtype)
+            out[idx, : seq.size(0)] = seq.to(device=out.device, dtype=out.dtype)
     return out
 
 
@@ -87,6 +91,7 @@ def build_frame_plan(
     device = slot_duration_exec.device
     slot_duration_exec = torch.round(slot_duration_exec.float()).long().clamp_min(0)
     slot_mask = slot_mask.float()
+    slot_active_mask = slot_mask > 0.5
     slot_is_blank = slot_is_blank.long()
     slot_unit_index = slot_unit_index.long()
     src_anchor = torch.round(dur_anchor_src.float()).long().clamp_min(0)
@@ -101,7 +106,6 @@ def build_frame_plan(
 
     for batch_idx in range(slot_duration_exec.size(0)):
         src_cursor = 0
-        visible_slots = int(slot_mask[batch_idx].sum().item())
         src_total = int(src_anchor[batch_idx].sum().item())
         frame_src_index = []
         frame_blank = []
@@ -109,7 +113,8 @@ def build_frame_plan(
         frame_unit_index = []
         frame_phase_features = []
         valid_len = 0
-        for slot_idx in range(visible_slots):
+        active_slot_indices = torch.nonzero(slot_active_mask[batch_idx], as_tuple=False).flatten().tolist()
+        for slot_idx in active_slot_indices:
             duration = int(slot_duration_exec[batch_idx, slot_idx].item())
             unit_idx = int(slot_unit_index[batch_idx, slot_idx].item())
             is_blank = int(slot_is_blank[batch_idx, slot_idx].item()) > 0
@@ -181,9 +186,10 @@ def build_frame_plan(
     frame_unit_index = _pad_sequences(frame_unit_index_list, pad_value=-1, dtype=torch.long)
     frame_phase_features = _pad_sequences(frame_phase_feature_list, pad_value=0.0)
     total_mask = torch.zeros_like(blank_mask)
-    for batch_idx, valid_len in enumerate(valid_lengths):
-        if valid_len > 0:
-            total_mask[batch_idx, :valid_len] = 1.0
+    if valid_lengths and total_mask.numel() > 0:
+        valid_length_tensor = torch.tensor(valid_lengths, dtype=torch.long, device=device)
+        steps = torch.arange(total_mask.size(1), device=device)[None, :]
+        total_mask = (steps < valid_length_tensor[:, None]).to(dtype=blank_mask.dtype)
     blank_mask = blank_mask * total_mask
     speech_mask = (1.0 - blank_mask).clamp(0.0, 1.0) * total_mask
     return RhythmFramePlan(

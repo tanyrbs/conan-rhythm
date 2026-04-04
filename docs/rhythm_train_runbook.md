@@ -1,6 +1,7 @@
 # Rhythm Train Runbook
 
 This is the maintained pre-train checklist and stage order for the rhythm mainline.
+For the latest repo-wide code audit, also see `docs/rhythm_repo_audit_2026-04-04.md`.
 
 ## 0. What is and is not train-ready in this repo
 

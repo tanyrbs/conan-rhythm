@@ -112,3 +112,30 @@ If a new feature does not make one of these stronger:
 - streaming stability
 
 then it is probably not the next thing to migrate.
+
+## 6. Latest audit outcomes (2026-04-04)
+
+The latest repo-wide audit re-checked six streams in parallel:
+
+1. rhythm core modules
+2. task/runtime/loss integration
+3. dataset/cache/binarization contracts
+4. scripts and preflight tooling
+5. tests and CI coverage
+6. docs and performance hot paths
+
+Immediate conclusions:
+
+- the maintained Rhythm V2 path is structurally healthy and the local rhythm test suite is green
+- `modules/Conan/rhythm/frame_plan.py` previously assumed active slots were prefix-contiguous; this is a real correctness risk once sparse slot masks appear
+- the shared frame-plan path remains one of the highest-frequency Python hot paths, so it is still a priority optimization surface
+- current performance-upside work should stay focused on:
+  - frame-plan materialization
+  - reducing Python loops in streaming unitization / retimed target prep
+  - keeping cache contracts minimal so dataset items carry fewer sidecars
+
+Short-term next actions:
+
+- keep frame-plan / retimed-target regression tests ahead of any projector or scheduler refactor
+- add lightweight benchmark gates for the maintained CPU probe path
+- avoid re-expanding legacy dual-mode branches until the maintained student path has stable throughput and cache hygiene
