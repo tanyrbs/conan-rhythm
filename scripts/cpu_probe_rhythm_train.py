@@ -12,6 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.commons.single_thread_env import apply_single_thread_env, maybe_limit_torch_cpu_threads
+
 
 def _move_to_device(obj, device):
     if isinstance(obj, torch.Tensor):
@@ -198,8 +200,14 @@ def main():
         split=args.split,
     )
 
+    if args.device != "cuda":
+        apply_single_thread_env()
+
     import torch  # type: ignore[no-redef]
     from torch.utils.data import DataLoader  # type: ignore[no-redef]
+
+    if args.device != "cuda":
+        maybe_limit_torch_cpu_threads()
 
     from tasks.Conan.Conan import ConanTask  # type: ignore[no-redef]
     from tasks.Conan.dataset import ConanDataset  # type: ignore[no-redef]

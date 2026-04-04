@@ -92,7 +92,12 @@ class RhythmDatasetTargetBuilder:
         full_prefix_anchor_raw = full_anchor_raw[:visible_units]
         is_truncated = visible_units < full_units
         if not is_truncated and full_prefix_anchor_raw.shape[0] == visible_units:
-            is_truncated = not np.array_equal(visible_anchor_raw, full_prefix_anchor_raw)
+            is_truncated = not np.allclose(
+                visible_anchor_raw,
+                full_prefix_anchor_raw,
+                atol=1e-5,
+                rtol=1e-5,
+            )
         return {
             "visible_units": visible_units,
             "visible_anchor": visible_anchor_raw.astype(np.float32),
@@ -108,6 +113,7 @@ class RhythmDatasetTargetBuilder:
 
     @classmethod
     def _apply_prefix_tail_ratio(cls, adapted, *, tail_ratio: float) -> None:
+        tail_ratio = float(np.clip(tail_ratio, 0.0, 1.0))
         if tail_ratio >= 0.999999:
             return
         for key in cls._RHYTHM_PREFIX_TAIL_RESCALE_KEYS:
@@ -184,6 +190,7 @@ class RhythmDatasetTargetBuilder:
         tail_ratio = 1.0
         if visible_units > 0 and full_prefix_anchor.shape[0] >= visible_units:
             tail_ratio = float(visible_anchor[-1] / max(float(full_prefix_anchor[-1]), 1e-6))
+            tail_ratio = float(np.clip(tail_ratio, 0.0, 1.0))
         self._apply_prefix_tail_ratio(adapted, tail_ratio=tail_ratio)
         self._refresh_prefix_budget_targets(adapted)
         self._refresh_prefix_teacher_targets(adapted, visible_anchor=visible_anchor)

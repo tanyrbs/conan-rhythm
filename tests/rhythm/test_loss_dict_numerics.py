@@ -65,6 +65,39 @@ class LossDictNumericsTests(unittest.TestCase):
             )
         )
 
+    def test_zero_mass_distill_allocation_target_is_ignored(self) -> None:
+        speech_exec = torch.tensor([[2.0, 1.0]], dtype=torch.float32)
+        pause_exec = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        unit_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        execution = SimpleNamespace(
+            speech_duration_exec=speech_exec,
+            blank_duration_exec=pause_exec,
+            pause_after_exec=pause_exec,
+            planner=SimpleNamespace(
+                speech_budget_win=speech_exec.sum(dim=1, keepdim=True),
+                pause_budget_win=pause_exec.sum(dim=1, keepdim=True),
+                raw_speech_budget_win=speech_exec.sum(dim=1, keepdim=True),
+                raw_pause_budget_win=pause_exec.sum(dim=1, keepdim=True),
+                boundary_score_unit=torch.zeros_like(speech_exec),
+                source_boundary_cue=torch.zeros_like(speech_exec),
+            ),
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech_exec.clone(),
+            pause_exec_tgt=pause_exec.clone(),
+            speech_budget_tgt=speech_exec.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_exec.sum(dim=1, keepdim=True),
+            unit_mask=unit_mask,
+            dur_anchor_src=torch.ones_like(speech_exec),
+            distill_speech_tgt=speech_exec.clone(),
+            distill_pause_tgt=pause_exec.clone(),
+            distill_allocation_tgt=torch.zeros_like(speech_exec),
+            distill_allocation_weight=1.0,
+        )
+        losses = build_rhythm_loss_dict(execution, targets)
+        self.assertTrue(torch.allclose(losses["rhythm_distill_allocation"], torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(losses["rhythm_distill"], losses["rhythm_distill_exec"]))
+
 
 if __name__ == "__main__":
     unittest.main()

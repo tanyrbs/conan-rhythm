@@ -118,7 +118,7 @@ class MonotonicRhythmScheduler(nn.Module):
             slow_rhythm_summary=slow_rhythm_summary,
             boundary_score_unit=boundary_score_unit,
         )
-        return RhythmPlannerOutputs(
+        planner = RhythmPlannerOutputs(
             speech_budget_win=budget_outputs["speech_budget_win"],
             pause_budget_win=budget_outputs["pause_budget_win"],
             dur_logratio_unit=redistribution_outputs["dur_logratio_unit"],
@@ -127,3 +127,6 @@ class MonotonicRhythmScheduler(nn.Module):
             trace_context=trace_context,
             source_boundary_cue=source_boundary_cue,
         )
+        planner.raw_speech_budget_win = budget_outputs.get("raw_speech_budget_win", planner.speech_budget_win)
+        planner.raw_pause_budget_win = budget_outputs.get("raw_pause_budget_win", planner.pause_budget_win)
+        return planner

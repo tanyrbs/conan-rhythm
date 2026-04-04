@@ -59,6 +59,51 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["rhythm_distill_exec"], torch.tensor(0.0)))
         self.assertGreater(float(losses["rhythm_distill_speech_shape"].item()), 0.1)
 
+    def test_distill_exec_weight_zero_keeps_non_exec_distill_active(self) -> None:
+        speech = torch.zeros((1, 2), dtype=torch.float32)
+        pause = torch.zeros_like(speech)
+        planner = SimpleNamespace(
+            raw_speech_budget_win=torch.zeros((1, 1), dtype=torch.float32),
+            raw_pause_budget_win=torch.zeros((1, 1), dtype=torch.float32),
+            speech_budget_win=torch.zeros((1, 1), dtype=torch.float32),
+            pause_budget_win=torch.zeros((1, 1), dtype=torch.float32),
+            source_boundary_cue=torch.zeros_like(speech),
+            feasible_total_budget_delta=torch.zeros((1, 1), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=speech,
+            blank_duration_exec=pause,
+            pause_after_exec=pause,
+            planner=planner,
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause,
+            speech_budget_tgt=torch.zeros((1, 1), dtype=torch.float32),
+            pause_budget_tgt=torch.zeros((1, 1), dtype=torch.float32),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            distill_speech_tgt=torch.tensor([[2.0, 0.0]], dtype=torch.float32),
+            distill_pause_tgt=pause,
+            distill_speech_budget_tgt=torch.tensor([[2.0]], dtype=torch.float32),
+            distill_pause_budget_tgt=torch.zeros((1, 1), dtype=torch.float32),
+            distill_prefix_clock_tgt=torch.tensor([[0.5, 1.0]], dtype=torch.float32),
+            distill_prefix_backlog_tgt=torch.tensor([[0.5, 0.0]], dtype=torch.float32),
+            distill_confidence=torch.ones((1, 1), dtype=torch.float32),
+            distill_exec_weight=0.0,
+            distill_budget_weight=1.0,
+            distill_prefix_weight=1.0,
+            distill_speech_shape_weight=1.0,
+        )
+        losses = build_rhythm_loss_dict(execution, targets)
+        self.assertTrue(torch.allclose(losses["rhythm_distill_exec"], torch.tensor(0.0)))
+        self.assertGreater(float(losses["rhythm_distill_budget"].item()), 0.0)
+        self.assertGreater(float(losses["rhythm_distill_prefix"].item()), 0.0)
+        self.assertGreater(float(losses["rhythm_distill_speech_shape"].item()), 0.0)
+        self.assertGreater(float(losses["rhythm_distill"].item()), 0.0)
+
     def test_plan_terms_are_zero_when_plan_weights_are_disabled(self) -> None:
         speech = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
         pause = torch.zeros_like(speech)
@@ -77,6 +122,34 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["rhythm_plan_local"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_plan_cum"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_plan"], torch.tensor(0.0)))
+
+    def test_feasible_debt_penalizes_budget_redistribution_repairs(self) -> None:
+        speech = torch.tensor([[4.0, 4.0]], dtype=torch.float32)
+        pause = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[6.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            source_boundary_cue=torch.zeros_like(speech),
+            feasible_total_budget_delta=torch.tensor([[0.0]], dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=speech,
+            blank_duration_exec=pause,
+            pause_after_exec=pause,
+            planner=planner,
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause,
+            speech_budget_tgt=planner.speech_budget_win,
+            pause_budget_tgt=planner.pause_budget_win,
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=speech,
+        )
+        losses = build_rhythm_loss_dict(execution, targets)
+        self.assertGreater(float(losses["rhythm_feasible_debt"].item()), 0.0)
 
     def test_runtime_teacher_aux_is_separate_from_kd(self) -> None:
         teacher_losses = {

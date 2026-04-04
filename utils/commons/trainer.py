@@ -23,7 +23,14 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from utils.commons.ckpt_utils import get_last_checkpoint, get_all_ckpts
-from utils.commons.ddp_config import load_ddp_logging_data, resolve_ddp_runtime_config, save_ddp_logging_data
+from utils.commons.ddp_config import (
+    build_ddp_auto_signature,
+    get_ddp_auto_min_step,
+    load_ddp_logging_data,
+    resolve_ddp_runtime_config,
+    save_ddp_logging_data,
+    select_ddp_logging_hint,
+)
 from utils.commons.ddp_utils import DDP
 from utils.commons.hparams import hparams
 from utils.commons.trainer_loop import TrainerLoopMixin
@@ -335,6 +342,9 @@ class Trainer(TrainerLoopMixin):
     def _load_ddp_logging_hint(self):
         return load_ddp_logging_data(self._ddp_logging_data_path())
 
+    def _build_ddp_auto_signature(self, task):
+        return build_ddp_auto_signature(hparams=hparams, task=task)
+
     def maybe_save_ddp_logging_data(self):
         if self.proc_rank != 0 or not isinstance(self.task, DDP):
             return
@@ -350,10 +360,16 @@ class Trainer(TrainerLoopMixin):
             logging_data,
             global_step=self.global_step,
             epoch=self.current_epoch,
+            signature=self._build_ddp_auto_signature(self.task.module),
         )
 
     def configure_ddp(self, task):
-        ddp_logging_data = self._load_ddp_logging_hint()
+        ddp_signature = self._build_ddp_auto_signature(task)
+        ddp_logging_data = select_ddp_logging_hint(
+            self._load_ddp_logging_hint(),
+            signature=ddp_signature,
+            min_saved_global_step=get_ddp_auto_min_step(hparams),
+        )
         find_unused, static_graph = resolve_ddp_runtime_config(
             hparams.get('ddp_find_unused_parameters', 'auto'),
             hparams.get('ddp_static_graph', 'auto'),
@@ -373,10 +389,11 @@ class Trainer(TrainerLoopMixin):
                 'DDP static_graph resolved true but current DistributedDataParallel does not expose static_graph.'
             )
         logging.info(
-            'DDP config resolved: find_unused_parameters=%s, static_graph=%s, can_set_static_graph=%s',
+            'DDP config resolved: find_unused_parameters=%s, static_graph=%s, can_set_static_graph=%s, auto_hint_loaded=%s',
             find_unused,
             static_graph,
             bool(ddp_logging_data.get('can_set_static_graph', False)),
+            bool(ddp_logging_data),
         )
         task = DDP(task, **ddp_kwargs)
         random.seed(self.seed)

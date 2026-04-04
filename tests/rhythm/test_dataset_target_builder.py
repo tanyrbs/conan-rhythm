@@ -71,6 +71,35 @@ class RhythmDatasetTargetBuilderTests(unittest.TestCase):
         self.assertEqual(adapted["rhythm_teacher_prefix_clock_tgt"].shape[0], 2)
         self.assertEqual(adapted["rhythm_teacher_prefix_backlog_tgt"].shape[0], 2)
 
+    def test_prefix_alignment_tolerates_float_noise(self) -> None:
+        alignment = RhythmDatasetTargetBuilder._resolve_prefix_alignment(
+            {"dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32)},
+            {"dur_anchor_src": np.asarray([2.0, 3.0 + 1e-5], dtype=np.float32)},
+        )
+        self.assertFalse(alignment["is_truncated"])
+
+    def test_prefix_tail_ratio_is_clamped_to_unit_interval(self) -> None:
+        builder = RhythmDatasetTargetBuilder(_DummyOwner())
+        adapted = builder.adapt_cached_targets_to_prefix(
+            item={"dur_anchor_src": np.asarray([3.0, 2.0], dtype=np.float32)},
+            cached_targets={
+                "rhythm_speech_exec_tgt": np.asarray([3.0, 4.0], dtype=np.float32),
+                "rhythm_pause_exec_tgt": np.asarray([1.0, 2.0], dtype=np.float32),
+                "rhythm_teacher_speech_exec_tgt": np.asarray([3.0, 4.0], dtype=np.float32),
+                "rhythm_teacher_pause_exec_tgt": np.asarray([1.0, 2.0], dtype=np.float32),
+                "rhythm_teacher_allocation_tgt": np.asarray([0.3, 0.7], dtype=np.float32),
+            },
+            source_cache={"dur_anchor_src": np.asarray([3.0, 5.0], dtype=np.float32)},
+            sample={"mel": torch.zeros((8, 80), dtype=torch.float32)},
+        )
+        self.assertTrue(np.all(adapted["rhythm_speech_exec_tgt"] <= np.asarray([3.0, 4.0], dtype=np.float32) + 1e-6))
+        self.assertTrue(np.all(adapted["rhythm_pause_exec_tgt"] <= np.asarray([1.0, 2.0], dtype=np.float32) + 1e-6))
+
+    def test_prefix_tail_ratio_negative_is_clamped_to_zero(self) -> None:
+        adapted = {"rhythm_speech_exec_tgt": np.asarray([1.0, 2.0], dtype=np.float32)}
+        RhythmDatasetTargetBuilder._apply_prefix_tail_ratio(adapted, tail_ratio=-0.5)
+        self.assertTrue(np.allclose(adapted["rhythm_speech_exec_tgt"], np.asarray([1.0, 0.0], dtype=np.float32)))
+
 
 if __name__ == "__main__":
     unittest.main()

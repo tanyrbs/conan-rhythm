@@ -29,9 +29,13 @@ rhythm_export_cache_audit_to_sample: false
 
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.35
-rhythm_distill_budget_weight: 0.08
+# Stage-2 still uses cached teacher surfaces, but the duplicate control-view branch
+# is deduped away. Keep only the remaining shape regularizer explicitly enabled.
+rhythm_dedupe_teacher_primary_cache_distill: true
+rhythm_distill_exec_weight: 0.0
+rhythm_distill_budget_weight: 0.0
 rhythm_distill_allocation_weight: 0.0
-rhythm_distill_prefix_weight: 0.50
+rhythm_distill_prefix_weight: 0.0
 rhythm_distill_speech_shape_weight: 0.25
 rhythm_distill_pause_shape_weight: 0.25
 lambda_rhythm_teacher_aux: 0.0

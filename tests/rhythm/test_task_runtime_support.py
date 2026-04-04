@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -76,6 +77,38 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(kwargs["rhythm_state"], "state")
         self.assertEqual(kwargs["rhythm_source_cache"]["dur_anchor_src"].shape[1], 2)
         self.assertEqual(kwargs["rhythm_offline_source_cache"]["dur_anchor_src"].shape[1], 3)
+
+    def test_target_build_config_accepts_duplicate_distill_alias(self) -> None:
+        owner = SimpleNamespace(
+            mel_losses={"l1": 1.0},
+            _resolve_rhythm_plan_weights=lambda: (0.5, 1.0),
+            _resolve_rhythm_primary_target_surface=lambda: "teacher",
+            _resolve_rhythm_distill_surface=lambda: "cache",
+            _resolve_rhythm_pause_boundary_weight=lambda: 0.35,
+            _rhythm_policy=lambda: SimpleNamespace(strict_mainline=True),
+        )
+        support = RhythmTaskRuntimeSupport(owner)
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.25,
+                "rhythm_budget_raw_weight": 1.0,
+                "rhythm_budget_exec_weight": 0.25,
+                "rhythm_feasible_debt_weight": 0.05,
+                "rhythm_suppress_duplicate_primary_distill": True,
+            },
+            clear=True,
+        ):
+            config = support.build_rhythm_target_build_config()
+        self.assertTrue(config.dedupe_primary_teacher_cache_distill)
+        self.assertEqual(config.distill_exec_weight, 0.0)
 
 
 if __name__ == "__main__":

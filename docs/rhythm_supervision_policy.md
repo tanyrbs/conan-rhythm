@@ -239,10 +239,10 @@ Maintained optimizer policy:
 
 Policy:
 
-- `L_distill` should focus on the student-reachable executed surface
-- maintained distill breakdown = executed speech/pause + optional prefix carry + tiny budget term
-- default distill target = speech exec + pause exec (`blank_exec` only as cache/internal alias)
-- prefix carry distill is preferred over heavier allocation/budget distill
+- maintained strict teacher-mainline keeps the primary teacher contract on execution / budget / prefix surfaces and only leaves a small cached shape KD branch enabled by default
+- legacy / research KD branches may still focus `L_distill` on the student-reachable executed surface
+- default distill target on those legacy branches remains speech exec + pause exec (`blank_exec` only as cache/internal alias)
+- if legacy KD is enabled, prefix carry distill is preferred over heavier allocation/budget distill
 - allocation/budget distill should remain off by default unless the experiment explicitly needs them
 - when the legacy runtime learned offline teacher KD branch is enabled, teacher confidence weights must be detached before weighting student losses, and the runtime teacher itself should receive a light direct auxiliary supervision term instead of being left purely as a detached target producer
 - that legacy runtime teacher auxiliary supervision should prefer dedicated full-length offline teacher sidecars when available; otherwise it must slice the runtime teacher surface to the overlapping prefix before comparing against cached student-prefix targets
@@ -252,14 +252,14 @@ Policy:
 Maintained default:
 
 - keep `L_distill*` disabled in the default teacher-first stage; when enabled in the maintained chain, use the explicit cache-only path (`teacher_offline -> student_kd -> student_retimed`)
-- if KD is enabled, keep it as an explicit branch experiment rather than a hidden always-on objective
+- if KD is enabled on strict maintained stage-2, keep it shape-only (`rhythm_distill_exec_weight = rhythm_distill_budget_weight = rhythm_distill_prefix_weight = rhythm_distill_allocation_weight = 0`)
 - strict-mainline fast path now builds rhythm loss targets directly from the primary cached surface when guidance/distill are both disabled, instead of routing through runtime teacher / algorithmic teacher branches
 
 Maintained chain note:
 
 - `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` is the offline teacher asset-build entry (runtime learned teacher enabled, no student KD, no acoustic path)
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml` is a legacy warm-start / ablation entry (runtime learned teacher disabled)
-- `egs/conan_emformer_rhythm_v2_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, distillation kept on cached execution/prefix surfaces; `teacher_student_kd.yaml` is an alias)
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml` is the maintained stage-2 branch (teacher fully offline, primary supervision on cached teacher surfaces, plus a small cached shape KD branch only; `teacher_student_kd.yaml` is an alias)
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as an optional legacy runtime-teacher branch
 - `egs/conan_emformer_rhythm_v2_student_retimed.yaml` is the stage-3 formal joint entry (`retimed_train.yaml` is an alias)
 - the formal stage-3 config now enables retimed train/valid closure from step 0; the older delayed-start behavior remains only on transitional configs

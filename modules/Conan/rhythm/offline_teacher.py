@@ -6,7 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .controller import ResidualTemporalBlock, masked_mean, masked_softmax
+from .controller import (
+    ResidualTemporalBlock,
+    masked_mean,
+    masked_softmax,
+    resolve_budget_views_from_total_and_pause_share,
+)
 from .contracts import RhythmPlannerOutputs
 from .source_boundary import _masked_standardize, compose_boundary_score_unit
 
@@ -348,10 +353,10 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         pause_share = (pause_ratio_hint + pause_share_delta).clamp(0.0, self.pause_share_max)
 
         total_budget = total_anchor * torch.exp(raw_total_logratio)
-        pause_budget = total_budget * pause_share
-        min_speech_budget = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0) * self.min_speech_frames
-        speech_budget = (total_budget - pause_budget).clamp_min(min_speech_budget)
-        pause_budget = (total_budget - speech_budget).clamp_min(0.0)
+        budget_outputs = resolve_budget_views_from_total_and_pause_share(
+            total_budget=total_budget,
+            pause_share=pause_share,
+        )
 
         raw_logratio = torch.tanh(self.logratio_head(x).squeeze(-1)) * self.max_unit_logratio
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
@@ -362,14 +367,16 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
 
         planner = RhythmPlannerOutputs(
-            speech_budget_win=speech_budget,
-            pause_budget_win=pause_budget,
+            speech_budget_win=budget_outputs["speech_budget_win"],
+            pause_budget_win=budget_outputs["pause_budget_win"],
             dur_logratio_unit=dur_logratio,
             pause_weight_unit=pause_weight,
             boundary_score_unit=boundary_score_unit,
             trace_context=full_trace_context,
             source_boundary_cue=source_boundary_cue,
         )
+        planner.raw_speech_budget_win = budget_outputs["raw_speech_budget_win"]
+        planner.raw_pause_budget_win = budget_outputs["raw_pause_budget_win"]
 
         confidence_input = torch.cat(
             [

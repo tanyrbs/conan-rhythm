@@ -12,7 +12,11 @@ if str(ROOT) not in sys.path:
 
 from modules.Conan.rhythm.policy import resolve_pause_boundary_weight
 from tasks.Conan.rhythm.config_contract_stage_rules import validate_stage_contract
-from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
+from tasks.Conan.rhythm.loss_routing import (
+    compute_reporting_total_loss,
+    route_conan_optimizer_losses,
+    update_public_loss_aliases,
+)
 from tasks.Conan.rhythm.targets import scale_rhythm_loss_terms
 
 
@@ -55,10 +59,12 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_teacher_target_source": "learned_offline",
                 "rhythm_distill_surface": "cache",
                 "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
                 "rhythm_enable_dual_mode_teacher": False,
                 "rhythm_enable_learned_offline_teacher": False,
                 "rhythm_runtime_enable_learned_offline_teacher": False,
                 "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
                 "rhythm_apply_train_override": False,
                 "rhythm_apply_valid_override": False,
                 "rhythm_require_retimed_cache": False,
@@ -75,6 +81,220 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertIn("rhythm_strict_mainline requires lambda_rhythm_plan: 0.", errors)
         self.assertTrue(any("rhythm_pause_exec_boundary_boost and rhythm_pause_boundary_weight" in e for e in errors))
         self.assertTrue(any("lambda_rhythm_plan > 0 re-enables the optional planner proxy loss" in w for w in warnings))
+
+    def test_strict_mainline_rejects_cached_teacher_distill_without_dedupe(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_dedupe_teacher_primary_cache_distill": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+            }
+        )
+        self.assertTrue(any("rhythm_dedupe_teacher_primary_cache_distill" in e for e in errors))
+
+    def test_strict_mainline_rejects_allocation_plus_shape_distill(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "transitional",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_allocation_weight": 0.2,
+                "rhythm_distill_speech_shape_weight": 0.2,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertTrue(
+            any("double-constrains the same mass split" in e for e in errors),
+            msg=f"expected strict-mainline error, got errors={errors!r}, warnings={warnings!r}",
+        )
+
+    def test_strict_mainline_accepts_new_duplicate_distill_alias(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_suppress_duplicate_primary_distill": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertEqual(errors, [])
+
+    def test_strict_mainline_requires_shape_distill_when_cache_teacher_distill_is_deduped(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_dedupe_teacher_primary_cache_distill": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.08,
+                "rhythm_distill_prefix_weight": 0.50,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.0,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertTrue(any("must keep rhythm_distill_speech_shape_weight > 0" in e for e in errors))
+        self.assertTrue(any("dedupe neutralizes exact duplicate cache-based budget/prefix/allocation distill terms" in w for w in warnings))
+
+    def test_lambda_distill_requires_active_component_weight(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_dedupe_teacher_primary_cache_distill": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.0,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertTrue(any("requires at least one active distillation component weight" in e for e in errors))
+
+    def test_strict_mainline_rejects_duplicate_teacher_exec_distill(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_dedupe_teacher_primary_cache_distill": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.2,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.0,
+            }
+        )
+        self.assertTrue(any("rhythm_distill_exec_weight: 0" in e for e in errors))
 
     def test_scaled_terms_expose_plan_components_and_student_kd(self) -> None:
         scaled = scale_rhythm_loss_terms(
@@ -159,7 +379,55 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["L_teacher_aux"], torch.tensor(0.2)))
         self.assertTrue(torch.allclose(losses["L_kd_same_source"], torch.tensor(1.0)))
 
-    def test_student_kd_warning_mentions_active_same_source_components(self) -> None:
+    def test_reporting_total_loss_ignores_public_aliases_when_grad_is_enabled(self) -> None:
+        losses = {
+            "rhythm_exec_speech": torch.tensor(1.0, requires_grad=True),
+            "rhythm_exec_pause": torch.tensor(2.0, requires_grad=True),
+            "rhythm_budget": torch.tensor(3.0, requires_grad=True),
+        }
+        update_public_loss_aliases(losses, mel_loss_names=())
+        total = compute_reporting_total_loss(losses)
+        self.assertTrue(torch.allclose(total, torch.tensor(6.0)))
+
+    def test_public_aliases_fall_back_to_non_compact_components(self) -> None:
+        losses = {
+            "rhythm_exec_speech": torch.tensor(1.0),
+            "rhythm_exec_pause": torch.tensor(2.0),
+            "rhythm_budget": torch.tensor(3.0),
+            "rhythm_prefix_state": torch.tensor(4.0),
+        }
+        update_public_loss_aliases(losses, mel_loss_names=())
+        self.assertTrue(torch.allclose(losses["L_rhythm_exec"], torch.tensor(3.0)))
+        self.assertTrue(torch.allclose(losses["L_stream_state"], torch.tensor(7.0)))
+
+    def test_reporting_total_loss_reconstructs_compact_objective_under_no_grad(self) -> None:
+        losses = {
+            "rhythm_exec_speech": torch.tensor(1.0),
+            "rhythm_exec_pause": torch.tensor(2.0),
+            "rhythm_exec": torch.tensor(3.0),
+            "rhythm_budget": torch.tensor(4.0),
+            "rhythm_prefix_state": torch.tensor(5.0),
+            "rhythm_stream_state": torch.tensor(6.0),
+            "rhythm_distill": torch.tensor(7.0),
+            "rhythm_teacher_aux_loss": torch.tensor(8.0),
+        }
+        update_public_loss_aliases(losses, mel_loss_names=())
+        total = compute_reporting_total_loss(
+            losses,
+            mel_loss_names=(),
+            hparams={
+                "rhythm_compact_joint_loss": True,
+                "rhythm_enable_aux_optimizer_losses": False,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.2,
+            },
+            schedule_only_stage=False,
+        )
+        self.assertTrue(torch.allclose(total, torch.tensor(24.0)))
+
+    def test_student_kd_dedupe_warning_mentions_effective_remaining_shape_branch(self) -> None:
         _, _, warnings = validate_stage_contract(
             {
                 "rhythm_enable_v2": True,
@@ -179,10 +447,12 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_require_retimed_cache": False,
                 "rhythm_use_retimed_target_if_available": False,
                 "rhythm_compact_joint_loss": True,
+                "rhythm_dedupe_teacher_primary_cache_distill": True,
                 "lambda_rhythm_guidance": 0.0,
                 "lambda_rhythm_plan": 0.0,
                 "lambda_rhythm_distill": 0.35,
                 "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
                 "rhythm_distill_budget_weight": 0.1,
                 "rhythm_distill_prefix_weight": 0.5,
                 "rhythm_distill_speech_shape_weight": 0.25,
@@ -190,7 +460,46 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_distill_allocation_weight": 0.0,
             }
         )
-        self.assertTrue(any("active same-source components=['exec', 'budget', 'prefix', 'shape']" in w for w in warnings))
+        self.assertTrue(any("remaining shape distill" in w for w in warnings))
+
+    def test_student_kd_shape_only_dedupe_path_is_warning_free(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "student_kd",
+                "rhythm_strict_mainline": True,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "cache",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "rhythm_dedupe_teacher_primary_cache_distill": True,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.35,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_distill_exec_weight": 0.0,
+                "rhythm_distill_budget_weight": 0.0,
+                "rhythm_distill_prefix_weight": 0.0,
+                "rhythm_distill_allocation_weight": 0.0,
+                "rhythm_distill_speech_shape_weight": 0.25,
+                "rhythm_distill_pause_shape_weight": 0.25,
+            }
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

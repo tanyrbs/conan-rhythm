@@ -19,7 +19,12 @@ from data_gen.tts.base_binarizer import BaseBinarizer
 from modules.Conan.rhythm.stages import normalize_rhythm_stage
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.config_contract_stage_rules import detect_rhythm_profile
-from tasks.Conan.rhythm.preflight_support import _inspect_indexed_split_arrays, _inspect_indexed_split_files
+from tasks.Conan.rhythm.preflight_support import (
+    _inspect_indexed_split_arrays,
+    _inspect_indexed_split_files,
+    _inspect_pitch_feature_readiness,
+    _inspect_processed_data_dir,
+)
 from utils.commons.hparams import set_hparams
 
 
@@ -53,6 +58,28 @@ class PreflightReadinessTests(unittest.TestCase):
             issues = _inspect_indexed_split_arrays(str(prefix), dataset_len=2)
             self.assertTrue(any("lengths mismatch" in issue for issue in issues))
 
+    def test_preflight_flags_missing_f0_when_pitch_is_enabled(self) -> None:
+        issues = _inspect_pitch_feature_readiness(
+            [{"item_name": "ok", "f0": [1.0, 2.0]}, {"item_name": "bad"}],
+            split="train",
+            use_pitch_embed=True,
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertIn("missing non-empty f0", issues[0])
+
+    def test_preflight_skips_f0_check_when_pitch_is_disabled(self) -> None:
+        issues = _inspect_pitch_feature_readiness(
+            [{"item_name": "bad"}],
+            split="valid",
+            use_pitch_embed=False,
+        )
+        self.assertEqual(issues, [])
+
+    def test_preflight_treats_missing_processed_dir_as_warning_only(self) -> None:
+        issues = _inspect_processed_data_dir("")
+        self.assertEqual(len(issues), 1)
+        self.assertIn("cached-only preflight mainly validates binary cache readiness", issues[0])
+
     def test_rhythm_cache_scalar_contract_rejects_vectors(self) -> None:
         with self.assertRaises(RuntimeError):
             RhythmDatasetCacheContract.extract_scalar(np.asarray([1, 2], dtype=np.int32))
@@ -71,6 +98,20 @@ class PreflightReadinessTests(unittest.TestCase):
                 os.environ.pop("N_PROC", None)
             else:
                 os.environ["N_PROC"] = old
+
+    def test_convert_range_does_not_mutate_input(self) -> None:
+        base = BaseBinarizer.__new__(BaseBinarizer)
+        base.item_names = ["a", "b", "c"]
+        vc = VCBinarizer.__new__(VCBinarizer)
+        vc.item_names = ["a", "b", "c"]
+        original = [0, -1]
+
+        base_range = base._convert_range(original)
+        vc_range = vc._convert_range(original)
+
+        self.assertEqual(original, [0, -1])
+        self.assertEqual(base_range, [0, 3])
+        self.assertEqual(vc_range, [0, 3])
 
     def test_set_hparams_reset_ignores_saved_ckpt_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

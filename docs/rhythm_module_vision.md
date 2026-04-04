@@ -98,7 +98,7 @@ Current objective priority in practice:
 
 - schedule warm-start: `L_exec_speech + L_exec_pause + light L_budget + light L_prefix_state`
 - joint retimed stage: compact `3+1` view (`L_base + L_rhythm_exec + L_stream_state + optional L_pitch`)
-- phase-2 KD branch: add `L_distill`, preferably on executed speech/pause plus optional prefix carry + tiny budget
+- maintained phase-2 uses teacher-main supervision + small shape-only KD; executed speech/pause + prefix/budget distill remains only for legacy/research KD branches
 - `L_plan` and `L_guidance` remain available only as internal ablations/debug paths
 
 ---

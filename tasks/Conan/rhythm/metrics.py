@@ -6,6 +6,7 @@ from typing import Any
 import torch
 
 from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
+from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
 
 
 def _safe_mean(x: torch.Tensor) -> torch.Tensor:
@@ -124,6 +125,9 @@ class RhythmMetricContext:
     effective_total_budget: torch.Tensor
     raw_exec_gap: torch.Tensor
     feasible_total_budget_delta: torch.Tensor
+    projection_total_shift_abs: torch.Tensor
+    projection_redistribution_mass: torch.Tensor
+    projection_repair_mass: torch.Tensor
     commit_ratio: torch.Tensor
     pred_prefix_clock: torch.Tensor
     pred_prefix_backlog: torch.Tensor
@@ -156,9 +160,13 @@ def _build_rhythm_metric_context(output: dict[str, Any], execution) -> RhythmMet
     effective_pause_budget = getattr(planner, "effective_pause_budget_win", planner.pause_budget_win).float().squeeze(-1)
     raw_total_budget = (raw_speech_budget + raw_pause_budget).clamp_min(1e-6)
     effective_total_budget = (effective_speech_budget + effective_pause_budget).clamp_min(1e-6)
+    repair_stats = compute_budget_projection_repair_stats(planner)
     raw_exec_gap = (effective_speech_budget - raw_speech_budget).abs() + (
         effective_pause_budget - raw_pause_budget
     ).abs()
+    projection_total_shift_abs = repair_stats.total_shift_abs
+    projection_redistribution_mass = repair_stats.redistribution_mass
+    projection_repair_mass = repair_stats.repair_mass
     feasible_total_budget_delta = getattr(planner, "feasible_total_budget_delta", None)
     if feasible_total_budget_delta is None:
         feasible_total_budget_delta = raw_total_budget.new_zeros(raw_total_budget.shape)
@@ -206,6 +214,9 @@ def _build_rhythm_metric_context(output: dict[str, Any], execution) -> RhythmMet
         effective_total_budget=effective_total_budget,
         raw_exec_gap=raw_exec_gap,
         feasible_total_budget_delta=feasible_total_budget_delta,
+        projection_total_shift_abs=projection_total_shift_abs,
+        projection_redistribution_mass=projection_redistribution_mass,
+        projection_repair_mass=projection_repair_mass,
         commit_ratio=commit_ratio,
         pred_prefix_clock=pred_prefix_clock,
         pred_prefix_backlog=pred_prefix_backlog,
@@ -233,6 +244,18 @@ def _build_core_rhythm_metric_dict(ctx: RhythmMetricContext) -> dict[str, torch.
         ),
         "rhythm_metric_budget_repair_active_rate": _safe_mean(
             (ctx.feasible_total_budget_delta > 1e-6).float()
+        ),
+        "rhythm_metric_budget_projection_total_shift_abs_mean": _safe_mean(ctx.projection_total_shift_abs),
+        "rhythm_metric_budget_projection_redistribution_mean": _safe_mean(ctx.projection_redistribution_mass),
+        "rhythm_metric_budget_projection_redistribution_ratio_mean": _safe_mean(
+            ctx.projection_redistribution_mass / ctx.anchor_total.clamp_min(1.0)
+        ),
+        "rhythm_metric_budget_projection_repair_mean": _safe_mean(ctx.projection_repair_mass),
+        "rhythm_metric_budget_projection_repair_ratio_mean": _safe_mean(
+            ctx.projection_repair_mass / ctx.anchor_total.clamp_min(1.0)
+        ),
+        "rhythm_metric_budget_projection_repair_active_rate": _safe_mean(
+            (ctx.projection_repair_mass > 1e-6).float()
         ),
         "rhythm_metric_dur_shape_abs_mean": _masked_mean(ctx.planner.dur_shape_unit.abs(), ctx.unit_mask),
         "rhythm_metric_pause_shape_entropy": _safe_mean(ctx.pause_shape_entropy),

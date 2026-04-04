@@ -24,6 +24,25 @@ def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> t
     return probs / denom
 
 
+def resolve_budget_views_from_total_and_pause_share(
+    *,
+    total_budget: torch.Tensor,
+    pause_share: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Expose raw budget branches before projector feasibility repair."""
+
+    total_budget = total_budget.float().clamp_min(0.0)
+    pause_share = pause_share.float().clamp(0.0, 1.0)
+    raw_pause_budget = (total_budget * pause_share).clamp_min(0.0)
+    raw_speech_budget = (total_budget - raw_pause_budget).clamp_min(0.0)
+    return {
+        'raw_speech_budget_win': raw_speech_budget,
+        'raw_pause_budget_win': raw_pause_budget,
+        'speech_budget_win': raw_speech_budget,
+        'pause_budget_win': raw_pause_budget,
+    }
+
+
 class ResidualTemporalBlock(nn.Module):
     def __init__(
         self,
@@ -177,15 +196,10 @@ class WindowBudgetController(nn.Module):
 
         src_total = (dur_anchor_src.float() * unit_mask).sum(dim=1, keepdim=True).clamp_min(1.0)
         total_budget = src_total * torch.exp(raw_total_logratio)
-        pause_budget = total_budget * pause_share
-        min_speech_budget = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0) * self.min_speech_frames
-        speech_budget = (total_budget - pause_budget).clamp_min(min_speech_budget)
-        pause_budget = (total_budget - speech_budget).clamp_min(0.0)
-
-        return {
-            'speech_budget_win': speech_budget,
-            'pause_budget_win': pause_budget,
-        }
+        return resolve_budget_views_from_total_and_pause_share(
+            total_budget=total_budget,
+            pause_share=pause_share,
+        )
 
 
 class UnitRedistributionHead(nn.Module):

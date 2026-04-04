@@ -1,11 +1,37 @@
+import importlib
+
 import numpy as np
 import torch
-import pretty_midi
+
+_PRETTY_MIDI = None
+
+
+def _require_pretty_midi():
+    global _PRETTY_MIDI
+    if _PRETTY_MIDI is not None:
+        return _PRETTY_MIDI
+    try:
+        _PRETTY_MIDI = importlib.import_module("pretty_midi")
+    except Exception as exc:
+        raise ImportError(
+            "pretty_midi is required for MIDI export/evaluation helpers. "
+            "Install pretty_midi before using utils.audio.pitch_utils MIDI helpers."
+        ) from exc
+    return _PRETTY_MIDI
 
 def to_lf0(f0):
-    f0[f0 < 1.0e-5] = 1.0e-6
-    lf0 = f0.log() if isinstance(f0, torch.Tensor) else np.log(f0)
-    lf0[f0 < 1.0e-5] = - 1.0E+10
+    if isinstance(f0, torch.Tensor):
+        f0_safe = f0.clone()
+        small_mask = f0_safe < 1.0e-5
+        f0_safe[small_mask] = 1.0e-6
+        lf0 = f0_safe.log()
+        lf0[small_mask] = -1.0e10
+        return lf0
+    f0_safe = np.array(f0, copy=True)
+    small_mask = f0_safe < 1.0e-5
+    f0_safe[small_mask] = 1.0e-6
+    lf0 = np.log(f0_safe)
+    lf0[small_mask] = -1.0e10
     return lf0
 
 
@@ -115,7 +141,7 @@ def midi_to_hz(midi):
 def hz_to_midi(hz):
     if type(hz) == torch.Tensor:
         non_mask = hz == 0
-        midi = 69.0 + 12.0 * (torch.log2(hz) - torch.log2(torch.Tensor(440.0)))
+        midi = 69.0 + 12.0 * (torch.log2(hz) - torch.log2(hz.new_tensor(440.0)))
         midi[non_mask] = 0
     elif type(hz) == np.ndarray:
         non_mask = hz == 0
@@ -181,6 +207,7 @@ def save_midi(notes, note_itv, midi_path):
     if notes.shape == (0,):
         return None
     assert notes.shape[0] == note_itv.shape[0]
+    pretty_midi = _require_pretty_midi()
     piano_chord = pretty_midi.PrettyMIDI()
     piano_program = pretty_midi.instrument_name_to_program('Acoustic Grand Piano')
     piano = pretty_midi.Instrument(program=piano_program)
@@ -194,7 +221,8 @@ def save_midi(notes, note_itv, midi_path):
     return piano_chord
 
 def midi2NoteInterval(mid):
-    assert type(mid) == pretty_midi.PrettyMIDI
+    pretty_midi = _require_pretty_midi()
+    assert isinstance(mid, pretty_midi.PrettyMIDI)
     if len(mid.instruments) == 0 or len(mid.instruments[0].notes) == 0:
         return None
     ret = np.zeros(shape=(len(mid.instruments[0].notes), 2))
@@ -204,7 +232,8 @@ def midi2NoteInterval(mid):
     return ret
 
 def midi2NotePitch(mid):
-    assert type(mid) == pretty_midi.PrettyMIDI
+    pretty_midi = _require_pretty_midi()
+    assert isinstance(mid, pretty_midi.PrettyMIDI)
     if len(mid.instruments) == 0 or len(mid.instruments[0].notes) == 0:
         return None
     ret = np.zeros(shape=len(mid.instruments[0].notes))
@@ -295,4 +324,3 @@ def melody_eval_pitch_and_itv(pitch_true, interval_true, pitch_pred, interval_pr
     oa = mir_eval.melody.overall_accuracy(ref_voicing, ref_cent, est_voicing, est_cent)
 
     return vr, vfa, rpa, rca, oa
-

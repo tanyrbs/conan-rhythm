@@ -1,6 +1,10 @@
 import numpy as np
-from pycwt import wavelet
 from scipy.interpolate import interp1d
+
+try:
+    from pycwt import wavelet
+except Exception:
+    wavelet = None
 
 dt = 0.005
 dj = 1
@@ -47,6 +51,12 @@ def get_cont_lf0(f0, frame_period=5.0):
     return uv, cont_lf0_lpf
 
 
+def require_cwt_ops():
+    if wavelet is None:
+        raise ImportError('pycwt is required for CWT-based f0 features. Install pycwt or disable with_f0cwt.')
+    return get_lf0_cwt, get_cont_lf0
+
+
 def get_lf0_cwt(lf0):
     '''
     input:
@@ -54,6 +64,8 @@ def get_lf0_cwt(lf0):
     output:
         Wavelet_lf0 of shape(10, N), scales of shape(10)
     '''
+    if wavelet is None:
+        raise ImportError('pycwt is required for CWT-based f0 features. Install pycwt or disable with_f0cwt.')
     mother = wavelet.MexicanHat()
     s0 = dt * 2
     J = 9

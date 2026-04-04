@@ -5,6 +5,12 @@ from tasks.Conan.rhythm.targets import RhythmTargetBuildConfig
 from utils.commons.hparams import hparams
 
 
+def _resolve_duplicate_primary_distill_dedupe_flag(config) -> bool:
+    if "rhythm_dedupe_teacher_primary_cache_distill" in config:
+        return bool(config.get("rhythm_dedupe_teacher_primary_cache_distill", True))
+    return bool(config.get("rhythm_suppress_duplicate_primary_distill", True))
+
+
 class RhythmTaskRuntimeSupport:
     _OFFLINE_CONFIDENCE_COMPONENTS = (
         ("rhythm_offline_confidence", "overall", None),
@@ -42,6 +48,7 @@ class RhythmTaskRuntimeSupport:
             distill_surface=self.owner._resolve_rhythm_distill_surface(),
             lambda_guidance=float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0),
             lambda_distill=float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0),
+            distill_exec_weight=float(hparams.get("rhythm_distill_exec_weight", 1.0)),
             distill_budget_weight=float(hparams.get("rhythm_distill_budget_weight", 0.5)),
             distill_allocation_weight=float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
             distill_prefix_weight=float(hparams.get("rhythm_distill_prefix_weight", 0.25)),
@@ -53,6 +60,7 @@ class RhythmTaskRuntimeSupport:
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+            dedupe_primary_teacher_cache_distill=_resolve_duplicate_primary_distill_dedupe_flag(hparams),
         )
 
     def build_offline_confidence_outputs(self, confidence) -> dict:

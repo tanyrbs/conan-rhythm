@@ -1,12 +1,19 @@
 import argparse
 import numpy as np
-import torch
 from pathlib import Path
 import sys
 
 root = Path(__file__).resolve().parent.parent
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
+
+from utils.commons.single_thread_env import apply_single_thread_env, maybe_limit_torch_cpu_threads
+
+apply_single_thread_env()
+
+import torch
+
+maybe_limit_torch_cpu_threads()
 
 from modules.Conan.rhythm.contracts import RhythmPlannerOutputs
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
@@ -665,6 +672,7 @@ if __name__ == '__main__':
     print('learned teacher surface name:', _scalar_str(learned_bundle['rhythm_teacher_surface_name']))
     print('learned teacher target source id:', int(learned_bundle['rhythm_teacher_target_source_id'][0]))
     print('learned retimed target surface:', _scalar_str(learned_bundle['rhythm_retimed_target_surface_name']))
+    print('budget projection repair ratio:', float(metrics['rhythm_metric_budget_projection_repair_ratio_mean'].detach()))
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr'].detach()))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1'].detach()))
     print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean'].detach()))
@@ -692,6 +700,7 @@ if __name__ == '__main__':
     assert teacher_gap >= 0.0
     assert float(metrics['rhythm_metric_exec_total_corr'].detach()) > 0.99
     assert float(metrics['rhythm_metric_prefix_drift_l1'].detach()) < 1e-6
+    assert float(metrics['rhythm_metric_budget_projection_repair_ratio_mean'].detach()) >= 0.0
     assert float(metrics['rhythm_metric_frame_plan_present'].detach()) == 1.0
     blank_src_consistency = float(metrics['rhythm_metric_frame_plan_blank_src_consistency'].detach())
     assert np.isfinite(blank_src_consistency)

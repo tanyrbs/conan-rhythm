@@ -10,9 +10,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils.commons.ddp_config import (
+    build_ddp_auto_signature,
+    get_ddp_auto_min_step,
     load_ddp_logging_data,
     parse_ddp_mode,
     resolve_ddp_runtime_config,
+    select_ddp_logging_hint,
     save_ddp_logging_data,
 )
 
@@ -52,12 +55,44 @@ class DdpConfigTests(unittest.TestCase):
                 {"can_set_static_graph": True, "bucket_sizes": [1, 2, 3]},
                 global_step=123,
                 epoch=4,
+                signature="sig-1",
             )
             data = load_ddp_logging_data(path)
         self.assertTrue(data["can_set_static_graph"])
         self.assertEqual(data["bucket_sizes"], [1, 2, 3])
         self.assertEqual(data["saved_global_step"], 123)
         self.assertEqual(data["saved_epoch"], 4)
+        self.assertEqual(data["ddp_auto_signature"], "sig-1")
+
+    def test_select_ddp_logging_hint_rejects_signature_mismatch(self) -> None:
+        hint = select_ddp_logging_hint(
+            {"can_set_static_graph": True, "ddp_auto_signature": "old", "saved_global_step": 10},
+            signature="new",
+            min_saved_global_step=0,
+        )
+        self.assertEqual(hint, {})
+
+    def test_select_ddp_logging_hint_requires_stable_step(self) -> None:
+        signature = build_ddp_auto_signature(hparams={"rhythm_stage": "student_retimed"})
+        hint = select_ddp_logging_hint(
+            {"can_set_static_graph": True, "ddp_auto_signature": signature, "saved_global_step": 99},
+            signature=signature,
+            min_saved_global_step=100,
+        )
+        self.assertEqual(hint, {})
+
+    def test_ddp_auto_min_step_tracks_dynamic_runtime_switches(self) -> None:
+        self.assertEqual(
+            get_ddp_auto_min_step(
+                {
+                    "disc_start_steps": 40000,
+                    "rhythm_train_render_start_steps": 1000,
+                    "rhythm_retimed_target_start_steps": 5000,
+                    "rhythm_online_retimed_target_start_steps": 7000,
+                }
+            ),
+            40000,
+        )
 
 
 if __name__ == "__main__":

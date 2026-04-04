@@ -14,6 +14,7 @@ class RhythmTargetBuildConfig:
     distill_surface: str
     lambda_guidance: float
     lambda_distill: float
+    distill_exec_weight: float
     distill_budget_weight: float
     distill_allocation_weight: float
     distill_prefix_weight: float
@@ -25,6 +26,7 @@ class RhythmTargetBuildConfig:
     budget_raw_weight: float
     budget_exec_weight: float
     feasible_debt_weight: float
+    dedupe_primary_teacher_cache_distill: bool = True
 
     @property
     def use_guidance(self) -> bool:
@@ -33,6 +35,10 @@ class RhythmTargetBuildConfig:
     @property
     def use_distill(self) -> bool:
         return self.lambda_distill > 0.0
+
+    @property
+    def use_distill_exec(self) -> bool:
+        return self.use_distill and self.distill_exec_weight > 0.0
 
     @property
     def use_distill_budget(self) -> bool:
@@ -426,8 +432,49 @@ def _populate_distill_surface_fields(
             bundle.pause,
             unit_batch.dur_anchor_src,
             unit_batch.unit_mask,
-        )
+    )
     return replace(bundle, allocation=allocation, prefix_clock=prefix_clock, prefix_backlog=prefix_backlog)
+
+
+def _maybe_dedupe_primary_teacher_cache_distill(
+    bundle: DistillSurfaceBundle,
+    *,
+    config: RhythmTargetBuildConfig,
+) -> DistillSurfaceBundle:
+    if not bundle.is_complete:
+        return bundle
+    if not bool(config.dedupe_primary_teacher_cache_distill):
+        return bundle
+    if config.primary_target_surface != "teacher":
+        return bundle
+    if config.distill_surface not in {"auto", "cache"}:
+        return bundle
+    if bundle.source_kind != "cache":
+        return bundle
+
+    zero = bundle.speech.new_zeros((bundle.speech.size(0), 1))
+    shape_confidence = bundle.confidences.shape
+    if shape_confidence is None:
+        shape_confidence = bundle.confidences.exec
+    if shape_confidence is None:
+        shape_confidence = bundle.confidences.shared
+
+    return replace(
+        bundle,
+        speech_budget=None,
+        pause_budget=None,
+        allocation=None,
+        prefix_clock=None,
+        prefix_backlog=None,
+        confidences=DistillConfidenceBundle(
+            shared=bundle.confidences.shared,
+            exec=zero,
+            budget=zero,
+            prefix=zero,
+            allocation=zero,
+            shape=_detach_optional(shape_confidence),
+        ),
+    )
 
 
 def _normalize_distill_surface_confidences(
@@ -447,6 +494,14 @@ def _normalize_distill_surface_confidences(
     return replace(bundle, confidences=normalized_confidences)
 
 
+def _confidence_is_active(confidence: Optional[torch.Tensor]) -> bool:
+    if confidence is None:
+        return True
+    if not isinstance(confidence, torch.Tensor):
+        return bool(confidence)
+    return bool(torch.any(confidence.detach() > 0.0).item())
+
+
 def _annotate_distill_same_source_overlap(
     bundle: DistillSurfaceBundle,
     *,
@@ -461,24 +516,31 @@ def _annotate_distill_same_source_overlap(
         return bundle
     return replace(
         bundle,
-        same_source_primary_exec=True,
+        same_source_primary_exec=(
+            config.use_distill_exec
+            and _confidence_is_active(bundle.confidences.exec)
+        ),
         same_source_primary_budget=(
             config.use_distill_budget
             and bundle.speech_budget is not None
             and bundle.pause_budget is not None
+            and _confidence_is_active(bundle.confidences.budget)
         ),
         same_source_primary_prefix=(
             config.use_distill_prefix
             and (bundle.prefix_clock is not None or bundle.prefix_backlog is not None)
+            and _confidence_is_active(bundle.confidences.prefix)
         ),
         same_source_primary_allocation=(
             config.use_distill_allocation
             and bundle.allocation is not None
+            and _confidence_is_active(bundle.confidences.allocation)
         ),
         same_source_primary_shape=(
             (config.use_distill_speech_shape and bundle.speech is not None)
             or (config.use_distill_pause_shape and bundle.pause is not None)
-        ),
+        )
+        and _confidence_is_active(bundle.confidences.shape),
     )
 
 
@@ -532,13 +594,17 @@ def _resolve_distill_surface_bundle(
         config=config,
         build_prefix_carry_from_exec=build_prefix_carry_from_exec,
     )
-    bundle = _annotate_distill_same_source_overlap(bundle, config=config)
-    return _normalize_distill_surface_confidences(
+    bundle = _maybe_dedupe_primary_teacher_cache_distill(
+        bundle,
+        config=config,
+    )
+    bundle = _normalize_distill_surface_confidences(
         bundle,
         unit_batch=unit_batch,
         normalize_distill_confidence=normalize_distill_confidence,
         normalize_component_confidence=normalize_component_confidence,
     )
+    return _annotate_distill_same_source_overlap(bundle, config=config)
 
 
 def _build_sample_and_guidance_confidences(
@@ -631,6 +697,7 @@ def build_rhythm_loss_targets_from_sample(
         distill_prefix_confidence=distill_bundle.confidences.prefix,
         distill_allocation_confidence=distill_bundle.confidences.allocation,
         distill_shape_confidence=distill_bundle.confidences.shape,
+        distill_exec_weight=float(config.distill_exec_weight),
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),
@@ -668,6 +735,7 @@ def build_identity_rhythm_loss_targets(
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
         sample_confidence=torch.ones((unit_mask.size(0), 1), device=unit_mask.device),
+        distill_exec_weight=float(config.distill_exec_weight),
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
         distill_prefix_weight=float(config.distill_prefix_weight),

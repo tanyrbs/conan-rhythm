@@ -79,6 +79,52 @@ def _inspect_indexed_split_arrays(path_prefix: str, *, dataset_len: int) -> list
     return issues
 
 
+def _inspect_pitch_feature_readiness(
+    items: list[dict],
+    *,
+    split: str,
+    use_pitch_embed: bool,
+) -> list[str]:
+    if not use_pitch_embed or not items:
+        return []
+    issues: list[str] = []
+    for idx, item in enumerate(items):
+        item_name = str(item.get("item_name", f"{split}[{idx}]"))
+        f0 = item.get("f0")
+        if f0 is None:
+            issues.append(
+                f"Split '{split}' item '{item_name}' is missing non-empty f0 while use_pitch_embed=true."
+            )
+            continue
+        try:
+            f0_arr = np.asarray(f0)
+        except Exception as exc:
+            issues.append(
+                f"Split '{split}' item '{item_name}' has unreadable f0 while use_pitch_embed=true: {exc}"
+            )
+            continue
+        if int(f0_arr.size) <= 0:
+            issues.append(
+                f"Split '{split}' item '{item_name}' is missing non-empty f0 while use_pitch_embed=true."
+            )
+    return issues
+
+
+def _inspect_processed_data_dir(processed_dir: str) -> list[str]:
+    issues: list[str] = []
+    if not processed_dir:
+        issues.append(
+            "processed_data_dir is empty. cached-only preflight mainly validates binary cache readiness; "
+            "processed_data_dir is only required for metadata/export/integration workflows."
+        )
+    elif not os.path.isdir(processed_dir):
+        issues.append(
+            f"processed_data_dir does not exist: {processed_dir}. cached-only preflight mainly validates binary cache "
+            "readiness; processed_data_dir is only required for metadata/export/integration workflows."
+        )
+    return issues
+
+
 def _build_cache_shape_contract(hparams):
     from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
     from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
@@ -282,10 +328,7 @@ def main():
     elif not os.path.isdir(binary_dir):
         errors.append(f"binary_data_dir does not exist: {binary_dir}")
     processed_dir = hp.get("processed_data_dir", "")
-    if not processed_dir:
-        errors.append("processed_data_dir is empty.")
-    elif not os.path.isdir(processed_dir):
-        errors.append(f"processed_data_dir does not exist: {processed_dir}")
+    warnings.extend(_inspect_processed_data_dir(processed_dir))
 
     print(f"[preflight] config={args.config}")
     print(f"[preflight] profile={context.profile}")
@@ -334,6 +377,13 @@ def main():
         warnings.extend(split_contract.warnings)
         errors.extend(mismatches)
         errors.extend(_validate_item_shape_contracts(items, context=context, split=split))
+        errors.extend(
+            _inspect_pitch_feature_readiness(
+                items,
+                split=split,
+                use_pitch_embed=bool(hp.get("use_pitch_embed", False)),
+            )
+        )
 
         if args.model_dry_run:
             errors.extend(_run_dataset_and_model_dry_run(split, context=context, run_model=True))

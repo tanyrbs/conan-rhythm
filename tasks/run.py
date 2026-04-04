@@ -1,6 +1,6 @@
-import os
+from utils.commons.single_thread_env import apply_single_thread_env
 
-os.environ["OMP_NUM_THREADS"] = "1"
+apply_single_thread_env()
 
 from utils.commons.hparams import hparams, set_hparams
 import importlib

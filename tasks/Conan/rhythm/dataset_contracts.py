@@ -132,6 +132,7 @@ class RhythmDatasetCacheContract:
         primary_surface = self.owner._resolve_primary_target_surface()
         distill_surface = self.owner._resolve_distill_surface()
         lambda_distill = float(self.hparams.get("lambda_rhythm_distill", 0.0))
+        distill_exec_weight = float(self.hparams.get("rhythm_distill_exec_weight", 1.0))
         distill_budget_weight = float(self.hparams.get("rhythm_distill_budget_weight", 0.5))
         distill_allocation_weight = float(self.hparams.get("rhythm_distill_allocation_weight", 0.5))
         distill_prefix_weight = float(self.hparams.get("rhythm_distill_prefix_weight", 0.25))
@@ -187,21 +188,26 @@ class RhythmDatasetCacheContract:
                     "rhythm_teacher_pause_exec_tgt",
                     "rhythm_teacher_speech_budget_tgt",
                     "rhythm_teacher_pause_budget_tgt",
-                    "rhythm_teacher_allocation_tgt",
-                    "rhythm_teacher_prefix_clock_tgt",
-                    "rhythm_teacher_prefix_backlog_tgt",
                     "rhythm_teacher_confidence",
                     "rhythm_teacher_target_source_id",
                     "rhythm_teacher_surface_name",
                 ]
             )
         if lambda_distill > 0.0 and distill_surface == "cache":
-            keys.append("rhythm_teacher_confidence_exec")
+            if distill_exec_weight > 0.0:
+                keys.append("rhythm_teacher_confidence_exec")
             if distill_budget_weight > 0.0:
                 keys.append("rhythm_teacher_confidence_budget")
             if distill_prefix_weight > 0.0:
+                keys.extend(
+                    [
+                        "rhythm_teacher_prefix_clock_tgt",
+                        "rhythm_teacher_prefix_backlog_tgt",
+                    ]
+                )
                 keys.append("rhythm_teacher_confidence_prefix")
             if distill_allocation_weight > 0.0:
+                keys.append("rhythm_teacher_allocation_tgt")
                 keys.append("rhythm_teacher_confidence_allocation")
             if distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0:
                 keys.append("rhythm_teacher_confidence_shape")

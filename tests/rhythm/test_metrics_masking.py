@@ -104,7 +104,22 @@ class RhythmMetricMaskingTests(unittest.TestCase):
                 atol=1e-6,
             )
         )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_budget_projection_redistribution_ratio_mean"],
+                torch.tensor(0.5 / 3.0),
+                atol=1e-6,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_budget_projection_repair_ratio_mean"],
+                torch.tensor(1.0 / 3.0),
+                atol=1e-6,
+            )
+        )
         self.assertTrue(torch.allclose(metrics["rhythm_metric_budget_repair_active_rate"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_budget_projection_repair_active_rate"], torch.tensor(1.0)))
 
     def test_alias_metrics_export_same_source_kd_diagnostics(self) -> None:
         unit_mask = torch.tensor([[1.0]], dtype=torch.float32)

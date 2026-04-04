@@ -275,6 +275,7 @@ class RhythmConanDatasetMixin:
         distill_surface = policy.distill_surface
         lambda_guidance = float(self.hparams.get("lambda_rhythm_guidance", 0.0))
         lambda_distill = float(self.hparams.get("lambda_rhythm_distill", 0.0))
+        distill_exec_weight = float(self.hparams.get("rhythm_distill_exec_weight", 1.0))
         distill_budget_weight = float(self.hparams.get("rhythm_distill_budget_weight", 0.5))
         distill_allocation_weight = float(self.hparams.get("rhythm_distill_allocation_weight", 0.5))
         distill_prefix_weight = float(self.hparams.get("rhythm_distill_prefix_weight", 0.25))
@@ -297,7 +298,8 @@ class RhythmConanDatasetMixin:
         if need_teacher_core:
             keys.extend(self._RHYTHM_RUNTIME_TEACHER_CORE_KEYS)
         if lambda_distill > 0.0 and distill_surface == "cache":
-            keys.extend(("rhythm_teacher_confidence_exec",))
+            if distill_exec_weight > 0.0:
+                keys.extend(("rhythm_teacher_confidence_exec",))
             if distill_budget_weight > 0.0:
                 keys.extend(("rhythm_teacher_confidence_budget",))
             if distill_prefix_weight > 0.0:

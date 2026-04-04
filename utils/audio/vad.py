@@ -1,11 +1,17 @@
-from skimage.transform import resize
 import struct
-import webrtcvad
-from scipy.ndimage.morphology import binary_dilation
 import librosa
 import numpy as np
-import pyloudnorm as pyln
 import warnings
+
+try:
+    import webrtcvad
+except Exception:
+    webrtcvad = None
+
+try:
+    import pyloudnorm as pyln
+except Exception:
+    pyln = None
 
 warnings.filterwarnings("ignore", message="Possible clipped samples in output")
 
@@ -21,6 +27,15 @@ def trim_long_silences(path, sr=None, return_raw_wav=False, norm=True, vad_max_s
     :return: the same waveform with silences trimmed away (length <= original wav length)
     """
 
+    try:
+        from skimage.transform import resize
+        from scipy.ndimage import binary_dilation
+    except Exception as exc:
+        raise ImportError(
+            "trim_long_silences() requires optional dependencies scikit-image and scipy. "
+            "Install them or disable trim_long_sil."
+        ) from exc
+
     ## Voice Activation Detection
     # Window size of the VAD. Must be either 10, 20 or 30 milliseconds.
     # This sets the granularity of the VAD. Should not need to be changed.
@@ -28,13 +43,22 @@ def trim_long_silences(path, sr=None, return_raw_wav=False, norm=True, vad_max_s
     wav_raw, sr = librosa.core.load(path, sr=sr)
 
     if norm:
+        if pyln is None:
+            raise ImportError(
+                'pyloudnorm is required when trim_long_silences(..., norm=True). Install pyloudnorm or pass norm=False.'
+            )
         meter = pyln.Meter(sr)  # create BS.1770 meter
         loudness = meter.integrated_loudness(wav_raw)
         wav_raw = pyln.normalize.loudness(wav_raw, loudness, -20.0)
         if np.abs(wav_raw).max() > 1.0:
             wav_raw = wav_raw / np.abs(wav_raw).max()
 
-    wav = librosa.resample(wav_raw, sr, sampling_rate, res_type='kaiser_best')
+    wav = librosa.resample(
+        wav_raw,
+        orig_sr=sr,
+        target_sr=sampling_rate,
+        res_type='kaiser_best',
+    )
 
     vad_window_length = 30  # In milliseconds
     # Number of frames to average together when performing the moving average smoothing.
@@ -52,6 +76,10 @@ def trim_long_silences(path, sr=None, return_raw_wav=False, norm=True, vad_max_s
 
     # Perform voice activation detection
     voice_flags = []
+    if webrtcvad is None:
+        raise ImportError(
+            'webrtcvad is required for trim_long_silences(). Install webrtcvad or disable trim_long_sil.'
+        )
     vad = webrtcvad.Vad(mode=3)
     for window_start in range(0, len(wav), samples_per_window):
         window_end = window_start + samples_per_window
@@ -67,7 +95,7 @@ def trim_long_silences(path, sr=None, return_raw_wav=False, norm=True, vad_max_s
         return ret[width - 1:] / width
 
     audio_mask = moving_average(voice_flags, vad_moving_average_width)
-    audio_mask = np.round(audio_mask).astype(np.bool)
+    audio_mask = np.round(audio_mask).astype(np.bool_)
 
     # Dilate the voiced regions
     audio_mask = binary_dilation(audio_mask, np.ones(vad_max_silence_length + 1))

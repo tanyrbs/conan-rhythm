@@ -147,7 +147,8 @@ Important terminology note:
   - algorithmic teacher = explicit bootstrap / fallback surface
 - `egs/conan_emformer_rhythm_v2_student_kd.yaml` is the maintained stage-2 cache-only KD config (`teacher_student_kd.yaml` remains a compatibility alias)
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml` is retained only as a legacy runtime-teacher branch config
-- maintained stage-2 now distills purely from cached offline teacher surfaces; it does not keep a live runtime teacher branch in the training loop
+- maintained stage-2 now keeps cached offline teacher surfaces as the primary supervision contract and leaves only a small cached shape KD branch active by default; it does not keep a live runtime teacher branch in the training loop
+- maintained stage-2 cache / preflight contract is now slimmer as well: shape-only KD does not require cached teacher allocation / prefix sidecars or exec-confidence sidecars unless those distill components are explicitly enabled again
 - the runtime-teacher auxiliary supervision path (`lambda_rhythm_teacher_aux`) and detached confidence weighting stay only on the legacy `legacy_dual_mode_kd` research branch
 - when streaming prefix cropping is active on that legacy branch, runtime teacher auxiliary supervision prefers full-length offline cached teacher sidecars (`rhythm_offline_teacher_*`) when they exist, and otherwise slices the runtime teacher execution/state surface to the overlapping prefix instead of mixing a full-context teacher with student-prefix targets
 - stage-2 module-only runs also inherit the acoustic fast path and `with_f0: false`, so KD warm-start does not pay pitch/decoder cost unless you deliberately leave the rhythm-only route
@@ -214,10 +215,10 @@ Recommended future config direction after retimed targets exist:
 - keep `L_base` as the outer acoustic objective
 - keep the main timing path on executed speech/pause + light budget / prefix-state guardrail (`L_cumplan` remains the public compatibility alias)
 - keep optimizer view compact in joint mode: `L_base + L_rhythm_exec + L_stream_state (+ optional L_pitch)`
-- keep KD focused on executed speech/pause plus optional prefix carry + tiny budget only when explicitly enabled
+- keep strict maintained stage-2 KD shape-only; execution / budget / prefix surfaces are already covered by the primary teacher contract there
 - treat `rhythm_plan` as an optional regression/ablation term instead of the default mainline objective
 - treat scheduler outputs as debug/regression tensors, and treat projector execution as the real maintained contract
-- for `student_kd`, keep `rhythm_distill_allocation_weight: 0`; do not combine allocation KL with shape KL on the maintained path
+- for `student_kd`, keep `rhythm_distill_exec_weight: 0`, `rhythm_distill_budget_weight: 0`, `rhythm_distill_prefix_weight: 0`, and `rhythm_distill_allocation_weight: 0`; do not combine allocation KL with shape KL on the maintained path
 - if warm-starting from an older Conan checkpoint, use `load_ckpt_strict: false` and optionally `load_ckpt_force: false` so shared acoustic weights can load while new rhythm heads stay random-init
 
 This is one of the biggest remaining blockers before claiming strong-rhythm closure.

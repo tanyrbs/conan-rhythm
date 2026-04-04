@@ -494,8 +494,16 @@ class StreamingRhythmProjector(nn.Module):
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
         )
-        execution_planner.raw_speech_budget_win = planner.speech_budget_win
-        execution_planner.raw_pause_budget_win = planner.pause_budget_win
+        execution_planner.raw_speech_budget_win = getattr(
+            planner,
+            "raw_speech_budget_win",
+            planner.speech_budget_win,
+        )
+        execution_planner.raw_pause_budget_win = getattr(
+            planner,
+            "raw_pause_budget_win",
+            planner.pause_budget_win,
+        )
         execution_planner.feasible_speech_budget_delta = feasible_speech_budget_delta
         execution_planner.feasible_pause_budget_delta = feasible_pause_budget_delta
         execution_planner.feasible_total_budget_delta = feasibility.total_budget_delta

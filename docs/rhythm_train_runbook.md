@@ -17,7 +17,8 @@ This is the maintained pre-train checklist and stage order for the rhythm mainli
 
 ## 1. Preprocess / metadata
 
-Prepare a real `processed_data_dir` first.
+Prepare a real `processed_data_dir` for metadata/export workflows first. Formal cached-only
+training and preflight readiness are driven primarily by the binary cache.
 
 Typical scripts live under `scripts/`, not under a separate integration/export tree:
 

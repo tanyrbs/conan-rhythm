@@ -1,5 +1,10 @@
 # Rhythm Pre-Train Audit (2026-04-04)
 
+> Historical snapshot: parts of this audit are outdated after the later
+> teacher-main + shape-only KD cleanup. Prefer
+> `docs/rhythm_training_stages.md`, `docs/rhythm_supervision_policy.md`, and
+> `docs/rhythm_train_runbook.md` for the current maintained state.
+
 This audit was run on the local checkout at:
 
 - `D:\00_project\002project\rhythm\Conan-master`

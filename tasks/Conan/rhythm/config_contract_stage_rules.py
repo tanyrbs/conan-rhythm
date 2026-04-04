@@ -18,6 +18,12 @@ from modules.Conan.rhythm.stages import normalize_rhythm_stage, resolve_runtime_
 from .config_contract_core import RhythmContractValidationResult
 
 
+def _resolve_duplicate_primary_distill_dedupe_flag(hparams: Mapping[str, Any], *, default: bool = True) -> bool:
+    if "rhythm_dedupe_teacher_primary_cache_distill" in hparams:
+        return bool(hparams.get("rhythm_dedupe_teacher_primary_cache_distill", default))
+    return bool(hparams.get("rhythm_suppress_duplicate_primary_distill", default))
+
+
 def detect_rhythm_profile(hparams: Mapping[str, Any], config_path: str | None = None) -> str:
     explicit_stage = hparams.get("rhythm_stage", None)
     stage_is_minimal = False
@@ -132,26 +138,6 @@ def _build_stage_validation_context(
     )
 
 
-def _active_same_source_distill_components(
-    *,
-    distill_budget_weight: float,
-    distill_prefix_weight: float,
-    distill_allocation_weight: float,
-    distill_speech_shape_weight: float,
-    distill_pause_shape_weight: float,
-) -> list[str]:
-    components = ["exec"]
-    if distill_budget_weight > 0.0:
-        components.append("budget")
-    if distill_prefix_weight > 0.0:
-        components.append("prefix")
-    if distill_allocation_weight > 0.0:
-        components.append("allocation")
-    if distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0:
-        components.append("shape")
-    return components
-
-
 def _validate_general_stage_rules(
     ctx: RhythmStageValidationContext,
     errors: list[str],
@@ -191,11 +177,13 @@ def _validate_general_stage_rules(
     lambda_mel_adv = float(hparams.get("lambda_mel_adv", 0.0))
     lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
     lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    distill_exec_weight = float(hparams.get("rhythm_distill_exec_weight", 1.0))
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
     distill_allocation_weight = float(hparams.get("rhythm_distill_allocation_weight", 0.5))
     distill_prefix_weight = float(hparams.get("rhythm_distill_prefix_weight", 0.25))
     distill_speech_shape_weight = float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
     distill_pause_shape_weight = float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
+    dedupe_teacher_primary_cache_distill = _resolve_duplicate_primary_distill_dedupe_flag(hparams, default=True)
     plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
     plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
     compact_joint_loss = bool(hparams.get("rhythm_compact_joint_loss", True))
@@ -232,6 +220,12 @@ def _validate_general_stage_rules(
         "rhythm_plan_local_weight": plan_local_weight,
         "rhythm_plan_cum_weight": plan_cum_weight,
         "rhythm_pause_boundary_weight": pause_boundary_weight,
+        "rhythm_distill_exec_weight": distill_exec_weight,
+        "rhythm_distill_budget_weight": distill_budget_weight,
+        "rhythm_distill_allocation_weight": distill_allocation_weight,
+        "rhythm_distill_prefix_weight": distill_prefix_weight,
+        "rhythm_distill_speech_shape_weight": distill_speech_shape_weight,
+        "rhythm_distill_pause_shape_weight": distill_pause_shape_weight,
     }.items():
         if value < 0.0:
             errors.append(f"{name} must be >= 0.")
@@ -242,6 +236,17 @@ def _validate_general_stage_rules(
     if lambda_plan > 0.0 and (plan_local_weight + plan_cum_weight) <= 0.0:
         errors.append(
             "lambda_rhythm_plan > 0 requires rhythm_plan_local_weight + rhythm_plan_cum_weight > 0."
+        )
+    if lambda_distill > 0.0 and (
+        distill_exec_weight
+        + distill_budget_weight
+        + distill_allocation_weight
+        + distill_prefix_weight
+        + distill_speech_shape_weight
+        + distill_pause_shape_weight
+    ) <= 0.0:
+        errors.append(
+            "lambda_rhythm_distill > 0 requires at least one active distillation component weight."
         )
     if has_legacy_pause_boundary_weight and has_public_pause_boundary_weight:
         legacy_pause_boundary = float(hparams.get("rhythm_pause_exec_boundary_boost", 0.75))
@@ -298,10 +303,14 @@ def _validate_general_stage_rules(
     if distill_conf_power <= 0.0:
         errors.append("rhythm_distill_confidence_power must be > 0.")
     if distill_allocation_weight > 0.0 and (distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0):
-        warnings.append(
+        message = (
             "rhythm_distill_allocation_weight > 0 while shape distillation is also enabled; "
             "this double-constrains the same mass split and is not part of the maintained mainline."
         )
+        if strict_mainline:
+            errors.append(message)
+        else:
+            warnings.append(message)
     if lambda_plan > 0.0:
         warnings.append(
             "lambda_rhythm_plan > 0 re-enables the optional planner proxy loss; maintained mainline keeps it at 0."
@@ -429,11 +438,13 @@ def _validate_stage_specific_rules(
     lambda_mel_adv = float(hparams.get("lambda_mel_adv", 0.0))
     lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0))
     lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
+    distill_exec_weight = float(hparams.get("rhythm_distill_exec_weight", 1.0))
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
     distill_allocation_weight = float(hparams.get("rhythm_distill_allocation_weight", 0.5))
     distill_prefix_weight = float(hparams.get("rhythm_distill_prefix_weight", 0.25))
     distill_speech_shape_weight = float(hparams.get("rhythm_distill_speech_shape_weight", 0.0))
     distill_pause_shape_weight = float(hparams.get("rhythm_distill_pause_shape_weight", 0.0))
+    dedupe_teacher_primary_cache_distill = _resolve_duplicate_primary_distill_dedupe_flag(hparams, default=True)
     compact_joint_loss = bool(hparams.get("rhythm_compact_joint_loss", True))
     disable_mel_adv_when_retimed = bool(hparams.get("rhythm_disable_mel_adv_when_retimed", True))
     if stage == "teacher_offline":
@@ -516,25 +527,44 @@ def _validate_stage_specific_rules(
             errors.append("student_kd should keep lambda_rhythm_guidance: 0.")
         if distill_allocation_weight > 0.0:
             errors.append("student_kd should keep rhythm_distill_allocation_weight: 0.")
-        if distill_budget_weight > 0.15:
+        if not dedupe_teacher_primary_cache_distill and distill_budget_weight > 0.15:
             warnings.append("student_kd usually keeps rhythm_distill_budget_weight <= 0.15.")
-        if distill_prefix_weight <= 0.0:
+        if not dedupe_teacher_primary_cache_distill and distill_prefix_weight <= 0.0:
             warnings.append("student_kd usually keeps rhythm_distill_prefix_weight > 0.")
         if distill_allocation_weight > 0.0 and (distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0):
             warnings.append("student_kd maintained path should not enable allocation distill together with shape distill.")
         if primary == "teacher" and distill == "cache" and lambda_distill > 0.0:
-            overlap_components = _active_same_source_distill_components(
-                distill_budget_weight=distill_budget_weight,
-                distill_prefix_weight=distill_prefix_weight,
-                distill_allocation_weight=distill_allocation_weight,
-                distill_speech_shape_weight=distill_speech_shape_weight,
-                distill_pause_shape_weight=distill_pause_shape_weight,
-            )
-            warnings.append(
+            if distill_exec_weight > 0.0:
+                exec_overlap_msg = (
+                    "student_kd with rhythm_primary_target_surface: teacher and rhythm_distill_surface: cache "
+                    "must keep rhythm_distill_exec_weight: 0 so the distill branch does not re-regress the same "
+                    "cached teacher exec surface."
+                )
+                if strict_mainline:
+                    errors.append(exec_overlap_msg)
+                else:
+                    warnings.append(exec_overlap_msg)
+            duplicate_msg = (
                 "student_kd reuses cached teacher surfaces for both primary supervision and distillation; "
-                f"active same-source components={overlap_components}. "
-                "lambda_rhythm_distill therefore acts partly as extra teacher reweighting, not a fully independent KD branch."
+                "enable rhythm_dedupe_teacher_primary_cache_distill: true (recommended) or switch to a different "
+                "distill surface so lambda_rhythm_distill is not just extra teacher reweighting."
             )
+            if not dedupe_teacher_primary_cache_distill:
+                if strict_mainline:
+                    errors.append(duplicate_msg)
+                else:
+                    warnings.append(duplicate_msg)
+            else:
+                if distill_speech_shape_weight <= 0.0 and distill_pause_shape_weight <= 0.0:
+                    errors.append(
+                        "student_kd with deduped teacher/cache distill must keep rhythm_distill_speech_shape_weight > 0 "
+                        "or rhythm_distill_pause_shape_weight > 0, otherwise lambda_rhythm_distill becomes effectively inactive."
+                    )
+                if distill_budget_weight > 0.0 or distill_prefix_weight > 0.0 or distill_allocation_weight > 0.0:
+                    warnings.append(
+                        "student_kd dedupe neutralizes exact duplicate cache-based budget/prefix/allocation distill terms; "
+                        "the effective independent KD branch is the remaining shape distill."
+                    )
         if lambda_teacher_aux > 0.0:
             errors.append("student_kd should keep lambda_rhythm_teacher_aux: 0.")
         if apply_train or apply_valid:

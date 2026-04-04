@@ -1,5 +1,4 @@
-from resemblyzer import VoiceEncoder
-from utils.audio import librosa_wav2spec
+from collections import Counter
 import shutil
 import random, os, json
 import traceback
@@ -11,9 +10,7 @@ from utils.commons.multiprocess_utils import multiprocess_run_tqdm
 from functools import partial
 import numpy as np
 from tqdm import tqdm
-from utils.audio.align import get_mel2ph, mel2token_to_dur
-from utils.text.text_encoder import build_token_encoder
-from utils.audio.pitch.utils import f0_to_coarse
+from utils.text.text_encoder import TokenTextEncoder, build_token_encoder
 from modules.Conan.rhythm.supervision import build_item_rhythm_bundle, normalize_teacher_target_source
 np.seterr(divide='ignore', invalid='ignore')
 
@@ -152,9 +149,10 @@ class BaseBinarizer:
         return self.item_names[range_[0]:range_[1]]
 
     def _convert_range(self, range_):
-        if range_[1] == -1:
-            range_[1] = len(self.item_names)
-        return range_
+        start, end = int(range_[0]), int(range_[1])
+        if end == -1:
+            end = len(self.item_names)
+        return [start, end]
 
     def meta_data(self, prefix):
         if prefix == 'valid':
@@ -238,6 +236,8 @@ class BaseBinarizer:
 
     @classmethod
     def process_audio(cls, wav_fn, res, binarization_args):
+        from utils.audio import librosa_wav2spec
+
         wav2spec_dict = librosa_wav2spec(
             wav_fn,
             fft_size=hparams['fft_size'],
@@ -258,6 +258,8 @@ class BaseBinarizer:
 
     @staticmethod
     def process_align(tg_fn, item):
+        from utils.audio.align import get_mel2ph, mel2token_to_dur
+
         ph = item['ph']
         mel = item['mel']
         ph_token = item['ph_token']
@@ -280,7 +282,11 @@ class BaseBinarizer:
 
     @staticmethod
     def process_pitch(item, n_bos_frames, n_eos_frames):
-        wav, mel = item['wav'], item['mel']
+        from utils.audio.pitch.utils import f0_to_coarse
+        from utils.audio.pitch_extractors import extract_pitch_simple
+        from utils.audio.cwt import require_cwt_ops
+
+        mel = item['mel']
         f0 = extract_pitch_simple(item['wav'])
         if sum(f0) == 0:
             raise BinarizationError("Empty f0")
@@ -289,6 +295,7 @@ class BaseBinarizer:
         item['f0'] = f0
         item['pitch'] = pitch_coarse
         if hparams['binarization_args']['with_f0cwt']:
+            get_lf0_cwt, get_cont_lf0 = require_cwt_ops()
             uv, cont_lf0_lpf = get_cont_lf0(f0)
             logf0s_mean_org, logf0s_std_org = np.mean(cont_lf0_lpf), np.std(cont_lf0_lpf)
             cont_lf0_lpf_norm = (cont_lf0_lpf - logf0s_mean_org) / logf0s_std_org
@@ -440,6 +447,10 @@ class VCBinarizer(BaseBinarizer):
     def process_data(self, prefix):
         data_dir = hparams['binary_data_dir']
         builder = IndexedDatasetBuilder(f'{data_dir}/{prefix}')
+        if self.binarization_args.get('with_f0', False) and self.binarization_args.get('with_f0cwt', False):
+            from utils.audio.cwt import require_cwt_ops
+
+            require_cwt_ops()
 
         lengths, spk_ids = [], []
         total_sec = 0.0

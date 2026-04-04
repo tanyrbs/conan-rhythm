@@ -2,12 +2,140 @@ from __future__ import annotations
 
 import torch
 
+_PITCH_LOSS_KEYS = ("fdiff", "uv", "pflow", "gdiff", "mdiff")
+_STYLE_LOSS_KEYS = ("gloss", "vq_loss")
+
 
 def _detach_loss_value(losses, key):
     value = losses.get(key)
     if isinstance(value, torch.Tensor):
         losses[key] = value.detach()
     return value
+
+
+def _zero_reporting_loss(losses):
+    for value in losses.values():
+        if isinstance(value, torch.Tensor):
+            return value.new_zeros(())
+    return torch.tensor(0.0)
+
+
+def _append_reporting_key(keys, seen, losses, key):
+    if key in seen:
+        return
+    value = losses.get(key)
+    if isinstance(value, torch.Tensor):
+        keys.append(key)
+        seen.add(key)
+
+
+def _resolve_reporting_prefix_state_key(losses):
+    for key in ("rhythm_prefix_state", "rhythm_cumplan", "rhythm_carry"):
+        if isinstance(losses.get(key), torch.Tensor):
+            return key
+    return None
+
+
+def _collect_reporting_total_keys(
+    losses,
+    *,
+    mel_loss_names=(),
+    hparams=None,
+    schedule_only_stage: bool = False,
+):
+    hparams = hparams or {}
+    keys = []
+    seen = set()
+    compact_joint = not schedule_only_stage and bool(hparams.get("rhythm_compact_joint_loss", True))
+    keep_aux = bool(hparams.get("rhythm_enable_aux_optimizer_losses", False))
+    keep_plan = keep_aux or float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0) > 0.0
+    keep_guidance = keep_aux or float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0) > 0.0
+    keep_distill = keep_aux or float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0) > 0.0
+    keep_teacher_aux = keep_aux or float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0) > 0.0
+
+    if compact_joint and isinstance(losses.get("base"), torch.Tensor):
+        _append_reporting_key(keys, seen, losses, "base")
+    else:
+        for loss_name in mel_loss_names:
+            _append_reporting_key(keys, seen, losses, loss_name)
+
+    if compact_joint and isinstance(losses.get("pitch"), torch.Tensor):
+        _append_reporting_key(keys, seen, losses, "pitch")
+    else:
+        for key in _PITCH_LOSS_KEYS:
+            _append_reporting_key(keys, seen, losses, key)
+
+    for key in _STYLE_LOSS_KEYS:
+        _append_reporting_key(keys, seen, losses, key)
+
+    if compact_joint and isinstance(losses.get("rhythm_exec"), torch.Tensor):
+        _append_reporting_key(keys, seen, losses, "rhythm_exec")
+    else:
+        _append_reporting_key(keys, seen, losses, "rhythm_exec_speech")
+        _append_reporting_key(keys, seen, losses, "rhythm_exec_pause")
+
+    if compact_joint and isinstance(losses.get("rhythm_stream_state"), torch.Tensor):
+        _append_reporting_key(keys, seen, losses, "rhythm_stream_state")
+    else:
+        _append_reporting_key(keys, seen, losses, "rhythm_budget")
+        prefix_state_key = _resolve_reporting_prefix_state_key(losses)
+        if prefix_state_key is not None:
+            _append_reporting_key(keys, seen, losses, prefix_state_key)
+
+    if keep_plan:
+        _append_reporting_key(keys, seen, losses, "rhythm_plan")
+    if keep_guidance:
+        _append_reporting_key(keys, seen, losses, "rhythm_guidance")
+    if keep_distill:
+        _append_reporting_key(keys, seen, losses, "rhythm_distill")
+    if keep_teacher_aux:
+        teacher_aux_key = (
+            "rhythm_teacher_aux_loss"
+            if isinstance(losses.get("rhythm_teacher_aux_loss"), torch.Tensor)
+            else "rhythm_teacher_aux"
+        )
+        _append_reporting_key(keys, seen, losses, teacher_aux_key)
+
+    return keys
+
+
+def compute_reporting_total_loss(
+    losses,
+    *,
+    mel_loss_names=(),
+    hparams=None,
+    schedule_only_stage: bool = False,
+):
+    """Match the optimizer objective while excluding public aliases and diagnostics.
+
+    Validation runs under ``torch.no_grad()``, so a pure ``requires_grad`` filter
+    would collapse to zero there. We therefore prefer the real trainable terms
+    when gradients are enabled, then fall back to the routed canonical objective
+    keys when gradients are disabled.
+    """
+    trainable_terms = [
+        value
+        for value in losses.values()
+        if isinstance(value, torch.Tensor) and value.requires_grad
+    ]
+    if trainable_terms:
+        total = trainable_terms[0]
+        for term in trainable_terms[1:]:
+            total = total + term
+        return total
+
+    reporting_keys = _collect_reporting_total_keys(
+        losses,
+        mel_loss_names=mel_loss_names,
+        hparams=hparams,
+        schedule_only_stage=schedule_only_stage,
+    )
+    if not reporting_keys:
+        return _zero_reporting_loss(losses)
+    total = losses[reporting_keys[0]]
+    for key in reporting_keys[1:]:
+        total = total + losses[key]
+    return total
 
 
 def _compact_base_optimizer_losses(losses, *, mel_loss_names, hparams, schedule_only_stage: bool):
@@ -33,7 +161,7 @@ def _compact_pitch_optimizer_losses(losses, *, hparams, schedule_only_stage: boo
         return
     pitch_keys = []
     pitch_terms = []
-    for key in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
+    for key in _PITCH_LOSS_KEYS:
         value = losses.get(key)
         if isinstance(value, torch.Tensor):
             pitch_keys.append(key)
@@ -161,13 +289,30 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         teacher_aux = losses.get("rhythm_teacher_aux_loss", zero)
     losses["L_teacher_aux"] = teacher_aux.detach() if isinstance(teacher_aux, torch.Tensor) else zero
     rhythm_exec = losses.get("rhythm_exec")
-    losses["L_rhythm_exec"] = rhythm_exec.detach() if isinstance(rhythm_exec, torch.Tensor) else zero
+    if not isinstance(rhythm_exec, torch.Tensor):
+        rhythm_exec = zero
+        for key in ("rhythm_exec_speech", "rhythm_exec_pause"):
+            value = losses.get(key)
+            if isinstance(value, torch.Tensor):
+                rhythm_exec = rhythm_exec + value.detach()
+    else:
+        rhythm_exec = rhythm_exec.detach()
+    losses["L_rhythm_exec"] = rhythm_exec
     stream_state = losses.get("rhythm_stream_state")
-    losses["L_stream_state"] = stream_state.detach() if isinstance(stream_state, torch.Tensor) else zero
+    if not isinstance(stream_state, torch.Tensor):
+        stream_state = zero
+        budget_value = losses.get("rhythm_budget")
+        if isinstance(budget_value, torch.Tensor):
+            stream_state = stream_state + budget_value.detach()
+        if isinstance(prefix_state, torch.Tensor):
+            stream_state = stream_state + prefix_state.detach()
+    else:
+        stream_state = stream_state.detach()
+    losses["L_stream_state"] = stream_state
     pitch_value = losses.get("pitch")
     if not isinstance(pitch_value, torch.Tensor):
         pitch_value = zero
-        for loss_name in ("fdiff", "uv", "pflow", "gdiff", "mdiff"):
+        for loss_name in _PITCH_LOSS_KEYS:
             value = losses.get(loss_name)
             if isinstance(value, torch.Tensor):
                 pitch_value = pitch_value + value.detach()

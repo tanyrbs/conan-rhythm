@@ -1,4 +1,5 @@
 # %% pre-extracting f0
+import importlib
 import json
 import os
 import sys
@@ -11,12 +12,42 @@ import torch
 import numpy as np
 import argparse
 from multiprocessing import Pool
-
-from modules.pe.rmvpe import RMVPE
 from data_gen.tts.base_binarizer import BaseBinarizer
 from utils.commons.hparams import hparams, set_hparams
 from utils.commons.dataset_utils import batch_by_size, pad_or_cut_xd
 from utils.audio.pitch_utils import hz_to_midi, f0_to_coarse, resample_align_curve
+
+_RMVPE_CLS = None
+_PYWORLD = None
+
+
+def _require_rmvpe_cls():
+    global _RMVPE_CLS
+    if _RMVPE_CLS is not None:
+        return _RMVPE_CLS
+    try:
+        module = importlib.import_module("modules.pe.rmvpe")
+        _RMVPE_CLS = module.RMVPE
+    except Exception as exc:
+        raise ImportError(
+            "RMVPE pitch extraction requires the optional RMVPE/torchaudio stack. "
+            "Install those dependencies or avoid pe=rmvpe before using utils.extract_f0_rmvpe."
+        ) from exc
+    return _RMVPE_CLS
+
+
+def _require_pyworld():
+    global _PYWORLD
+    if _PYWORLD is not None:
+        return _PYWORLD
+    try:
+        _PYWORLD = importlib.import_module("pyworld")
+    except Exception as exc:
+        raise ImportError(
+            "pyworld is required for pe=pw in utils.extract_f0_rmvpe. "
+            "Install pyworld or switch pe=rmvpe."
+        ) from exc
+    return _PYWORLD
 
 class F0Extractor:
     def __init__(self):
@@ -50,7 +81,7 @@ class F0Extractor:
         f0_dict = {}
         pe = hparams.get('pe', 'pw')
         if pe == 'rmvpe':
-            rmvpe = RMVPE(hparams['pe_ckpt'], device=device)
+            rmvpe = _require_rmvpe_cls()(hparams['pe_ckpt'], device=device)
         skipped = 0
         for item_name in tqdm(items.keys(), total=len(items),
                               desc='Extracting' + (f' {task_id}' if task_id >= 0 else ''), position=task_id):
@@ -82,6 +113,7 @@ class F0Extractor:
                         fmin=hparams['f0_min']
                     )
             elif pe == 'pw':
+                pw = _require_pyworld()
                 f0, _ = pw.harvest(wav.astype(np.double), hparams['audio_sample_rate'],
                                    frame_period=hparams['hop_size'] * 1000 / hparams['audio_sample_rate'])
                 delta_l = length - len(f0)
@@ -100,7 +132,13 @@ class F0Extractor:
     def generate_batch(items, hparams, binarization_args, device=None, task_id=-1, bsz=1, max_tokens=100000, our_save_dir='/work/hdd/bcza/usertian/vctk-controlvc16k/wav16_silence_trimmed_padded_f0/'):
         # f0_dict = {}
         # pe = hparams.get('pe', 'pw')
-        rmvpe = RMVPE("/storage/baotong/workspace/streamvc/streamvc_checkpoint/rmvpe.pt", device=device)
+        pe_ckpt = str(hparams.get("pe_ckpt", "") or "").strip()
+        if not pe_ckpt:
+            raise RuntimeError(
+                "generate_batch() requires hparams['pe_ckpt'] when pe=rmvpe. "
+                "Set pe_ckpt to a valid RMVPE checkpoint path."
+            )
+        rmvpe = _require_rmvpe_cls()(pe_ckpt, device=device)
         bad=0
 
         item_names = list(items.keys())

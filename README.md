@@ -34,6 +34,8 @@ This repository is **our Conan-based engineering fork / modified branch**, focus
 >
 > - the repo has been heavily reworked around explicit rhythm planning, projector feasibility, cache-backed KD, and retimed training closure
 > - several legacy Conan / schedule-only / dual-mode branches are kept only for compatibility or research migration
+> - maintained `student_kd` is now explicitly **teacher-main + shape-only KD**, and its cache contract only requires teacher core + shape-confidence sidecars by default
+> - stage-3 retimed sampling has been tightened around the shared frame-plan path, including batched frame-plan gathering to reduce Python-loop overhead in retimed target construction
 > - README content below should be read as **project-specific implementation notes for this modified branch**, not as an official Conan introduction
 
 ## Requirements
@@ -78,7 +80,7 @@ If rhythm cache generation is enabled, the binarizer can additionally cache:
 - source phrase cache: `source_boundary_cue`, `phrase_group_index`, `phrase_group_pos`, `phrase_final_mask`
 - reference rhythm cache: `ref_rhythm_stats`, `ref_rhythm_trace`, `slow_rhythm_memory`, `slow_rhythm_summary`
 - selector metadata: `selector_meta_indices`, `selector_meta_scores`, `selector_meta_starts`, `selector_meta_ends`
-- cached guidance / teacher targets, including teacher allocation / prefix carry surfaces
+- cached guidance / teacher targets; note that maintained stage-2 shape-only KD only needs teacher core targets + teacher shape confidence by default, while allocation / prefix sidecars remain research/optional
 - cached retimed mel targets
 
 Keep the cache / batch schema layered:
@@ -115,7 +117,7 @@ The metadata file should contain entries like:
 1. **Extract F0 features using RMVPE (needed only for main model training)**:
 ```bash
 export PYTHONPATH=/storage/baotong/workspace/Conan:$PYTHONPATH # (optional) you may need to set the PYTHONPATH for import dependencies
-python trials/extract_f0_rmvpe.py \
+python utils/extract_f0_rmvpe.py \
     --config egs/conan_emformer_rhythm_v2_cached_only.yaml \
     --batch-size 80 \
     --save-dir /path/to/audio  
@@ -143,7 +145,7 @@ For formal Rhythm V2 experiments:
 - keep `rhythm_binarize_teacher_targets: true`
 - set `rhythm_teacher_target_source: learned_offline` and provide precomputed offline teacher bundles when building formal teacher-backed caches
 - use `scripts/export_rhythm_teacher_targets.py` to write `{split}/{item_name}.teacher.npz` assets into `rhythm_teacher_target_dir` by default (`--flat_output` keeps the old flat layout; `scripts/export_offline_teacher_assets.py` remains a compatibility wrapper)
-- treat teacher surfaces as the preferred **target source**; do not assume KD is required in the default training chain
+- treat teacher surfaces as the preferred **target source**; maintained `student_kd` now uses teacher-main supervision plus a small shape-only KD regularizer
 - re-binarize whenever `rhythm_cache_version` changes
 - treat `prefer_cache` only as a migration/debug mode
 
@@ -155,7 +157,7 @@ Update the configuration files in `egs/` directory to match your dataset:
 - `egs/conan_emformer_rhythm_v2_cached_only.yaml`: legacy alias to the maintained formal base
 - `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`: maintained offline teacher asset-build stage
 - `egs/conan_emformer_rhythm_v2_schedule_only.yaml`: legacy schedule warm-start / ablation config
-- `egs/conan_emformer_rhythm_v2_student_kd.yaml`: maintained stage-2 cache-only teacher->student KD
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml`: maintained stage-2 cache-only teacher-main supervision + small shape-only KD regularization
 - `egs/conan_emformer_rhythm_v2_dual_mode_kd.yaml`: legacy stage-2 runtime dual-mode KD branch
 - `egs/conan_emformer_rhythm_v2_student_retimed.yaml`: maintained retimed acoustic training stage
 - `egs/conan_emformer.yaml`: legacy / baseline main training configuration
@@ -165,8 +167,8 @@ Update the configuration files in `egs/` directory to match your dataset:
 Key parameters to adjust:
 ```yaml
 # Dataset paths
-binary_data_dir: 'data/binary/vc'
-processed_data_dir: 'data/processed/vc'
+binary_data_dir: '<YOUR_REAL_BINARY_DATA_DIR>'
+processed_data_dir: '<YOUR_REAL_PROCESSED_DATA_DIR>'
 ```
 ## 🎯 Training
 
@@ -239,7 +241,7 @@ Recommended formal path:
 
 0. `teacher_offline` + export `learned_offline` teacher assets
 1. rebuild student-facing cached teacher surfaces
-2. `student_kd`
+2. `student_kd` (teacher-main supervision + small shape-only KD)
 3. `student_retimed`
 
 Optional legacy ablations:

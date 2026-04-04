@@ -97,6 +97,7 @@ def build_frame_plan(
     frame_unit_index_list: list[torch.Tensor] = []
     frame_phase_feature_list: list[torch.Tensor] = []
     valid_lengths: list[int] = []
+    phase_feature_cache: dict[int, torch.Tensor] = {}
 
     for batch_idx in range(slot_duration_exec.size(0)):
         src_cursor = 0
@@ -110,32 +111,36 @@ def build_frame_plan(
         valid_len = 0
         for slot_idx in range(visible_slots):
             duration = int(slot_duration_exec[batch_idx, slot_idx].item())
-            if duration <= 0:
-                continue
             unit_idx = int(slot_unit_index[batch_idx, slot_idx].item())
             is_blank = int(slot_is_blank[batch_idx, slot_idx].item()) > 0
-            if duration <= 1:
-                phase = torch.zeros((duration,), dtype=torch.float32, device=device)
-            else:
-                phase = torch.linspace(0.0, 1.0, duration, dtype=torch.float32, device=device)
-            edge = torch.abs(2.0 * phase - 1.0)
-            phase_feat = torch.stack(
-                [
-                    phase,
-                    1.0 - phase,
-                    2.0 * phase - 1.0,
-                    torch.full((duration,), float(math.log1p(float(duration))), dtype=torch.float32, device=device),
-                    edge,
-                ],
-                dim=-1,
-            )
-            if is_blank:
-                src_indices = torch.full((duration,), -1, dtype=torch.long, device=device)
-            else:
+            if not is_blank:
                 src_len = int(src_anchor[batch_idx, unit_idx].item()) if unit_idx < src_anchor.size(1) else 0
                 src_start = src_cursor
                 src_end = min(src_cursor + max(src_len, 0), src_total)
                 src_cursor = src_end
+            if duration <= 0:
+                continue
+            phase_feat = phase_feature_cache.get(duration)
+            if phase_feat is None:
+                if duration <= 1:
+                    phase = torch.zeros((duration,), dtype=torch.float32, device=device)
+                else:
+                    phase = torch.linspace(0.0, 1.0, duration, dtype=torch.float32, device=device)
+                edge = torch.abs(2.0 * phase - 1.0)
+                phase_feat = torch.stack(
+                    [
+                        phase,
+                        1.0 - phase,
+                        2.0 * phase - 1.0,
+                        torch.full((duration,), float(math.log1p(float(duration))), dtype=torch.float32, device=device),
+                        edge,
+                    ],
+                    dim=-1,
+                )
+                phase_feature_cache[duration] = phase_feat
+            if is_blank:
+                src_indices = torch.full((duration,), -1, dtype=torch.long, device=device)
+            else:
                 if src_total <= 0:
                     src_indices = torch.full((duration,), -1, dtype=torch.long, device=device)
                 elif src_end <= src_start:
@@ -229,42 +234,71 @@ def sample_tensor_by_frame_plan(
             f"Batch mismatch between source {tuple(source.shape)} and frame plan "
             f"{tuple(frame_plan.frame_src_index.shape)}."
         )
-    outputs = []
-    for batch_idx in range(source.size(0)):
-        src = source[batch_idx]
-        indices = frame_plan.frame_src_index[batch_idx]
-        if src.size(0) <= 0:
-            if src.dim() == 1:
-                gathered = src.new_zeros(indices.shape)
-            else:
-                gathered = src.new_zeros((indices.size(0), *src.shape[1:]))
+    indices = frame_plan.frame_src_index
+    blank_mask = frame_plan.blank_mask > 0.5
+    total_mask = frame_plan.total_mask.to(device=source.device, dtype=source.dtype)
+
+    if source.size(1) <= 0:
+        if source.dim() == 2:
+            gathered = source.new_zeros(indices.shape)
         else:
-            safe_indices = indices.clamp(min=0, max=max(int(src.size(0)) - 1, 0))
-            if src.dim() == 1:
-                gathered = src[safe_indices]
-            else:
-                gathered = src.index_select(0, safe_indices)
-        blank_mask = frame_plan.blank_mask[batch_idx] > 0.5
-        if blank_mask.any():
-            if blank_fill is None:
-                fill = src.new_zeros(src.shape[1:]) if src.dim() > 1 else src.new_tensor(0.0)
-            elif isinstance(blank_fill, torch.Tensor):
-                fill = blank_fill[batch_idx] if blank_fill.dim() > src.dim() - 1 else blank_fill
-                fill = fill.to(device=src.device, dtype=src.dtype)
-            else:
-                fill = src.new_tensor(blank_fill)
-            if src.dim() == 1:
-                gathered = gathered.clone()
-                gathered[blank_mask] = fill
-            else:
-                gathered = gathered.clone()
-                gathered[blank_mask] = fill.view(1, *src.shape[1:])
-        if src.dim() == 1:
-            gathered = gathered * frame_plan.total_mask[batch_idx]
+            gathered = source.new_zeros((indices.size(0), indices.size(1), source.size(-1)))
+    else:
+        safe_indices = indices.clamp(min=0, max=max(int(source.size(1)) - 1, 0))
+        if source.dim() == 2:
+            gathered = torch.gather(source, 1, safe_indices)
         else:
-            gathered = gathered * frame_plan.total_mask[batch_idx].unsqueeze(-1)
-        outputs.append(gathered)
-    return _pad_sequences(outputs, pad_value=0.0, dtype=source.dtype)
+            gathered = torch.gather(
+                source,
+                1,
+                safe_indices.unsqueeze(-1).expand(-1, -1, source.size(-1)),
+            )
+
+    if blank_mask.any():
+        if blank_fill is None:
+            fill = source.new_zeros((source.size(0), 1) if source.dim() == 2 else (source.size(0), 1, source.size(-1)))
+        elif isinstance(blank_fill, torch.Tensor):
+            fill_tensor = blank_fill.to(device=source.device, dtype=source.dtype)
+            if source.dim() == 2:
+                if fill_tensor.dim() == 0:
+                    fill = fill_tensor.view(1, 1).expand(source.size(0), 1)
+                elif fill_tensor.dim() >= 1 and fill_tensor.size(0) == source.size(0):
+                    fill = fill_tensor.reshape(source.size(0), -1)[:, :1]
+                else:
+                    fill = fill_tensor.reshape(1, -1)[:, :1].expand(source.size(0), 1)
+            else:
+                if fill_tensor.dim() == 0:
+                    fill = fill_tensor.view(1, 1, 1).expand(source.size(0), 1, source.size(-1))
+                elif fill_tensor.dim() == 1:
+                    fill = fill_tensor.reshape(1, 1, -1)
+                    if fill.size(-1) == 1:
+                        fill = fill.expand(source.size(0), 1, source.size(-1))
+                    else:
+                        fill = fill.expand(source.size(0), 1, fill.size(-1))
+                elif fill_tensor.size(0) == source.size(0):
+                    fill = fill_tensor.reshape(source.size(0), -1)[:, None, :]
+                else:
+                    fill = fill_tensor.reshape(1, -1)[:, None, :].expand(source.size(0), 1, -1)
+                if fill.size(-1) == 1 and source.size(-1) != 1:
+                    fill = fill.expand(source.size(0), 1, source.size(-1))
+                elif fill.size(-1) != source.size(-1):
+                    raise ValueError(
+                        f"blank_fill feature dim mismatch: fill={tuple(fill.shape)}, source={tuple(source.shape)}."
+                    )
+        else:
+            if source.dim() == 2:
+                fill = source.new_tensor(blank_fill).view(1, 1).expand(source.size(0), 1)
+            else:
+                fill = source.new_tensor(blank_fill).view(1, 1, 1).expand(source.size(0), 1, source.size(-1))
+
+        if source.dim() == 2:
+            gathered = torch.where(blank_mask, fill.expand(-1, gathered.size(1)), gathered)
+        else:
+            gathered = torch.where(blank_mask.unsqueeze(-1), fill.expand(-1, gathered.size(1), -1), gathered)
+
+    if source.dim() == 2:
+        return gathered * total_mask
+    return gathered * total_mask.unsqueeze(-1)
 
 
 def build_frame_weight_from_plan(

@@ -59,17 +59,21 @@ _GUIDANCE_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
     ("rhythm_guidance_confidence",),
     ("rhythm_guidance_surface_name",),
 )
-_TEACHER_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+_TEACHER_CORE_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
     ("rhythm_teacher_speech_exec_tgt",),
     ("rhythm_teacher_blank_exec_tgt", "rhythm_teacher_pause_exec_tgt"),
     ("rhythm_teacher_speech_budget_tgt",),
     ("rhythm_teacher_blank_budget_tgt", "rhythm_teacher_pause_budget_tgt"),
-    ("rhythm_teacher_allocation_tgt",),
-    ("rhythm_teacher_prefix_clock_tgt",),
-    ("rhythm_teacher_prefix_backlog_tgt",),
     ("rhythm_teacher_confidence",),
     ("rhythm_teacher_target_source_id",),
     ("rhythm_teacher_surface_name",),
+)
+_TEACHER_ALLOCATION_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("rhythm_teacher_allocation_tgt",),
+)
+_TEACHER_PREFIX_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("rhythm_teacher_prefix_clock_tgt",),
+    ("rhythm_teacher_prefix_backlog_tgt",),
 )
 _TEACHER_COMPONENT_CONFIDENCE_GROUPS: tuple[tuple[str, ...], ...] = (
     ("rhythm_teacher_confidence_exec",),
@@ -114,6 +118,12 @@ def validate_cache_field_contract(
         str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
         == "cached_only"
     )
+    distill_exec_weight = float(hp.get("rhythm_distill_exec_weight", 1.0))
+    distill_budget_weight = float(hp.get("rhythm_distill_budget_weight", 0.5))
+    distill_allocation_weight = float(hp.get("rhythm_distill_allocation_weight", 0.5))
+    distill_prefix_weight = float(hp.get("rhythm_distill_prefix_weight", 0.25))
+    distill_speech_shape_weight = float(hp.get("rhythm_distill_speech_shape_weight", 0.0))
+    distill_pause_shape_weight = float(hp.get("rhythm_distill_pause_shape_weight", 0.0))
 
     expected_groups: list[tuple[str, ...]] = [(key,) for key in sorted(CORE_RHYTHM_FIELDS)]
     errors: list[str] = []
@@ -129,7 +139,7 @@ def validate_cache_field_contract(
         or bool(hp.get("rhythm_binarize_teacher_targets", False))
         or str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower() == "teacher"
     ):
-        expected_groups.extend(_TEACHER_FIELD_GROUPS)
+        expected_groups.extend(_TEACHER_CORE_FIELD_GROUPS)
     if (
         bool(hp.get("rhythm_require_retimed_cache", False))
         or bool(hp.get("rhythm_apply_train_override", False))
@@ -146,18 +156,20 @@ def validate_cache_field_contract(
         if distill == "offline" and not bool(hp.get("rhythm_enable_dual_mode_teacher", False)):
             errors.append("Offline distillation requires rhythm_enable_dual_mode_teacher: true.")
         if distill == "cache":
-            expected_groups.extend(_TEACHER_FIELD_GROUPS)
-            expected_groups.append(("rhythm_teacher_confidence_exec",))
-            if float(hp.get("rhythm_distill_budget_weight", 0.5)) > 0.0:
+            expected_groups.extend(_TEACHER_CORE_FIELD_GROUPS)
+            if distill_allocation_weight > 0.0:
+                expected_groups.extend(_TEACHER_ALLOCATION_FIELD_GROUPS)
+            if distill_prefix_weight > 0.0:
+                expected_groups.extend(_TEACHER_PREFIX_FIELD_GROUPS)
+            if distill_exec_weight > 0.0:
+                expected_groups.append(("rhythm_teacher_confidence_exec",))
+            if distill_budget_weight > 0.0:
                 expected_groups.append(("rhythm_teacher_confidence_budget",))
-            if float(hp.get("rhythm_distill_prefix_weight", 0.25)) > 0.0:
+            if distill_prefix_weight > 0.0:
                 expected_groups.append(("rhythm_teacher_confidence_prefix",))
-            if float(hp.get("rhythm_distill_allocation_weight", 0.5)) > 0.0:
+            if distill_allocation_weight > 0.0:
                 expected_groups.append(("rhythm_teacher_confidence_allocation",))
-            if (
-                float(hp.get("rhythm_distill_speech_shape_weight", 0.0)) > 0.0
-                or float(hp.get("rhythm_distill_pause_shape_weight", 0.0)) > 0.0
-            ):
+            if distill_speech_shape_weight > 0.0 or distill_pause_shape_weight > 0.0:
                 expected_groups.append(("rhythm_teacher_confidence_shape",))
 
     if bool(hp.get("rhythm_apply_train_override", False)) and not bool(

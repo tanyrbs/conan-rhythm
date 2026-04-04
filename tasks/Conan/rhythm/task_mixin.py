@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from tasks.Conan.base_gen_task import f0_to_figure
 from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
+from tasks.Conan.rhythm.loss_routing import compute_reporting_total_loss
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
 from tasks.Conan.rhythm.distill_confidence import (
     build_runtime_distill_confidence_bundle as build_runtime_distill_confidence_bundle_helper,
@@ -753,7 +754,13 @@ class RhythmConanTaskMixin:
         outputs = {}
         outputs['losses'], model_out = self.run_model(sample, infer=True)
         outputs['rhythm_metrics'] = tensors_to_scalars(build_rhythm_metric_dict(model_out, sample))
-        outputs['total_loss'] = sum(outputs['losses'].values())
+        outputs['losses'].update(outputs['rhythm_metrics'])
+        outputs['total_loss'] = compute_reporting_total_loss(
+            outputs['losses'],
+            mel_loss_names=self._task_runtime_support().mel_loss_names(),
+            hparams=hparams,
+            schedule_only_stage=bool(model_out.get("rhythm_schedule_only_stage", False)),
+        )
         outputs['nsamples'] = sample['nsamples']
         outputs = tensors_to_scalars(outputs)
         if batch_idx < hparams['num_valid_plots']:
