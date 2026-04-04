@@ -341,6 +341,89 @@ class RhythmTargetBuilderTests(unittest.TestCase):
         self.assertFalse(targets.distill_same_source_allocation)
         self.assertTrue(targets.distill_same_source_shape)
 
+    def test_context_matched_kd_downweights_distill_confidence_for_truncated_prefix(self) -> None:
+        unit_batch = SimpleNamespace(
+            dur_anchor_src=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 2), dtype=torch.float32),
+            open_run_mask=torch.tensor([[0, 1]], dtype=torch.long),
+        )
+        sample = {
+            "rhythm_speech_exec_tgt": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "rhythm_pause_exec_tgt": torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+            "rhythm_speech_budget_tgt": torch.tensor([[2.0]], dtype=torch.float32),
+            "rhythm_pause_budget_tgt": torch.tensor([[0.0]], dtype=torch.float32),
+            "rhythm_teacher_speech_exec_tgt": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "rhythm_teacher_pause_exec_tgt": torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+            "rhythm_teacher_speech_budget_tgt": torch.tensor([[2.0]], dtype=torch.float32),
+            "rhythm_teacher_pause_budget_tgt": torch.tensor([[0.0]], dtype=torch.float32),
+            "rhythm_teacher_confidence": torch.tensor([[1.0]], dtype=torch.float32),
+            "rhythm_teacher_confidence_exec": torch.tensor([[1.0]], dtype=torch.float32),
+            "rhythm_stream_prefix_ratio": torch.tensor([[0.5]], dtype=torch.float32),
+        }
+
+        targets = build_rhythm_loss_targets_from_sample(
+            sample=sample,
+            unit_batch=unit_batch,
+            config=RhythmTargetBuildConfig(
+                primary_target_surface="guidance",
+                distill_surface="cache",
+                lambda_guidance=0.0,
+                lambda_distill=0.35,
+                distill_exec_weight=1.0,
+                distill_budget_weight=0.0,
+                distill_allocation_weight=0.0,
+                distill_prefix_weight=0.0,
+                distill_speech_shape_weight=0.0,
+                distill_pause_shape_weight=0.0,
+                plan_local_weight=0.0,
+                plan_cum_weight=0.0,
+                pause_boundary_weight=0.35,
+                budget_raw_weight=1.0,
+                budget_exec_weight=0.25,
+                feasible_debt_weight=0.05,
+                enable_distill_context_match=True,
+                distill_context_floor=0.35,
+                distill_context_power=1.0,
+                distill_context_open_run_penalty=0.50,
+            ),
+            runtime_teacher=None,
+            algorithmic_teacher=None,
+            offline_confidences=DistillConfidenceBundle(),
+            normalize_distill_confidence=lambda confidence, *, batch_size, device: normalize_distill_confidence(
+                confidence,
+                batch_size=batch_size,
+                device=device,
+                floor=0.05,
+                power=1.0,
+            ),
+            normalize_component_confidence=lambda confidence, *, fallback_confidence, batch_size, device: normalize_component_distill_confidence(
+                confidence,
+                fallback_confidence=fallback_confidence,
+                batch_size=batch_size,
+                device=device,
+                floor=0.05,
+                power=1.0,
+                preserve_zeros=True,
+            ),
+            build_prefix_carry_from_exec=lambda speech, pause, dur_anchor_src, unit_mask: (
+                torch.zeros_like(speech),
+                torch.zeros_like(speech),
+            ),
+            slice_rhythm_surface_to_student=lambda **kwargs: (
+                kwargs["speech_exec"],
+                kwargs["pause_exec"],
+                kwargs.get("speech_budget"),
+                kwargs.get("pause_budget"),
+                kwargs.get("allocation"),
+                kwargs.get("prefix_clock"),
+                kwargs.get("prefix_backlog"),
+            ),
+        )
+        self.assertIsNotNone(targets)
+        self.assertTrue(torch.allclose(targets.distill_context_match, torch.tensor([[0.50625]], dtype=torch.float32)))
+        self.assertTrue(torch.allclose(targets.distill_confidence, torch.tensor([[0.50625]], dtype=torch.float32)))
+        self.assertTrue(torch.allclose(targets.distill_exec_confidence, torch.tensor([[0.50625]], dtype=torch.float32)))
+
 
 if __name__ == "__main__":
     unittest.main()

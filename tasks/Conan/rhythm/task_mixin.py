@@ -12,6 +12,7 @@ from tasks.Conan.base_gen_task import f0_to_figure
 from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
 from tasks.Conan.rhythm.loss_routing import compute_reporting_total_loss
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
+from tasks.Conan.rhythm.loss_balance import AdaptiveRhythmLossBalancer
 from tasks.Conan.rhythm.distill_confidence import (
     build_runtime_distill_confidence_bundle as build_runtime_distill_confidence_bundle_helper,
     normalize_component_distill_confidence as normalize_component_distill_confidence_helper,
@@ -67,6 +68,23 @@ class RhythmConanTaskMixin:
         if helper is None:
             helper = RhythmTaskRuntimeSupport(self)
             self._cached_rhythm_task_runtime_support = helper
+        return helper
+
+    def _rhythm_loss_balancer(self) -> AdaptiveRhythmLossBalancer:
+        signature = (
+            str(hparams.get("rhythm_loss_balance_mode", "none") or "none").strip().lower(),
+            float(hparams.get("rhythm_loss_balance_beta", 0.98)),
+            float(hparams.get("rhythm_loss_balance_alpha", 0.50)),
+            int(hparams.get("rhythm_loss_balance_warmup_steps", 0) or 0),
+            float(hparams.get("rhythm_loss_balance_min_scale", 0.50)),
+            float(hparams.get("rhythm_loss_balance_max_scale", 2.00)),
+            float(hparams.get("rhythm_loss_balance_eps", 1.0e-6)),
+        )
+        helper = getattr(self, "_cached_rhythm_loss_balancer", None)
+        if helper is None or getattr(self, "_cached_rhythm_loss_balancer_signature", None) != signature:
+            helper = AdaptiveRhythmLossBalancer.from_hparams(hparams)
+            self._cached_rhythm_loss_balancer = helper
+            self._cached_rhythm_loss_balancer_signature = signature
         return helper
 
     @staticmethod
@@ -243,6 +261,13 @@ class RhythmConanTaskMixin:
 
     def _build_rhythm_target_build_config(self) -> RhythmTargetBuildConfig:
         return self._task_runtime_support().build_rhythm_target_build_config()
+
+    def _maybe_balance_rhythm_loss_terms(self, losses: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return self._rhythm_loss_balancer().apply(
+            losses,
+            global_step=int(self.global_step),
+            training=bool(self.training and torch.is_grad_enabled()),
+        )
 
     @staticmethod
     def _resolve_rhythm_plan_weights() -> tuple[float, float]:
@@ -669,13 +694,13 @@ class RhythmConanTaskMixin:
             return
         rhythm_execution = output["rhythm_execution"]
         rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
-        losses.update(
-            scale_rhythm_loss_terms(
-                rhythm_losses,
-                hparams=hparams,
-                cumplan_lambda=self._get_rhythm_prefix_state_lambda(),
-            )
+        scaled_rhythm_losses = scale_rhythm_loss_terms(
+            rhythm_losses,
+            hparams=hparams,
+            cumplan_lambda=self._get_rhythm_prefix_state_lambda(),
         )
+        scaled_rhythm_losses = self._maybe_balance_rhythm_loss_terms(scaled_rhythm_losses)
+        losses.update(scaled_rhythm_losses)
 
         runtime_teacher = output.get("rhythm_offline_execution")
         lambda_teacher_aux = float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)

@@ -19,6 +19,7 @@ np.random.seed(1234)
 
 from modules.Conan.rhythm.contracts import RhythmPlannerOutputs
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
+from modules.Conan.rhythm.frame_plan import build_frame_plan_from_execution
 from modules.Conan.pitch_utils import (
     apply_silent_content_to_uv,
     f0_minmax_denorm,
@@ -109,6 +110,15 @@ if __name__ == '__main__':
     assert bool(inferred_uv[0, 0].item()) is True
     assert bool(inferred_uv[0, 1].item()) is True
     assert bool(apply_silent_content_to_uv(inferred_uv, content=content, silent_token=57)[0, 1].item()) is True
+    fractional_plan = build_frame_plan_from_execution(
+        dur_anchor_src=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+        speech_exec=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+        pause_exec=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+        unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+    )
+    assert int(fractional_plan.total_mask[0].sum().item()) == 2
+    assert int(fractional_plan.speech_mask[0].sum().item()) == 1
+    assert int(fractional_plan.blank_mask[0].sum().item()) == 1
 
     frontend = RhythmUnitFrontend(silent_token=57, separator_aware=True)
     batch = frontend.from_token_lists([
@@ -481,10 +491,15 @@ if __name__ == '__main__':
     assert frame_plan.blank_mask.shape == frame_plan.total_mask.shape
     assert frame_plan.speech_mask.shape == frame_plan.total_mask.shape
     assert frame_plan.frame_phase_features.size(-1) == 5
-    rounded_slot_frames = (torch.round(out1.slot_duration_exec.float()).clamp_min(0.0) * out1.slot_mask.float()).sum(dim=1)
-    assert torch.equal(frame_plan.total_mask.sum(dim=1).long(), rounded_slot_frames.long())
-    rounded_pause_frames = (torch.round(out1.pause_after_exec.float()).clamp_min(0.0) * batch.unit_mask.float()).sum(dim=1)
-    assert torch.equal(frame_plan.blank_mask.sum(dim=1).long(), rounded_pause_frames.long())
+    rounded_speech_frames = torch.round(
+        (out1.speech_duration_exec.float().clamp_min(0.0) * batch.unit_mask.float()).sum(dim=1)
+    ).long()
+    rounded_pause_frames = torch.round(
+        (out1.pause_after_exec.float().clamp_min(0.0) * batch.unit_mask.float()).sum(dim=1)
+    ).long()
+    assert torch.equal(frame_plan.speech_mask.sum(dim=1).long(), rounded_speech_frames)
+    assert torch.equal(frame_plan.blank_mask.sum(dim=1).long(), rounded_pause_frames)
+    assert torch.equal(frame_plan.total_mask.sum(dim=1).long(), rounded_speech_frames + rounded_pause_frames)
     valid_blank = (frame_plan.blank_mask > 0.5) & (frame_plan.total_mask > 0.5)
     valid_speech = (frame_plan.blank_mask <= 0.5) & (frame_plan.total_mask > 0.5)
     assert torch.all(frame_plan.frame_src_index[valid_blank] < 0)

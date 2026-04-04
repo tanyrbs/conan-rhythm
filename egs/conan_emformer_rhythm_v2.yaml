@@ -122,6 +122,10 @@ rhythm_teacher_phrase_final_bonus: 0.20
 rhythm_teacher_confidence_bonus: 0.05
 rhythm_distill_confidence_floor: 0.05
 rhythm_distill_confidence_power: 1.0
+rhythm_enable_distill_context_match: false
+rhythm_distill_context_floor: 0.35
+rhythm_distill_context_power: 1.0
+rhythm_distill_context_open_run_penalty: 0.50
 rhythm_test_chunkwise: true
 rhythm_test_tokens_per_chunk: 4
 
@@ -168,3 +172,9 @@ rhythm_schedule_only_stage: false
 rhythm_optimize_module_only: false
 rhythm_optimize_pause_state: false
 rhythm_retimed_confidence_floor: 0.05
+rhythm_loss_balance_mode: none
+rhythm_loss_balance_beta: 0.98
+rhythm_loss_balance_alpha: 0.50
+rhythm_loss_balance_warmup_steps: 0
+rhythm_loss_balance_min_scale: 0.50
+rhythm_loss_balance_max_scale: 2.00

@@ -27,6 +27,10 @@ class RhythmTargetBuildConfig:
     budget_exec_weight: float
     feasible_debt_weight: float
     dedupe_primary_teacher_cache_distill: bool = True
+    enable_distill_context_match: bool = False
+    distill_context_floor: float = 0.35
+    distill_context_power: float = 1.0
+    distill_context_open_run_penalty: float = 0.50
 
     @property
     def use_guidance(self) -> bool:
@@ -220,6 +224,7 @@ class DistillSurfaceBundle:
     prefix_clock: Optional[torch.Tensor] = None
     prefix_backlog: Optional[torch.Tensor] = None
     confidences: DistillConfidenceBundle = field(default_factory=DistillConfidenceBundle)
+    context_match: Optional[torch.Tensor] = None
     source_kind: str = "none"
     same_source_primary_exec: bool = False
     same_source_primary_budget: bool = False
@@ -481,6 +486,79 @@ def _normalize_distill_surface_confidences(
     return replace(bundle, confidences=normalized_confidences)
 
 
+def _estimate_distill_context_match(
+    sample: dict,
+    *,
+    unit_batch,
+    config: RhythmTargetBuildConfig,
+) -> Optional[torch.Tensor]:
+    if not bool(config.enable_distill_context_match):
+        return None
+    batch_size = unit_batch.dur_anchor_src.size(0)
+    device = unit_batch.dur_anchor_src.device
+    ratio = sample.get("rhythm_stream_prefix_ratio")
+    if ratio is None:
+        visible = sample.get("rhythm_stream_visible_units")
+        full = sample.get("rhythm_stream_full_units")
+        if visible is not None and full is not None:
+            ratio = visible.float() / full.float().clamp_min(1.0)
+    ratio = _normalize_optional_confidence(
+        ratio,
+        batch_size=batch_size,
+        device=device,
+        fallback_confidence=torch.ones((batch_size, 1), device=device),
+    ).clamp(0.0, 1.0)
+    floor = min(max(float(config.distill_context_floor), 0.0), 1.0)
+    ratio_gate = ratio.pow(float(config.distill_context_power))
+    gate = floor + (1.0 - floor) * ratio_gate
+    open_run_mask = getattr(unit_batch, "open_run_mask", None)
+    if open_run_mask is not None:
+        visible_mask = unit_batch.unit_mask.float()
+        open_run_ratio = (open_run_mask.float() * visible_mask).sum(dim=1, keepdim=True) / visible_mask.sum(
+            dim=1, keepdim=True
+        ).clamp_min(1.0)
+        is_truncated = ratio < (1.0 - 1.0e-6)
+        open_run_penalty = (1.0 - float(config.distill_context_open_run_penalty) * open_run_ratio).clamp(0.0, 1.0)
+        gate = torch.where(is_truncated, gate * open_run_penalty, gate)
+    return gate.detach().clamp(0.0, 1.0)
+
+
+def _apply_distill_context_match(
+    bundle: DistillSurfaceBundle,
+    *,
+    sample: dict,
+    unit_batch,
+    config: RhythmTargetBuildConfig,
+) -> DistillSurfaceBundle:
+    if not bundle.is_complete:
+        return bundle
+    context_match = _estimate_distill_context_match(
+        sample,
+        unit_batch=unit_batch,
+        config=config,
+    )
+    if context_match is None:
+        return bundle
+
+    def _mul_optional(value, *, fill_if_missing: bool = False):
+        if value is None:
+            return context_match if fill_if_missing else None
+        return _detach_optional(value) * context_match
+
+    return replace(
+        bundle,
+        confidences=DistillConfidenceBundle(
+            shared=_mul_optional(bundle.confidences.shared, fill_if_missing=True),
+            exec=_mul_optional(bundle.confidences.exec),
+            budget=_mul_optional(bundle.confidences.budget),
+            prefix=_mul_optional(bundle.confidences.prefix),
+            allocation=_mul_optional(bundle.confidences.allocation),
+            shape=_mul_optional(bundle.confidences.shape),
+        ),
+        context_match=context_match,
+    )
+
+
 def _confidence_is_active(confidence: Optional[torch.Tensor]) -> bool:
     if confidence is None:
         return True
@@ -585,6 +663,12 @@ def _resolve_distill_surface_bundle(
         bundle,
         config=config,
     )
+    bundle = _apply_distill_context_match(
+        bundle,
+        sample=sample,
+        unit_batch=unit_batch,
+        config=config,
+    )
     bundle = _normalize_distill_surface_confidences(
         bundle,
         unit_batch=unit_batch,
@@ -684,6 +768,7 @@ def build_rhythm_loss_targets_from_sample(
         distill_prefix_confidence=distill_bundle.confidences.prefix,
         distill_allocation_confidence=distill_bundle.confidences.allocation,
         distill_shape_confidence=distill_bundle.confidences.shape,
+        distill_context_match=distill_bundle.context_match,
         distill_exec_weight=float(config.distill_exec_weight),
         distill_budget_weight=float(config.distill_budget_weight),
         distill_allocation_weight=float(config.distill_allocation_weight),
@@ -873,6 +958,7 @@ def scale_rhythm_loss_terms(
         "rhythm_distill_same_source_allocation",
         "rhythm_distill_same_source_shape",
         "rhythm_distill_same_source_any",
+        "rhythm_distill_context_match",
     ):
         value = rhythm_losses.get(key)
         if isinstance(value, torch.Tensor):

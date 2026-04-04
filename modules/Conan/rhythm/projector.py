@@ -27,6 +27,40 @@ class ProjectorConfig:
     build_render_plan: bool = True
 
 
+def _pad_or_truncate_rows(values: torch.Tensor, *, target_size: int) -> torch.Tensor:
+    if values.size(1) == target_size:
+        return values
+    if values.size(1) > target_size:
+        return values[:, :target_size]
+    pad = values.new_zeros((values.size(0), target_size - values.size(1)))
+    return torch.cat([values, pad], dim=1)
+
+
+def _build_prefix_reuse_mask(
+    unit_mask: torch.Tensor,
+    commit_frontier: torch.Tensor,
+    *,
+    reuse_prefix: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    active = unit_mask.float()
+    if not reuse_prefix or active.size(1) <= 0:
+        prefix_mask = active.new_zeros(active.shape)
+        return prefix_mask, active
+    steps = torch.arange(active.size(1), device=active.device)[None, :]
+    frontier = commit_frontier.long().clamp(min=0, max=max(int(active.size(1)), 0))
+    prefix_mask = (steps < frontier[:, None]).to(dtype=active.dtype) * active
+    tail_mask = (active - prefix_mask).clamp_min(0.0)
+    return prefix_mask, tail_mask
+
+
+def _prefix_sum_from_cumsum(cumsum: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+    if cumsum.size(1) <= 0:
+        return cumsum.new_zeros((cumsum.size(0),))
+    padded = torch.cat([cumsum.new_zeros((cumsum.size(0), 1)), cumsum], dim=1)
+    safe_counts = counts.long().clamp(min=0, max=cumsum.size(1))
+    return padded.gather(1, safe_counts.unsqueeze(1)).squeeze(1)
+
+
 def _allocate_pause_budget(
     *,
     candidate_scores: torch.Tensor,
@@ -37,33 +71,38 @@ def _allocate_pause_budget(
     reuse_prefix: bool,
 ) -> torch.Tensor:
     total_units = candidate_scores.size(1)
-    pause_rows = []
-    for batch_idx in range(candidate_scores.size(0)):
-        mask_row = unit_mask[batch_idx : batch_idx + 1].float()
-        budget_row = pause_budget_win[batch_idx].reshape(1, 1).float()
-        frontier = int(commit_frontier[batch_idx].item())
-        prefix_row = candidate_scores.new_zeros((1, total_units))
-        valid_frontier = 0
-        if reuse_prefix and previous_pause_exec is not None and batch_idx < previous_pause_exec.size(0) and frontier > 0:
-            valid_frontier = min(frontier, int(previous_pause_exec.size(1)), total_units)
-            prefix = previous_pause_exec[batch_idx : batch_idx + 1, :valid_frontier].float() * mask_row[:, :valid_frontier]
-            if valid_frontier < total_units:
-                prefix_row = torch.cat([prefix, prefix.new_zeros((1, total_units - valid_frontier))], dim=1)
-            else:
-                prefix_row = prefix
-        tail_mask = mask_row.clone()
-        if valid_frontier > 0:
-            tail_mask[:, :valid_frontier] = 0.0
-        if float(tail_mask.sum().item()) <= 0:
-            pause_rows.append(prefix_row)
-            continue
-        remaining_budget = (budget_row - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
-        fallback = tail_mask / tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        tail_candidate = candidate_scores[batch_idx : batch_idx + 1].float().clamp_min(0.0) * tail_mask
-        total = (tail_candidate + fallback * 1e-6).sum(dim=1, keepdim=True).clamp_min(1e-6)
-        tail_values = (tail_candidate + fallback * 1e-6) * (remaining_budget / total)
-        pause_rows.append(prefix_row + tail_values * tail_mask)
-    return torch.cat(pause_rows, dim=0) * unit_mask.float()
+    active = unit_mask.float()
+    prefix_mask, tail_mask = _build_prefix_reuse_mask(
+        active,
+        commit_frontier,
+        reuse_prefix=bool(reuse_prefix and previous_pause_exec is not None),
+    )
+    prefix_row = candidate_scores.new_zeros((candidate_scores.size(0), total_units))
+    if reuse_prefix and previous_pause_exec is not None:
+        previous_pause_exec = previous_pause_exec.float()
+        previous_pause_exec = _pad_or_truncate_rows(previous_pause_exec, target_size=total_units)
+        if previous_pause_exec.size(0) != candidate_scores.size(0):
+            padded = prefix_row.clone()
+            rows = min(int(previous_pause_exec.size(0)), int(candidate_scores.size(0)))
+            padded[:rows] = previous_pause_exec[:rows]
+            previous_pause_exec = padded
+        prefix_row = previous_pause_exec * prefix_mask
+    remaining_budget = (pause_budget_win.float() - prefix_row.sum(dim=1, keepdim=True)).clamp_min(0.0)
+    tail_candidate = candidate_scores.float().clamp_min(0.0) * tail_mask
+    tail_total = tail_candidate.sum(dim=1, keepdim=True)
+    tail_slots = tail_mask.sum(dim=1, keepdim=True)
+    fallback = torch.where(
+        tail_slots > 0.0,
+        tail_mask / tail_slots.clamp_min(1.0),
+        torch.zeros_like(tail_mask),
+    )
+    tail_distribution = torch.where(
+        tail_total > 1e-6,
+        tail_candidate / tail_total.clamp_min(1e-6),
+        fallback,
+    )
+    tail_values = tail_distribution * remaining_budget
+    return (prefix_row + tail_values) * active
 
 
 def _project_pause_impl(
@@ -86,32 +125,28 @@ def _project_pause_impl(
         pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
     )
     scores = (scores + boundary_bias) * unit_mask.float()
-    total_units = scores.size(1)
-    sparse_rows = []
-    for batch_idx in range(scores.size(0)):
-        visible = int(unit_mask[batch_idx].sum().item())
-        if visible <= 0:
-            sparse_rows.append(scores.new_zeros((1, total_units)))
-            continue
-        topk = max(1, int(round(visible * topk_ratio)))
-        row_scores = scores[batch_idx, :visible]
-        keep_k = min(topk, visible)
-        if keep_k >= visible:
-            selected = row_scores
+    visible = unit_mask.float().sum(dim=1).long()
+    topk = torch.round(visible.float() * float(topk_ratio)).long()
+    topk = torch.where(visible > 0, topk.clamp(min=1), topk).clamp(max=visible)
+    valid_mask = unit_mask.float() > 0.5
+    sparse_scores = scores.new_zeros(scores.shape)
+    if bool(torch.any(topk > 0).item()):
+        k_max = max(1, int(topk.max().item()))
+        masked_scores = scores.masked_fill(~valid_mask, float("-inf"))
+        top_values, top_indices = torch.topk(masked_scores, k=k_max, dim=1)
+        rank_mask = (
+            torch.arange(k_max, device=scores.device)[None, :] < topk[:, None]
+        ) & (top_values > float("-inf"))
+        if soft_pause_selection:
+            full_keep = topk >= visible
+            threshold_index = (topk.clamp_min(1) - 1).unsqueeze(1)
+            threshold = top_values.gather(1, threshold_index)
+            gated = scores * torch.sigmoid((scores - threshold) / float(temperature))
+            sparse_scores = torch.where(full_keep[:, None], scores, gated) * unit_mask.float()
         else:
-            values, indices = torch.topk(row_scores, k=keep_k, dim=0)
-            if soft_pause_selection:
-                threshold = values[-1].detach()
-                gate = torch.sigmoid((row_scores - threshold) / temperature)
-                selected = row_scores * gate
-            else:
-                selector = torch.zeros_like(row_scores)
-                selector.scatter_(0, indices, 1.0)
-                selected = row_scores * selector
-        if visible < total_units:
-            selected = torch.cat([selected, selected.new_zeros((total_units - visible,))], dim=0)
-        sparse_rows.append(selected.unsqueeze(0))
-    sparse_scores = torch.cat(sparse_rows, dim=0) * unit_mask.float()
+            selector = torch.zeros_like(scores)
+            selector.scatter_(1, top_indices, rank_mask.to(dtype=scores.dtype))
+            sparse_scores = scores * selector
     return _allocate_pause_budget(
         candidate_scores=sparse_scores,
         unit_mask=unit_mask,
@@ -372,34 +407,32 @@ class StreamingRhythmProjector(nn.Module):
         boundary_score_unit: torch.Tensor | None,
         force_full_commit: bool,
     ) -> torch.Tensor:
-        batch_size, _ = unit_mask.shape
         active_len = unit_mask.long().sum(dim=1)
         if force_full_commit:
             return active_len.long()
         if open_run_mask is None:
             open_run_mask = torch.zeros_like(unit_mask, dtype=torch.long)
-        commit = state.commit_frontier.clone()
-        for batch_idx in range(batch_size):
-            visible = int(active_len[batch_idx].item())
-            prev = int(state.commit_frontier[batch_idx].item())
-            release_cap = min(max(0, visible - int(self.config.tail_hold_units)), visible)
-            closed_prefix = 0
-            for unit_idx in range(visible):
-                if int(open_run_mask[batch_idx, unit_idx].item()) > 0:
-                    break
-                closed_prefix = unit_idx + 1
-            candidate = min(release_cap, closed_prefix)
-            if (
-                bool(self.config.use_boundary_commit_guard)
-                and candidate > 0
-                and boundary_score_unit is not None
-                and candidate < visible
-            ):
-                boundary_value = float(boundary_score_unit[batch_idx, candidate - 1].item())
-                if boundary_value < float(self.config.boundary_commit_threshold):
-                    candidate = max(prev, candidate - 1)
-            commit[batch_idx] = max(prev, candidate)
-        return commit
+        steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
+        visible_mask = steps < active_len[:, None]
+        open_visible = (open_run_mask.long() > 0) & visible_mask
+        seen_open = torch.cumsum(open_visible.long(), dim=1)
+        closed_prefix = (visible_mask & (seen_open == 0)).long().sum(dim=1)
+        release_cap = (active_len - int(self.config.tail_hold_units)).clamp(min=0)
+        candidate = torch.minimum(release_cap, closed_prefix)
+        if (
+            bool(self.config.use_boundary_commit_guard)
+            and boundary_score_unit is not None
+            and boundary_score_unit.size(1) > 0
+        ):
+            guard_mask = (candidate > 0) & (candidate < active_len)
+            boundary_index = (candidate - 1).clamp_min(0)
+            boundary_value = boundary_score_unit.float().gather(1, boundary_index.unsqueeze(1)).squeeze(1)
+            candidate = torch.where(
+                guard_mask & (boundary_value < float(self.config.boundary_commit_threshold)),
+                (candidate - 1).clamp_min(0),
+                candidate,
+            )
+        return torch.maximum(state.commit_frontier.long(), candidate.long())
 
     def _advance_state(
         self,
@@ -411,40 +444,42 @@ class StreamingRhythmProjector(nn.Module):
         speech_duration_exec: torch.Tensor,
         pause_after_exec: torch.Tensor,
     ) -> StreamingRhythmState:
-        batch_size = dur_anchor_src.size(0)
-        next_phase = state.phase_ptr.clone()
-        next_clock = state.clock_delta.clone()
+        next_phase = state.phase_ptr.float().clone()
+        next_clock = state.clock_delta.float().clone()
         next_phase_anchor = (
-            state.phase_anchor.clone()
+            state.phase_anchor.float().clone()
             if state.phase_anchor is not None
             else torch.zeros(next_phase.size(0), 2, device=next_phase.device, dtype=next_phase.dtype)
         )
-        for batch_idx in range(batch_size):
-            prev = int(state.commit_frontier[batch_idx].item())
-            curr = int(commit_frontier[batch_idx].item())
-            prev_phase = state.phase_ptr[batch_idx].float().clamp(0.0, 1.0)
-            prev_phase_progress = next_phase_anchor[batch_idx, 0].float().clamp_min(0.0)
-            prev_phase_total = next_phase_anchor[batch_idx, 1].float().clamp_min(1.0)
-            visible_anchor = dur_anchor_src[batch_idx].float().clamp_min(0.0)
-            visible_anchor_total = visible_anchor.sum().clamp_min(1.0)
-            committed_anchor = visible_anchor[:curr].sum()
-            # phase_ptr tracks committed progress, not current visible-prefix ratio.
-            # Keep both progress and denominator monotonic to avoid phase rollback/jitter.
-            monotonic_phase_progress = torch.maximum(prev_phase_progress, committed_anchor)
-            monotonic_phase_total = torch.maximum(prev_phase_total, visible_anchor_total)
-            raw_phase = (monotonic_phase_progress / monotonic_phase_total).clamp(0.0, 1.0)
-            next_phase_anchor[batch_idx, 0] = monotonic_phase_progress
-            next_phase_anchor[batch_idx, 1] = monotonic_phase_total
-            next_phase[batch_idx] = torch.maximum(prev_phase, raw_phase)
-            if curr <= prev:
-                next_phase_anchor[batch_idx, 0] = prev_phase_progress
-                next_phase_anchor[batch_idx, 1] = prev_phase_total
-                next_phase[batch_idx] = prev_phase
-                continue
-            exec_prefix = effective_duration_exec[batch_idx, prev:curr].sum()
-            src_prefix = dur_anchor_src[batch_idx, prev:curr].float().sum()
-            delta = exec_prefix - src_prefix
-            next_clock[batch_idx] = next_clock[batch_idx] + delta
+        prev = state.commit_frontier.long().clamp(min=0, max=dur_anchor_src.size(1))
+        curr = commit_frontier.long().clamp(min=0, max=dur_anchor_src.size(1))
+        advance_mask = curr > prev
+        prev_phase = state.phase_ptr.float().clamp(0.0, 1.0)
+        prev_phase_progress = next_phase_anchor[:, 0].float().clamp_min(0.0)
+        prev_phase_total = next_phase_anchor[:, 1].float().clamp_min(1.0)
+        visible_anchor = dur_anchor_src.float().clamp_min(0.0)
+        visible_anchor_total = visible_anchor.sum(dim=1).clamp_min(1.0)
+        anchor_cumsum = torch.cumsum(visible_anchor, dim=1)
+        exec_cumsum = torch.cumsum(effective_duration_exec.float(), dim=1)
+        committed_anchor = _prefix_sum_from_cumsum(anchor_cumsum, curr)
+        monotonic_phase_progress = torch.maximum(prev_phase_progress, committed_anchor)
+        monotonic_phase_total = torch.maximum(prev_phase_total, visible_anchor_total)
+        raw_phase = (monotonic_phase_progress / monotonic_phase_total.clamp_min(1.0)).clamp(0.0, 1.0)
+        next_phase = torch.where(
+            advance_mask,
+            torch.maximum(prev_phase, raw_phase),
+            prev_phase,
+        )
+        next_phase_anchor = torch.stack(
+            [
+                torch.where(advance_mask, monotonic_phase_progress, prev_phase_progress),
+                torch.where(advance_mask, monotonic_phase_total, prev_phase_total),
+            ],
+            dim=-1,
+        )
+        exec_delta = _prefix_sum_from_cumsum(exec_cumsum, curr) - _prefix_sum_from_cumsum(exec_cumsum, prev)
+        src_delta = _prefix_sum_from_cumsum(anchor_cumsum, curr) - _prefix_sum_from_cumsum(anchor_cumsum, prev)
+        next_clock = next_clock + torch.where(advance_mask, exec_delta - src_delta, torch.zeros_like(next_clock))
         return StreamingRhythmState(
             phase_ptr=next_phase,
             clock_delta=next_clock,

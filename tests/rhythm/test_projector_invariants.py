@@ -17,7 +17,7 @@ from modules.Conan.rhythm.prefix_state import (
     build_prefix_state_from_exec_numpy,
     build_prefix_state_from_exec_torch,
 )
-from modules.Conan.rhythm.projector import ProjectorConfig, StreamingRhythmProjector
+from modules.Conan.rhythm.projector import ProjectorConfig, StreamingRhythmProjector, _project_pause_impl
 from modules.Conan.rhythm.scheduler import MonotonicRhythmScheduler
 
 
@@ -223,6 +223,24 @@ class ProjectorInvariantTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(next_state.phase_ptr, torch.tensor([0.60], dtype=torch.float32)))
         self.assertTrue(torch.allclose(next_state.phase_progress_ratio, torch.tensor([0.60], dtype=torch.float32)))
+
+    def test_pause_projection_preserves_reused_prefix_mass(self) -> None:
+        pause = _project_pause_impl(
+            pause_weight_unit=torch.tensor([[0.1, 0.3, 0.6]], dtype=torch.float32),
+            boundary_score_unit=torch.zeros((1, 3), dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
+            previous_pause_exec=torch.tensor([[2.0, 0.0]], dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+            reuse_prefix=True,
+            soft_pause_selection=False,
+            topk_ratio=1.0,
+            pause_min_boundary_weight=0.10,
+            pause_boundary_bias_weight=0.15,
+            temperature=0.12,
+        )
+        self.assertTrue(torch.allclose(pause[:, :1], torch.tensor([[2.0]], dtype=torch.float32)))
+        self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([3.0], dtype=torch.float32)))
 
     def test_prefix_state_torch_numpy_parity(self) -> None:
         speech_exec = torch.tensor([[2.0, 1.0, 0.0, 0.0]], dtype=torch.float32)

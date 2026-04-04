@@ -134,8 +134,17 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **151 passed**
+- rhythm unittests: **157 passed**
 - maintained smoke test: **passed**
+
+This latest rerun includes the new coverage added for:
+
+- frame-plan preserved-sum integer rounding
+- projector hot-path invariants after vectorization
+- context-matched KD gating / dedupe interaction
+- conservative EMA group loss balancing
+
+The longer 2000-step probe results below remain the latest recorded long-run measurements for the maintained default configs; the new `context_match` / `balanced` configs are still experimental and were not silently promoted to the maintained baseline.
 
 ### 2) Teacher-offline preflight + model dry-run on smoke assets
 
@@ -245,7 +254,9 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_
 |---|---|---|---:|---:|---:|
 | `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | learned offline teacher stage | no | no | usually no |
 | `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | student runtime + cached teacher supervision; maintained path usually keeps KD shape-only | yes | no | no |
+| `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
+| `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
 | `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
 | `conan_emformer_rhythm_v2.yaml` | transitional | migration / debug path | optional | optional | stage-dependent |
 | `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | schedule-only ablation; not part of maintained training prep | optional | no | no |
@@ -268,6 +279,12 @@ So the next formal sequence should be:
 5. prepare dedicated retimed cache + F0 side files
 6. re-check `student_retimed` with real assets before long training
 
+Experimental notes:
+
+- `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
+- `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
+- maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
+
 ## Inference boundary
 
 Current checked-in inference is best treated as a streaming-oriented evaluation path, not a polished native low-latency production deployment.
@@ -280,11 +297,17 @@ If historical notes mention fixed latency numbers or SOTA-style claims, read the
 
 Recent branch work improved the maintained path around:
 
-- shared frame-plan sampling for retimed targets
+- sum-preserving frame-plan integerization for speech / blank groups and `dur_anchor_src`
 - cache-contract hardening and fail-fast preflight
 - reduced duplicate Python work in the maintained student path
+- vectorized projector outer hot paths such as pause projection, commit-frontier resolution, and state advance
 - smaller orchestration entrypoints for preflight/metrics
 - removal of a deprecated local TorchScript helper in `modules/Conan/diff/net.py`
+
+Recent branch work also added opt-in experimental surfaces:
+
+- bounded `ema_group` rhythm-loss balancing (`rhythm_loss_balance_mode: none` remains the default)
+- context-matched KD gating for prefix-truncated stage-2 experiments (`rhythm_enable_distill_context_match: false` remains the default)
 
 Current performance headroom is still mostly in:
 

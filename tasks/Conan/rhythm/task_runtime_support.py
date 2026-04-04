@@ -58,6 +58,14 @@ class RhythmTaskRuntimeSupport:
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
             dedupe_primary_teacher_cache_distill=_resolve_duplicate_primary_distill_dedupe_flag(hparams),
+            enable_distill_context_match=bool(
+                hparams.get("rhythm_enable_distill_context_match", False)
+            ),
+            distill_context_floor=float(hparams.get("rhythm_distill_context_floor", 0.35)),
+            distill_context_power=float(hparams.get("rhythm_distill_context_power", 1.0)),
+            distill_context_open_run_penalty=float(
+                hparams.get("rhythm_distill_context_open_run_penalty", 0.50)
+            ),
         )
 
     def build_offline_confidence_outputs(self, confidence) -> dict:

@@ -66,6 +66,27 @@ class RhythmFramePlanTests(unittest.TestCase):
         self.assertEqual(plan.total_mask[0, :5].tolist(), [1.0, 1.0, 1.0, 1.0, 1.0])
         self.assertTrue(torch.all(plan.total_mask[0, 5:] == 0.0))
 
+    def test_fractional_slot_rounding_preserves_group_totals(self) -> None:
+        plan = build_frame_plan_from_execution(
+            dur_anchor_src=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+            speech_exec=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+            pause_exec=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        )
+        self.assertEqual(int(plan.total_mask[0].sum().item()), 2)
+        self.assertEqual(int(plan.speech_mask[0].sum().item()), 1)
+        self.assertEqual(int(plan.blank_mask[0].sum().item()), 1)
+
+    def test_fractional_anchor_rounding_preserves_source_mass(self) -> None:
+        plan = build_frame_plan_from_execution(
+            dur_anchor_src=torch.tensor([[0.4, 0.4, 0.4]], dtype=torch.float32),
+            speech_exec=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+            pause_exec=torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        )
+        speech_indices = plan.frame_src_index[0, plan.speech_mask[0] > 0.5]
+        self.assertEqual(speech_indices.tolist(), [0])
+
 
 if __name__ == "__main__":
     unittest.main()

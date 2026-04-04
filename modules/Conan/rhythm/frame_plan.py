@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -24,6 +25,37 @@ class RhythmFramePlan:
     speech_mask: torch.Tensor
     blank_mask: torch.Tensor
     frame_phase_features: torch.Tensor
+
+
+def _round_masked_preserve_sum(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    values = values.float().clamp_min(0.0)
+    active = mask.float() > 0.5
+    values = values * active.float()
+    base = torch.floor(values)
+    target = torch.round(values.sum(dim=1, keepdim=True)).long()
+    current = base.sum(dim=1, keepdim=True).long()
+    need = (target - current).clamp_min(0)
+    if not bool(torch.any(need > 0).item()):
+        return base.long()
+    fractional = (values - base).masked_fill(~active, -1.0)
+    rank_desc = torch.argsort(fractional, dim=1, descending=True)
+    rank = torch.argsort(rank_desc, dim=1)
+    add = ((rank < need) & active).to(dtype=base.dtype)
+    return (base + add).long()
+
+
+def _build_unit_active_mask(
+    slot_mask: torch.Tensor,
+    slot_unit_index: torch.Tensor,
+    *,
+    num_units: int,
+) -> torch.Tensor:
+    if num_units <= 0:
+        return slot_mask.new_zeros((slot_mask.size(0), 0))
+    slot_active = slot_mask.float() > 0.5
+    safe_unit_index = slot_unit_index.long().clamp(min=0, max=max(num_units - 1, 0))
+    unit_one_hot = F.one_hot(safe_unit_index, num_classes=num_units).bool()
+    return (unit_one_hot & slot_active.unsqueeze(-1)).any(dim=1).to(dtype=slot_mask.dtype)
 
 
 def _pad_sequences(
@@ -89,12 +121,25 @@ def build_frame_plan(
     slot_unit_index: torch.Tensor,
 ) -> RhythmFramePlan:
     device = slot_duration_exec.device
-    slot_duration_exec = torch.round(slot_duration_exec.float()).long().clamp_min(0)
     slot_mask = slot_mask.float()
     slot_active_mask = slot_mask > 0.5
     slot_is_blank = slot_is_blank.long()
     slot_unit_index = slot_unit_index.long()
-    src_anchor = torch.round(dur_anchor_src.float()).long().clamp_min(0)
+    speech_slot_duration = _round_masked_preserve_sum(
+        slot_duration_exec.float(),
+        slot_active_mask & (slot_is_blank == 0),
+    )
+    blank_slot_duration = _round_masked_preserve_sum(
+        slot_duration_exec.float(),
+        slot_active_mask & (slot_is_blank > 0),
+    )
+    slot_duration_exec = (speech_slot_duration + blank_slot_duration).clamp_min(0)
+    unit_active_mask = _build_unit_active_mask(
+        slot_mask,
+        slot_unit_index,
+        num_units=int(dur_anchor_src.size(1)),
+    )
+    src_anchor = _round_masked_preserve_sum(dur_anchor_src.float(), unit_active_mask).clamp_min(0)
 
     frame_src_index_list: list[torch.Tensor] = []
     frame_blank_list: list[torch.Tensor] = []

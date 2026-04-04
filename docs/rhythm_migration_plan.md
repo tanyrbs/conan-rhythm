@@ -51,6 +51,23 @@ The maintained branch now includes these corrective changes:
 - stage-validation defaults now match runtime defaults for:
   - `rhythm_enable_learned_offline_teacher`
   - `rhythm_disable_pitch_loss_when_retimed`
+- frame-plan construction now uses masked sum-preserving rounding for speech slots, blank slots, and `dur_anchor_src`, so integerization no longer leaks or drops total frame mass on fractional edge cases
+- projector outer hot paths are more vectorized in:
+  - `_allocate_pause_budget`
+  - `_project_pause_impl`
+  - `_compute_commit_frontier`
+  - `_advance_state`
+- a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
+  - `rhythm_loss_balance_mode: ema_group`
+  - maintained default stays `none`
+- context-matched KD gating now exists as an opt-in stage-2 research path:
+  - `rhythm_enable_distill_context_match`
+  - `rhythm_distill_context_floor`
+  - `rhythm_distill_context_power`
+  - `rhythm_distill_context_open_run_penalty`
+- new experimental configs were added without changing the maintained default chain:
+  - `egs/conan_emformer_rhythm_v2_student_kd_context_match.yaml`
+  - `egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
 
 ## 4. Validation actually run on this checkout
 
@@ -67,10 +84,18 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **151 rhythm tests passed**
+- unit coverage: **157 rhythm tests passed**
+- latest compile/unit/smoke rerun after the frame-plan / projector / loss-balance / context-match round: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
+
+The newest rerun extended regression coverage specifically around:
+
+- preserved-sum frame-plan rounding
+- projector invariants after hot-path vectorization
+- target-builder context-match gating / dedupe semantics
+- conservative rhythm-loss balancing
 
 Important asset-level caveats from the same audit:
 
@@ -91,12 +116,14 @@ Important asset-level caveats from the same audit:
 - code path: **ready**
 - teacher-export integration chain: **ready as smoke**
 - formal run from this checkout: **blocked by missing real learned teacher export / rebuilt cache**
+- experimental branch available: `conan_emformer_rhythm_v2_student_kd_context_match.yaml`
 
 ### `student_retimed`
 
 - code path: **closer to ready**
 - smoke path: **runs**
 - formal run from this checkout: **not ready to bless**
+- experimental branch available: `conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
 
 Why stage-3 is still guarded:
 
@@ -130,6 +157,8 @@ The audit found a few remaining gaps that were intentionally not over-corrected 
 - optimizer-scope coverage is better, but still benefits from more direct end-to-end param-group tests
 - student-retimed needs a cleaner formal stage-3 integration smoke once real F0 assets exist
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
+- projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
+- loss balancing and context-matched KD are deliberately opt-in research knobs, not new maintained defaults
 
 These are follow-up tasks, not blockers for merging the current cleanup.
 

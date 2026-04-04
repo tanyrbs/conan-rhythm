@@ -41,6 +41,7 @@ class RhythmLossTargets:
     distill_prefix_confidence: Optional[torch.Tensor] = None
     distill_allocation_confidence: Optional[torch.Tensor] = None
     distill_shape_confidence: Optional[torch.Tensor] = None
+    distill_context_match: Optional[torch.Tensor] = None
     distill_exec_weight: float = 1.0
     distill_budget_weight: float = 1.0
     distill_allocation_weight: float = 1.0
@@ -846,6 +847,13 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
                 kd_same_source_prefix,
                 torch.maximum(kd_same_source_allocation, kd_same_source_shape),
             ),
+        ),
+        **(
+            {
+                'rhythm_distill_context_match': targets.distill_context_match.detach().mean()
+            }
+            if isinstance(targets.distill_context_match, torch.Tensor)
+            else {}
         ),
         'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + distill_losses['rhythm_distill'],
     }

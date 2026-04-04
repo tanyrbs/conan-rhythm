@@ -1,0 +1,10 @@
+base_config: egs/conan_emformer_rhythm_v2_student_retimed.yaml
+
+# Conservative experimental stage-3 variant:
+# keep maintained stage semantics, but enable bounded EMA group balancing.
+rhythm_loss_balance_mode: ema_group
+rhythm_loss_balance_beta: 0.98
+rhythm_loss_balance_alpha: 0.50
+rhythm_loss_balance_warmup_steps: 200
+rhythm_loss_balance_min_scale: 0.50
+rhythm_loss_balance_max_scale: 2.00
