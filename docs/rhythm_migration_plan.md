@@ -129,10 +129,14 @@ Immediate conclusions:
 - the maintained Rhythm V2 path is structurally healthy and the local rhythm test suite is green
 - `modules/Conan/rhythm/frame_plan.py` previously assumed active slots were prefix-contiguous; this is a real correctness risk once sparse slot masks appear
 - the shared frame-plan path remains one of the highest-frequency Python hot paths, so it is still a priority optimization surface
+- the previous launcher/import path accidentally clamped normal training to a single CPU thread; this has now been moved behind an explicit env opt-in (`CONAN_SINGLE_THREAD_ENV`)
+- the trainer loop also duplicated batch preparation for multi-optimizer steps; this is now treated as a maintained hot-path optimization target
+- endless dataloader mode no longer pre-expands a 1000x repeated batch list, which removes avoidable launcher-time memory churn
 - current performance-upside work should stay focused on:
   - frame-plan materialization
   - reducing Python loops in streaming unitization / retimed target prep
   - keeping cache contracts minimal so dataset items carry fewer sidecars
+  - avoiding redundant batch/device preparation in optimizer-heavy training stages
 
 Short-term next actions:
 

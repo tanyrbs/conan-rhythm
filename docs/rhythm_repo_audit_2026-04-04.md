@@ -76,6 +76,110 @@ Reason:
 
 - small but safe reduction in Python overhead in a hot utility path
 
+### 3. Remove accidental global single-thread clamp from the main training launcher
+
+Files:
+
+- `utils/commons/single_thread_env.py`
+- `tasks/run.py`
+- `data_gen/tts/runs/*.py`
+
+Problem:
+
+- importing `utils.commons.single_thread_env` used to immediately set `OMP/MKL/OPENBLAS/...=1`
+- `tasks/run.py` also called the clamp unconditionally
+- that effectively capped every normal training launch to one CPU thread unless the user had already overridden the environment
+
+Fix applied:
+
+- make the clamp opt-in via `CONAN_SINGLE_THREAD_ENV`
+- keep explicit clamps in smoke / preflight / CPU-probe style utilities
+- preserve an escape hatch for binarization / launcher scripts that still want deterministic low-thread execution
+
+Why it matters:
+
+- this was a direct throughput ceiling on data loading, preprocessing, BLAS-heavy CPU work, and mixed CPU/GPU pipelines
+
+### 4. Reuse the prepared batch across multi-optimizer training steps
+
+File:
+
+- `utils/commons/trainer_loop.py`
+
+Problem:
+
+- the training loop re-ran `_prepare_batch(...)` once per optimizer
+- with generator + discriminator style training this duplicated batch copying / device transfer on the hottest path
+
+Fix applied:
+
+- prepare the batch once per training step
+- hand each optimizer a cheap shallow copy of the already-prepared batch mapping
+
+Why it matters:
+
+- it removes redundant host-side work and unnecessary batch-to-device traffic without changing the optimizer contract
+
+### 5. Stop pre-expanding endless dataloader batches
+
+File:
+
+- `utils/commons/dataset_utils.py`
+
+Problem:
+
+- the old endless-dataloader path materialized a repeated 1000x batch list up front
+- that inflated Python memory, delayed startup, and added unnecessary list churn before training even began
+
+Fix applied:
+
+- replace the pre-expanded list path with a lightweight dynamic batch sampler
+- rebuild batch groups lazily each cycle, while preserving shuffle/DDP sharding behavior
+
+Why it matters:
+
+- it raises the practical throughput ceiling for long-running jobs and reduces launcher overhead on large datasets
+
+### 6. Reuse raw dataset items across stacked dataset builders
+
+Files:
+
+- `tasks/tts/dataset_utils.py`
+- `tasks/Conan/rhythm/dataset_mixin.py`
+- `tasks/Conan/rhythm/dataset_sample_builder.py`
+
+Problem:
+
+- upper dataset layers were re-fetching the same indexed item and reference item even when the base sample had already loaded them
+
+Fix applied:
+
+- stash `_raw_item` / `_raw_ref_item` during early sample assembly
+- consume those cached objects in downstream dataset builders
+- strip the temporary raw payloads before the final public sample leaves the assembler
+
+Why it matters:
+
+- it removes duplicate indexed-dataset lookups on a very common training/data-loading path
+
+### 7. Make RMVPE refinement depend on `pyworld` only when used
+
+File:
+
+- `modules/pe/rmvpe/inference.py`
+
+Problem:
+
+- importing RMVPE inference pulled in `pyworld` immediately, even though only the optional audio-refinement branch needs it
+
+Fix applied:
+
+- lazy-load `pyworld` inside the refinement path and raise a targeted error only on use
+
+Why it matters:
+
+- it keeps optional-dependency failures out of unrelated import paths and makes setup/debug workflows more robust
+
 ## Remaining high-value opportunities
 
 These were not changed yet, but remain the best next targets for throughput work:
@@ -89,6 +193,12 @@ These were not changed yet, but remain the best next targets for throughput work
 
 - `tests/rhythm/test_frame_plan.py`
   - added sparse-slot regression coverage for `build_frame_plan(...)`
+- `tests/rhythm/test_single_thread_env.py`
+  - verifies that thread clamping is opt-in and that numeric overrides work
+- `tests/rhythm/test_trainer_loop.py`
+  - verifies multi-optimizer training prepares the batch only once
+- `tests/rhythm/test_dataset_utils.py`
+  - verifies the endless sampler rebuilds batches lazily instead of relying on a giant pre-expanded batch list
 
 ## Suggested next action order
 

@@ -1,6 +1,6 @@
-from utils.commons.single_thread_env import apply_single_thread_env
+from utils.commons.single_thread_env import maybe_apply_single_thread_env_from_env
 
-apply_single_thread_env()
+maybe_apply_single_thread_env_from_env()
 
 from utils.commons.hparams import hparams, set_hparams
 import importlib

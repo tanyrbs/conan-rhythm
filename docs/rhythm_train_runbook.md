@@ -129,6 +129,7 @@ Interpretation:
 
 - passing probe means the code path is alive
 - it does **not** prove data quality, convergence, or maintained-stage readiness by itself
+- normal `python tasks/run.py ...` launches no longer force `OMP/MKL/...=1`; if you need a low-noise single-thread run for debugging, set `CONAN_SINGLE_THREAD_ENV=1` (or a numeric thread count) explicitly
 
 ## 8. Known blockers from the current repository checkout
 

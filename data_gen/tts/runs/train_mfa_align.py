@@ -1,9 +1,11 @@
-import utils.commons.single_thread_env  # NOQA
+from utils.commons.single_thread_env import maybe_apply_single_thread_env_from_env
 import glob
 import subprocess
 from textgrid import TextGrid
 import os
 from utils.commons.hparams import hparams, set_hparams
+
+maybe_apply_single_thread_env_from_env()
 
 
 def train_mfa_align(mfa_outputs="mfa_outputs",

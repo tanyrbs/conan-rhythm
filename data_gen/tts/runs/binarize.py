@@ -1,6 +1,8 @@
-import utils.commons.single_thread_env  # NOQA
+from utils.commons.single_thread_env import maybe_apply_single_thread_env_from_env
 from utils.commons.hparams import hparams, set_hparams
 import importlib
+
+maybe_apply_single_thread_env_from_env()
 
 
 def binarize():

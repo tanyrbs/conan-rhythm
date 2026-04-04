@@ -21,6 +21,40 @@ def apply_single_thread_env(threads: int = 1, *, force: bool = False) -> int:
     return threads
 
 
+def _parse_thread_env_request(value: str | None, *, default_threads: int) -> int | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "0", "false", "off", "no", "none"}:
+        return None
+    if normalized in {"1", "true", "on", "yes", "auto"}:
+        return max(1, int(default_threads))
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:  # pragma: no cover - defensive config guard
+        raise ValueError(
+            "CONAN_SINGLE_THREAD_ENV must be a positive integer or a truthy/falsey toggle."
+        ) from exc
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def maybe_apply_single_thread_env_from_env(
+    *,
+    env_var: str = "CONAN_SINGLE_THREAD_ENV",
+    default_threads: int = 1,
+    force: bool = False,
+) -> int | None:
+    requested = _parse_thread_env_request(
+        os.environ.get(env_var),
+        default_threads=default_threads,
+    )
+    if requested is None:
+        return None
+    return apply_single_thread_env(requested, force=force)
+
+
 def maybe_limit_torch_cpu_threads(threads: int = 1, *, force: bool = False) -> int:
     """Best-effort torch thread clamp for CPU-only probes / smoke tests."""
 
@@ -54,7 +88,8 @@ def maybe_limit_torch_cpu_threads(threads: int = 1, *, force: bool = False) -> i
     return threads
 
 
-apply_single_thread_env()
-
-
-__all__ = ["apply_single_thread_env", "maybe_limit_torch_cpu_threads"]
+__all__ = [
+    "apply_single_thread_env",
+    "maybe_apply_single_thread_env_from_env",
+    "maybe_limit_torch_cpu_threads",
+]

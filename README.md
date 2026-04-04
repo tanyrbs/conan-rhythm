@@ -239,6 +239,12 @@ What this probe checks:
 - gradient finiteness and clipped gradient norm
 - whether representative parameters actually move
 
+Performance note:
+
+- `tasks/run.py` no longer auto-clamps the whole training job to a single CPU thread
+- the explicit single-thread clamp is still used by smoke / preflight / CPU probe utilities where low-noise diagnostics are more important than peak throughput
+- if you need the old clamp for a launcher, set `CONAN_SINGLE_THREAD_ENV=1` (or a numeric thread count such as `CONAN_SINGLE_THREAD_ENV=4`) before `python tasks/run.py`
+
 Recommended formal path:
 
 0. `teacher_offline` + export `learned_offline` teacher assets

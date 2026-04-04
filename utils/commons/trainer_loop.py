@@ -36,6 +36,16 @@ class TrainerLoopMixin:
             return batch
         return move_to_cuda(copy.copy(batch), self.root_gpu)
 
+    @staticmethod
+    def _set_dataloader_epoch(dataloader, epoch: int):
+        for sampler in (
+            getattr(dataloader, 'batch_sampler', None),
+            getattr(dataloader, 'sampler', None),
+        ):
+            if hasattr(sampler, 'set_epoch'):
+                sampler.set_epoch(epoch)
+                return
+
     def _set_trainable_params_for_optimizer(self, task_ref, optimizer):
         if len(self.optimizers) <= 1:
             return
@@ -186,8 +196,7 @@ class TrainerLoopMixin:
         dataloader = task_ref.train_dataloader()
         epoch = self.current_epoch
         while True:
-            if self.use_ddp and hasattr(dataloader.sampler, 'set_epoch'):
-                dataloader.sampler.set_epoch(epoch)
+            self._set_dataloader_epoch(dataloader, epoch)
             task_ref.current_epoch = epoch
             self.current_epoch = epoch
             self.batch_loss_value = 0
@@ -230,16 +239,17 @@ class TrainerLoopMixin:
         amp_enabled = self._amp_enabled()
         autocast_kwargs = self._build_autocast_kwargs()
         should_step = self._should_step_optimizer()
+        prepared_batch = self._prepare_batch(batch)
 
         for opt_idx, optimizer in enumerate(self.optimizers):
             if optimizer is None:
                 continue
             self._set_trainable_params_for_optimizer(task_ref, optimizer)
-            prepared_batch = self._prepare_batch(batch)
+            optimizer_batch = copy.copy(prepared_batch)
             sync_context = self._ddp_sync_context(should_step=should_step)
             with sync_context:
                 with autocast(**autocast_kwargs):
-                    args = [prepared_batch, batch_idx, opt_idx]
+                    args = [optimizer_batch, batch_idx, opt_idx]
                     if self.use_ddp:
                         output = self.task(*args)
                     else:

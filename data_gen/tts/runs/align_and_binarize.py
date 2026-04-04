@@ -1,8 +1,10 @@
-import utils.commons.single_thread_env  # NOQA
+from utils.commons.single_thread_env import maybe_apply_single_thread_env_from_env
 from utils.commons.hparams import set_hparams, hparams
 from data_gen.tts.runs.binarize import binarize
 from data_gen.tts.runs.preprocess import preprocess
 from data_gen.tts.runs.train_mfa_align import train_mfa_align
+
+maybe_apply_single_thread_env_from_env()
 
 if __name__ == '__main__':
     set_hparams()
