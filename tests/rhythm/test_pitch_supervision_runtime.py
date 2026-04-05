@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
 
 
@@ -125,6 +126,56 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
                 test=False,
                 retimed_stage_active=False,
             )
+
+    def test_attach_bundle_then_add_pitch_loss_avoids_length_mismatch_on_retimed_targets(self) -> None:
+        class _DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        class _DummyTask(RhythmConanTaskMixin):
+            pass
+
+        support = RhythmTaskRuntimeSupport(_DummyOwner())
+        task = _DummyTask()
+        output = {
+            "mel_out": torch.zeros((1, 4, 80), dtype=torch.float32),
+            "retimed_f0_tgt": torch.arange(6, dtype=torch.float32).unsqueeze(0),
+            "retimed_uv_tgt": torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]], dtype=torch.float32),
+            "uv_pred": torch.zeros((1, 4, 1), dtype=torch.float32),
+            "fdiff": torch.tensor(0.0),
+        }
+        sample = {
+            "content": torch.ones((1, 4), dtype=torch.long),
+            "f0": torch.zeros((1, 4), dtype=torch.float32),
+            "uv": torch.zeros((1, 4), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_resample_retimed_target_to_output": False},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 6, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=torch.ones((1, 6), dtype=torch.float32),
+                acoustic_target_source="cached",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        losses = {}
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_mixin.hparams",
+            {"f0_gen": "diff", "lambda_uv": 1.0},
+            clear=True,
+        ):
+            task.add_pitch_loss(output, sample, losses)
+        self.assertIn("uv", losses)
+        self.assertTrue(torch.isfinite(losses["uv"]))
 
 
 if __name__ == "__main__":

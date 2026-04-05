@@ -106,7 +106,7 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **206 rhythm tests passed**
+- unit coverage: **207 rhythm tests passed**
 - latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, and stage-freeze fail-fast guards: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
@@ -133,7 +133,7 @@ The newest rerun extended regression coverage specifically around:
 - optional dependency guards for text frontend / tensorboard imports
 - optional dependency guards for `torchdyn` on non-flow rhythm paths
 - weighted acoustic-loss normalization over broadcasted weight mass
-- retimed pitch fallback suppression, missing-target detection, and post-align length parity with `mel_out`
+- retimed pitch fallback suppression, missing-target detection, post-align length parity with `mel_out`, and the `attach_acoustic_target_bundle(...) -> add_pitch_loss(...)` no-mismatch handoff
 - online retimed target confidence / repair gating
 - stage-specific parameter freeze guards and foreign-param detection
 - validation / smoke observability for skipped acoustic objectives and missing matched retimed pitch targets
