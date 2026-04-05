@@ -359,6 +359,15 @@ def _update_state_metrics(
     output: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> None:
+    device = ctx.execution.speech_duration_exec.device
+    for metric_key, field_name in (
+        ("rhythm_metric_disable_acoustic_train_path", "disable_acoustic_train_path"),
+        ("rhythm_metric_module_only_objective", "rhythm_module_only_objective"),
+        ("rhythm_metric_skip_acoustic_objective", "rhythm_skip_acoustic_objective"),
+    ):
+        scalar = _optional_scalar(output.get(field_name), device=device)
+        if scalar is not None:
+            metrics[metric_key] = scalar
     state_next = output.get("rhythm_state_next")
     if state_next is not None:
         metrics.update(
@@ -501,6 +510,13 @@ def _update_acoustic_target_metrics(
         metrics["rhythm_metric_teacher_source_boundary_scale_mean"] = _safe_mean(
             teacher_source_boundary_scale.float()
         )
+    for metric_key, field_name in (
+        ("rhythm_metric_pitch_supervision_disabled", "rhythm_pitch_supervision_disabled"),
+        ("rhythm_metric_missing_retimed_pitch_target", "rhythm_missing_retimed_pitch_target"),
+    ):
+        scalar = _optional_scalar(output.get(field_name), ctx.execution.speech_duration_exec.device)
+        if scalar is not None:
+            metrics[metric_key] = scalar
     for metric_key, field_name in (
         ("rhythm_metric_acoustic_target_length_frames_before_align", "acoustic_target_length_frames_before_align"),
         ("rhythm_metric_acoustic_output_length_frames_before_align", "acoustic_output_length_frames_before_align"),

@@ -94,7 +94,7 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **189 rhythm tests passed**
+- unit coverage: **190 rhythm tests passed**
 - latest compile/unit/smoke rerun after the validation-alignment, weighted-acoustic-loss, and retimed-pitch-guard fixes: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
@@ -113,6 +113,7 @@ The newest rerun extended regression coverage specifically around:
 - optional dependency guards for text frontend / tensorboard imports
 - weighted acoustic-loss normalization over broadcasted weight mass
 - retimed pitch fallback suppression and missing-target detection
+- validation / smoke observability for skipped acoustic objectives and missing matched retimed pitch targets
 
 Important asset-level caveats from the same audit:
 

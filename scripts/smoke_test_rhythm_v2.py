@@ -693,6 +693,12 @@ if __name__ == '__main__':
     print('metric exec total corr:', float(metrics['rhythm_metric_exec_total_corr'].detach()))
     print('metric prefix drift l1:', float(metrics['rhythm_metric_prefix_drift_l1'].detach()))
     print('metric prefix backlog mean:', float(metrics['rhythm_metric_prefix_backlog_mean'].detach()))
+    if 'rhythm_metric_skip_acoustic_objective' in metrics:
+        print('metric skip acoustic objective:', float(metrics['rhythm_metric_skip_acoustic_objective'].detach()))
+    if 'rhythm_metric_pitch_supervision_disabled' in metrics:
+        print('metric pitch supervision disabled:', float(metrics['rhythm_metric_pitch_supervision_disabled'].detach()))
+    if 'rhythm_metric_missing_retimed_pitch_target' in metrics:
+        print('metric missing retimed pitch target:', float(metrics['rhythm_metric_missing_retimed_pitch_target'].detach()))
     print('minimal metric source id:', float(minimal_metrics['rhythm_metric_acoustic_target_source_id']))
     print('minimal metric frame plan present:', float(minimal_metrics['rhythm_metric_frame_plan_present']))
     assert "rhythm_blank_exec_tgt" in guidance and "rhythm_teacher_blank_exec_tgt" in teacher

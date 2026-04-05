@@ -261,6 +261,43 @@ class RhythmMetricMaskingTests(unittest.TestCase):
             )
         )
 
+    def test_runtime_objective_and_pitch_guard_metrics_are_observable(self) -> None:
+        unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
+        dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            dur_shape_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_shape_unit=torch.tensor([[1.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 1, 3), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[1.0]], dtype=torch.float32),
+            blank_duration_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            planner=planner,
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+        metrics = build_rhythm_metric_dict(
+            {
+                "rhythm_execution": execution,
+                "rhythm_unit_batch": SimpleNamespace(unit_mask=unit_mask, dur_anchor_src=dur_anchor),
+                "disable_acoustic_train_path": 1.0,
+                "rhythm_module_only_objective": 1.0,
+                "rhythm_skip_acoustic_objective": 1.0,
+                "rhythm_pitch_supervision_disabled": 1.0,
+                "rhythm_missing_retimed_pitch_target": 1.0,
+            }
+        )
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_disable_acoustic_train_path"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_module_only_objective"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_skip_acoustic_objective"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_pitch_supervision_disabled"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_missing_retimed_pitch_target"], torch.tensor(1.0)))
+
     def test_metric_sections_flatten_without_loss(self) -> None:
         unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
         dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)

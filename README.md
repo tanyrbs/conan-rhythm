@@ -150,7 +150,7 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **189 passed**
+- rhythm unittests: **190 passed**
 - maintained smoke test: **passed**
 
 This latest rerun includes the new coverage added for:
@@ -164,6 +164,7 @@ This latest rerun includes the new coverage added for:
 - optional dependency guards for lazy text frontend import and no-op tensorboard fallback
 - weighted retimed acoustic loss normalization over full broadcasted weight mass
 - conservative retimed-pitch guard that disables wrong-axis source-pitch fallback unless explicitly opted in
+- validation / smoke metrics now surface runtime flags such as skipped acoustic objectives and missing matched retimed pitch targets
 
 The longer 2000-step probe results below remain the latest recorded long-run measurements for the maintained default configs; the new `context_match` / `balanced` configs are still experimental and were not silently promoted to the maintained baseline.
 
