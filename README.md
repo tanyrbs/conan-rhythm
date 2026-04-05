@@ -24,8 +24,9 @@ Canonical documentation is intentionally reduced to:
 
 1. `README.md`
 2. `docs/rhythm_migration_plan.md`
+3. `docs/autodl_training_handoff.md`
 
-Historical rhythm notes were retired from `docs/` so training guidance now has a single maintained source of truth plus one migration note.
+Historical rhythm notes were retired from `docs/` so training guidance now stays concentrated in one branch overview, one migration/audit note, and one cloud-launch handoff.
 
 ## Quickstart
 
@@ -40,6 +41,8 @@ Recommended maintained stage order:
 7. run `student_retimed`
 
 Formal student runs are not meaningful until the teacher export and cache rebuild are complete.
+
+For the practical AutoDL launch sequence, see `docs/autodl_training_handoff.md`.
 
 ## Installation
 
@@ -150,8 +153,11 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **191 passed**
+- rhythm unittests: **207 passed**
 - maintained smoke test: **passed**
+- strict `teacher_offline` preflight + dry-run on smoke assets: **passed**
+- strict `student_kd` preflight + dry-run on the maintained smoke integration binary: **passed**
+- strict default `student_retimed` preflight on the smoke stage-3 binary: **fails as expected** on missing `f0`; a `use_pitch_embed=False` override still passes only as a structural smoke check
 
 This latest rerun includes the new coverage added for:
 

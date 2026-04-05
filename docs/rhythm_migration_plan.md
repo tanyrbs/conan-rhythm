@@ -1,8 +1,10 @@
 # Rhythm Migration Plan (2026-04-05)
 
-This is the only maintained document under `docs/`. Together with `README.md`, it defines the current training path, the April 4-5 audit outcome, and what is still blocked.
+This remains the maintained migration/audit note under `docs/`. Together with `README.md` and `docs/autodl_training_handoff.md`, it defines the current training path, the April 4-5 audit outcome, and the cloud-launch handoff.
 
 ## 1. Maintained path and code boundaries
+
+AutoDL handoff note: if you are about to launch the real cloud run, read `docs/autodl_training_handoff.md` first; this file stays focused on migration status and audit conclusions.
 
 The maintained rhythm path remains:
 
