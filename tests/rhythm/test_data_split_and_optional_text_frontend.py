@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data_gen.conan_binarizer import BinarizationError, ConanBinarizer
-from scripts.build_libritts_local_processed_metadata import build_argparser
+from scripts.build_libritts_local_processed_metadata import build_argparser, _normalize_split_arg_list
 
 
 def _pop_modules(prefix: str) -> dict[str, object]:
@@ -155,6 +155,34 @@ class MetadataScriptDefaultsTests(unittest.TestCase):
         self.assertEqual(args.train_limit, 0)
         self.assertEqual(args.valid_limit, 0)
         self.assertEqual(args.test_limit, 0)
+
+    def test_build_libritts_metadata_accepts_multiple_train_splits(self) -> None:
+        args = build_argparser().parse_args(
+            [
+                "--raw_root",
+                "dummy_raw",
+                "--processed_data_dir",
+                "dummy_processed",
+                "--train_split",
+                "train-clean-100",
+                "--train_split",
+                "train-clean-360,train-other-500",
+            ]
+        )
+        self.assertEqual(
+            args.train_split,
+            ["train-clean-100", "train-clean-360,train-other-500"],
+        )
+
+    def test_normalize_split_arg_list_dedupes_and_preserves_order(self) -> None:
+        normalized = _normalize_split_arg_list(
+            ["train-clean-100", "train-clean-360, train-clean-100", "train-other-500"],
+            default="train-clean-100",
+        )
+        self.assertEqual(
+            normalized,
+            ["train-clean-100", "train-clean-360", "train-other-500"],
+        )
 
 
 if __name__ == "__main__":

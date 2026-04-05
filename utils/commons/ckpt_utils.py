@@ -4,6 +4,21 @@ import re
 import torch
 
 
+def _log_non_strict_incompatible_keys(model_name, incompatible):
+    if incompatible is None:
+        return
+    missing_keys = list(getattr(incompatible, 'missing_keys', []) or [])
+    unexpected_keys = list(getattr(incompatible, 'unexpected_keys', []) or [])
+    if missing_keys:
+        preview = ", ".join(missing_keys[:20])
+        suffix = " ..." if len(missing_keys) > 20 else ""
+        print(f"| Missing keys while loading '{model_name}': {len(missing_keys)} [{preview}{suffix}]")
+    if unexpected_keys:
+        preview = ", ".join(unexpected_keys[:20])
+        suffix = " ..." if len(unexpected_keys) > 20 else ""
+        print(f"| Unexpected keys while loading '{model_name}': {len(unexpected_keys)} [{preview}{suffix}]")
+
+
 def get_last_checkpoint(work_dir, steps=None):
     checkpoint = None
     last_ckpt_path = None
@@ -56,7 +71,9 @@ def load_ckpt(cur_model, ckpt_base_dir, model_name='model', force=True, strict=T
                         print("| Unmatched keys: ", key, new_param.shape, param.shape)
             for key in unmatched_keys:
                 del state_dict[key]
-        cur_model.load_state_dict(state_dict, strict=strict)
+        incompatible = cur_model.load_state_dict(state_dict, strict=strict)
+        if not strict:
+            _log_non_strict_incompatible_keys(model_name, incompatible)
         print(f"| load '{model_name}' from '{ckpt_path}'.")
     else:
         e_msg = f"| ckpt not found in {base_dir}."
@@ -85,7 +102,9 @@ def load_ckpt_emformer(cur_model, ckpt_base_dir, model_name='model', force=True,
                         print("| Unmatched keys: ", key, new_param.shape, param.shape)
             for key in unmatched_keys:
                 del state_dict[key]
-        cur_model.load_state_dict(state_dict, strict=strict)
+        incompatible = cur_model.load_state_dict(state_dict, strict=strict)
+        if not strict:
+            _log_non_strict_incompatible_keys(model_name, incompatible)
         print(f"| load '{model_name}' from '{ckpt_path}'.")
     else:
         e_msg = f"| ckpt not found in {base_dir}."

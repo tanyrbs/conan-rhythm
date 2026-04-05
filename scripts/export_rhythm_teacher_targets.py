@@ -50,6 +50,30 @@ def _sample_scalar_to_float(value, sample_idx: int, np, torch, default=1.0):
     return _tensor_scalar_to_float(value, np, torch, default=default)
 
 
+def _bool_like_metric(value, *, np, torch, default: float = 0.0) -> bool:
+    return bool(_tensor_scalar_to_float(value, np, torch, default=default) > 0.5)
+
+
+def _require_teacher_export_runtime(output, *, np, torch):
+    execution = output.get("rhythm_execution")
+    unit_batch = output.get("rhythm_unit_batch")
+    if execution is None or unit_batch is None:
+        raise RuntimeError("Teacher target export expected rhythm_execution and rhythm_unit_batch.")
+    teacher_as_main = _bool_like_metric(output.get("rhythm_teacher_as_main", 0.0), np=np, torch=torch)
+    teacher_only_stage = _bool_like_metric(output.get("rhythm_teacher_only_stage", 0.0), np=np, torch=torch)
+    if not (teacher_as_main or teacher_only_stage):
+        raise RuntimeError(
+            "Teacher target export expected teacher_offline runtime semantics "
+            "(rhythm_teacher_as_main or rhythm_teacher_only_stage)."
+        )
+    if output.get("rhythm_offline_execution") is not None:
+        raise RuntimeError(
+            "Teacher target export should not emit separate rhythm_offline_execution; "
+            "export consumes the primary teacher execution only."
+        )
+    return execution, unit_batch
+
+
 def _resolve_asset_path(output_dir: Path, *, split: str, item_name: str, flat_output: bool) -> Path:
     if flat_output:
         return output_dir / f"{item_name}.teacher.npz"
@@ -206,14 +230,11 @@ def main() -> None:
             with torch.no_grad():
                 with inference_ctx:
                     _, output = task.run_model(batch, infer=False, test=False)
-            execution = output.get("rhythm_execution")
-            unit_batch = output.get("rhythm_unit_batch")
-            if execution is None or unit_batch is None:
-                raise RuntimeError("Teacher target export expected rhythm_execution and rhythm_unit_batch.")
-            if not bool(output.get("rhythm_teacher_as_main", 0.0)):
-                raise RuntimeError("Teacher target export expected teacher_offline runtime with rhythm_teacher_as_main=true.")
-            if output.get("rhythm_offline_execution") is not None:
-                raise RuntimeError("Teacher target export should not emit separate rhythm_offline_execution in teacher_as_main mode.")
+            execution, unit_batch = _require_teacher_export_runtime(
+                output,
+                np=np,
+                torch=torch,
+            )
             remaining = args.max_items - split_processed if args.max_items > 0 else len(item_names)
             item_count = min(len(item_names), remaining)
             for sample_idx, item_name in enumerate(item_names[:item_count]):

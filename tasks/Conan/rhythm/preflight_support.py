@@ -26,6 +26,11 @@ from tasks.Conan.rhythm.config_contract import (
     collect_config_contract_evaluation,
     collect_cache_contract_report,
 )
+from utils.commons.train_set_contracts import (
+    collect_condition_map_issues,
+    collect_shared_json_artifact_issues,
+    normalize_train_set_dirs,
+)
 from utils.commons.hparams import set_hparams
 from utils.commons.indexed_datasets import IndexedDataset
 
@@ -496,6 +501,48 @@ def _collect_data_staging_checks(run_ctx: PreflightRunContext) -> None:
         run_ctx.split_reports.append(report)
         run_ctx.errors.extend(report.errors)
         run_ctx.warnings.extend(report.warnings)
+
+    train_set_dirs = normalize_train_set_dirs(run_ctx.hparams.get("train_sets", ""))
+    if train_set_dirs:
+        run_ctx.errors.extend(
+            _inspect_train_set_data_staging(
+                run_ctx.binary_dir,
+                train_set_dirs=train_set_dirs,
+            )
+        )
+
+
+def _inspect_train_set_data_staging(
+    binary_data_dir: str,
+    *,
+    train_set_dirs: list[str],
+) -> list[str]:
+    issues: list[str] = []
+    normalized_dirs = normalize_train_set_dirs(train_set_dirs)
+    if not binary_data_dir or not normalized_dirs:
+        return issues
+
+    for train_dir in normalized_dirs:
+        if not os.path.isdir(train_dir):
+            issues.append(f"train_set directory does not exist: {train_dir}")
+            continue
+        split_prefix = os.path.join(train_dir, "train")
+        issues.extend(_inspect_indexed_split_files(split_prefix))
+        ds = _open_dataset(split_prefix)
+        if ds is None:
+            issues.append(
+                f"Missing indexed dataset for train_set '{train_dir}' at {split_prefix}.data/.idx"
+            )
+            continue
+        dataset_len = len(ds)
+        if dataset_len <= 0:
+            issues.append(f"Indexed dataset for train_set '{train_dir}' is empty at {split_prefix}.")
+            continue
+        issues.extend(_inspect_indexed_split_arrays(split_prefix, dataset_len=dataset_len))
+
+    issues.extend(collect_shared_json_artifact_issues(binary_data_dir, normalized_dirs))
+    issues.extend(collect_condition_map_issues(binary_data_dir, normalized_dirs))
+    return issues
 
 
 def _collect_control_preview_checks(run_ctx: PreflightRunContext) -> None:

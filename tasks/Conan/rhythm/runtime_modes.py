@@ -234,7 +234,10 @@ def _apply_online_retimed_repair_gate(frame_weight, model_out):
         repair_stats.effective_speech_budget + repair_stats.effective_pause_budget
     ).clamp_min(0.0)
     repair_mass = repair_stats.repair_mass.clamp_min(0.0)
-    repair_gate = (effective_total / (effective_total + repair_mass).clamp_min(1.0)).clamp_(0.0, 1.0)
+    # Keep clean short-utterance online targets at full weight when no repair happened.
+    # clamp_min(1.0) would incorrectly shrink samples with effective_total < 1 even when
+    # repair_mass == 0.
+    repair_gate = (effective_total / (effective_total + repair_mass).clamp_min(1e-6)).clamp_(0.0, 1.0)
     repair_gate = repair_gate.to(device=frame_weight.device, dtype=frame_weight.dtype)
     while repair_gate.dim() < frame_weight.dim():
         repair_gate = repair_gate.unsqueeze(-1)

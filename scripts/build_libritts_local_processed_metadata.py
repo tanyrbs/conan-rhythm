@@ -111,7 +111,15 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--exp_name", default="build_libritts_local_processed_metadata")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
-    parser.add_argument("--train_split", default="train-clean-100")
+    parser.add_argument(
+        "--train_split",
+        action="append",
+        default=None,
+        help=(
+            "Training split name. Repeat the flag or pass a comma-separated value to combine "
+            "multiple training splits, e.g. --train_split train-clean-100 --train_split train-clean-360"
+        ),
+    )
     parser.add_argument("--valid_split", default="dev-clean")
     parser.add_argument("--test_split", default="test-clean")
     parser.add_argument("--train_limit", type=int, default=0, help="0 means no limit; use the full split.")
@@ -120,6 +128,19 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--min_mel_frames", type=int, default=32)
     parser.add_argument("--max_mel_frames", type=int, default=600)
     return parser
+
+
+def _normalize_split_arg_list(values: list[str] | None, *, default: str) -> list[str]:
+    raw_values = values if values else [default]
+    normalized: list[str] = []
+    for raw in raw_values:
+        parts = [part.strip() for part in str(raw).split(",")]
+        for part in parts:
+            if part and part not in normalized:
+                normalized.append(part)
+    if not normalized:
+        normalized.append(default)
+    return normalized
 
 
 def main() -> None:
@@ -156,8 +177,11 @@ def main() -> None:
     model.to(device)
     model.eval()
 
+    train_splits = _normalize_split_arg_list(args.train_split, default="train-clean-100")
     split_specs = [
-        (args.train_split, _normalize_split_tag(args.train_split), args.train_limit),
+        (split_name, _normalize_split_tag(split_name), args.train_limit)
+        for split_name in train_splits
+    ] + [
         (args.valid_split, _normalize_split_tag(args.valid_split), args.valid_limit),
         (args.test_split, _normalize_split_tag(args.test_split), args.test_limit),
     ]
@@ -211,8 +235,10 @@ def main() -> None:
                     "min_mel_frames": args.min_mel_frames,
                     "max_mel_frames": args.max_mel_frames,
                 },
+                "train_splits": train_splits,
+                "train_split_tags": [_normalize_split_tag(split) for split in train_splits],
                 "split_tags": {
-                    "train": _normalize_split_tag(args.train_split),
+                    "train": _normalize_split_tag(train_splits[0]) if len(train_splits) == 1 else "train",
                     "valid": _normalize_split_tag(args.valid_split),
                     "test": _normalize_split_tag(args.test_split),
                 },

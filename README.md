@@ -153,7 +153,7 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **207 passed**
+- rhythm unittests: **222 passed**
 - maintained smoke test: **passed**
 - strict `teacher_offline` preflight + dry-run on smoke assets: **passed**
 - strict `student_kd` preflight + dry-run on the maintained smoke integration binary: **passed**
@@ -300,10 +300,11 @@ intended chain is partial-load warm-start, not exact-architecture resume:
 - `student_kd` can warm-start from `teacher_offline`, which includes offline-teacher-only params that stage-2 does not instantiate
 - `student_retimed` can warm-start from `student_kd`, which may have been trained with `use_pitch_embed=false`, so stage-3 pitch embed / predictor weights may be missing
 
-When using `load_ckpt`, watch startup logs for missing or unmatched keys:
+When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched keys:
 
 - expected missing Rhythm V2 / offline-teacher / pitch keys are normal for cross-stage warm-start
 - missing core backbone keys such as encoder / decoder / speaker-related weights are a stop-and-debug signal
+- the non-strict loader now prints missing/unexpected key counts with a preview, so warm-start strength is no longer silent
 
 ## Config matrix
 
@@ -400,6 +401,20 @@ Current performance headroom is still mostly in:
 - batch transfer efficiency
 - binarization throughput
 - Windows-vs-Linux preprocessing throughput
+
+## Multi-binary `train_sets` note
+
+The codebase now hardens `train_sets` more than before:
+
+- train-set preflight checks now inspect extra `train` sidecars
+- the train dataloader now checks shared JSON artifacts across `binary_data_dir` and every entry in `train_sets`
+- known condition maps (`style` / `emotion` / `accent`) are compared when present
+
+But the practical recommendation is still conservative:
+
+- `train_sets` only affects the **train** dataloader; `valid` / `test` still come from `binary_data_dir`
+- for a first formal baseline, prefer one unified preprocess/binarize pass that produces a single `binary_data_dir`
+- use `train_sets` only when you intentionally accept multi-binary protocol coupling and have verified those artifacts match
 
 ## Repository hygiene
 

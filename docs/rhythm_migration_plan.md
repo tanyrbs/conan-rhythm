@@ -80,7 +80,10 @@ The maintained branch now includes these corrective changes:
   - base Conan -> `teacher_offline`
   - `teacher_offline` -> `student_kd`
   - `student_kd` -> `student_retimed`
+- non-strict checkpoint load now reports missing / unexpected key counts with a preview instead of only logging shape mismatches
 - `content_lengths` is now propagated explicitly through the rhythm dataset collater, runtime forward kwargs, and streaming evaluation instead of quietly reusing `mel_lengths`
+- teacher target export now accepts either `rhythm_teacher_as_main` or `rhythm_teacher_only_stage` runtime semantics, while still rejecting shadow `rhythm_offline_execution` on the export path
+- the local LibriTTS metadata helper now supports repeated or comma-separated `--train_split` values, so `train-clean-100 + train-clean-360` can be built in one processed metadata pass
 - a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
   - `rhythm_loss_balance_mode: ema_group`
   - maintained default stays `none`
@@ -112,8 +115,8 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **207 rhythm tests passed**
-- latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, and stage-freeze fail-fast guards: **passed**
+- unit coverage: **222 rhythm tests passed**
+- latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, stage-freeze fail-fast guards, train-set contract hardening, and warm-start missing/unexpected-key observability: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
@@ -153,6 +156,13 @@ Important asset-level caveats from the same audit:
 - the current teacher->student KD integration artifact under `artifacts/rhythm_teacher_export_student_kd/...` is smoke-only because its teacher ckpt mode is `bootstrap_random_init`
 - the generated stage-2 smoke `student_binary` already contains learned-offline teacher + retimed targets, but it still does **not** include F0
 - formal stage-3 still needs real F0 side files; the smoke probe used `--hparams use_pitch_embed=False` only to avoid claiming a false formal pass
+
+Additional training-prep caution:
+
+- `train_sets` is now better guarded, but it is still not the preferred first-formal-run path
+- the safer baseline remains: merge raw data first, then preprocess / binarize once into a single `binary_data_dir`
+- multi-binary concatenation is best treated as an advanced path, not the default maintained launch recipe
+- if you do choose multi-binary training, preflight now checks extra train-side indexed sidecars plus shared JSON / known condition maps before the run starts
 
 ## 4.1 Training-prep audit notes that matter before you launch
 

@@ -1,4 +1,3 @@
-import filecmp
 import os
 import traceback
 import numpy as np
@@ -29,6 +28,11 @@ from utils.nn.seq_utils import weights_nonzero_speech
 from utils.plot.plot import spec_to_figure
 from utils.text.text_encoder import build_token_encoder
 import matplotlib.pyplot as plt
+from utils.commons.train_set_contracts import (
+    collect_condition_map_issues,
+    collect_shared_json_artifact_issues,
+    normalize_train_set_dirs,
+)
 
 
 class SpeechBaseTask(BaseTask):
@@ -59,21 +63,13 @@ class SpeechBaseTask(BaseTask):
         if bool(hparams.get('print_train_hparams', False)):
             print(hparams)
         
-        if hparams['train_sets'] != '':
-            train_sets = hparams['train_sets'].split("|")
-            # check if all train_sets have the same spk map and dictionary
+        train_sets = normalize_train_set_dirs(hparams.get('train_sets', ''))
+        if train_sets:
             binary_data_dir = hparams['binary_data_dir']
-            file_to_cmp = ['phone_set.json']
-            if os.path.exists(f'{binary_data_dir}/word_set.json'):
-                file_to_cmp.append('word_set.json')
-            if hparams['use_spk_id']:
-                file_to_cmp.append('spk_map.json')
-            for f in file_to_cmp:
-                for ds_name in train_sets:
-                    base_file = os.path.join(binary_data_dir, f)
-                    ds_file = os.path.join(ds_name, f)
-                    assert filecmp.cmp(base_file, ds_file), \
-                        f'{f} in {ds_name} is not same with that in {binary_data_dir}.'
+            issues = collect_shared_json_artifact_issues(binary_data_dir, train_sets)
+            issues.extend(collect_condition_map_issues(binary_data_dir, train_sets))
+            if issues:
+                raise AssertionError("train_sets contract check failed: " + " | ".join(issues))
             train_dataset = BaseConcatDataset([
                 self.dataset_cls(prefix='train', shuffle=True, data_dir=ds_name) for ds_name in train_sets])
         else:

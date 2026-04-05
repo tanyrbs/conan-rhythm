@@ -54,7 +54,7 @@ python scripts/preflight_rhythm_v2.py \
 Observed result:
 
 - compileall: **passed**
-- rhythm tests: **207 passed**
+- rhythm tests: **222 passed**
 - maintained smoke test: **passed**
 - `teacher_offline` strict preflight + dry-run: **passed**
 - `student_kd` strict preflight + dry-run: **passed**
@@ -99,6 +99,7 @@ Use Linux paths, but keep the same logical contract.
 - The checked-in `artifacts/rhythm_teacher_export_student_kd/...` chain is smoke only because the teacher checkpoint is `bootstrap_random_init`.
 - Do not start `student_kd` until teacher export covers `train`, `valid`, and `test`.
 - Do not start default `student_retimed` unless the rebuilt stage-3 binary really contains usable F0/UV for the retimed path.
+- Even though `train_sets` is now checked more strictly, the first formal AutoDL baseline should still prefer one unified binary over concatenating multiple separately-binarized train roots.
 
 ## 4. AutoDL environment bootstrap
 
@@ -139,7 +140,9 @@ python -u scripts/smoke_test_rhythm_v2.py
 Expected:
 
 - compileall passes
-- tests stay at least at the local baseline order of magnitude (currently 207 rhythm tests)
+- tests stay at least at the local baseline order of magnitude (currently 222 rhythm tests)
+
+If you are building a LibriTTS processed metadata set for `train-clean-100 + train-clean-360`, the local metadata helper now supports repeated or comma-separated `--train_split` flags instead of forcing a single train split.
 - smoke still reports healthy closure signals such as:
   - `metric exec total corr = 1.0`
   - `metric prefix drift l1 = 0.0`
