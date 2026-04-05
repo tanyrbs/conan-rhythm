@@ -156,6 +156,111 @@ class RhythmMetricMaskingTests(unittest.TestCase):
         self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_budget"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_alias_L_kd_same_source_prefix"], torch.tensor(1.0)))
 
+    def test_acoustic_target_metrics_expose_length_mismatch_and_alignment_mode(self) -> None:
+        unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
+        dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            dur_shape_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_shape_unit=torch.tensor([[1.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 1, 3), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[1.0]], dtype=torch.float32),
+            blank_duration_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0]], dtype=torch.float32),
+            planner=planner,
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+        metrics = build_rhythm_metric_dict(
+            {
+                "rhythm_execution": execution,
+                "rhythm_unit_batch": SimpleNamespace(unit_mask=unit_mask, dur_anchor_src=dur_anchor),
+                "acoustic_target_is_retimed": True,
+                "acoustic_target_source": "cached",
+                "acoustic_target_length_frames_before_align": 17.0,
+                "acoustic_output_length_frames_before_align": 12.0,
+                "acoustic_target_length_delta_before_align": 5.0,
+                "acoustic_target_length_mismatch_abs_before_align": 5.0,
+                "acoustic_target_length_mismatch_present_before_align": 1.0,
+                "acoustic_target_length_mismatch_ratio_before_align": 5.0 / 17.0,
+                "acoustic_target_resampled_to_output": 1.0,
+                "acoustic_target_trimmed_to_output": 0.0,
+                "acoustic_target_length_frames_after_align": 12.0,
+                "acoustic_output_length_frames_after_align": 12.0,
+            }
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_frames_before_align"],
+                torch.tensor(17.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_output_length_frames_before_align"],
+                torch.tensor(12.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_delta_before_align"],
+                torch.tensor(5.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_mismatch_abs_before_align"],
+                torch.tensor(5.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_mismatch_present_before_align"],
+                torch.tensor(1.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_mismatch_ratio_before_align"],
+                torch.tensor(5.0 / 17.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_resampled_to_output"],
+                torch.tensor(1.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_trimmed_to_output"],
+                torch.tensor(0.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_length_frames_after_align"],
+                torch.tensor(12.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_output_length_frames_after_align"],
+                torch.tensor(12.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["rhythm_metric_acoustic_target_source_is_cached"],
+                torch.tensor(1.0),
+            )
+        )
+
     def test_metric_sections_flatten_without_loss(self) -> None:
         unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
         dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)

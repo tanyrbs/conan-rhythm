@@ -25,6 +25,7 @@ class TaskRuntimeState:
     retimed_stage_active: bool
     disable_source_pitch_supervision: bool
     disable_acoustic_train_path: bool
+    module_only_objective: bool
 
 
 def resolve_task_apply_override(
@@ -89,12 +90,15 @@ def resolve_task_runtime_state(
             or bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", False))
         )
     )
-    disable_acoustic_train_path = bool(
-        not infer
-        and not test
+    module_only_objective = bool(
+        not test
         and not apply_rhythm_render
         and bool(hparams.get("rhythm_enable_v2", False))
         and bool(hparams.get("rhythm_optimize_module_only", False))
+    )
+    disable_acoustic_train_path = bool(
+        not infer
+        and module_only_objective
         and bool(hparams.get("rhythm_fastpath_disable_acoustic_when_module_only", True))
     )
     disable_source_pitch_supervision = bool(
@@ -112,6 +116,7 @@ def resolve_task_runtime_state(
         retimed_stage_active=retimed_stage_active,
         disable_source_pitch_supervision=disable_source_pitch_supervision,
         disable_acoustic_train_path=disable_acoustic_train_path,
+        module_only_objective=module_only_objective,
     )
 
 

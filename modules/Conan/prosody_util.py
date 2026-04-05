@@ -57,7 +57,7 @@ class VQEmbeddingEMA(nn.Module):
             print('| running kmeans in VQVAE')  # data driven initialization for the embeddings
             x_flat = x.detach().reshape(-1, D)
             rp = torch.randperm(x_flat.size(0))
-            kd = kmeans2(x_flat[rp].data.cpu().numpy(), self.n_embeddings, minit='points')
+            kd = kmeans2(x_flat[rp].detach().cpu().numpy(), self.n_embeddings, minit='points')
             self.embedding.copy_(torch.from_numpy(kd[0]))
             x_flat, quantized, indices = self.encode(x)
             encodings = F.one_hot(indices, M).float()
@@ -186,7 +186,7 @@ class LocalStyleAdaptor(nn.Module):
         :param ref_mels: [B, T, 80]
         :return: [B, 1, H]
         """
-        padding_mask = ref_mels[:, :, 0].eq(self.padding_idx).data
+        padding_mask = ref_mels[:, :, 0].eq(self.padding_idx)
         ref_mels = self.wavenet(ref_mels.transpose(1, 2), nonpadding=(~padding_mask).unsqueeze(1).repeat([1, 80, 1])).transpose(1, 2)
         if mel2ph is not None:
             ref_ph, _ = group_hidden_by_segs(ref_mels, mel2ph, torch.max(mel2ph))

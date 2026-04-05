@@ -141,21 +141,69 @@ class RhythmTaskRuntimeSupport:
         disable_source_pitch_supervision: bool,
         disable_acoustic_train_path: bool,
     ):
+        pitch_supervision_disabled = bool(disable_source_pitch_supervision)
+        missing_retimed_pitch_target = False
+        if (
+            acoustic_target_is_retimed
+            and not pitch_supervision_disabled
+            and not bool(hparams.get("rhythm_allow_source_pitch_fallback_when_retimed", False))
+        ):
+            has_retimed_pitch = (
+                output.get("retimed_f0_tgt") is not None
+                and output.get("retimed_uv_tgt") is not None
+            )
+            if not has_retimed_pitch:
+                pitch_supervision_disabled = True
+                missing_retimed_pitch_target = True
         output["acoustic_target_mel"] = acoustic_target
         output["acoustic_target_is_retimed"] = bool(acoustic_target_is_retimed)
         output["acoustic_target_weight"] = acoustic_weight
         output["acoustic_target_source"] = acoustic_target_source
-        output["rhythm_pitch_supervision_disabled"] = float(disable_source_pitch_supervision)
+        output["rhythm_pitch_supervision_disabled"] = float(pitch_supervision_disabled)
+        output["rhythm_missing_retimed_pitch_target"] = float(missing_retimed_pitch_target)
         output["disable_acoustic_train_path"] = float(disable_acoustic_train_path)
+        target_len_before_align = None
+        mel_len_before_align = None
+        if hasattr(acoustic_target, "dim") and acoustic_target.dim() >= 2:
+            target_len_before_align = int(acoustic_target.size(1))
+            output["acoustic_target_length_frames_before_align"] = float(target_len_before_align)
+        if hasattr(output.get("mel_out"), "dim") and output["mel_out"].dim() >= 2:
+            mel_len_before_align = int(output["mel_out"].size(1))
+            output["acoustic_output_length_frames_before_align"] = float(mel_len_before_align)
+        if target_len_before_align is not None and mel_len_before_align is not None:
+            delta = float(target_len_before_align - mel_len_before_align)
+            output["acoustic_target_length_delta_before_align"] = delta
+            mismatch_abs = abs(delta)
+            output["acoustic_target_length_mismatch_abs_before_align"] = mismatch_abs
+            output["acoustic_target_length_mismatch_present_before_align"] = float(mismatch_abs > 0.0)
+            output["acoustic_target_length_mismatch_ratio_before_align"] = mismatch_abs / float(
+                max(target_len_before_align, mel_len_before_align, 1)
+            )
+        output["acoustic_target_resampled_to_output"] = 0.0
+        output["acoustic_target_trimmed_to_output"] = 0.0
         if acoustic_target_is_retimed:
+            had_length_mismatch = (
+                target_len_before_align is not None
+                and mel_len_before_align is not None
+                and target_len_before_align != mel_len_before_align
+            )
             mel_out_aligned, acoustic_target, acoustic_weight = self.owner._align_acoustic_target_to_output(
                 output["mel_out"],
                 acoustic_target,
                 acoustic_weight,
             )
+            if had_length_mismatch:
+                if bool(hparams.get("rhythm_resample_retimed_target_to_output", True)):
+                    output["acoustic_target_resampled_to_output"] = 1.0
+                else:
+                    output["acoustic_target_trimmed_to_output"] = 1.0
             output["mel_out"] = mel_out_aligned
             output["acoustic_target_mel"] = acoustic_target
             output["acoustic_target_weight"] = acoustic_weight
+        if hasattr(output.get("acoustic_target_mel"), "dim") and output["acoustic_target_mel"].dim() >= 2:
+            output["acoustic_target_length_frames_after_align"] = float(output["acoustic_target_mel"].size(1))
+        if hasattr(output.get("mel_out"), "dim") and output["mel_out"].dim() >= 2:
+            output["acoustic_output_length_frames_after_align"] = float(output["mel_out"].size(1))
         return output["acoustic_target_mel"], output["acoustic_target_weight"]
 
     def add_style_losses(self, output, losses, *, schedule_only_stage: bool) -> None:

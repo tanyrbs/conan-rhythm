@@ -6,12 +6,14 @@ import json
 import time
 from datetime import datetime
 
+from utils.numpy_compat import ensure_legacy_numpy_aliases
 from utils.commons.hparams import hparams, set_hparams
 from utils.commons.ckpt_utils import load_ckpt, load_ckpt_emformer
 from utils.audio import librosa_wav2spec
 from utils.audio.io import save_wav
 from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
 
+ensure_legacy_numpy_aliases()
 import soundfile as sf
 from librosa.filters import mel as librosa_mel_fn
 from librosa.util import normalize
@@ -240,4 +242,4 @@ if __name__ == "__main__":
     ]
     
     engine = StreamingVoiceConversion(hparams)
-    engine.test_multiple_sentences(demo) 
+    engine.test_multiple_sentences(demo)

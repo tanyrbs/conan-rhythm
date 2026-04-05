@@ -153,6 +153,18 @@ def _inspect_processed_data_dir(processed_dir: str) -> list[str]:
     return issues
 
 
+def _collect_processed_data_dir_findings(processed_dir: str, *, strict: bool) -> tuple[list[str], list[str]]:
+    issues = _inspect_processed_data_dir(processed_dir)
+    if not issues:
+        return [], []
+    if strict:
+        return [], [
+            f"{issue} Strict processed-data validation is enabled for formal training."
+            for issue in issues
+        ]
+    return issues, []
+
+
 def _build_cache_shape_contract(hparams):
     from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
     from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
@@ -329,6 +341,11 @@ def _parse_preflight_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Also build ConanDataset/ConanTask and run one no-grad batch.",
     )
+    parser.add_argument(
+        "--strict_processed_data_dir",
+        action="store_true",
+        help="Escalate missing/placeholder processed_data_dir from warning to error for formal training checks.",
+    )
     return parser.parse_args(argv)
 
 
@@ -435,7 +452,12 @@ def _collect_data_staging_checks(run_ctx: PreflightRunContext) -> None:
         run_ctx.errors.append("binary_data_dir is empty.")
     elif not os.path.isdir(run_ctx.binary_dir):
         run_ctx.errors.append(f"binary_data_dir does not exist: {run_ctx.binary_dir}")
-    run_ctx.warnings.extend(_inspect_processed_data_dir(run_ctx.processed_dir))
+    processed_warnings, processed_errors = _collect_processed_data_dir_findings(
+        run_ctx.processed_dir,
+        strict=bool(getattr(run_ctx.args, "strict_processed_data_dir", False)),
+    )
+    run_ctx.warnings.extend(processed_warnings)
+    run_ctx.errors.extend(processed_errors)
 
     for split in run_ctx.args.splits:
         report = _inspect_split_data_staging(run_ctx, split)

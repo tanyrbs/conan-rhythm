@@ -1,3 +1,6 @@
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
 import librosa
 from utils.audio import librosa_wav2spec
 from utils.commons.hparams import hparams

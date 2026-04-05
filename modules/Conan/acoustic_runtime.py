@@ -27,7 +27,7 @@ def resolve_style_embed(model, *, spk_embed, ref, ret: dict):
         return style_embed
     if ref is None:
         raise ValueError(
-            "When spk_embed is None, need target tensor to extract speaker embedding."
+            "When spk_embed is None, need reference mel tensor to extract speaker embedding."
         )
     ret["style_embed"] = style_embed = model.encode_spk_embed(
         ref.transpose(1, 2)

@@ -1,7 +1,11 @@
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
+import librosa
 
 
 def _stft(y, hop_size, win_size, fft_size):
@@ -14,7 +18,7 @@ def _istft(y, hop_size, win_size):
 
 def griffin_lim(S, hop_size, win_size, fft_size, angles=None, n_iters=30):
     angles = np.exp(2j * np.pi * np.random.rand(*S.shape)) if angles is None else angles
-    S_complex = np.abs(S).astype(np.complex)
+    S_complex = np.abs(S).astype(np.complex128)
     y = _istft(S_complex * angles, hop_size, win_size)
     for i in range(n_iters):
         angles = np.exp(1j * np.angle(_stft(y, hop_size, win_size, fft_size)))

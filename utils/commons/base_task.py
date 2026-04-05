@@ -7,7 +7,11 @@ from datetime import datetime
 import numpy as np
 import torch.utils.data
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
+
+try:
+    from torch.utils.tensorboard import SummaryWriter as _TorchSummaryWriter
+except Exception:
+    _TorchSummaryWriter = None
 from utils.commons.dataset_utils import data_loader
 from utils.commons.hparams import hparams
 from utils.commons.meters import AvgrageMeter
@@ -19,6 +23,20 @@ from utils.commons.trainer import Trainer
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format=log_format, datefmt='%m/%d %I:%M:%S %p')
+
+
+class _NullSummaryWriter:
+    def __init__(self, *args, **kwargs):
+        self.log_dir = kwargs.get('log_dir')
+
+    def __getattr__(self, name):
+        def _noop(*args, **kwargs):
+            return None
+
+        return _noop
+
+
+SummaryWriter = _TorchSummaryWriter or _NullSummaryWriter
 
 
 class BaseTask(nn.Module):
@@ -68,6 +86,11 @@ class BaseTask(nn.Module):
     def build_tensorboard(self, save_dir, name, **kwargs):
         log_dir = os.path.join(save_dir, name)
         os.makedirs(log_dir, exist_ok=True)
+        if _TorchSummaryWriter is None:
+            logging.warning(
+                "tensorboard is not installed; falling back to a no-op SummaryWriter for log_dir=%s",
+                log_dir,
+            )
         self.logger = SummaryWriter(log_dir=log_dir, **kwargs)
 
     ######################

@@ -5,6 +5,10 @@ from utils.commons.ckpt_utils import load_ckpt
 from utils.commons.hparams import set_hparams, hparams
 from utils.commons.meters import Timer
 import numpy as np
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
 import librosa
 import json
 import glob

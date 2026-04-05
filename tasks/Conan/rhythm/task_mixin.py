@@ -8,11 +8,15 @@ debugging and focused inspection.
 import torch
 import torch.nn.functional as F
 
-from tasks.Conan.base_gen_task import f0_to_figure
+from tasks.Conan.rhythm.acoustic_loss_utils import (
+    expand_frame_weight,
+    reduce_weighted_elementwise_loss,
+)
 from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
 from tasks.Conan.rhythm.loss_routing import compute_reporting_total_loss
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
 from tasks.Conan.rhythm.loss_balance import AdaptiveRhythmLossBalancer
+from tasks.Conan.rhythm.plot_utils import f0_to_figure
 from tasks.Conan.rhythm.distill_confidence import (
     build_runtime_distill_confidence_bundle as build_runtime_distill_confidence_bundle_helper,
     normalize_component_distill_confidence as normalize_component_distill_confidence_helper,
@@ -59,7 +63,6 @@ from utils.audio.pitch.utils import denorm_f0
 from utils.commons.hparams import hparams
 from utils.commons.tensor_utils import tensors_to_scalars
 from utils.metrics.ssim import ssim
-from utils.nn.seq_utils import weights_nonzero_speech
 
 
 class RhythmConanTaskMixin:
@@ -358,32 +361,37 @@ class RhythmConanTaskMixin:
         return mel_out, acoustic_target, acoustic_weight
 
     @staticmethod
-    def _expand_frame_weight(weight: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if weight is None:
-            return weights_nonzero_speech(target)
-        weight = weight.float()
-        if weight.dim() == 1:
-            weight = weight.unsqueeze(0)
-        while weight.dim() < target.dim():
-            weight = weight.unsqueeze(-1)
-        return weight
+    def _expand_frame_weight(weight: torch.Tensor | None, target: torch.Tensor) -> torch.Tensor:
+        weights = expand_frame_weight(weight, target)
+        if weights.shape != target.shape:
+            weights = torch.broadcast_to(weights, target.shape)
+        return weights
 
     def _weighted_l1_loss(self, decoder_output, target, frame_weight):
         loss = F.l1_loss(decoder_output, target, reduction='none')
-        weights = self._expand_frame_weight(frame_weight, target)
-        return (loss * weights).sum() / weights.sum().clamp_min(1.0)
+        return reduce_weighted_elementwise_loss(
+            loss,
+            frame_weight=frame_weight,
+            target=target,
+        )
 
     def _weighted_mse_loss(self, decoder_output, target, frame_weight):
         loss = F.mse_loss(decoder_output, target, reduction='none')
-        weights = self._expand_frame_weight(frame_weight, target)
-        return (loss * weights).sum() / weights.sum().clamp_min(1.0)
+        return reduce_weighted_elementwise_loss(
+            loss,
+            frame_weight=frame_weight,
+            target=target,
+        )
 
     def _weighted_ssim_loss(self, decoder_output, target, frame_weight, bias=6.0):
         decoder_output = decoder_output[:, None] + bias
         target = target[:, None] + bias
         ssim_loss = 1 - ssim(decoder_output, target, size_average=False)
-        weights = self._expand_frame_weight(frame_weight, target[:, 0])
-        return (ssim_loss * weights).sum() / weights.sum().clamp_min(1.0)
+        return reduce_weighted_elementwise_loss(
+            ssim_loss,
+            frame_weight=frame_weight,
+            target=target[:, 0],
+        )
 
     def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
         if frame_weight is None:
@@ -409,7 +417,7 @@ class RhythmConanTaskMixin:
         return tech
 
     def _run_offline_teacher_model(self, sample, *, infer: bool, test: bool, **kwargs):
-        if infer or test:
+        if test:
             return None
         if not getattr(self.model, "rhythm_enable_v2", False):
             return None
@@ -437,12 +445,12 @@ class RhythmConanTaskMixin:
         if rhythm_ref_conditioning is None:
             raise RuntimeError("rhythm_teacher_only_stage requires ref_rhythm_stats and ref_rhythm_trace.")
         teacher_scale = self.model._resolve_rhythm_source_boundary_scale(
-            infer=False,
+            infer=bool(infer),
             global_steps=int(self.global_step),
             teacher=True,
         )
         pause_ratio = self.model._resolve_rhythm_pause_topk_ratio(
-            infer=False,
+            infer=bool(infer),
             global_steps=int(self.global_step),
         )
         execution, confidence = rhythm_module.forward_teacher(
@@ -460,9 +468,12 @@ class RhythmConanTaskMixin:
         output = {
             "rhythm_execution": execution,
             "rhythm_unit_batch": unit_batch,
+            "rhythm_stage": "teacher_offline",
             "disable_acoustic_train_path": 1.0,
             "rhythm_schedule_only_stage": 0.0,
             "rhythm_teacher_only_stage": 1.0,
+            "rhythm_module_only_objective": 1.0,
+            "rhythm_skip_acoustic_objective": 1.0,
             **self._task_runtime_support().build_offline_confidence_outputs(confidence),
         }
         output.update(collect_planner_runtime_outputs(execution))
@@ -496,6 +507,7 @@ class RhythmConanTaskMixin:
         apply_rhythm_render = runtime_state.apply_rhythm_render
         retimed_stage_active = runtime_state.retimed_stage_active
         disable_source_pitch_supervision = runtime_state.disable_source_pitch_supervision
+        module_only_objective = runtime_state.module_only_objective
         if disable_source_pitch_supervision and retimed_stage_active and not self._warned_retimed_pitch_supervision:
             print("| Rhythm V2: retimed canvas active, disabling source-aligned pitch supervision for this run.")
             self._warned_retimed_pitch_supervision = True
@@ -535,7 +547,7 @@ class RhythmConanTaskMixin:
         # pharyngeal, vibrato, glissando = sample['pharyngeal'], sample['vibrato'], sample['glissando']
         disable_acoustic_train_path = runtime_state.disable_acoustic_train_path
         disable_source_pitch_supervision = bool(disable_source_pitch_supervision or disable_acoustic_train_path)
-        if disable_acoustic_train_path and rhythm_ref_conditioning is not None:
+        if disable_acoustic_train_path and rhythm_ref_conditioning is not None and not infer:
             ref = None
         runtime_helper = self._task_runtime_support()
         runtime_offline_source_cache = runtime_helper.collect_runtime_offline_source_cache(sample, infer=infer)
@@ -578,12 +590,22 @@ class RhythmConanTaskMixin:
             disable_source_pitch_supervision=disable_source_pitch_supervision,
             disable_acoustic_train_path=disable_acoustic_train_path,
         )
+        self._assert_pitch_supervision_ready(
+            output,
+            sample,
+            infer=infer,
+            test=test,
+            retimed_stage_active=retimed_stage_active,
+        )
         
         if not test:
             schedule_only_stage = stage == "legacy_schedule_only"
+            skip_acoustic_objective = bool(schedule_only_stage or module_only_objective)
             output["rhythm_schedule_only_stage"] = float(schedule_only_stage)
             output["rhythm_stage"] = stage
-            if not schedule_only_stage and not disable_acoustic_train_path:
+            output["rhythm_module_only_objective"] = float(module_only_objective)
+            output["rhythm_skip_acoustic_objective"] = float(skip_acoustic_objective)
+            if not skip_acoustic_objective:
                 self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
                 self.add_pitch_loss(output, sample, losses)
@@ -592,6 +614,86 @@ class RhythmConanTaskMixin:
             runtime_helper.route_conan_losses(losses, schedule_only_stage=schedule_only_stage)
         
         return losses, output
+
+    @staticmethod
+    def _has_nonempty_pitch_payload(value) -> bool:
+        if value is None:
+            return False
+        numel = getattr(value, "numel", None)
+        if callable(numel):
+            try:
+                return int(numel()) > 0
+            except Exception:
+                pass
+        shape = getattr(value, "shape", None)
+        if shape is not None:
+            try:
+                if len(shape) == 0:
+                    return True
+                return all(int(dim) > 0 for dim in shape)
+            except Exception:
+                pass
+        try:
+            return len(value) > 0
+        except Exception:
+            return True
+
+    @classmethod
+    def _assert_pitch_supervision_ready(
+        cls,
+        output,
+        sample,
+        *,
+        infer: bool,
+        test: bool,
+        retimed_stage_active: bool,
+    ) -> None:
+        if infer or test:
+            return
+        if not bool(hparams.get("rhythm_fail_fast_missing_pitch_supervision", True)):
+            return
+        if not bool(hparams.get("use_pitch_embed", False)):
+            return
+        if bool(output.get("disable_acoustic_train_path", False)):
+            return
+
+        supervision_disabled = bool(output.get("rhythm_pitch_supervision_disabled", False))
+        acoustic_target_is_retimed = bool(output.get("acoustic_target_is_retimed", False))
+        retimed_f0 = output.get("retimed_f0_tgt")
+        retimed_uv = output.get("retimed_uv_tgt")
+        source_f0 = sample.get("f0")
+        source_uv = sample.get("uv")
+
+        has_retimed_pitch = cls._has_nonempty_pitch_payload(retimed_f0) and cls._has_nonempty_pitch_payload(retimed_uv)
+        has_source_pitch = cls._has_nonempty_pitch_payload(source_f0) and cls._has_nonempty_pitch_payload(source_uv)
+        if acoustic_target_is_retimed:
+            if has_retimed_pitch and not supervision_disabled:
+                return
+        else:
+            if has_source_pitch and not supervision_disabled:
+                return
+
+        detail = (
+            f"(acoustic_target_is_retimed={int(acoustic_target_is_retimed)}, "
+            f"supervision_disabled={int(supervision_disabled)}, "
+            f"has_retimed_f0={int(cls._has_nonempty_pitch_payload(retimed_f0))}, "
+            f"has_retimed_uv={int(cls._has_nonempty_pitch_payload(retimed_uv))}, "
+            f"has_source_f0={int(cls._has_nonempty_pitch_payload(source_f0))}, "
+            f"has_source_uv={int(cls._has_nonempty_pitch_payload(source_uv))})"
+        )
+        if acoustic_target_is_retimed or retimed_stage_active:
+            raise RuntimeError(
+                "Rhythm retimed training is missing usable pitch supervision while use_pitch_embed=true. "
+                "Retimed acoustic targets must be paired with matched retimed f0/uv targets instead of silently "
+                f"falling back to source-aligned supervision. {detail} "
+                "Provide source f0/uv so retimed_f0_tgt/retimed_uv_tgt can be built, or explicitly set "
+                "rhythm_fail_fast_missing_pitch_supervision=false only for debugging."
+            )
+        raise RuntimeError(
+            "Pitch supervision is missing while use_pitch_embed=true during training. "
+            f"{detail} Provide f0/uv in the binary cache, disable use_pitch_embed, or explicitly set "
+            "rhythm_fail_fast_missing_pitch_supervision=false only for debugging."
+        )
 
     def add_pitch_loss(self, output, sample, losses):
         # mel2ph = sample['mel2ph']  # [B, T_s]
@@ -789,7 +891,8 @@ class RhythmConanTaskMixin:
         )
         outputs['nsamples'] = sample['nsamples']
         outputs = tensors_to_scalars(outputs)
-        if batch_idx < hparams['num_valid_plots']:
+        mel_out = model_out.get("mel_out")
+        if batch_idx < hparams['num_valid_plots'] and mel_out is not None:
             sr = hparams["audio_sample_rate"]
             gt_f0 = (
                 denorm_f0(sample['f0'], sample["uv"])
@@ -806,11 +909,11 @@ class RhythmConanTaskMixin:
             self.logger.add_audio(f'wav_gt_{batch_idx}', wav_gt, self.global_step, sr)
 
             if pred_f0 is not None:
-                wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy(), f0=pred_f0[0].cpu().numpy())
+                wav_pred = self.vocoder.spec2wav(mel_out[0].cpu().numpy(), f0=pred_f0[0].cpu().numpy())
             else:
-                wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy())
+                wav_pred = self.vocoder.spec2wav(mel_out[0].cpu().numpy())
             self.logger.add_audio(f'wav_pred_{batch_idx}', wav_pred, self.global_step, sr)
-            self.plot_mel(batch_idx, acoustic_target, model_out['mel_out'][0], f'mel_{batch_idx}')
+            self.plot_mel(batch_idx, acoustic_target, mel_out[0], f'mel_{batch_idx}')
             if gt_f0 is not None or pred_f0 is not None:
                 self.logger.add_figure(
                     f'f0_{batch_idx}',

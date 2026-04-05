@@ -21,6 +21,7 @@ from modules.Conan.rhythm.stages import normalize_rhythm_stage
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.config_contract_stage_rules import detect_rhythm_profile
 from tasks.Conan.rhythm.preflight_support import (
+    _collect_processed_data_dir_findings,
     _compose_hparams_override,
     _inspect_indexed_split_arrays,
     _inspect_indexed_split_files,
@@ -81,6 +82,12 @@ class PreflightReadinessTests(unittest.TestCase):
         issues = _inspect_processed_data_dir("")
         self.assertEqual(len(issues), 1)
         self.assertIn("cached-only preflight mainly validates binary cache readiness", issues[0])
+
+    def test_preflight_can_escalate_missing_processed_dir_for_formal_training(self) -> None:
+        warnings, errors = _collect_processed_data_dir_findings("", strict=True)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Strict processed-data validation is enabled", errors[0])
 
     def test_preflight_compose_hparams_override_accepts_binary_and_processed_dirs(self) -> None:
         args = SimpleNamespace(

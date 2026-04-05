@@ -14,10 +14,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data_gen.voice_encoder_optional import build_voice_encoder
+from data_gen.tts.txt_processors import base_text_processor as txt_base_module
+from data_gen.tts.txt_processors.base_text_processor import get_txt_processor_cls
 from utils.audio import librosa_wav2spec
 from utils.audio import align as audio_align
 from utils.audio import cwt as audio_cwt
 from utils.audio import vad as audio_vad
+from utils.commons import base_task as base_task_module
 from utils.audio import pitch_utils
 from utils.extract_f0_rmvpe import F0Extractor, _require_pyworld, _require_rmvpe_cls
 
@@ -225,6 +228,72 @@ class OptionalDependencyGuardTests(unittest.TestCase):
             self.assertIsInstance(module._HIFIGAN_NSF_IMPORT_ERROR, OSError)
         finally:
             _restore_modules("tasks.tts.vocoder_infer", removed)
+
+    def test_txt_processor_package_import_does_not_require_g2p_en_at_import_time(self) -> None:
+        removed = _pop_modules("data_gen.tts.txt_processors")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "g2p_en" or name.startswith("g2p_en."):
+                raise ModuleNotFoundError("No module named 'g2p_en'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                module = importlib.import_module("data_gen.tts.txt_processors")
+            self.assertTrue(hasattr(module, "__doc__"))
+        finally:
+            _restore_modules("data_gen.tts.txt_processors", removed)
+
+    def test_task_mixin_import_does_not_require_g2p_en_at_import_time(self) -> None:
+        removed_task_mixin = _pop_modules("tasks.Conan.rhythm.task_mixin")
+        removed_base_task = _pop_modules("tasks.Conan.base_gen_task")
+        removed_txt = _pop_modules("data_gen.tts.txt_processors")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "g2p_en" or name.startswith("g2p_en."):
+                raise ModuleNotFoundError("No module named 'g2p_en'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                module = importlib.import_module("tasks.Conan.rhythm.task_mixin")
+            self.assertTrue(hasattr(module, "RhythmConanTaskMixin"))
+        finally:
+            _restore_modules("data_gen.tts.txt_processors", removed_txt)
+            _restore_modules("tasks.Conan.base_gen_task", removed_base_task)
+            _restore_modules("tasks.Conan.rhythm.task_mixin", removed_task_mixin)
+
+    def test_get_txt_processor_cls_raises_clear_error_for_missing_optional_dependency(self) -> None:
+        missing = ModuleNotFoundError("No module named 'g2p_en'")
+        missing.name = "g2p_en"
+        with mock.patch.dict(txt_base_module.REGISTERED_TEXT_PROCESSORS, {}, clear=True):
+            with mock.patch(
+                "data_gen.tts.txt_processors.base_text_processor.importlib.import_module",
+                side_effect=missing,
+            ):
+                with self.assertRaisesRegex(ImportError, "optional dependency 'g2p_en'"):
+                    get_txt_processor_cls("en")
+
+    def test_get_txt_processor_cls_returns_none_for_missing_processor_module(self) -> None:
+        missing = ModuleNotFoundError("No module named 'data_gen.tts.txt_processors.zz'")
+        missing.name = "data_gen.tts.txt_processors.zz"
+        with mock.patch.dict(txt_base_module.REGISTERED_TEXT_PROCESSORS, {}, clear=True):
+            with mock.patch(
+                "data_gen.tts.txt_processors.base_text_processor.importlib.import_module",
+                side_effect=missing,
+            ):
+                self.assertIsNone(get_txt_processor_cls("zz"))
+
+    def test_build_tensorboard_falls_back_to_noop_writer_without_tensorboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = base_task_module.BaseTask.__new__(base_task_module.BaseTask)
+            with mock.patch.object(base_task_module, "_TorchSummaryWriter", None):
+                with mock.patch.object(base_task_module, "SummaryWriter", base_task_module._NullSummaryWriter):
+                    task.build_tensorboard(tmp, "tb_logs")
+            self.assertIsInstance(task.logger, base_task_module._NullSummaryWriter)
+            self.assertIsNone(task.logger.add_scalar("demo", 1.0, 0))
 
 
 if __name__ == "__main__":

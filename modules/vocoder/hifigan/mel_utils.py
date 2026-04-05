@@ -1,6 +1,10 @@
 import numpy as np
 import torch
 import torch.utils.data
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
 from librosa.filters import mel as librosa_mel_fn
 from scipy.io.wavfile import read
 

@@ -1,6 +1,10 @@
-import librosa
 import numpy as np
 import wave
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
+import librosa
 
 try:
     import soundfile as sf

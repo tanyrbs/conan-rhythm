@@ -17,6 +17,17 @@ from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 
 
 class RhythmTaskRuntimeSupportTests(unittest.TestCase):
+    @staticmethod
+    def _runtime_owner():
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                return mel_out, acoustic_target, acoustic_weight
+
+        return DummyOwner()
+
     def test_dedup_trainable_params_filters_duplicates_and_frozen(self) -> None:
         p1 = torch.nn.Parameter(torch.tensor([1.0]))
         p2 = torch.nn.Parameter(torch.tensor([2.0]), requires_grad=False)
@@ -111,6 +122,46 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertTrue(config.dedupe_primary_teacher_cache_distill)
         self.assertEqual(config.distill_exec_weight, 0.0)
 
+    def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        support = RhythmTaskRuntimeSupport(DummyOwner())
+        output = {
+            "mel_out": torch.zeros((1, 4, 3), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_resample_retimed_target_to_output": False},
+            clear=True,
+        ):
+            acoustic_target, acoustic_weight = support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.ones((1, 6, 3), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=torch.ones((1, 6), dtype=torch.float32),
+                acoustic_target_source="cached",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(tuple(acoustic_target.shape), (1, 4, 3))
+        self.assertEqual(tuple(acoustic_weight.shape), (1, 4))
+        self.assertEqual(output["acoustic_target_length_frames_before_align"], 6.0)
+        self.assertEqual(output["acoustic_output_length_frames_before_align"], 4.0)
+        self.assertEqual(output["acoustic_target_length_delta_before_align"], 2.0)
+        self.assertEqual(output["acoustic_target_length_mismatch_abs_before_align"], 2.0)
+        self.assertEqual(output["acoustic_target_length_mismatch_present_before_align"], 1.0)
+        self.assertAlmostEqual(output["acoustic_target_length_mismatch_ratio_before_align"], 2.0 / 6.0)
+        self.assertEqual(output["acoustic_target_resampled_to_output"], 0.0)
+        self.assertEqual(output["acoustic_target_trimmed_to_output"], 1.0)
+        self.assertEqual(output["acoustic_target_length_frames_after_align"], 4.0)
+        self.assertEqual(output["acoustic_output_length_frames_after_align"], 4.0)
+
     def test_merge_retimed_weight_preserves_explicit_zero_confidence(self) -> None:
         merged = merge_retimed_weight(
             torch.ones((1, 3), dtype=torch.float32),
@@ -126,6 +177,74 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             confidence_floor=0.05,
         )
         self.assertTrue(torch.allclose(merged, torch.full((1, 2), 0.05, dtype=torch.float32)))
+
+    def test_attach_acoustic_target_bundle_disables_pitch_when_retimed_pitch_missing(self) -> None:
+        support = RhythmTaskRuntimeSupport(self._runtime_owner())
+        output = {
+            "mel_out": torch.zeros((1, 3, 80), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_allow_source_pitch_fallback_when_retimed": False},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 3, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=None,
+                acoustic_target_source="cached",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(float(output["rhythm_pitch_supervision_disabled"]), 1.0)
+        self.assertEqual(float(output["rhythm_missing_retimed_pitch_target"]), 1.0)
+
+    def test_attach_acoustic_target_bundle_keeps_pitch_when_retimed_pitch_present(self) -> None:
+        support = RhythmTaskRuntimeSupport(self._runtime_owner())
+        output = {
+            "mel_out": torch.zeros((1, 3, 80), dtype=torch.float32),
+            "retimed_f0_tgt": torch.ones((1, 3), dtype=torch.float32),
+            "retimed_uv_tgt": torch.zeros((1, 3), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_allow_source_pitch_fallback_when_retimed": False},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 3, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=None,
+                acoustic_target_source="online",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(float(output["rhythm_pitch_supervision_disabled"]), 0.0)
+        self.assertEqual(float(output["rhythm_missing_retimed_pitch_target"]), 0.0)
+
+    def test_attach_acoustic_target_bundle_allows_explicit_source_pitch_fallback(self) -> None:
+        support = RhythmTaskRuntimeSupport(self._runtime_owner())
+        output = {
+            "mel_out": torch.zeros((1, 3, 80), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_allow_source_pitch_fallback_when_retimed": True},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 3, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=None,
+                acoustic_target_source="cached",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(float(output["rhythm_pitch_supervision_disabled"]), 0.0)
+        self.assertEqual(float(output["rhythm_missing_retimed_pitch_target"]), 0.0)
 
 
 if __name__ == "__main__":

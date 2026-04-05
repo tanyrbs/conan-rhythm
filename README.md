@@ -104,6 +104,7 @@ Important caveats:
   - `test.data` is empty
 - the checked-in `libritts_single_smoke_rhythm_v4` items are rhythm-cache **v4 compatibility smoke**, not maintained v5 training assets
 - the generated stage-2 `student_binary` smoke assets already contain learned-offline teacher + retimed targets, but they still **do not include F0**, so default `student_retimed` smoke remains blocked when `use_pitch_embed=true`
+- retimed mel supervision now refuses to silently reuse source-axis pitch by default; without matched `retimed_f0_tgt` / `retimed_uv_tgt`, pitch supervision is disabled first and fail-fast checks can still escalate during formal stage-3 training
 
 ### Runnable now vs blocked now
 
@@ -122,7 +123,7 @@ Run preflight before probe or training. The script accepts both binary and proce
 python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/your_dataset   --processed_data_dir data/processed/your_dataset   --splits train valid   --inspect_items 2   --model_dry_run
 ```
 
-Preflight is intentionally **binary-cache-first**. It validates indexed rhythm/cache fields and stage contracts, but `processed_data_dir` is only weakly checked for existence. A placeholder processed directory can still look “green”, so always override both binary and processed paths for real runs.
+Preflight is intentionally **binary-cache-first**. It validates indexed rhythm/cache fields and stage contracts first. By default `processed_data_dir` is still only lightly checked, but formal readiness runs can now add `--strict_processed_data_dir` to escalate missing or placeholder processed paths into hard errors instead of warnings.
 
 Useful local verification commands:
 
@@ -149,7 +150,7 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **157 passed**
+- rhythm unittests: **189 passed**
 - maintained smoke test: **passed**
 
 This latest rerun includes the new coverage added for:
@@ -158,6 +159,11 @@ This latest rerun includes the new coverage added for:
 - projector hot-path invariants after vectorization
 - context-matched KD gating / dedupe interaction
 - conservative EMA group loss balancing
+- module-only train/valid objective alignment
+- teacher-offline validation using the real offline-teacher branch
+- optional dependency guards for lazy text frontend import and no-op tensorboard fallback
+- weighted retimed acoustic loss normalization over full broadcasted weight mass
+- conservative retimed-pitch guard that disables wrong-axis source-pitch fallback unless explicitly opted in
 
 The longer 2000-step probe results below remain the latest recorded long-run measurements for the maintained default configs; the new `context_match` / `balanced` configs are still experimental and were not silently promoted to the maintained baseline.
 
@@ -331,10 +337,15 @@ Recent branch work improved the maintained path around:
 
 - sum-preserving frame-plan integerization for speech / blank groups and `dur_anchor_src`
 - cache-contract hardening and fail-fast preflight
+- train/valid objective alignment for module-only stages such as `teacher_offline` and `student_kd`
+- correct teacher-offline validation routing instead of silently falling back to the student/runtime branch
 - reduced duplicate Python work in the maintained student path
 - vectorized projector outer hot paths such as pause projection, commit-frontier resolution, and state advance
 - smaller orchestration entrypoints for preflight/metrics
 - removal of a deprecated local TorchScript helper in `modules/Conan/diff/net.py`
+- weighted retimed acoustic losses now normalize by full broadcasted weight mass instead of frame count only
+- retimed mel supervision now blocks accidental source-axis pitch fallback unless explicitly allowed for debugging
+- rhythm-only imports no longer require the English text frontend or tensorboard at import time
 
 Recent branch work also added opt-in experimental surfaces:
 

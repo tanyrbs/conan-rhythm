@@ -1,3 +1,5 @@
+import importlib
+
 from utils.text.text_encoder import is_sil_phoneme
 
 REGISTERED_TEXT_PROCESSORS = {}
@@ -12,6 +14,22 @@ def register_txt_processors(name):
 
 
 def get_txt_processor_cls(name):
+    processor = REGISTERED_TEXT_PROCESSORS.get(name, None)
+    if processor is not None or not name:
+        return processor
+    module_name = f"data_gen.tts.txt_processors.{name}"
+    try:
+        importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        missing = getattr(exc, "name", "") or ""
+        if not missing:
+            message = str(exc)
+            missing = message.split("'")[1] if "'" in message else message
+        if missing not in {module_name, name}:
+            raise ImportError(
+                f"Text processor '{name}' requires optional dependency '{missing}'. "
+                "Install that dependency before using this processor."
+            ) from exc
     return REGISTERED_TEXT_PROCESSORS.get(name, None)
 
 

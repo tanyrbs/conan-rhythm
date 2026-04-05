@@ -321,8 +321,8 @@ class Conan(ConanPitchMixin, FastSpeech):
         prosody_embedding = self.l1(torch.cat([prosody_embedding, positions], dim=-1))
 
         # style-to-content attention
-        src_key_padding_mask = encoder_out[:, :, 0].eq(self.padding_idx).data
-        prosody_key_padding_mask = prosody_embedding[:, :, 0].eq(self.padding_idx).data
+        src_key_padding_mask = encoder_out[:, :, 0].eq(self.padding_idx)
+        prosody_key_padding_mask = prosody_embedding[:, :, 0].eq(self.padding_idx)
         # assert False,f'encoder_out:{encoder_out.size()},prosody_embedding:{prosody_embedding.size()},src_key_padding_mask:{src_key_padding_mask.size()},prosody_key_padding_mask:{prosody_key_padding_mask.size()}'
         if global_steps < hparams["forcing"]:
             output, guided_loss, attn_emo = self.align(

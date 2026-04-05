@@ -1,6 +1,10 @@
-import librosa
 import numpy as np
 import torch
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
+import librosa
 
 from .constants import *
 

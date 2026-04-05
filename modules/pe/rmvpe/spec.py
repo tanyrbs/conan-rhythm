@@ -1,6 +1,10 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
 from librosa.filters import mel
 
 

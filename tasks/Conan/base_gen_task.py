@@ -142,17 +142,28 @@ class AuxDecoderMIDITask(FastSpeechTask):
         outputs = tensors_to_scalars(outputs)
         if batch_idx < hparams['num_valid_plots']:
             sr = hparams["audio_sample_rate"]
-            gt_f0 = denorm_f0(sample['f0'], sample["uv"])
+            gt_f0 = (
+                denorm_f0(sample['f0'], sample["uv"])
+                if sample.get('f0') is not None and sample.get('uv') is not None
+                else None
+            )
+            pred_f0 = model_out.get("f0_denorm_pred")
             wav_gt = self.vocoder.spec2wav(sample["mels"][0].cpu().numpy())
             self.logger.add_audio(f'wav_gt_{batch_idx}', wav_gt, self.global_step, sr)
 
             wav_pred = self.vocoder.spec2wav(model_out['mel_out'][0].cpu().numpy())
             self.logger.add_audio(f'wav_pred_{batch_idx}', wav_pred, self.global_step, sr)
             self.plot_mel(batch_idx, sample['mels'], model_out['mel_out'][0], f'mel_{batch_idx}')
-            self.logger.add_figure(
-                f'f0_{batch_idx}',
-                f0_to_figure(gt_f0[0], None, model_out["f0_denorm_pred"][0]),
-                self.global_step)
+            if gt_f0 is not None or pred_f0 is not None:
+                self.logger.add_figure(
+                    f'f0_{batch_idx}',
+                    f0_to_figure(
+                        gt_f0[0] if gt_f0 is not None else None,
+                        None,
+                        pred_f0[0] if pred_f0 is not None else None,
+                    ),
+                    self.global_step,
+                )
         return outputs
 
     def test_start(self):
@@ -175,8 +186,13 @@ class AuxDecoderMIDITask(FastSpeechTask):
         # sample["mel2word"] = None   
         _, outputs = self.run_model(sample, infer=True)
         # sample["mel2ph"] = mel2ph
-        f0 = denorm_f0(sample['f0'], sample['uv'])[0].cpu().numpy()
-        f0_pred = outputs.get('f0_denorm_pred')[0].cpu().numpy()
+        f0 = (
+            denorm_f0(sample['f0'], sample['uv'])[0].cpu().numpy()
+            if sample.get('f0') is not None and sample.get('uv') is not None
+            else None
+        )
+        f0_pred_tensor = outputs.get('f0_denorm_pred')
+        f0_pred = f0_pred_tensor[0].cpu().numpy() if f0_pred_tensor is not None else None
         # f0_cond = outputs.get('midi_f0')[0].cpu().numpy()
         # self.result_f0s.append({"gt": f0, "pred": f0_pred})
         item_name = sample['item_name'][0]

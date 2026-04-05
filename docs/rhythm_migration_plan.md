@@ -42,11 +42,18 @@ The maintained branch now includes these corrective changes:
 - explicit zero-confidence stays hard-off for component KD and retimed confidence weighting
 - factor intervention syncs compact edits back into `ref_rhythm_stats` / `ref_rhythm_trace` and drops stale sidecars
 - budget supervision and feasibility-debt accounting are cleaner under repair-heavy cases
+- module-only stages now keep train/valid objectives aligned instead of reintroducing acoustic/pitch losses only during validation
+- `teacher_offline` validation now uses the real offline-teacher branch instead of silently falling back to the student/runtime path
 - preflight orchestration and rhythm diagnostics are split into smaller units instead of monoliths
+- preflight can now escalate missing or placeholder processed paths with `--strict_processed_data_dir`
 - the local deprecated TorchScript helper in `modules/Conan/diff/net.py` is gone
 - the acoustic runtime no longer touches pitch-embed branches when `use_pitch_embed=false`
 - RMVPE / torchaudio loading is more lazy, so optional dependency failures happen only on the paths that really need them
+- rhythm-only imports no longer require the English text frontend or tensorboard at import time
 - inference helpers tolerate `f0_denorm_pred=None` instead of indexing into a missing tensor
+- Conan / Emformer export paths also tolerate missing source or predicted F0 instead of indexing blindly
+- weighted retimed acoustic losses now normalize by the full broadcasted weight mass instead of frame count only
+- retimed mel supervision now disables pitch loss when matched `retimed_f0_tgt` / `retimed_uv_tgt` are missing, unless source-axis fallback is explicitly opted in
 - integration export now covers `train/valid/test` by default for the teacher->student KD smoke chain
 - stage-validation defaults now match runtime defaults for:
   - `rhythm_enable_learned_offline_teacher`
@@ -87,8 +94,8 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **157 rhythm tests passed**
-- latest compile/unit/smoke rerun after the frame-plan / projector / loss-balance / context-match round: **passed**
+- unit coverage: **189 rhythm tests passed**
+- latest compile/unit/smoke rerun after the validation-alignment, weighted-acoustic-loss, and retimed-pitch-guard fixes: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
@@ -101,6 +108,11 @@ The newest rerun extended regression coverage specifically around:
 - projector invariants after hot-path vectorization
 - target-builder context-match gating / dedupe semantics
 - conservative rhythm-loss balancing
+- module-only train/valid objective alignment
+- teacher-offline validation routing
+- optional dependency guards for text frontend / tensorboard imports
+- weighted acoustic-loss normalization over broadcasted weight mass
+- retimed pitch fallback suppression and missing-target detection
 
 Important asset-level caveats from the same audit:
 
@@ -117,8 +129,8 @@ Important asset-level caveats from the same audit:
 - `scripts/preflight_rhythm_v2.py` is only a thin wrapper; the real validation lives in `tasks/Conan/rhythm/preflight_support.py`
 - preflight is **binary-cache-first**, not a full processed-corpus validator:
   - it strongly checks indexed cache fields / contracts
-  - it only weakly checks `processed_data_dir` existence
-  - so a placeholder processed directory can still look “green”
+  - by default it still only lightly checks `processed_data_dir`
+  - for formal readiness runs, `--strict_processed_data_dir` now escalates missing or placeholder processed paths into hard errors
 - `scripts/cpu_probe_rhythm_train.py` is a throughput / gradient probe, not a full cache-contract validator
 - `scripts/integration_teacher_export_student_kd.py` exports `train/valid/test`, but the post-export smoke assertions are still centered on `train/valid`
 - on the checked-in LibriTTS smoke corpus, integration split inference relies on the generated `build_summary.json`
@@ -150,6 +162,7 @@ Why stage-3 is still guarded:
 
 - smoke requires `use_pitch_embed=False`
 - the smoke binary already has retimed targets, but default stage-3 still fails because it lacks F0
+- retimed mel no longer silently falls back to source-axis pitch; missing matched retimed pitch now disables pitch supervision first and can still trip fail-fast checks during formal runs
 - `L_base` dominates the current smoke objective
 - `grad_norm_before_clip` stays very high for long stretches
 - the real F0 / retimed asset contract is not present in this shared checkout

@@ -501,6 +501,21 @@ def _update_acoustic_target_metrics(
         metrics["rhythm_metric_teacher_source_boundary_scale_mean"] = _safe_mean(
             teacher_source_boundary_scale.float()
         )
+    for metric_key, field_name in (
+        ("rhythm_metric_acoustic_target_length_frames_before_align", "acoustic_target_length_frames_before_align"),
+        ("rhythm_metric_acoustic_output_length_frames_before_align", "acoustic_output_length_frames_before_align"),
+        ("rhythm_metric_acoustic_target_length_delta_before_align", "acoustic_target_length_delta_before_align"),
+        ("rhythm_metric_acoustic_target_length_mismatch_abs_before_align", "acoustic_target_length_mismatch_abs_before_align"),
+        ("rhythm_metric_acoustic_target_length_mismatch_present_before_align", "acoustic_target_length_mismatch_present_before_align"),
+        ("rhythm_metric_acoustic_target_length_mismatch_ratio_before_align", "acoustic_target_length_mismatch_ratio_before_align"),
+        ("rhythm_metric_acoustic_target_resampled_to_output", "acoustic_target_resampled_to_output"),
+        ("rhythm_metric_acoustic_target_trimmed_to_output", "acoustic_target_trimmed_to_output"),
+        ("rhythm_metric_acoustic_target_length_frames_after_align", "acoustic_target_length_frames_after_align"),
+        ("rhythm_metric_acoustic_output_length_frames_after_align", "acoustic_output_length_frames_after_align"),
+    ):
+        scalar = _optional_scalar(output.get(field_name), ctx.execution.speech_duration_exec.device)
+        if scalar is not None:
+            metrics[metric_key] = scalar
     acoustic_target_source = output.get("acoustic_target_source")
     acoustic_source_name = str(acoustic_target_source) if acoustic_target_source is not None else "unknown"
     source_to_id = {"source": 0.0, "cached": 1.0, "online": 2.0}

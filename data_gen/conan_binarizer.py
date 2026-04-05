@@ -376,18 +376,142 @@ class VCBinarizer(BaseBinarizer):
             )
         return int(spker_map[speaker_key])
 
+    @staticmethod
+    def _normalize_split_label(value: str) -> str:
+        return "".join(ch for ch in str(value or '').strip().lower() if ch.isalnum())
+
+    @classmethod
+    def _resolve_metadata_path(cls, processed_data_dir: str) -> str:
+        candidates = (
+            os.path.join(processed_data_dir, 'metadata_vctk_librittsr_gt.json'),
+            os.path.join(processed_data_dir, 'metadata.json'),
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise BinarizationError(
+            f"No Conan metadata file found under {processed_data_dir}. "
+            "Expected metadata_vctk_librittsr_gt.json or metadata.json."
+        )
+
+    @classmethod
+    def _load_summary_split_tags(cls, processed_data_dir: str):
+        summary_path = os.path.join(processed_data_dir, 'build_summary.json')
+        if not os.path.exists(summary_path):
+            return {}
+        with open(summary_path, encoding='utf-8') as f:
+            payload = json.load(f)
+        split_tags = payload.get('split_tags', {}) or {}
+        resolved = {}
+        for canonical in ('train', 'valid', 'test'):
+            raw_tag = str(split_tags.get(canonical, '') or '').strip()
+            if raw_tag:
+                resolved[canonical] = raw_tag
+        return resolved
+
+    @classmethod
+    def _canonicalize_item_split(cls, raw_split: str, *, summary_split_tags):
+        raw_split = str(raw_split or '').strip()
+        if not raw_split:
+            return None
+        normalized = cls._normalize_split_label(raw_split)
+        for canonical, summary_tag in summary_split_tags.items():
+            if normalized == cls._normalize_split_label(summary_tag):
+                return canonical
+        aliases = {
+            'tr': 'train',
+            'train': 'train',
+            'training': 'train',
+            'val': 'valid',
+            'valid': 'valid',
+            'validation': 'valid',
+            'dev': 'valid',
+            'eval': 'test',
+            'evaluation': 'test',
+            'test': 'test',
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+        if normalized.startswith('train'):
+            return 'train'
+        if normalized.startswith('dev') or normalized.startswith('valid') or normalized.startswith('val'):
+            return 'valid'
+        if normalized.startswith('test') or normalized.startswith('eval'):
+            return 'test'
+        return None
+
+    @staticmethod
+    def _item_matches_split_marker(item_name: str, marker: str) -> bool:
+        item_name = str(item_name or '').strip()
+        marker = str(marker or '').strip()
+        if not item_name or not marker:
+            return False
+        if '_' in marker:
+            return marker in item_name
+        return (
+            item_name == marker
+            or item_name.startswith(f"{marker}_")
+            or item_name.startswith(marker)
+        )
+
+    def _resolve_prefix_markers(self):
+        summary_split_tags = self._load_summary_split_tags(self.processed_data_dir)
+        if summary_split_tags.get('valid') or summary_split_tags.get('test'):
+            valid_markers = [f"_{summary_split_tags['valid']}_"] if summary_split_tags.get('valid') else []
+            test_markers = [f"_{summary_split_tags['test']}_"] if summary_split_tags.get('test') else []
+            return valid_markers, test_markers
+        return list(hparams.get('valid_prefixes', [])), list(hparams.get('test_prefixes', []))
+
+    def _split_item_names_from_explicit_metadata(self, items_list):
+        summary_split_tags = self._load_summary_split_tags(self.processed_data_dir)
+        split_sets = {'train': set(), 'valid': set(), 'test': set()}
+        labeled_items = 0
+        total_items = 0
+        for item in items_list:
+            item_name = str(item.get('item_name', '') or '').strip()
+            if not item_name:
+                continue
+            total_items += 1
+            canonical_split = self._canonicalize_item_split(
+                item.get('split', ''),
+                summary_split_tags=summary_split_tags,
+            )
+            if canonical_split is None:
+                continue
+            split_sets[canonical_split].add(item_name)
+            labeled_items += 1
+        if labeled_items == 0:
+            return None
+        if labeled_items != total_items:
+            raise BinarizationError(
+                'Only part of the metadata carries explicit split labels. '
+                'Refuse to mix explicit and prefix-derived splitting because it can silently leak items across splits.'
+            )
+        return split_sets['train'], split_sets['test'], split_sets['valid']
+
     def split_train_test_set(self, item_names):
         item_names = deepcopy(item_names)
+        valid_markers, test_markers = self._resolve_prefix_markers()
+        overlap_markers = sorted(set(valid_markers) & set(test_markers))
+        if overlap_markers:
+            raise BinarizationError(
+                'valid/test split markers overlap; this would duplicate evaluation samples across splits. '
+                f'overlap={overlap_markers}. Set explicit metadata split labels or provide disjoint valid_prefixes/test_prefixes.'
+            )
 
-        # first find test/validation sets
-        test_item_names  = [x for x in item_names if any(ts in x for ts in hparams['test_prefixes'])]
-        valid_item_names = [x for x in item_names if any(ts in x for ts in hparams['valid_prefixes'])]
+        test_item_names = [x for x in item_names if any(self._item_matches_split_marker(x, ts) for ts in test_markers)]
+        valid_item_names = [x for x in item_names if any(self._item_matches_split_marker(x, ts) for ts in valid_markers)]
 
-        # ⚠️ Key: construct set only once
         test_set = set(test_item_names)
         valid_set = set(valid_item_names)
+        overlap_items = sorted(test_set & valid_set)
+        if overlap_items:
+            preview = overlap_items[:8]
+            raise BinarizationError(
+                'Validation/test split assignment overlaps. '
+                f'This would leak held-out evaluation items. overlap_preview={preview}'
+            )
 
-        # training set = neither in test set nor validation set
         train_item_names = [x for x in item_names if x not in test_set and x not in valid_set]
 
         logging.info(f"train {len(train_item_names)}")
@@ -395,10 +519,11 @@ class VCBinarizer(BaseBinarizer):
         logging.info(f"test  {len(test_item_names)}")
         return train_item_names, test_item_names, valid_item_names
 
-
     def load_meta_data(self):
         processed_data_dir = self.processed_data_dir
-        items_list = json.load(open(f"{processed_data_dir}/metadata_vctk_librittsr_gt.json"))
+        metadata_path = self._resolve_metadata_path(processed_data_dir)
+        with open(metadata_path, encoding='utf-8') as f:
+            items_list = json.load(f)
         for r in tqdm(items_list, desc='Loading meta data.'):
             item_name = r['item_name']
             self.items[item_name] = r
@@ -406,7 +531,21 @@ class VCBinarizer(BaseBinarizer):
         if self.binarization_args['shuffle']:
             random.seed(1234)
             random.shuffle(self.item_names)
-        self._train_item_names, self._test_item_names,self._valid_item_names = self.split_train_test_set(self.item_names)
+        explicit_split_sets = self._split_item_names_from_explicit_metadata(items_list)
+        if explicit_split_sets is not None:
+            train_set, test_set, valid_set = explicit_split_sets
+            self._train_item_names = [x for x in self.item_names if x in train_set]
+            self._test_item_names = [x for x in self.item_names if x in test_set]
+            self._valid_item_names = [x for x in self.item_names if x in valid_set]
+            logging.info(
+                'Using explicit metadata split labels from %s: train=%d valid=%d test=%d',
+                metadata_path,
+                len(self._train_item_names),
+                len(self._valid_item_names),
+                len(self._test_item_names),
+            )
+            return
+        self._train_item_names, self._test_item_names, self._valid_item_names = self.split_train_test_set(self.item_names)
 
     @property
     def train_item_names(self):

@@ -5,11 +5,15 @@ import os
 import sys
 import math
 
-import librosa.core
 from tqdm import tqdm
 import torch
 # import pyworld as pw
 import numpy as np
+
+from utils.numpy_compat import ensure_legacy_numpy_aliases
+
+ensure_legacy_numpy_aliases()
+import librosa.core
 import argparse
 from multiprocessing import Pool
 from data_gen.tts.base_binarizer import BaseBinarizer

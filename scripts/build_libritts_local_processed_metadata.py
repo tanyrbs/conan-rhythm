@@ -114,9 +114,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--train_split", default="train-clean-100")
     parser.add_argument("--valid_split", default="dev-clean")
     parser.add_argument("--test_split", default="test-clean")
-    parser.add_argument("--train_limit", type=int, default=640)
-    parser.add_argument("--valid_limit", type=int, default=64)
-    parser.add_argument("--test_limit", type=int, default=64)
+    parser.add_argument("--train_limit", type=int, default=0, help="0 means no limit; use the full split.")
+    parser.add_argument("--valid_limit", type=int, default=0, help="0 means no limit; use the full split.")
+    parser.add_argument("--test_limit", type=int, default=0, help="0 means no limit; use the full split.")
     parser.add_argument("--min_mel_frames", type=int, default=32)
     parser.add_argument("--max_mel_frames", type=int, default=600)
     return parser
