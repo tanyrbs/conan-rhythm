@@ -88,19 +88,27 @@ The following were run locally in the `conda` `conan` environment:
 - teacher export -> student KD integration smoke
 - 1-step `student_retimed` CPU probe with default `use_pitch_embed=true`
 - 1-step `student_retimed` CPU probe with `--hparams use_pitch_embed=False`
+- 2-step `student_retimed` CPU probe after probe-observability wiring to confirm runtime summaries are exported
 - 2000-step CPU probe for `teacher_offline`
 - 2000-step CPU probe for `student_kd`
 - 2000-step CPU smoke probe for `student_retimed`
 
 Observed result summary:
 
-- unit coverage: **190 rhythm tests passed**
+- unit coverage: **191 rhythm tests passed**
 - latest compile/unit/smoke rerun after the validation-alignment, weighted-acoustic-loss, and retimed-pitch-guard fixes: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
 - fresh stage-3 spot-check: default `student_retimed` probe fails immediately on missing `f0` in the smoke `student_binary`
 - fresh stage-3 spot-check with `use_pitch_embed=False`: runs, but still shows large one-step gradient pressure (`grad_norm_before_clip ~= 274`)
+- CPU probe now also exports runtime observability summaries for:
+  - `rhythm_metric_disable_acoustic_train_path`
+  - `rhythm_metric_module_only_objective`
+  - `rhythm_metric_skip_acoustic_objective`
+  - `rhythm_metric_pitch_supervision_disabled`
+  - `rhythm_metric_missing_retimed_pitch_target`
+  - pre-align retimed-target mismatch / resample / trim signals
 
 The newest rerun extended regression coverage specifically around:
 
@@ -167,6 +175,30 @@ Why stage-3 is still guarded:
 - `L_base` dominates the current smoke objective
 - `grad_norm_before_clip` stays very high for long stretches
 - the real F0 / retimed asset contract is not present in this shared checkout
+
+Concrete 2000-step smoke numbers from `artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`:
+
+- `L_base.mean ~= 6.5258`
+- `L_rhythm_exec.mean ~= 0.00279`
+- `L_stream_state.mean ~= 0.000746`
+- `L_pitch.mean = 0.0` because that smoke probe had to force `use_pitch_embed=False`
+- `grad_norm_before_clip.mean ~= 158.86`
+- `grad_norm_before_clip.max ~= 275.92`
+
+That is roughly:
+
+- `L_base / L_rhythm_exec ~= 2342x`
+- `L_base / L_stream_state ~= 8745x`
+
+So the current stage-3 smoke result is not “mildly imbalanced”; it is still overwhelmingly acoustic-dominated.
+
+The new probe-observability wiring was also validated on a fresh 2-step `student_retimed` CPU probe:
+
+- `rhythm_metric_pitch_supervision_disabled = 1.0`
+- `rhythm_metric_skip_acoustic_objective = 0.0`
+- `rhythm_metric_acoustic_target_is_retimed = 1.0`
+
+So the probe can now distinguish “pitch was intentionally disabled because matched retimed pitch is unavailable” from “the whole acoustic objective got skipped”.
 
 ## 6. Remaining blockers before formal training
 

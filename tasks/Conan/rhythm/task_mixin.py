@@ -91,6 +91,35 @@ class RhythmConanTaskMixin:
         return helper
 
     @staticmethod
+    def _collect_runtime_observability_outputs(model_out: dict) -> dict:
+        if model_out is None:
+            return {}
+        observability = {}
+        for metric_key, field_name in (
+            ("rhythm_metric_disable_acoustic_train_path", "disable_acoustic_train_path"),
+            ("rhythm_metric_module_only_objective", "rhythm_module_only_objective"),
+            ("rhythm_metric_skip_acoustic_objective", "rhythm_skip_acoustic_objective"),
+            ("rhythm_metric_pitch_supervision_disabled", "rhythm_pitch_supervision_disabled"),
+            ("rhythm_metric_missing_retimed_pitch_target", "rhythm_missing_retimed_pitch_target"),
+            ("rhythm_metric_acoustic_target_is_retimed", "acoustic_target_is_retimed"),
+            ("rhythm_metric_acoustic_target_length_delta_before_align", "acoustic_target_length_delta_before_align"),
+            (
+                "rhythm_metric_acoustic_target_length_mismatch_abs_before_align",
+                "acoustic_target_length_mismatch_abs_before_align",
+            ),
+            ("rhythm_metric_acoustic_target_resampled_to_output", "acoustic_target_resampled_to_output"),
+            ("rhythm_metric_acoustic_target_trimmed_to_output", "acoustic_target_trimmed_to_output"),
+        ):
+            value = model_out.get(field_name)
+            if isinstance(value, torch.Tensor):
+                if value.numel() <= 0:
+                    continue
+                observability[metric_key] = value.detach().float().mean()
+            elif isinstance(value, (bool, int, float)):
+                observability[metric_key] = float(value)
+        return observability
+
+    @staticmethod
     def _validate_rhythm_training_hparams():
         validate_rhythm_training_hparams(hparams)
 
@@ -852,6 +881,7 @@ class RhythmConanTaskMixin:
                 if pc_ is not None:
                     loss_output['ac'] = self.mse_loss_fn(pc_, pc_.new_ones(pc_.size()))
                     loss_weights['ac'] = hparams['lambda_mel_adv']
+            loss_output.update(self._collect_runtime_observability_outputs(model_out))
         else:
             #######################
             #    Discriminator    #

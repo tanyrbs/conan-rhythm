@@ -15,6 +15,31 @@ if str(REPO_ROOT) not in sys.path:
 from utils.commons.single_thread_env import apply_single_thread_env, maybe_limit_torch_cpu_threads
 
 
+PROBE_LOSS_KEYS = (
+    "L_base",
+    "L_rhythm_exec",
+    "L_stream_state",
+    "L_pitch",
+    "L_exec_speech",
+    "L_exec_pause",
+    "L_budget",
+    "L_prefix_state",
+)
+
+PROBE_RUNTIME_KEYS = (
+    "rhythm_metric_disable_acoustic_train_path",
+    "rhythm_metric_module_only_objective",
+    "rhythm_metric_skip_acoustic_objective",
+    "rhythm_metric_pitch_supervision_disabled",
+    "rhythm_metric_missing_retimed_pitch_target",
+    "rhythm_metric_acoustic_target_is_retimed",
+    "rhythm_metric_acoustic_target_length_delta_before_align",
+    "rhythm_metric_acoustic_target_length_mismatch_abs_before_align",
+    "rhythm_metric_acoustic_target_resampled_to_output",
+    "rhythm_metric_acoustic_target_trimmed_to_output",
+)
+
+
 def _move_to_device(obj, device):
     if isinstance(obj, torch.Tensor):
         return obj.to(device)
@@ -312,16 +337,7 @@ def main():
         step_time = time.perf_counter() - step_start
 
         scalar_losses = {}
-        for key in (
-            "L_base",
-            "L_rhythm_exec",
-            "L_stream_state",
-            "L_pitch",
-            "L_exec_speech",
-            "L_exec_pause",
-            "L_budget",
-            "L_prefix_state",
-        ):
+        for key in PROBE_LOSS_KEYS + PROBE_RUNTIME_KEYS:
             value = _tensor_to_float(loss_output.get(key))
             if value is not None:
                 scalar_losses[key] = value
@@ -352,6 +368,21 @@ def main():
             prefix_state_value = scalar_losses.get("L_prefix_state", scalar_losses.get("L_cumplan"))
             if prefix_state_value is not None:
                 detail_parts.append(f"prefix_state={prefix_state_value:.4f}")
+        if scalar_losses.get("rhythm_metric_module_only_objective", 0.0) > 0.5:
+            detail_parts.append("module_only=1")
+        if scalar_losses.get("rhythm_metric_skip_acoustic_objective", 0.0) > 0.5:
+            detail_parts.append("skip_acoustic=1")
+        if scalar_losses.get("rhythm_metric_pitch_supervision_disabled", 0.0) > 0.5:
+            detail_parts.append("pitch_off=1")
+        if scalar_losses.get("rhythm_metric_missing_retimed_pitch_target", 0.0) > 0.5:
+            detail_parts.append("retimed_pitch_missing=1")
+        if scalar_losses.get("rhythm_metric_acoustic_target_resampled_to_output", 0.0) > 0.5:
+            detail_parts.append("retimed_resample=1")
+        if scalar_losses.get("rhythm_metric_acoustic_target_trimmed_to_output", 0.0) > 0.5:
+            detail_parts.append("retimed_trim=1")
+        align_mismatch = scalar_losses.get("rhythm_metric_acoustic_target_length_mismatch_abs_before_align")
+        if align_mismatch is not None and align_mismatch > 0.0:
+            detail_parts.append(f"align_abs={align_mismatch:.1f}")
         mem_part = ""
         if scalar_losses.get("cpu_rss_bytes") is not None:
             mem_part += f" rss={(scalar_losses['cpu_rss_bytes'] / (1024 ** 2)):.1f}MB"
@@ -411,16 +442,9 @@ def main():
     print("[train-probe] summary:")
     for key in (
         "total_loss",
-        "L_base",
-        "L_rhythm_exec",
-        "L_stream_state",
-        "L_pitch",
-        "L_exec_speech",
-        "L_exec_pause",
-        "L_budget",
-        "L_prefix_state",
+        *PROBE_LOSS_KEYS,
         "grad_norm_before_clip",
-        ):
+    ):
         summary = summarize(key)
         if summary is None:
             continue
@@ -428,6 +452,18 @@ def main():
             f"  - {key}: start={summary['start']:.4f} end={summary['end']:.4f} "
             f"min={summary['min']:.4f} max={summary['max']:.4f} mean={summary['mean']:.4f}"
         )
+    runtime_summaries = {key: summarize(key) for key in PROBE_RUNTIME_KEYS}
+    runtime_summaries = {key: value for key, value in runtime_summaries.items() if value is not None}
+    if runtime_summaries:
+        print("[train-probe] runtime_observability:")
+        for key in PROBE_RUNTIME_KEYS:
+            summary = runtime_summaries.get(key)
+            if summary is None:
+                continue
+            print(
+                f"  - {key}: start={summary['start']:.4f} end={summary['end']:.4f} "
+                f"min={summary['min']:.4f} max={summary['max']:.4f} mean={summary['mean']:.4f}"
+            )
 
     print(
         f"  - param_norm: start={param_norm_start:.4f} end={param_norm_end:.4f} "
@@ -491,18 +527,12 @@ def main():
                 key: summarize(key)
                 for key in (
                     "total_loss",
-                    "L_base",
-                    "L_rhythm_exec",
-                    "L_stream_state",
-                    "L_pitch",
-                    "L_exec_speech",
-                    "L_exec_pause",
-                    "L_budget",
-                    "L_prefix_state",
+                    *PROBE_LOSS_KEYS,
                     "grad_norm_before_clip",
                 )
                 if summarize(key) is not None
             },
+            "runtime_summary": runtime_summaries,
             "throughput_summary": throughput_summary,
         }
         profile_path = Path(args.profile_json)

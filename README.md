@@ -150,7 +150,7 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **190 passed**
+- rhythm unittests: **191 passed**
 - maintained smoke test: **passed**
 
 This latest rerun includes the new coverage added for:
@@ -307,6 +307,22 @@ Current branch conclusion after code review, probes, and smoke integration:
 - `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
 - `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
 
+Latest 2000-step smoke profile (`artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`) still says the same thing numerically:
+
+- `L_base.mean ~= 6.526`
+- `L_rhythm_exec.mean ~= 0.00279`
+- `L_stream_state.mean ~= 0.000746`
+- `L_pitch.mean = 0.0` in that smoke run because it had to override `use_pitch_embed=False`
+- `grad_norm_before_clip.mean ~= 158.86`, `max ~= 275.92`
+
+So stage-3 is runnable as a smoke path, but not yet something this checkout should market as formally training-ready.
+
+A fresh 2-step retimed probe after the newest observability patch also confirmed the runtime flags are now visible directly in probe output:
+
+- `rhythm_metric_pitch_supervision_disabled = 1.0`
+- `rhythm_metric_skip_acoustic_objective = 0.0`
+- `rhythm_metric_acoustic_target_is_retimed = 1.0`
+
 So the next formal sequence should be:
 
 1. train a real `teacher_offline` checkpoint
@@ -346,6 +362,11 @@ Recent branch work improved the maintained path around:
 - removal of a deprecated local TorchScript helper in `modules/Conan/diff/net.py`
 - weighted retimed acoustic losses now normalize by full broadcasted weight mass instead of frame count only
 - retimed mel supervision now blocks accidental source-axis pitch fallback unless explicitly allowed for debugging
+- CPU probe summaries now surface runtime observability flags for:
+  - module-only / acoustic-skip stages
+  - retimed pitch supervision disablement
+  - missing matched retimed pitch targets
+  - pre-align acoustic length mismatch / resample / trim events
 - rhythm-only imports no longer require the English text frontend or tensorboard at import time
 
 Recent branch work also added opt-in experimental surfaces:

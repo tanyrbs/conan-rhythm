@@ -72,6 +72,30 @@ class _ValidationWithoutMelTask(RhythmConanTaskMixin):
         return {"rhythm_exec_speech": torch.tensor(1.0)}, {"rhythm_teacher_only_stage": 1.0}
 
 
+class _TrainingObservabilityTask(RhythmConanTaskMixin):
+    def __init__(self) -> None:
+        self.global_step = 0
+        self.mel_disc = None
+        self.model = object()
+
+    def run_model(self, sample, infer=False, test=False, **kwargs):
+        return (
+            {"L_base": torch.tensor(1.0, requires_grad=True)},
+            {
+                "disable_acoustic_train_path": 1.0,
+                "rhythm_module_only_objective": 1.0,
+                "rhythm_skip_acoustic_objective": 1.0,
+                "rhythm_pitch_supervision_disabled": 1.0,
+                "rhythm_missing_retimed_pitch_target": 1.0,
+                "acoustic_target_is_retimed": 1.0,
+                "acoustic_target_length_delta_before_align": 12.0,
+                "acoustic_target_length_mismatch_abs_before_align": 12.0,
+                "acoustic_target_resampled_to_output": 0.0,
+                "acoustic_target_trimmed_to_output": 1.0,
+            },
+        )
+
+
 class RuntimeValidationAlignmentTests(unittest.TestCase):
     @staticmethod
     def _sample():
@@ -147,6 +171,33 @@ class RuntimeValidationAlignmentTests(unittest.TestCase):
                 with mock.patch("tasks.Conan.rhythm.task_mixin.compute_reporting_total_loss", return_value=1.0):
                     outputs = task.validation_step(self._sample(), batch_idx=0)
         self.assertEqual(outputs["total_loss"], 1.0)
+
+    def test_training_step_exposes_runtime_observability_scalars(self) -> None:
+        task = _TrainingObservabilityTask()
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_mixin.hparams",
+            {
+                "disc_start_steps": 999999,
+                "lambda_mel_adv": 0.0,
+            },
+            clear=True,
+        ):
+            total_loss, loss_output = task._training_step(self._sample(), batch_idx=0, optimizer_idx=0)
+        self.assertAlmostEqual(float(total_loss.detach()), 1.0)
+        self.assertEqual(loss_output["batch_size"], 1)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_disable_acoustic_train_path"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_module_only_objective"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_skip_acoustic_objective"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_pitch_supervision_disabled"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_missing_retimed_pitch_target"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_is_retimed"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_length_delta_before_align"]), 12.0)
+        self.assertAlmostEqual(
+            float(loss_output["rhythm_metric_acoustic_target_length_mismatch_abs_before_align"]),
+            12.0,
+        )
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_resampled_to_output"]), 0.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_trimmed_to_output"]), 1.0)
 
 
 if __name__ == "__main__":
