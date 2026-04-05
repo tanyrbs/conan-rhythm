@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 
 from modules.Conan.diff.net import DiffNet, F0DiffNet, OriDiffNet, CausalConv1d
-from modules.Conan.flow.flow import FlowMel
-from modules.Conan.flow.flow_f0 import ReflowF0
 from modules.Conan.acoustic_runtime import (
     maybe_short_circuit_acoustic_train,
     prepare_content_inputs,
@@ -36,6 +34,44 @@ Flow_DECODERS = {
 
 DEFAULT_MAX_SOURCE_POSITIONS = 2000
 DEFAULT_MAX_TARGET_POSITIONS = 2000
+
+
+def _require_flow_mel():
+    try:
+        from modules.Conan.flow.flow import FlowMel
+    except ModuleNotFoundError as exc:
+        missing_name = str(getattr(exc, "name", "") or "")
+        exc_message = str(exc)
+        if missing_name == "torchdyn" or missing_name.startswith("torchdyn."):
+            raise ImportError(
+                "FlowMel / ConanPostnet requires torchdyn. Install the flow dependencies or disable the flow "
+                "postnet path before importing it."
+            ) from exc
+        if "torchdyn" in exc_message:
+            raise ImportError(
+                "FlowMel / ConanPostnet requires torchdyn. Install the flow dependencies or disable the flow "
+                "postnet path before importing it."
+            ) from exc
+        raise
+    return FlowMel
+
+
+def _require_reflow_f0():
+    try:
+        from modules.Conan.flow.flow_f0 import ReflowF0
+    except ModuleNotFoundError as exc:
+        missing_name = str(getattr(exc, "name", "") or "")
+        exc_message = str(exc)
+        if missing_name == "torchdyn" or missing_name.startswith("torchdyn."):
+            raise ImportError(
+                "Flow-based F0 generation requires torchdyn. Install the flow dependencies or set f0_gen != 'flow'."
+            ) from exc
+        if "torchdyn" in exc_message:
+            raise ImportError(
+                "Flow-based F0 generation requires torchdyn. Install the flow dependencies or set f0_gen != 'flow'."
+            ) from exc
+        raise
+    return ReflowF0
 
 
 class Conan(ConanPitchMixin, FastSpeech):
@@ -114,6 +150,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         if hparams["f0_gen"] != "flow":
             return
         self.pitch_flownet = F0DiffNet(in_dims=1)
+        ReflowF0 = _require_reflow_f0()
         self.f0_gen = ReflowF0(
             out_dims=1,
             denoise_fn=self.pitch_flownet,
@@ -359,6 +396,7 @@ class ConanPostnet(nn.Module):
         cond_hs = 80 + hparams["hidden_size"]
 
         self.ln_proj = nn.Linear(cond_hs, hparams["hidden_size"])
+        FlowMel = _require_flow_mel()
         self.postflow = FlowMel(
             out_dims=80,
             denoise_fn=Flow_DECODERS[hparams["flow_decoder_type"]](hparams),

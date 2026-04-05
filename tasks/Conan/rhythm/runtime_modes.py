@@ -7,6 +7,7 @@ import torch
 from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
 from modules.Conan.rhythm.policy import resolve_apply_override
 from modules.Conan.rhythm.stages import detect_rhythm_stage, resolve_teacher_as_main
+from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
 from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
 from tasks.Conan.rhythm.task_config import (
     resolve_task_retimed_target_mode,
@@ -196,6 +197,50 @@ def merge_retimed_weight(frame_weight, confidence, *, confidence_floor: float = 
     return frame_weight * confidence
 
 
+def _resolve_online_retimed_sample_confidence(sample, model_out):
+    reference = model_out.get("rhythm_online_retimed_frame_weight") if model_out is not None else None
+    if not isinstance(reference, torch.Tensor) and model_out is not None:
+        reference = model_out.get("rhythm_online_retimed_mel_tgt")
+    reference_device = reference.device if isinstance(reference, torch.Tensor) else None
+    for key in (
+        "rhythm_retimed_target_confidence",
+        "rhythm_teacher_confidence",
+        "rhythm_target_confidence",
+    ):
+        for source in (model_out, sample):
+            if source is None:
+                continue
+            value = source.get(key)
+            if value is None:
+                continue
+            if torch.is_tensor(value):
+                value = value.float()
+                if reference_device is not None:
+                    value = value.to(device=reference_device)
+                return value
+            return torch.as_tensor(value, dtype=torch.float32, device=reference_device)
+    return None
+
+
+def _apply_online_retimed_repair_gate(frame_weight, model_out):
+    if frame_weight is None or model_out is None:
+        return frame_weight
+    execution = model_out.get("rhythm_execution")
+    planner = getattr(execution, "planner", None) if execution is not None else None
+    if planner is None:
+        return frame_weight
+    repair_stats = compute_budget_projection_repair_stats(planner)
+    effective_total = (
+        repair_stats.effective_speech_budget + repair_stats.effective_pause_budget
+    ).clamp_min(0.0)
+    repair_mass = repair_stats.repair_mass.clamp_min(0.0)
+    repair_gate = (effective_total / (effective_total + repair_mass).clamp_min(1.0)).clamp_(0.0, 1.0)
+    repair_gate = repair_gate.to(device=frame_weight.device, dtype=frame_weight.dtype)
+    while repair_gate.dim() < frame_weight.dim():
+        repair_gate = repair_gate.unsqueeze(-1)
+    return frame_weight * repair_gate
+
+
 def resolve_acoustic_target_post_model(
     sample,
     model_out,
@@ -229,14 +274,16 @@ def resolve_acoustic_target_post_model(
     if prefer_online:
         online_target = model_out.get("rhythm_online_retimed_mel_tgt")
         if online_target is not None:
+            online_weight = merge_retimed_weight(
+                model_out.get("rhythm_online_retimed_frame_weight"),
+                _resolve_online_retimed_sample_confidence(sample, model_out),
+                confidence_floor=float(hparams.get("rhythm_retimed_confidence_floor", 0.05)),
+            )
+            online_weight = _apply_online_retimed_repair_gate(online_weight, model_out)
             return (
                 online_target,
                 True,
-                merge_retimed_weight(
-                    model_out.get("rhythm_online_retimed_frame_weight"),
-                    None,
-                    confidence_floor=float(hparams.get("rhythm_retimed_confidence_floor", 0.05)),
-                ),
+                online_weight,
                 "online",
             )
         if target_mode == "online":

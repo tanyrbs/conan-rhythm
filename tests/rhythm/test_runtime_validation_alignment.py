@@ -92,6 +92,9 @@ class _TrainingObservabilityTask(RhythmConanTaskMixin):
                 "acoustic_target_length_mismatch_abs_before_align": 12.0,
                 "acoustic_target_resampled_to_output": 0.0,
                 "acoustic_target_trimmed_to_output": 1.0,
+                "retimed_pitch_target_length_mismatch_abs_before_align": 7.0,
+                "retimed_pitch_target_resampled_to_output": 1.0,
+                "retimed_pitch_target_trimmed_to_output": 0.0,
             },
         )
 
@@ -198,6 +201,12 @@ class RuntimeValidationAlignmentTests(unittest.TestCase):
         )
         self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_resampled_to_output"]), 0.0)
         self.assertAlmostEqual(float(loss_output["rhythm_metric_acoustic_target_trimmed_to_output"]), 1.0)
+        self.assertAlmostEqual(
+            float(loss_output["rhythm_metric_retimed_pitch_target_length_mismatch_abs_before_align"]),
+            7.0,
+        )
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_retimed_pitch_target_resampled_to_output"]), 1.0)
+        self.assertAlmostEqual(float(loss_output["rhythm_metric_retimed_pitch_target_trimmed_to_output"]), 0.0)
 
 
 if __name__ == "__main__":

@@ -59,13 +59,14 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
         chunk_len = int(chunk_tokens.size(1))
         sample_chunk["content"] = chunk_tokens
         sample_chunk["mel_lengths"] = torch.tensor([chunk_len], dtype=torch.long, device=content_full.device)
+        sample_chunk["content_lengths"] = torch.tensor([chunk_len], dtype=torch.long, device=content_full.device)
         if rhythm_frontend is not None:
             if rhythm_unitizer_state is None:
                 rhythm_unitizer_state = rhythm_frontend.init_stream_state(batch_size=1, device=content_full.device)
             unit_batch, rhythm_unitizer_state = rhythm_frontend.step_content_tensor(
                 chunk_tokens,
                 state=rhythm_unitizer_state,
-                content_lengths=sample_chunk["mel_lengths"],
+                content_lengths=sample_chunk["content_lengths"],
                 mark_last_open=True,
             )
             sample_chunk["content_units"] = unit_batch.content_units

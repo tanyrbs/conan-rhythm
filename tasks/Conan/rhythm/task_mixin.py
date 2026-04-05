@@ -109,6 +109,12 @@ class RhythmConanTaskMixin:
             ),
             ("rhythm_metric_acoustic_target_resampled_to_output", "acoustic_target_resampled_to_output"),
             ("rhythm_metric_acoustic_target_trimmed_to_output", "acoustic_target_trimmed_to_output"),
+            (
+                "rhythm_metric_retimed_pitch_target_length_mismatch_abs_before_align",
+                "retimed_pitch_target_length_mismatch_abs_before_align",
+            ),
+            ("rhythm_metric_retimed_pitch_target_resampled_to_output", "retimed_pitch_target_resampled_to_output"),
+            ("rhythm_metric_retimed_pitch_target_trimmed_to_output", "retimed_pitch_target_trimmed_to_output"),
         ):
             value = model_out.get(field_name)
             if isinstance(value, torch.Tensor):
@@ -498,6 +504,7 @@ class RhythmConanTaskMixin:
             "rhythm_execution": execution,
             "rhythm_unit_batch": unit_batch,
             "rhythm_stage": "teacher_offline",
+            "rhythm_teacher_as_main": 0.0,
             "disable_acoustic_train_path": 1.0,
             "rhythm_schedule_only_stage": 0.0,
             "rhythm_teacher_only_stage": 1.0,
@@ -667,6 +674,16 @@ class RhythmConanTaskMixin:
         except Exception:
             return True
 
+    @staticmethod
+    def _infer_time_steps(value) -> int | None:
+        if not isinstance(value, torch.Tensor):
+            return None
+        if value.dim() >= 2:
+            return int(value.size(1))
+        if value.dim() == 1:
+            return int(value.size(0))
+        return None
+
     @classmethod
     def _assert_pitch_supervision_ready(
         cls,
@@ -695,32 +712,51 @@ class RhythmConanTaskMixin:
 
         has_retimed_pitch = cls._has_nonempty_pitch_payload(retimed_f0) and cls._has_nonempty_pitch_payload(retimed_uv)
         has_source_pitch = cls._has_nonempty_pitch_payload(source_f0) and cls._has_nonempty_pitch_payload(source_uv)
+        expected_steps = cls._infer_time_steps(output.get("mel_out"))
+        retimed_f0_steps = cls._infer_time_steps(retimed_f0)
+        retimed_uv_steps = cls._infer_time_steps(retimed_uv)
+        source_f0_steps = cls._infer_time_steps(source_f0)
+        source_uv_steps = cls._infer_time_steps(source_uv)
+        retimed_lengths_match = bool(
+            expected_steps is None
+            or (retimed_f0_steps == expected_steps and retimed_uv_steps == expected_steps)
+        )
+        source_lengths_match = bool(
+            expected_steps is None
+            or (source_f0_steps == expected_steps and source_uv_steps == expected_steps)
+        )
         if acoustic_target_is_retimed:
-            if has_retimed_pitch and not supervision_disabled:
+            if has_retimed_pitch and retimed_lengths_match and not supervision_disabled:
                 return
         else:
-            if has_source_pitch and not supervision_disabled:
+            if has_source_pitch and source_lengths_match and not supervision_disabled:
                 return
 
         detail = (
             f"(acoustic_target_is_retimed={int(acoustic_target_is_retimed)}, "
             f"supervision_disabled={int(supervision_disabled)}, "
+            f"expected_steps={expected_steps}, "
             f"has_retimed_f0={int(cls._has_nonempty_pitch_payload(retimed_f0))}, "
             f"has_retimed_uv={int(cls._has_nonempty_pitch_payload(retimed_uv))}, "
+            f"retimed_f0_steps={retimed_f0_steps}, "
+            f"retimed_uv_steps={retimed_uv_steps}, "
             f"has_source_f0={int(cls._has_nonempty_pitch_payload(source_f0))}, "
-            f"has_source_uv={int(cls._has_nonempty_pitch_payload(source_uv))})"
+            f"has_source_uv={int(cls._has_nonempty_pitch_payload(source_uv))}, "
+            f"source_f0_steps={source_f0_steps}, "
+            f"source_uv_steps={source_uv_steps})"
         )
         if acoustic_target_is_retimed or retimed_stage_active:
             raise RuntimeError(
                 "Rhythm retimed training is missing usable pitch supervision while use_pitch_embed=true. "
-                "Retimed acoustic targets must be paired with matched retimed f0/uv targets instead of silently "
-                f"falling back to source-aligned supervision. {detail} "
+                "Retimed acoustic targets must be paired with matched retimed f0/uv targets and kept length-aligned with mel_out. "
+                f"{detail} "
+                "Retimed pitch supervision must not silently fall back to source-aligned supervision. "
                 "Provide source f0/uv so retimed_f0_tgt/retimed_uv_tgt can be built, or explicitly set "
                 "rhythm_fail_fast_missing_pitch_supervision=false only for debugging."
             )
         raise RuntimeError(
-            "Pitch supervision is missing while use_pitch_embed=true during training. "
-            f"{detail} Provide f0/uv in the binary cache, disable use_pitch_embed, or explicitly set "
+            "Pitch supervision is missing or length-misaligned while use_pitch_embed=true during training. "
+            f"{detail} Provide f0/uv in the binary cache, keep pitch targets length-aligned with mel_out, disable use_pitch_embed, or explicitly set "
             "rhythm_fail_fast_missing_pitch_supervision=false only for debugging."
         )
 

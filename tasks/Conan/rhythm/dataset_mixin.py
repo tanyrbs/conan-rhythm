@@ -728,8 +728,9 @@ class RhythmConanDatasetMixin:
         if len(samples) == 0:
             return {}
         batch = super().collater(samples)
-        content= collate_1d_or_2d([s['content'] for s in samples], 0).long()
+        content = collate_1d_or_2d([s['content'] for s in samples], 0).long()
         batch['content'] = content
+        batch['content_lengths'] = torch.tensor([s['content'].shape[0] for s in samples], dtype=torch.long)
 
         optional_collate = self._build_optional_collate_spec()
         optional_keys = self._resolve_optional_sample_keys()

@@ -221,6 +221,18 @@ def _collect_presence(ds: IndexedDataset, limit: int) -> tuple[list[dict], Count
     return items, counts, mismatches
 
 
+def _bool_like_metric(value) -> bool:
+    if isinstance(value, (bool, int, float)):
+        return bool(value)
+    try:
+        arr = np.asarray(value)
+    except Exception:
+        return False
+    if arr.size <= 0:
+        return False
+    return bool(arr.reshape(-1)[0])
+
+
 def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> list[str]:
     errors: list[str] = []
     try:
@@ -251,12 +263,31 @@ def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> l
         task.global_step = 0
         with torch.no_grad():
             losses, output = task.run_model(batch, infer=False)
-        if "mel_out" not in output:
+        stage = context.stage
+        teacher_as_main_runtime = _bool_like_metric(output.get("rhythm_teacher_as_main", 0.0))
+        teacher_only_runtime = _bool_like_metric(output.get("rhythm_teacher_only_stage", 0.0))
+        skip_acoustic_objective = _bool_like_metric(output.get("rhythm_skip_acoustic_objective", 0.0))
+        module_only_objective = _bool_like_metric(output.get("rhythm_module_only_objective", 0.0))
+        disable_acoustic_train_path = _bool_like_metric(output.get("disable_acoustic_train_path", 0.0))
+        acoustic_forward_optional = bool(
+            not teacher_as_main_runtime
+            and (
+                teacher_only_runtime
+                or skip_acoustic_objective
+                or module_only_objective
+                or disable_acoustic_train_path
+            )
+        )
+        if "mel_out" not in output and not acoustic_forward_optional:
             errors.append(f"Model dry-run for split '{split}' did not produce mel_out.")
         if "rhythm_execution" not in output:
             errors.append(f"Model dry-run for split '{split}' did not produce rhythm_execution.")
+        if module_only_objective and not skip_acoustic_objective:
+            errors.append(
+                f"Model dry-run for split '{split}' reported rhythm_module_only_objective without "
+                "rhythm_skip_acoustic_objective. Module-only stages must not silently re-enable acoustic objectives."
+            )
 
-        stage = context.stage
         hp = context.hparams
         runtime_teacher_enabled = resolve_policy_runtime_offline_teacher_enable(hp, stage=stage)
         dual_mode_enabled = resolve_runtime_dual_mode_teacher_enable(hp, stage=stage, infer=False)
@@ -267,10 +298,11 @@ def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> l
                 f"Model dry-run for split '{split}' reported rhythm_stage={reported_stage}, expected {stage}."
             )
         offline_execution = output.get("rhythm_offline_execution")
-        teacher_as_main_runtime = bool(output.get("rhythm_teacher_as_main", 0.0))
-        if teacher_as_main and not teacher_as_main_runtime:
+        teacher_stage_runtime_ok = bool(teacher_as_main_runtime or teacher_only_runtime)
+        if teacher_as_main and not teacher_stage_runtime_ok:
             errors.append(
-                f"Model dry-run for split '{split}' expected rhythm_teacher_as_main=true in stage {stage}."
+                f"Model dry-run for split '{split}' expected teacher_offline runtime semantics in stage {stage} "
+                "(teacher_as_main or teacher_only_stage)."
             )
         if not teacher_as_main and teacher_as_main_runtime:
             errors.append(
@@ -318,7 +350,7 @@ def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> l
                     "but retimed stage expects cached/online/hybrid retimed target routing."
                 )
         print(
-            f"[preflight] model_dry_run split={split} mel_out={tuple(output['mel_out'].shape)} "
+            f"[preflight] model_dry_run split={split} mel_out={tuple(output['mel_out'].shape) if 'mel_out' in output else 'n/a'} "
             f"units={tuple(output['speech_duration_exec'].shape) if 'speech_duration_exec' in output else 'n/a'} "
             f"loss_keys={sorted(losses.keys())[:8]}"
         )

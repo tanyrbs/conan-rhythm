@@ -159,6 +159,48 @@ class DataPipelinePerfTests(unittest.TestCase):
             self.assertNotIn("_raw_item", sample["sample_keys"])
             self.assertNotIn("_raw_ref_item", sample["sample_keys"])
 
+    def test_rhythm_dataset_collater_emits_explicit_content_lengths(self) -> None:
+        with mock.patch.dict(
+            "utils.commons.hparams.hparams",
+            {
+                "sort_by_len": False,
+                "max_frames": 16,
+                "ds_workers": 0,
+                "binary_data_dir": "",
+                "frames_multiple": 1,
+                "test_ids": [],
+                "min_frames": 0,
+                "use_spk_id": False,
+                "use_spk_embed": False,
+                "use_pitch_embed": True,
+                "max_input_tokens": 16,
+            },
+            clear=True,
+        ):
+            dataset = _CountingRhythmDataset([])
+            sample_a = {
+                "id": 0,
+                "item_name": "spk0_a",
+                "mel": torch.ones((4, 3), dtype=torch.float32),
+                "ref_mel": torch.ones((4, 3), dtype=torch.float32),
+                "content": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                "f0": torch.ones((4,), dtype=torch.float32),
+                "uv": torch.zeros((4,), dtype=torch.float32),
+            }
+            sample_b = {
+                "id": 1,
+                "item_name": "spk0_b",
+                "mel": torch.ones((5, 3), dtype=torch.float32),
+                "ref_mel": torch.ones((5, 3), dtype=torch.float32),
+                "content": torch.tensor([1, 2, 3, 4, 5], dtype=torch.long),
+                "f0": torch.ones((5,), dtype=torch.float32),
+                "uv": torch.zeros((5,), dtype=torch.float32),
+            }
+            batch = dataset.collater([sample_a, sample_b])
+        self.assertIn("content_lengths", batch)
+        self.assertTrue(torch.equal(batch["content_lengths"], torch.tensor([4, 5], dtype=torch.long)))
+        self.assertEqual(batch["content"].shape[:2], (2, 5))
+
 
 if __name__ == "__main__":
     unittest.main()

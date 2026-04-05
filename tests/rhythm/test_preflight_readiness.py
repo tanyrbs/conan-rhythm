@@ -7,9 +7,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
+import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -27,8 +30,70 @@ from tasks.Conan.rhythm.preflight_support import (
     _inspect_indexed_split_files,
     _inspect_pitch_feature_readiness,
     _inspect_processed_data_dir,
+    _run_dataset_and_model_dry_run,
 )
 from utils.commons.hparams import set_hparams
+
+
+class _DummyPreflightDataset:
+    def __init__(self, prefix: str, shuffle: bool = False) -> None:
+        self._items = [{"item_name": f"{prefix}_0"}]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, idx: int):
+        return self._items[idx]
+
+    def collater(self, items):
+        return {"content": torch.ones((len(items), 1), dtype=torch.long)}
+
+
+class _DummyTeacherOnlyPreflightTask:
+    def build_tts_model(self) -> None:
+        return None
+
+    def run_model(self, batch, infer: bool = False):
+        return {}, {
+            "rhythm_execution": object(),
+            "rhythm_stage": "teacher_offline",
+            "rhythm_teacher_as_main": 0.0,
+            "rhythm_teacher_only_stage": 1.0,
+            "rhythm_module_only_objective": 1.0,
+            "rhythm_skip_acoustic_objective": 1.0,
+            "disable_acoustic_train_path": 1.0,
+        }
+
+
+class _DummyBrokenModuleOnlyPreflightTask:
+    def build_tts_model(self) -> None:
+        return None
+
+    def run_model(self, batch, infer: bool = False):
+        return {}, {
+            "mel_out": torch.zeros((1, 2, 3), dtype=torch.float32),
+            "rhythm_execution": object(),
+            "rhythm_stage": "student_kd",
+            "rhythm_module_only_objective": 1.0,
+            "rhythm_skip_acoustic_objective": 0.0,
+            "disable_acoustic_train_path": 0.0,
+        }
+
+
+class _DummyBrokenTeacherAsMainPreflightTask:
+    def build_tts_model(self) -> None:
+        return None
+
+    def run_model(self, batch, infer: bool = False):
+        return {}, {
+            "rhythm_execution": object(),
+            "rhythm_stage": "teacher_offline",
+            "rhythm_teacher_as_main": 1.0,
+            "rhythm_teacher_only_stage": 0.0,
+            "rhythm_module_only_objective": 1.0,
+            "rhythm_skip_acoustic_objective": 1.0,
+            "disable_acoustic_train_path": 1.0,
+        }
 
 
 class PreflightReadinessTests(unittest.TestCase):
@@ -133,6 +198,56 @@ class PreflightReadinessTests(unittest.TestCase):
         self.assertEqual(original, [0, -1])
         self.assertEqual(base_range, [0, 3])
         self.assertEqual(vc_range, [0, 3])
+
+    def test_preflight_model_dry_run_allows_teacher_only_stage_without_mel_out(self) -> None:
+        dataset_module = ModuleType("tasks.Conan.dataset")
+        dataset_module.ConanDataset = _DummyPreflightDataset
+        task_module = ModuleType("tasks.Conan.Conan")
+        task_module.ConanTask = _DummyTeacherOnlyPreflightTask
+        context = SimpleNamespace(stage="teacher_offline", hparams={})
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "tasks.Conan.dataset": dataset_module,
+                "tasks.Conan.Conan": task_module,
+            },
+        ):
+            errors = _run_dataset_and_model_dry_run("train", context=context, run_model=True)
+        self.assertEqual(errors, [])
+
+    def test_preflight_model_dry_run_rejects_module_only_without_skip_flag(self) -> None:
+        dataset_module = ModuleType("tasks.Conan.dataset")
+        dataset_module.ConanDataset = _DummyPreflightDataset
+        task_module = ModuleType("tasks.Conan.Conan")
+        task_module.ConanTask = _DummyBrokenModuleOnlyPreflightTask
+        context = SimpleNamespace(stage="student_kd", hparams={})
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "tasks.Conan.dataset": dataset_module,
+                "tasks.Conan.Conan": task_module,
+            },
+        ):
+            errors = _run_dataset_and_model_dry_run("train", context=context, run_model=True)
+        self.assertTrue(
+            any("rhythm_module_only_objective" in error and "rhythm_skip_acoustic_objective" in error for error in errors)
+        )
+
+    def test_preflight_model_dry_run_requires_mel_out_when_teacher_runs_as_main(self) -> None:
+        dataset_module = ModuleType("tasks.Conan.dataset")
+        dataset_module.ConanDataset = _DummyPreflightDataset
+        task_module = ModuleType("tasks.Conan.Conan")
+        task_module.ConanTask = _DummyBrokenTeacherAsMainPreflightTask
+        context = SimpleNamespace(stage="teacher_offline", hparams={})
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "tasks.Conan.dataset": dataset_module,
+                "tasks.Conan.Conan": task_module,
+            },
+        ):
+            errors = _run_dataset_and_model_dry_run("train", context=context, run_model=True)
+        self.assertTrue(any("did not produce mel_out" in error for error in errors))
 
     def test_set_hparams_reset_ignores_saved_ckpt_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -43,24 +43,44 @@ class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
         teacher_only_stage = stage == "teacher_offline"
         if teacher_only_stage:
             teacher_params = self._collect_offline_teacher_gen_params()
-            if len(teacher_params) > 0:
-                trainable_param_ids = {id(param) for param in teacher_params}
-                for param in self.model.parameters():
-                    param.requires_grad = id(param) in trainable_param_ids
-                self.gen_params = [param for param in teacher_params if param.requires_grad]
-            else:
-                self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+            self.gen_params = self._freeze_to_trainable_params(
+                teacher_params,
+                stage_name="teacher_offline",
+            )
         elif bool(hparams.get("rhythm_optimize_module_only", False)):
             rhythm_params = self._collect_rhythm_gen_params()
-            if len(rhythm_params) > 0:
-                trainable_param_ids = {id(param) for param in rhythm_params}
-                for param in self.model.parameters():
-                    param.requires_grad = id(param) in trainable_param_ids
-                self.gen_params = [param for param in rhythm_params if param.requires_grad]
-            else:
-                self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+            self.gen_params = self._freeze_to_trainable_params(
+                rhythm_params,
+                stage_name=stage,
+            )
         else:
             self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+
+    def _freeze_to_trainable_params(self, params, *, stage_name: str):
+        if len(params) <= 0:
+            raise RuntimeError(
+                f"Stage '{stage_name}' resolved zero trainable params. "
+                "Refusing to silently fall back to full-model optimization because that would break "
+                "stage isolation and invalidate gradient-scope checks."
+            )
+        trainable_param_ids = {id(param) for param in params}
+        frozen_params = []
+        for param in self.model.parameters():
+            selected = id(param) in trainable_param_ids
+            param.requires_grad = selected
+            if selected:
+                frozen_params.append(param)
+        if len(frozen_params) <= 0:
+            raise RuntimeError(
+                f"Stage '{stage_name}' lost all trainable params after freeze application. "
+                "Check rhythm/offline-teacher parameter collection against the current model structure."
+            )
+        if len({id(param) for param in frozen_params}) != len(trainable_param_ids):
+            raise RuntimeError(
+                f"Stage '{stage_name}' collected params that do not belong to the active model instance. "
+                "Refusing to continue with a partially matched parameter set."
+            )
+        return frozen_params
 
     def build_disc_model(self):
         disc_win_num = int(hparams.get('disc_win_num', 0) or 0)

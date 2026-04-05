@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.runtime_modes import merge_retimed_weight
+from tasks.Conan.rhythm.runtime_modes import merge_retimed_weight, resolve_acoustic_target_post_model
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 
 
@@ -62,6 +62,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
 
         support = RhythmTaskRuntimeSupport(DummyOwner())
         sample = {
+            "content_lengths": torch.tensor([7]),
             "mel_lengths": torch.tensor([5]),
             "ref_mel_lengths": torch.tensor([4]),
             "dur_anchor_src": torch.tensor([[1, 2]]),
@@ -85,6 +86,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         )
         self.assertIsNone(kwargs["f0"])
         self.assertIsNone(kwargs["uv"])
+        self.assertTrue(torch.equal(kwargs["content_lengths"], sample["content_lengths"]))
         self.assertEqual(kwargs["global_steps"], 10)
         self.assertEqual(kwargs["rhythm_state"], "state")
         self.assertEqual(kwargs["rhythm_source_cache"]["dur_anchor_src"].shape[1], 2)
@@ -162,6 +164,116 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(output["acoustic_target_length_frames_after_align"], 4.0)
         self.assertEqual(output["acoustic_output_length_frames_after_align"], 4.0)
 
+    def test_attach_acoustic_target_bundle_aligns_retimed_pitch_targets_and_nonpadding(self) -> None:
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        support = RhythmTaskRuntimeSupport(DummyOwner())
+        output = {
+            "mel_out": torch.zeros((1, 4, 80), dtype=torch.float32),
+            "tgt_nonpadding": torch.ones((1, 6, 1), dtype=torch.float32),
+            "retimed_f0_tgt": torch.arange(6, dtype=torch.float32).view(1, 6),
+            "retimed_uv_tgt": torch.tensor([[0.0, 0.0, 1.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_resample_retimed_target_to_output": False,
+                "rhythm_allow_source_pitch_fallback_when_retimed": False,
+            },
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 6, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=torch.ones((1, 6), dtype=torch.float32),
+                acoustic_target_source="cached",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(tuple(output["retimed_f0_tgt"].shape), (1, 4))
+        self.assertEqual(tuple(output["retimed_uv_tgt"].shape), (1, 4))
+        self.assertEqual(tuple(output["tgt_nonpadding"].shape), (1, 4, 1))
+        self.assertEqual(output["retimed_pitch_target_length_frames_before_align"], 6.0)
+        self.assertEqual(output["retimed_pitch_target_length_mismatch_abs_before_align"], 2.0)
+        self.assertEqual(output["retimed_pitch_target_resampled_to_output"], 0.0)
+        self.assertEqual(output["retimed_pitch_target_trimmed_to_output"], 1.0)
+        self.assertEqual(output["retimed_pitch_target_length_frames_after_align"], 4.0)
+
+    def test_attach_acoustic_target_bundle_trims_retimed_pitch_targets_with_exact_values(self) -> None:
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        support = RhythmTaskRuntimeSupport(DummyOwner())
+        output = {
+            "mel_out": torch.zeros((1, 4, 80), dtype=torch.float32),
+            "retimed_f0_tgt": torch.arange(6, dtype=torch.float32).unsqueeze(0),
+            "retimed_uv_tgt": torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]], dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_resample_retimed_target_to_output": False},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 6, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=torch.ones((1, 6), dtype=torch.float32),
+                acoustic_target_source="online",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertTrue(torch.allclose(output["retimed_f0_tgt"], torch.tensor([[0.0, 1.0, 2.0, 3.0]])))
+        self.assertTrue(torch.allclose(output["retimed_uv_tgt"], torch.tensor([[0.0, 1.0, 0.0, 1.0]])))
+
+    def test_attach_acoustic_target_bundle_resamples_retimed_pitch_targets_and_keeps_uv_binary(self) -> None:
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        support = RhythmTaskRuntimeSupport(DummyOwner())
+        output = {
+            "mel_out": torch.zeros((1, 4, 80), dtype=torch.float32),
+            "retimed_f0_tgt": torch.arange(3, dtype=torch.float32).unsqueeze(0),
+            "retimed_uv_tgt": torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_resample_retimed_target_to_output": False},
+            clear=True,
+        ):
+            support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.zeros((1, 4, 80), dtype=torch.float32),
+                acoustic_target_is_retimed=True,
+                acoustic_weight=torch.ones((1, 4), dtype=torch.float32),
+                acoustic_target_source="online",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(tuple(output["retimed_f0_tgt"].shape), (1, 4))
+        self.assertEqual(tuple(output["retimed_uv_tgt"].shape), (1, 4))
+        self.assertTrue(torch.isfinite(output["retimed_f0_tgt"]).all())
+        self.assertTrue(set(output["retimed_uv_tgt"].reshape(-1).tolist()).issubset({0.0, 1.0}))
+        self.assertEqual(output["retimed_pitch_target_resampled_to_output"], 1.0)
+        self.assertEqual(output["retimed_pitch_target_trimmed_to_output"], 0.0)
+
     def test_merge_retimed_weight_preserves_explicit_zero_confidence(self) -> None:
         merged = merge_retimed_weight(
             torch.ones((1, 3), dtype=torch.float32),
@@ -177,6 +289,45 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             confidence_floor=0.05,
         )
         self.assertTrue(torch.allclose(merged, torch.full((1, 2), 0.05, dtype=torch.float32)))
+
+    def test_online_retimed_weight_uses_confidence_and_repair_gate(self) -> None:
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            effective_speech_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
+            effective_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            feasible_total_budget_delta=torch.tensor([[1.0]], dtype=torch.float32),
+        )
+        execution = SimpleNamespace(planner=planner)
+        sample = {
+            "mels": torch.zeros((1, 3, 80), dtype=torch.float32),
+            "rhythm_teacher_confidence": torch.tensor([[0.5]], dtype=torch.float32),
+        }
+        model_out = {
+            "rhythm_execution": execution,
+            "rhythm_online_retimed_mel_tgt": torch.ones((1, 3, 80), dtype=torch.float32),
+            "rhythm_online_retimed_frame_weight": torch.ones((1, 3), dtype=torch.float32),
+        }
+        _, is_retimed, frame_weight, source = resolve_acoustic_target_post_model(
+            sample,
+            model_out,
+            hparams={
+                "rhythm_use_retimed_target_if_available": True,
+                "rhythm_retimed_target_start_steps": 0,
+                "rhythm_online_retimed_target_start_steps": 0,
+                "rhythm_retimed_target_mode": "hybrid",
+                "rhythm_retimed_confidence_floor": 0.05,
+            },
+            global_step=0,
+            apply_rhythm_render=True,
+            infer=False,
+            test=False,
+        )
+        self.assertTrue(is_retimed)
+        self.assertEqual(source, "online")
+        self.assertTrue(torch.allclose(frame_weight, torch.full((1, 3), 0.375, dtype=torch.float32)))
 
     def test_attach_acoustic_target_bundle_disables_pitch_when_retimed_pitch_missing(self) -> None:
         support = RhythmTaskRuntimeSupport(self._runtime_owner())

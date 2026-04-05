@@ -229,6 +229,42 @@ class OptionalDependencyGuardTests(unittest.TestCase):
         finally:
             _restore_modules("tasks.tts.vocoder_infer", removed)
 
+    def test_conan_module_import_does_not_require_torchdyn_at_import_time(self) -> None:
+        removed_conan = _pop_modules("modules.Conan.Conan")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torchdyn.core" or name.startswith("torchdyn"):
+                raise ModuleNotFoundError("No module named 'torchdyn'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                module = importlib.import_module("modules.Conan.Conan")
+            self.assertTrue(hasattr(module, "Conan"))
+            self.assertTrue(hasattr(module, "ConanPostnet"))
+        finally:
+            _restore_modules("modules.Conan.Conan", removed_conan)
+
+    def test_conan_flow_helpers_raise_clear_error_when_torchdyn_is_missing(self) -> None:
+        removed_conan = _pop_modules("modules.Conan.Conan")
+        real_import = __import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torchdyn.core" or name.startswith("torchdyn"):
+                raise ModuleNotFoundError("No module named 'torchdyn'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                module = importlib.import_module("modules.Conan.Conan")
+                with self.assertRaisesRegex(ImportError, "requires torchdyn"):
+                    module._require_flow_mel()
+                with self.assertRaisesRegex(ImportError, "requires torchdyn"):
+                    module._require_reflow_f0()
+        finally:
+            _restore_modules("modules.Conan.Conan", removed_conan)
+
     def test_txt_processor_package_import_does_not_require_g2p_en_at_import_time(self) -> None:
         removed = _pop_modules("data_gen.tts.txt_processors")
         real_import = __import__

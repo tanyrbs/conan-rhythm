@@ -37,6 +37,9 @@ PROBE_RUNTIME_KEYS = (
     "rhythm_metric_acoustic_target_length_mismatch_abs_before_align",
     "rhythm_metric_acoustic_target_resampled_to_output",
     "rhythm_metric_acoustic_target_trimmed_to_output",
+    "rhythm_metric_retimed_pitch_target_length_mismatch_abs_before_align",
+    "rhythm_metric_retimed_pitch_target_resampled_to_output",
+    "rhythm_metric_retimed_pitch_target_trimmed_to_output",
 )
 
 
@@ -383,6 +386,13 @@ def main():
         align_mismatch = scalar_losses.get("rhythm_metric_acoustic_target_length_mismatch_abs_before_align")
         if align_mismatch is not None and align_mismatch > 0.0:
             detail_parts.append(f"align_abs={align_mismatch:.1f}")
+        pitch_align_mismatch = scalar_losses.get("rhythm_metric_retimed_pitch_target_length_mismatch_abs_before_align")
+        if pitch_align_mismatch is not None and pitch_align_mismatch > 0.0:
+            detail_parts.append(f"pitch_align_abs={pitch_align_mismatch:.1f}")
+        if scalar_losses.get("rhythm_metric_retimed_pitch_target_resampled_to_output", 0.0) > 0.5:
+            detail_parts.append("pitch_resample=1")
+        if scalar_losses.get("rhythm_metric_retimed_pitch_target_trimmed_to_output", 0.0) > 0.5:
+            detail_parts.append("pitch_trim=1")
         mem_part = ""
         if scalar_losses.get("cpu_rss_bytes") is not None:
             mem_part += f" rss={(scalar_losses['cpu_rss_bytes'] / (1024 ** 2)):.1f}MB"

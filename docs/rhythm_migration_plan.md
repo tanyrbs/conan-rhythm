@@ -42,18 +42,24 @@ The maintained branch now includes these corrective changes:
 - explicit zero-confidence stays hard-off for component KD and retimed confidence weighting
 - factor intervention syncs compact edits back into `ref_rhythm_stats` / `ref_rhythm_trace` and drops stale sidecars
 - budget supervision and feasibility-debt accounting are cleaner under repair-heavy cases
+- online retimed acoustic targets now inherit sample confidence and projector-repair gating instead of being implicitly trusted at weight `1.0`
 - module-only stages now keep train/valid objectives aligned instead of reintroducing acoustic/pitch losses only during validation
 - `teacher_offline` validation now uses the real offline-teacher branch instead of silently falling back to the student/runtime path
+- `teacher_offline` preflight dry-run now distinguishes:
+  - `teacher_only` / module-only runtime, where `mel_out` is optional
+  - `teacher_as_main` runtime, where `mel_out` is still required for audition / export semantics
 - preflight orchestration and rhythm diagnostics are split into smaller units instead of monoliths
 - preflight can now escalate missing or placeholder processed paths with `--strict_processed_data_dir`
 - the local deprecated TorchScript helper in `modules/Conan/diff/net.py` is gone
 - the acoustic runtime no longer touches pitch-embed branches when `use_pitch_embed=false`
+- flow components in `modules/Conan/Conan.py` now lazy-load `torchdyn`, so non-flow rhythm checks do not fail at import time
 - RMVPE / torchaudio loading is more lazy, so optional dependency failures happen only on the paths that really need them
 - rhythm-only imports no longer require the English text frontend or tensorboard at import time
 - inference helpers tolerate `f0_denorm_pred=None` instead of indexing into a missing tensor
 - Conan / Emformer export paths also tolerate missing source or predicted F0 instead of indexing blindly
 - weighted retimed acoustic losses now normalize by the full broadcasted weight mass instead of frame count only
 - retimed mel supervision now disables pitch loss when matched `retimed_f0_tgt` / `retimed_uv_tgt` are missing, unless source-axis fallback is explicitly opted in
+- retimed mel / weight alignment now keeps `retimed_f0_tgt`, `retimed_uv_tgt`, and `tgt_nonpadding` on the same time axis as `mel_out`, with linear resize for `retimed_f0_tgt`, nearest / binary-preserving resize for `retimed_uv_tgt`, and trim-mode parity with the aligned mel target
 - integration export now covers `train/valid/test` by default for the teacher->student KD smoke chain
 - stage-validation defaults now match runtime defaults for:
   - `rhythm_enable_learned_offline_teacher`
@@ -64,6 +70,11 @@ The maintained branch now includes these corrective changes:
   - `_project_pause_impl`
   - `_compute_commit_frontier`
   - `_advance_state`
+- stage-specific optimizer scope no longer silently falls back to full-model training:
+  - empty collectors now fail fast
+  - post-freeze zero-trainable states now fail fast
+  - foreign / stale params from the wrong model instance now fail fast
+- `content_lengths` is now propagated explicitly through the rhythm dataset collater, runtime forward kwargs, and streaming evaluation instead of quietly reusing `mel_lengths`
 - a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
   - `rhythm_loss_balance_mode: ema_group`
   - maintained default stays `none`
@@ -95,8 +106,8 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **191 rhythm tests passed**
-- latest compile/unit/smoke rerun after the validation-alignment, weighted-acoustic-loss, and retimed-pitch-guard fixes: **passed**
+- unit coverage: **206 rhythm tests passed**
+- latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, and stage-freeze fail-fast guards: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary
 - student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
@@ -118,9 +129,13 @@ The newest rerun extended regression coverage specifically around:
 - conservative rhythm-loss balancing
 - module-only train/valid objective alignment
 - teacher-offline validation routing
+- teacher-offline preflight semantics for `teacher_only` vs `teacher_as_main`
 - optional dependency guards for text frontend / tensorboard imports
+- optional dependency guards for `torchdyn` on non-flow rhythm paths
 - weighted acoustic-loss normalization over broadcasted weight mass
-- retimed pitch fallback suppression and missing-target detection
+- retimed pitch fallback suppression, missing-target detection, and post-align length parity with `mel_out`
+- online retimed target confidence / repair gating
+- stage-specific parameter freeze guards and foreign-param detection
 - validation / smoke observability for skipped acoustic objectives and missing matched retimed pitch targets
 
 Important asset-level caveats from the same audit:
@@ -140,6 +155,9 @@ Important asset-level caveats from the same audit:
   - it strongly checks indexed cache fields / contracts
   - by default it still only lightly checks `processed_data_dir`
   - for formal readiness runs, `--strict_processed_data_dir` now escalates missing or placeholder processed paths into hard errors
+- `teacher_offline` preflight now intentionally treats runtime semantics, not just stage name, as the source of truth:
+  - `teacher_only` / module-only dry-runs may omit `mel_out`
+  - `teacher_as_main` dry-runs must still emit `mel_out`, because that path is also used for teacher audition / export
 - `scripts/cpu_probe_rhythm_train.py` is a throughput / gradient probe, not a full cache-contract validator
 - `scripts/integration_teacher_export_student_kd.py` exports `train/valid/test`, but the post-export smoke assertions are still centered on `train/valid`
 - on the checked-in LibriTTS smoke corpus, integration split inference relies on the generated `build_summary.json`
@@ -171,7 +189,7 @@ Why stage-3 is still guarded:
 
 - smoke requires `use_pitch_embed=False`
 - the smoke binary already has retimed targets, but default stage-3 still fails because it lacks F0
-- retimed mel no longer silently falls back to source-axis pitch; missing matched retimed pitch now disables pitch supervision first and can still trip fail-fast checks during formal runs
+- retimed mel no longer silently falls back to source-axis pitch; missing matched retimed pitch now disables pitch supervision first, and aligned retimed pitch tracks are kept on the same time axis as `mel_out`
 - `L_base` dominates the current smoke objective
 - `grad_norm_before_clip` stays very high for long stretches
 - the real F0 / retimed asset contract is not present in this shared checkout
@@ -190,7 +208,7 @@ That is roughly:
 - `L_base / L_rhythm_exec ~= 2342x`
 - `L_base / L_stream_state ~= 8745x`
 
-So the current stage-3 smoke result is not “mildly imbalanced”; it is still overwhelmingly acoustic-dominated.
+So the current stage-3 smoke result is not "mildly imbalanced"; it is still overwhelmingly acoustic-dominated.
 
 The new probe-observability wiring was also validated on a fresh 2-step `student_retimed` CPU probe:
 
@@ -198,7 +216,7 @@ The new probe-observability wiring was also validated on a fresh 2-step `student
 - `rhythm_metric_skip_acoustic_objective = 0.0`
 - `rhythm_metric_acoustic_target_is_retimed = 1.0`
 
-So the probe can now distinguish “pitch was intentionally disabled because matched retimed pitch is unavailable” from “the whole acoustic objective got skipped”.
+So the probe can now distinguish "pitch was intentionally disabled because matched retimed pitch is unavailable" from "the whole acoustic objective got skipped".
 
 ## 6. Remaining blockers before formal training
 
@@ -236,7 +254,7 @@ The main blocker is still assets, not the control-loss hot path.
 
 The audit found a few remaining gaps that were intentionally not over-corrected in the same round:
 
-- optimizer-scope coverage is better, but still benefits from more direct end-to-end param-group tests
+- optimizer-scope coverage is now guarded against empty / foreign collector output, but it still benefits from more direct end-to-end param-group tests under real checkpoints
 - student-retimed needs a cleaner formal stage-3 integration smoke once real F0 assets exist
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
 - projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
