@@ -1,5 +1,10 @@
 base_config: egs/conan_emformer_rhythm_v2_student_kd.yaml
 
+# Stage-3 is normally warm-started from stage-2. Because stage-2 often keeps
+# `use_pitch_embed=false` while stage-3 enables it, pitch embed / predictor weights may
+# be missing from the stage-2 checkpoint. Keep maintained warm-start loading non-strict.
+load_ckpt_strict: false
+
 # Formal stage-3 maintained path:
 # keep runtime student-only, but close train/valid on the retimed acoustic canvas.
 rhythm_stage: student_retimed

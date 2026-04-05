@@ -121,6 +121,7 @@ Recommended first launch posture:
 - keep maintained configs unchanged on the first long run
 - avoid turning on experimental knobs (`context_match`, `balanced`) before the default chain is clean
 - use a **fresh `exp_name`** or `--reset` for fresh runs, so stale saved config does not silently override the current YAML
+- the maintained stage configs intentionally pin `load_ckpt_strict: false` for cross-stage warm-start; still inspect startup logs so only expected Rhythm V2 / offline-teacher / pitch keys are missing
 
 ## 5. Pre-launch checklist on AutoDL
 
@@ -214,6 +215,13 @@ If this command only passes after disabling pitch embed, stop. That means your s
 
 Use these as the maintained launch templates.
 
+Warm-start rule:
+
+- `teacher_offline` should normally warm-start from a base Conan checkpoint
+- `student_kd` should normally warm-start from the finished `teacher_offline` checkpoint
+- `student_retimed` should normally warm-start from the finished `student_kd` checkpoint
+- for the **first formal stage-3 run**, prefer `rhythm_retimed_target_mode='cached'` as the safer debug baseline before you A/B `hybrid`
+
 ### 6.1 `teacher_offline`
 
 ```bash
@@ -222,7 +230,7 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
   --exp_name conan_rhythm_v2_teacher_offline \
   --reset \
-  -hp "binary_data_dir='data/binary/<teacher_binary>',processed_data_dir='data/processed/<dataset>'"
+  -hp "load_ckpt='checkpoints/<original_conan_ckpt_or_dir>',binary_data_dir='data/binary/<teacher_binary>',processed_data_dir='data/processed/<dataset>'"
 ```
 
 What this stage is for:
@@ -272,7 +280,7 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
   --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
   --exp_name conan_rhythm_v2_student_kd \
   --reset \
-  -hp "binary_data_dir='data/binary/<student_kd_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline'"
+  -hp "load_ckpt='checkpoints/conan_rhythm_v2_teacher_offline',binary_data_dir='data/binary/<student_kd_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline'"
 ```
 
 Maintained expectation:
@@ -299,7 +307,7 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
   --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
   --exp_name conan_rhythm_v2_student_retimed \
   --reset \
-  -hp "binary_data_dir='data/binary/<student_retimed_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline'"
+  -hp "load_ckpt='checkpoints/conan_rhythm_v2_student_kd',binary_data_dir='data/binary/<student_retimed_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline',rhythm_retimed_target_mode='cached'"
 ```
 
 First formal stage-3 launch rules:

@@ -1,5 +1,11 @@
 base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 
+# Warm-start into the rhythmized model from a base Conan checkpoint is usually partial:
+# the checkpoint will not contain Rhythm V2 teacher/runtime modules.
+# Keep loading non-strict so overlapping backbone weights restore cleanly while new
+# rhythm-specific parameters initialize from scratch.
+load_ckpt_strict: false
+
 # Formal stage-1 maintained path:
 # train the learned offline planner teacher as the primary execution branch,
 # then export learned_offline teacher surfaces for student_kd / student_retimed.

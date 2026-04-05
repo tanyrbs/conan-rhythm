@@ -1,5 +1,10 @@
 base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 
+# Stage-2 is normally warm-started from stage-1 `teacher_offline`.
+# That checkpoint contains offline-teacher-only parameters that are absent here, so
+# maintained warm-start should stay non-strict.
+load_ckpt_strict: false
+
 # Formal stage-2 maintained path:
 # student-only runtime, cache-backed learned_offline teacher supervision.
 rhythm_stage: student_kd

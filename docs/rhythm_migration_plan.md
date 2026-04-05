@@ -76,6 +76,10 @@ The maintained branch now includes these corrective changes:
   - empty collectors now fail fast
   - post-freeze zero-trainable states now fail fast
   - foreign / stale params from the wrong model instance now fail fast
+- maintained stage configs now pin `load_ckpt_strict: false` so cross-stage warm-start behaves like partial restore instead of exact-architecture resume:
+  - base Conan -> `teacher_offline`
+  - `teacher_offline` -> `student_kd`
+  - `student_kd` -> `student_retimed`
 - `content_lengths` is now propagated explicitly through the rhythm dataset collater, runtime forward kwargs, and streaming evaluation instead of quietly reusing `mel_lengths`
 - a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
   - `rhythm_loss_balance_mode: ema_group`

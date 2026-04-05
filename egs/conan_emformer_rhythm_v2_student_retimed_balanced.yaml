@@ -1,5 +1,8 @@
 base_config: egs/conan_emformer_rhythm_v2_student_retimed.yaml
 
+# Experimental stage-3 branch follows the same partial warm-start rule as student_retimed.
+load_ckpt_strict: false
+
 # Conservative experimental stage-3 variant:
 # keep maintained stage semantics, but enable bounded EMA group balancing.
 rhythm_loss_balance_mode: ema_group

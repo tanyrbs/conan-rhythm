@@ -291,6 +291,20 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_
 
 Real stage-3 runs additionally require a binary cache that already contains retimed targets plus valid F0 side data. The checked-in smoke `student_binary` does not satisfy that default `use_pitch_embed=true` contract.
 
+### Warm-start loading note
+
+These maintained stage configs now set `load_ckpt_strict: false` on purpose. The
+intended chain is partial-load warm-start, not exact-architecture resume:
+
+- `teacher_offline` can warm-start from a base Conan checkpoint that has no Rhythm V2 modules
+- `student_kd` can warm-start from `teacher_offline`, which includes offline-teacher-only params that stage-2 does not instantiate
+- `student_retimed` can warm-start from `student_kd`, which may have been trained with `use_pitch_embed=false`, so stage-3 pitch embed / predictor weights may be missing
+
+When using `load_ckpt`, watch startup logs for missing or unmatched keys:
+
+- expected missing Rhythm V2 / offline-teacher / pitch keys are normal for cross-stage warm-start
+- missing core backbone keys such as encoder / decoder / speaker-related weights are a stop-and-debug signal
+
 ## Config matrix
 
 | Config | Status | Purpose | Needs teacher cache | Needs retimed cache | Needs F0 |

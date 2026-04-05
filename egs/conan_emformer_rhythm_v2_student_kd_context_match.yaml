@@ -1,5 +1,8 @@
 base_config: egs/conan_emformer_rhythm_v2_student_kd.yaml
 
+# Experimental stage-2 branch follows the same partial warm-start rule as student_kd.
+load_ckpt_strict: false
+
 # Experimental stage-2 branch:
 # prefix-truncated training + context-matched KD gate + conservative EMA balance.
 rhythm_streaming_prefix_train: true
