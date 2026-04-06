@@ -18,9 +18,9 @@
 ### 正在进行
 
 - `train360` metadata 分片构建
-- 当前大约 **64.5%**
+- 当前大约 **70.3%**
 - ETA 约：
-  - **2026-04-06 18:03 UTC**
+  - **2026-04-06 18:02 UTC**
 
 ### 还没开始
 
@@ -44,6 +44,11 @@
   - `logs/stage1_recovery_mixed100360_v2_20260406_091257.status`
 - shard 日志：
   - `logs/prepare_train360_shards/shard_*.log`
+
+### 当前 Git 分支
+
+- 本地：`autodl`
+- 远端：`origin/autodl`
 
 ### train360 metadata 完成后的接管脚本
 

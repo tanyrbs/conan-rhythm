@@ -64,11 +64,11 @@
 
 - `TRAIN360_METADATA_SHARDED_START`
 
-按 `logs/prepare_train360_shards/shard_*.log` 最新进度估算：
+按 `logs/prepare_train360_shards/shard_*.log` 最新进度估算（2026-04-06 15:25 UTC）：
 
-- shard 平均进度约 **64.5%**
+- shard 平均进度约 **70.3%**
 - 估计 metadata 分片结束时间约：
-  - **2026-04-06 18:03 UTC**
+  - **2026-04-06 18:02 UTC**
 
 说明：
 
@@ -129,6 +129,11 @@ formal takeover 脚本的“train360 train-only binarize”本身是对的；
 - 本地额外补充：
   - streaming 侧 phase non-retro 指标
   - 显式 `student_ref_bootstrap` stage 名称，便于本地 contract fail-fast
+
+当前 Git 分支：
+
+- 本地：`autodl`
+- 远端：`origin/autodl`
 
 ## 5. 当前最重要的判断
 
