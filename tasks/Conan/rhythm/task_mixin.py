@@ -115,6 +115,8 @@ class RhythmConanTaskMixin:
             ),
             ("rhythm_metric_retimed_pitch_target_resampled_to_output", "retimed_pitch_target_resampled_to_output"),
             ("rhythm_metric_retimed_pitch_target_trimmed_to_output", "retimed_pitch_target_trimmed_to_output"),
+            ("rhythm_metric_stage3_acoustic_loss_scale", "rhythm_stage3_acoustic_loss_scale"),
+            ("rhythm_metric_retimed_acoustic_loss_scale", "rhythm_retimed_acoustic_loss_scale"),
         ):
             value = model_out.get(field_name)
             if isinstance(value, torch.Tensor):
@@ -428,9 +430,82 @@ class RhythmConanTaskMixin:
             target=target[:, 0],
         )
 
-    def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None):
+    @staticmethod
+    def _resolve_stage3_acoustic_hparam(name: str, legacy_name: str, default):
+        if name in hparams:
+            return hparams.get(name)
+        if legacy_name in hparams:
+            return hparams.get(legacy_name)
+        return default
+
+    def _resolve_stage3_acoustic_loss_scale(
+        self,
+        *,
+        stage: str,
+        retimed_stage_active: bool,
+        acoustic_target_is_retimed: bool,
+        infer: bool,
+        test: bool,
+    ) -> float:
+        """Resolve a true scalar on the stage-3 retimed acoustic objective.
+
+        Frame weights reshape per-frame trust, but because the reducer normalizes
+        by the full broadcasted weight mass they do not reliably reduce the
+        overall scalar objective. A post-reduction scalar is therefore required
+        to keep early stage-3 updates from becoming overly acoustic-dominated.
+        """
+        if infer or test:
+            return 1.0
+        if stage != "student_retimed":
+            return 1.0
+        if not bool(retimed_stage_active) or not bool(acoustic_target_is_retimed):
+            return 1.0
+        end_scale = float(
+            self._resolve_stage3_acoustic_hparam(
+                "rhythm_stage3_acoustic_weight_end",
+                "rhythm_retimed_acoustic_loss_scale",
+                1.0,
+            )
+        )
+        start_scale = float(
+            self._resolve_stage3_acoustic_hparam(
+                "rhythm_stage3_acoustic_weight_start",
+                "rhythm_retimed_acoustic_loss_scale_start",
+                end_scale,
+            )
+        )
+        warmup_steps = int(
+            self._resolve_stage3_acoustic_hparam(
+                "rhythm_stage3_acoustic_ramp_steps",
+                "rhythm_retimed_acoustic_loss_scale_warmup_steps",
+                0,
+            )
+            or 0
+        )
+        retimed_start = int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
+        if warmup_steps <= 0:
+            return max(0.0, end_scale)
+        elapsed = max(int(self.global_step) - retimed_start, 0)
+        progress = min(max(elapsed / float(warmup_steps), 0.0), 1.0)
+        scale = start_scale + (end_scale - start_scale) * progress
+        return max(0.0, float(scale))
+
+    def _resolve_acoustic_loss_scale(self, output, *, infer: bool, test: bool) -> float:
+        return self._resolve_stage3_acoustic_loss_scale(
+            stage=str(output.get("rhythm_stage", "")),
+            retimed_stage_active=bool(output.get("acoustic_target_is_retimed", False)),
+            acoustic_target_is_retimed=bool(output.get("acoustic_target_is_retimed", False)),
+            infer=infer,
+            test=test,
+        )
+
+    def _add_acoustic_loss(self, mel_out, target, losses, *, frame_weight=None, loss_scale: float = 1.0):
+        loss_scale = float(max(0.0, loss_scale))
         if frame_weight is None:
-            self.add_mel_loss(mel_out, target, losses)
+            mel_losses = {}
+            self.add_mel_loss(mel_out, target, mel_losses)
+            for loss_name, loss_value in mel_losses.items():
+                losses[loss_name] = loss_value * loss_scale
             return
         for loss_name, lambd in self.mel_losses.items():
             if loss_name == "l1":
@@ -441,7 +516,7 @@ class RhythmConanTaskMixin:
                 loss = self._weighted_ssim_loss(mel_out, target, frame_weight)
             else:
                 loss = getattr(self, f'{loss_name}_loss')(mel_out, target)
-            losses[loss_name] = loss * lambd
+            losses[loss_name] = loss * lambd * loss_scale
 
     def drop_multi(self, tech, drop_p):
         if torch.rand(1) < drop_p:
@@ -641,8 +716,23 @@ class RhythmConanTaskMixin:
             output["rhythm_stage"] = stage
             output["rhythm_module_only_objective"] = float(module_only_objective)
             output["rhythm_skip_acoustic_objective"] = float(skip_acoustic_objective)
+            acoustic_loss_scale = self._resolve_stage3_acoustic_loss_scale(
+                stage=stage,
+                retimed_stage_active=bool(retimed_stage_active),
+                acoustic_target_is_retimed=bool(output.get("acoustic_target_is_retimed", False)),
+                infer=infer,
+                test=test,
+            )
+            output["rhythm_stage3_acoustic_loss_scale"] = float(acoustic_loss_scale)
+            output["rhythm_retimed_acoustic_loss_scale"] = float(acoustic_loss_scale)
             if not skip_acoustic_objective:
-                self._add_acoustic_loss(output['mel_out'], acoustic_target, losses, frame_weight=acoustic_weight)
+                self._add_acoustic_loss(
+                    output['mel_out'],
+                    acoustic_target,
+                    losses,
+                    frame_weight=acoustic_weight,
+                    loss_scale=acoustic_loss_scale,
+                )
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
                 self.add_pitch_loss(output, sample, losses)
             self.add_rhythm_loss(output, sample, losses)

@@ -1,0 +1,12 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml
+
+# Single-GPU utilization probe:
+# - modestly enlarge the dynamic batch window
+# - keep the loader hotter with more workers/prefetch
+# This is meant for resume-from-4000 verification, not a full retune.
+max_sentences: 12
+max_tokens: 18000
+ds_workers: 8
+dl_pin_memory: true
+dl_persistent_workers: true
+dl_prefetch_factor: 4

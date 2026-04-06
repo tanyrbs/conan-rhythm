@@ -59,6 +59,16 @@ _RETIMED_TARGET_MODE_ALIASES = {
     "mixed": "hybrid",
 }
 
+_CACHED_REFERENCE_POLICY_ALIASES = {
+    "self": "self",
+    "sample_ref": "sample_ref",
+    "sampled_ref": "sample_ref",
+    "ref": "sample_ref",
+    "paired": "paired",
+    "pairwise": "paired",
+    "external": "external",
+}
+
 
 def parse_optional_bool(value):
     if value is None:
@@ -111,6 +121,14 @@ def normalize_retimed_target_mode(value) -> str:
     resolved = _RETIMED_TARGET_MODE_ALIASES.get(mode, mode)
     if resolved not in {"cached", "online", "hybrid"}:
         raise ValueError(f"Unsupported rhythm_retimed_target_mode: {value}")
+    return resolved
+
+
+def normalize_cached_reference_policy(value) -> str:
+    policy = str(value or "self").strip().lower()
+    resolved = _CACHED_REFERENCE_POLICY_ALIASES.get(policy, policy)
+    if resolved not in {"self", "sample_ref", "paired", "external"}:
+        raise ValueError(f"Unsupported rhythm_cached_reference_policy: {value}")
     return resolved
 
 
@@ -252,6 +270,7 @@ class RhythmHparamsPolicy:
     stage: str = ""
     strict_mainline: bool = False
     target_mode: str = "prefer_cache"
+    cached_reference_policy: str = "self"
     primary_target_surface: str = "guidance"
     distill_surface: str = "auto"
     retimed_target_mode: str = "cached"
@@ -285,6 +304,9 @@ class RhythmHparamsPolicy:
             strict_mainline=use_strict_mainline(hparams),
             target_mode=normalize_rhythm_target_mode(
                 hparams.get("rhythm_dataset_target_mode", "prefer_cache")
+            ),
+            cached_reference_policy=normalize_cached_reference_policy(
+                hparams.get("rhythm_cached_reference_policy", "self")
             ),
             primary_target_surface=normalize_primary_target_surface(
                 hparams.get("rhythm_primary_target_surface", "guidance")

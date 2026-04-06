@@ -102,6 +102,7 @@ class Trainer(TrainerLoopMixin):
         self.global_step = 0
         self.current_epoch = 0
         self.total_batches = 0
+        self.last_saved_ckpt_step = None
 
         # configure checkpoint
         self.monitor_key = monitor_key
@@ -257,6 +258,7 @@ class Trainer(TrainerLoopMixin):
         self.best_val_results = checkpoint['checkpoint_callback_best']
         self.global_step = checkpoint['global_step']
         self.current_epoch = checkpoint['epoch']
+        self.last_saved_ckpt_step = self.global_step
         task_ref.global_step = self.global_step
 
         # wait for all models to restore weights
@@ -296,6 +298,7 @@ class Trainer(TrainerLoopMixin):
         ckpt_path = f'{self.work_dir}/model_ckpt_steps_{self.global_step}.ckpt'
         logging.info(f'Epoch {epoch:05d}@{self.global_step}: saving model to {ckpt_path}')
         self._atomic_save(ckpt_path)
+        self.last_saved_ckpt_step = self.global_step
         self.maybe_save_ddp_logging_data()
         for old_ckpt in get_all_ckpts(self.work_dir)[self.num_ckpt_keep:]:
             remove_file(old_ckpt)

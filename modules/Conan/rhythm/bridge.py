@@ -248,6 +248,7 @@ def run_rhythm_frontend(
     return {
         "unit_batch": unit_batch,
         "execution": execution,
+        "state_prev": rhythm_state,
         "ref_conditioning": rhythm_ref_conditioning,
         "offline_execution": offline_execution,
         "offline_confidence": offline_confidence,
@@ -274,9 +275,12 @@ def attach_rhythm_outputs(
         return content_embed, tgt_nonpadding
     unit_batch = rhythm_bundle["unit_batch"]
     execution = rhythm_bundle["execution"]
+    state_prev = rhythm_bundle.get("state_prev")
     ref_conditioning = rhythm_bundle["ref_conditioning"]
     ret["rhythm_unit_batch"] = unit_batch
     ret["rhythm_execution"] = execution
+    if state_prev is not None:
+        ret["rhythm_state_prev"] = state_prev
     ret["rhythm_state_next"] = execution.next_state
     ret["rhythm_teacher_as_main"] = float(bool(rhythm_bundle.get("teacher_as_main", False)))
     ret["rhythm_ref_conditioning"] = ref_conditioning

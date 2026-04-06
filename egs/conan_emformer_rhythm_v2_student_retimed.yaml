@@ -24,6 +24,12 @@ rhythm_export_cache_audit_to_sample: false
 rhythm_compact_joint_loss: true
 rhythm_joint_budget_macro_weight: 0.35
 rhythm_joint_cumplan_macro_weight: 0.65
+# Conservative stage-3 curriculum:
+# early student_retimed updates should not be fully acoustic-dominated before
+# the explicit rhythm controller stabilizes on the retimed canvas.
+rhythm_stage3_acoustic_weight_start: 0.25
+rhythm_stage3_acoustic_weight_end: 1.0
+rhythm_stage3_acoustic_ramp_steps: 10000
 
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none
@@ -56,6 +62,9 @@ rhythm_distill_speech_shape_weight: 0.0
 rhythm_distill_pause_shape_weight: 0.0
 lambda_mel_adv: 0.0
 
+# Formal stage-3 expects matched retimed f0/uv sidecars.
+# If a smoke binary lacks F0, only structural smoke should override this with
+# use_pitch_embed=false; that is not a formal stage-3 pass.
 use_pitch_embed: true
 binarization_args:
   with_f0: true

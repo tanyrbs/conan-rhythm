@@ -108,22 +108,34 @@ def validate_cache_field_contract(
     context: RhythmConfigContractContext,
 ) -> RhythmConfigContractReport:
     hp = context.hparams
+    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
     primary = normalize_primary_target_surface(
         str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
     )
     distill = normalize_distill_surface(
         str(hp.get("rhythm_distill_surface", "auto") or "auto").strip().lower()
     )
-    cached_only = (
-        str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
-        == "cached_only"
-    )
+    cached_only = target_mode == "cached_only"
     distill_exec_weight = float(hp.get("rhythm_distill_exec_weight", 1.0))
     distill_budget_weight = float(hp.get("rhythm_distill_budget_weight", 0.5))
     distill_allocation_weight = float(hp.get("rhythm_distill_allocation_weight", 0.5))
     distill_prefix_weight = float(hp.get("rhythm_distill_prefix_weight", 0.25))
     distill_speech_shape_weight = float(hp.get("rhythm_distill_speech_shape_weight", 0.0))
     distill_pause_shape_weight = float(hp.get("rhythm_distill_pause_shape_weight", 0.0))
+    retimed_source = str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
+    retimed_path_active = (
+        bool(hp.get("rhythm_require_retimed_cache", False))
+        or bool(hp.get("rhythm_apply_train_override", False))
+        or bool(hp.get("rhythm_apply_valid_override", False))
+        or bool(hp.get("rhythm_binarize_retimed_mel_targets", False))
+        or bool(hp.get("rhythm_use_retimed_target_if_available", False))
+    )
+    need_teacher_cache = (
+        (primary == "teacher" and target_mode != "runtime_only")
+        or bool(hp.get("rhythm_require_cached_teacher", False))
+        or bool(hp.get("rhythm_binarize_teacher_targets", False))
+        or (retimed_path_active and retimed_source == "teacher")
+    )
 
     expected_groups: list[tuple[str, ...]] = [(key,) for key in sorted(CORE_RHYTHM_FIELDS)]
     errors: list[str] = []
@@ -133,12 +145,7 @@ def validate_cache_field_contract(
         expected_groups.extend(_CACHED_ONLY_META_FIELD_GROUPS)
     if primary == "guidance":
         expected_groups.extend(_GUIDANCE_FIELD_GROUPS)
-    if (
-        primary == "teacher"
-        or bool(hp.get("rhythm_require_cached_teacher", False))
-        or bool(hp.get("rhythm_binarize_teacher_targets", False))
-        or str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower() == "teacher"
-    ):
+    if need_teacher_cache:
         expected_groups.extend(_TEACHER_CORE_FIELD_GROUPS)
     if (
         bool(hp.get("rhythm_require_retimed_cache", False))
@@ -180,7 +187,7 @@ def validate_cache_field_contract(
         errors.append("Schedule-only stage should not enable train-time retimed rendering.")
     if cached_only and int(hp.get("rhythm_cache_version", -1)) <= 0:
         errors.append("cached_only requires a positive rhythm_cache_version.")
-    if primary == "teacher" and not bool(hp.get("rhythm_binarize_teacher_targets", False)):
+    if primary == "teacher" and target_mode != "runtime_only" and not bool(hp.get("rhythm_binarize_teacher_targets", False)):
         warnings.append("Primary surface is teacher but rhythm_binarize_teacher_targets is false.")
 
     return RhythmConfigContractReport(
@@ -240,18 +247,25 @@ def validate_inspected_cache_items(
     split: str,
 ) -> RhythmConfigContractReport:
     hp = context.hparams
-    cached_only = (
-        str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
-        == "cached_only"
-    )
+    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
+    cached_only = target_mode == "cached_only"
     expected_teacher_surface = context.policy.teacher_surface_name
     expected_teacher_source_id = context.policy.teacher_target_source_id
+    primary = normalize_primary_target_surface(
+        str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
+    )
+    retimed_source = str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
+    retimed_path_active = (
+        bool(hp.get("rhythm_require_retimed_cache", False))
+        or bool(hp.get("rhythm_apply_train_override", False))
+        or bool(hp.get("rhythm_apply_valid_override", False))
+        or bool(hp.get("rhythm_binarize_retimed_mel_targets", False))
+        or bool(hp.get("rhythm_use_retimed_target_if_available", False))
+    )
     need_teacher = (
-        normalize_primary_target_surface(
-            str(hp.get("rhythm_primary_target_surface", "guidance") or "guidance").strip().lower()
-        )
-        == "teacher"
+        (primary == "teacher" and target_mode != "runtime_only")
         or bool(hp.get("rhythm_require_cached_teacher", False))
+        or bool(hp.get("rhythm_binarize_teacher_targets", False))
         or (
             float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0
             and normalize_distill_surface(
@@ -259,11 +273,13 @@ def validate_inspected_cache_items(
             )
             == "cache"
         )
-        or str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower() == "teacher"
+        or (retimed_path_active and retimed_source == "teacher")
     )
     need_retimed = bool(hp.get("rhythm_require_retimed_cache", False)) or bool(
         hp.get("rhythm_apply_train_override", False)
-    ) or bool(hp.get("rhythm_apply_valid_override", False))
+    ) or bool(hp.get("rhythm_apply_valid_override", False)) or bool(
+        hp.get("rhythm_binarize_retimed_mel_targets", False)
+    )
     expected_meta = build_expected_cache_contract(hp)
 
     errors: list[str] = []
@@ -367,5 +383,4 @@ __all__ = [
     "validate_inspected_cache_items",
     "validate_required_field_presence",
 ]
-
 

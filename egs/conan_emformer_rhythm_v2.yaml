@@ -95,6 +95,9 @@ rhythm_streaming_prefix_min_tokens: 8
 rhythm_streaming_prefix_multiple: 4
 # Cached rhythm targets in the current repo are self-conditioned surfaces.
 # Keep rhythm conditioning self-consistent unless a pairwise offline cache is introduced later.
+# If you switch rhythm_cached_reference_policy -> sample_ref/external, also switch
+# rhythm_dataset_target_mode -> runtime_only (or build a true pairwise offline cache),
+# otherwise sampled external conditioning will be trained against item-local self targets.
 rhythm_cached_reference_policy: self
 rhythm_dataset_build_guidance_from_ref: true
 rhythm_dataset_build_teacher_from_ref: false

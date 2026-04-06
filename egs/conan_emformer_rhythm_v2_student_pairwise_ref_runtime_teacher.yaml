@@ -1,0 +1,65 @@
+base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
+
+# Experimental stage-2.5:
+# pair source item A with a sampled same-speaker reference B, then synthesize the
+# rhythm teacher online from B instead of reusing A's self-conditioned cached surfaces.
+#
+# Intended chain:
+#   teacher_offline -> student_kd -> this config -> student_retimed
+#
+# Keep warm-start loading non-strict. In practice this stage is usually initialized
+# from student_kd, but allowing partial restore is still safer across audit branches.
+load_ckpt_strict: false
+
+# Keep the explicit stage name so local contract validation can fail fast if this
+# experimental branch drifts away from its intended runtime-only semantics.
+rhythm_stage: student_ref_bootstrap
+rhythm_minimal_v1_profile: false
+rhythm_strict_mainline: false
+rhythm_schedule_only_stage: false
+rhythm_teacher_only_stage: false
+rhythm_teacher_as_main: false
+rhythm_optimize_module_only: true
+rhythm_fastpath_disable_acoustic_when_module_only: true
+rhythm_compact_joint_loss: false
+
+# Externalize both conditioning and supervision:
+#   - sampled same-speaker ref drives the rhythm descriptor
+#   - runtime algorithmic teacher generates targets from that sampled ref
+rhythm_dataset_target_mode: runtime_only
+rhythm_cached_reference_policy: sample_ref
+rhythm_require_external_reference: true
+rhythm_primary_target_surface: teacher
+rhythm_teacher_target_source: algorithmic
+rhythm_require_cached_teacher: false
+rhythm_distill_surface: none
+rhythm_dataset_build_teacher_from_ref: true
+rhythm_dataset_build_guidance_from_ref: false
+rhythm_binarize_teacher_targets: false
+rhythm_binarize_retimed_mel_targets: false
+rhythm_binarize_retimed_mel_source: guidance
+rhythm_use_retimed_target_if_available: false
+rhythm_require_retimed_cache: false
+rhythm_apply_train_override: false
+rhythm_apply_valid_override: false
+rhythm_export_debug_sidecars: false
+rhythm_export_cache_audit_to_sample: false
+
+lambda_rhythm_guidance: 0.0
+lambda_rhythm_distill: 0.0
+lambda_rhythm_teacher_aux: 0.0
+lambda_rhythm_exec_speech: 1.0
+lambda_rhythm_exec_pause: 1.0
+lambda_rhythm_budget: 0.08
+lambda_rhythm_cumplan: 0.12
+lambda_rhythm_plan: 0.0
+lambda_mel_adv: 0.0
+rhythm_pause_boundary_weight: 0.35
+rhythm_feasible_debt_weight: 0.05
+
+# Keep stage-2.5 light and stable like existing module-only stages.
+# Enforce true external-reference training semantics; if a speaker collapses to a
+# singleton after filtering, fail fast instead of silently falling back to self.
+use_pitch_embed: false
+binarization_args:
+  with_f0: false

@@ -14,6 +14,7 @@ LEGACY_RHYTHM_STAGES = {
 
 SPECIAL_RHYTHM_STAGES = {
     "minimal_v1",
+    "student_ref_bootstrap",
     "transitional",
 }
 
@@ -34,6 +35,10 @@ _STAGE_ALIASES = {
     "legacy_dual_mode_kd": "legacy_dual_mode_kd",
     "cached_only": "minimal_v1",
     "minimal_v1": "minimal_v1",
+    "student_ref_bootstrap": "student_ref_bootstrap",
+    "student_pairwise_ref_runtime_teacher": "student_ref_bootstrap",
+    "pairwise_ref_runtime_teacher": "student_ref_bootstrap",
+    "ref_bootstrap": "student_ref_bootstrap",
     "transitional": "transitional",
 }
 
@@ -77,6 +82,8 @@ def detect_rhythm_stage(hparams, *, config_name: str | None = None) -> str:
         return "student_kd"
     if "student_retimed" in config_name or "retimed_train" in config_name:
         return "student_retimed"
+    if "student_ref_bootstrap" in config_name or "pairwise_ref_runtime_teacher" in config_name:
+        return "student_ref_bootstrap"
     if "schedule_only" in config_name:
         return "legacy_schedule_only"
     if "dual_mode_kd" in config_name:

@@ -162,6 +162,47 @@ def _validate_supervision_overlap(
             )
 
 
+def _validate_reference_supervision_alignment(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    knobs = ctx.knobs
+    external_ref_policy = knobs.cached_reference_policy in {"sample_ref", "paired", "external"}
+    if knobs.target_mode == "runtime_only" and knobs.primary_target_surface == "teacher":
+        if ctx.policy.teacher_target_source != "algorithmic":
+            errors.append(
+                "rhythm_dataset_target_mode: runtime_only with rhythm_primary_target_surface: teacher "
+                "requires rhythm_teacher_target_source: algorithmic. The current runtime target builder "
+                "cannot synthesize learned_offline teacher targets online."
+            )
+        if knobs.require_cached_teacher:
+            warnings.append(
+                "runtime_only teacher supervision usually keeps rhythm_require_cached_teacher: false; "
+                "cached teacher contracts do not drive the active objective in this path."
+            )
+    if not external_ref_policy:
+        return
+    if knobs.target_mode != "runtime_only":
+        errors.append(
+            "rhythm_cached_reference_policy in {sample_ref, paired, external} requires "
+            "rhythm_dataset_target_mode: runtime_only in the current cache design. "
+            "Otherwise the model mixes sampled external rhythm conditioning with item-local cached "
+            "self targets, creating a supervision conflict that encourages the rhythm branch to "
+            "ignore the reference. Use a true pairwise offline cache before enabling cached_only/prefer_cache."
+        )
+    if knobs.primary_target_surface == "teacher" and ctx.policy.teacher_target_source != "algorithmic":
+        errors.append(
+            "External-reference rhythm supervision with rhythm_primary_target_surface: teacher "
+            "should use rhythm_teacher_target_source: algorithmic unless a true pairwise offline cache exists."
+        )
+    if knobs.require_retimed_cache:
+        warnings.append(
+            "External-reference runtime bootstrap usually keeps rhythm_require_retimed_cache: false; "
+            "retimed acoustic closure belongs in stage-3 after the rhythm branch has learned to respond to the reference."
+        )
+
+
 def _validate_source_boundary_controls(
     ctx: RhythmStageValidationContext,
     errors: list[str],
@@ -209,7 +250,13 @@ def _validate_retimed_target_controls(
             "Retimed train/valid rendering must either enable rhythm_use_retimed_pitch_target "
             "or set rhythm_disable_pitch_loss_when_retimed: true."
         )
-    if knobs.retimed_mel_source == "teacher" and not knobs.binarize_teacher_targets:
+    retimed_path_active = (
+        knobs.require_retimed_cache
+        or knobs.use_retimed_target_if_available
+        or knobs.has_train_or_valid_override
+        or bool(ctx.hparams.get("rhythm_binarize_retimed_mel_targets", False))
+    )
+    if retimed_path_active and knobs.retimed_mel_source == "teacher" and not knobs.binarize_teacher_targets:
         errors.append("Teacher retimed targets require rhythm_binarize_teacher_targets: true.")
 
 
@@ -286,7 +333,11 @@ def _validate_stage_hints(
             )
     if knobs.enable_dual_mode_teacher and knobs.lambda_distill <= 0.0:
         warnings.append("Dual-mode teacher is enabled but lambda_rhythm_distill == 0.")
-    if knobs.primary_target_surface == "teacher" and not knobs.binarize_teacher_targets:
+    if (
+        knobs.primary_target_surface == "teacher"
+        and not knobs.binarize_teacher_targets
+        and knobs.target_mode != "runtime_only"
+    ):
         warnings.append(
             "Primary rhythm target surface is teacher but rhythm_binarize_teacher_targets is false."
         )
@@ -310,6 +361,7 @@ def validate_general_stage_rules(
     _validate_runtime_teacher_configuration(ctx, errors, warnings)
     _validate_projector_schedule_ranges(ctx, errors, warnings)
     _validate_supervision_overlap(ctx, errors, warnings)
+    _validate_reference_supervision_alignment(ctx, errors, warnings)
     _validate_source_boundary_controls(ctx, errors, warnings)
     _validate_retimed_target_controls(ctx, errors, warnings)
     _validate_reporting_and_export_hints(ctx, warnings)

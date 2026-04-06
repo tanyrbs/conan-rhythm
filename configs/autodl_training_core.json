@@ -1,0 +1,36 @@
+{
+  "repo_root": "/root/autodl-tmp/project-1/conan-rhythm",
+  "raw_root": "/root/autodl-tmp/data/LibriTTS",
+  "core_docs": [
+    "README.md",
+    "docs/autodl_train100_formal_quickstart.md"
+  ],
+  "core_configs": {
+    "stage1_train100": "egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml",
+    "stage1_train100_360": "egs/conan_emformer_rhythm_v2_teacher_offline_train100_360.yaml",
+    "stage2_student_kd": "egs/conan_emformer_rhythm_v2_student_kd.yaml",
+    "stage3_student_retimed": "egs/conan_emformer_rhythm_v2_student_retimed.yaml"
+  },
+  "core_scripts": {
+    "verify": "scripts/verify_core_training_assets.py",
+    "prepare_train100": "scripts/autodl_prepare_train100_formal.sh",
+    "prepare_train100_360": "scripts/autodl_prepare_train100_360_formal.sh",
+    "train_stage1": "scripts/autodl_train_stage1.sh"
+  },
+  "core_outputs": {
+    "train100_processed": "data/processed/libritts_train100_formal",
+    "train100_binary": "data/binary/libritts_train100_formal_rhythm_v5",
+    "train100_360_processed": "data/processed/libritts_train100_360_formal",
+    "train100_360_binary": "data/binary/libritts_train100_360_formal_rhythm_v5"
+  },
+  "command_templates": {
+    "verify": "python scripts/verify_core_training_assets.py",
+    "prepare_train100": "bash scripts/autodl_prepare_train100_formal.sh",
+    "prepare_train100_with_f0": "WITH_F0=1 bash scripts/autodl_prepare_train100_formal.sh",
+    "train100_real_smoke": "MAX_UPDATES=1000 VAL_CHECK_INTERVAL=200 bash scripts/autodl_train_stage1.sh egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml teacher_offline_train100_real_smoke",
+    "train100_warmup_5k": "MAX_UPDATES=5000 VAL_CHECK_INTERVAL=1000 bash scripts/autodl_train_stage1.sh egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml teacher_offline_train100_warmup",
+    "train100_continue_20k": "RESET=0 MAX_UPDATES=20000 VAL_CHECK_INTERVAL=1000 bash scripts/autodl_train_stage1.sh egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml teacher_offline_train100_warmup",
+    "prepare_train100_360": "bash scripts/autodl_prepare_train100_360_formal.sh",
+    "train100_360_stage1": "MAX_UPDATES=180000 VAL_CHECK_INTERVAL=5000 bash scripts/autodl_train_stage1.sh egs/conan_emformer_rhythm_v2_teacher_offline_train100_360.yaml teacher_offline_train100_360_stage1"
+  }
+}

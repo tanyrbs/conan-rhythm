@@ -389,6 +389,10 @@ def _update_state_metrics(
             )
     state_prev = output.get("rhythm_state_prev")
     if state_prev is not None and state_next is not None:
+        # This metric is only well-defined when the caller threads an explicit
+        # previous streaming state into the current forward pass. The standard
+        # non-streaming validation path often lacks rhythm_state_prev, so the
+        # chunkwise/streaming audit path is the more reliable place to inspect it.
         phase_delta = state_next.phase_ptr.float() - state_prev.phase_ptr.float()
         metrics["rhythm_metric_phase_delta_mean"] = _safe_mean(phase_delta)
         metrics["rhythm_metric_phase_delta_min"] = phase_delta.min()
@@ -760,6 +764,10 @@ def _update_sample_supervision_metrics(
         metrics["rhythm_metric_stream_visible_units"] = _safe_mean(sample["rhythm_stream_visible_units"].float())
     if "rhythm_stream_full_units" in sample:
         metrics["rhythm_metric_stream_full_units"] = _safe_mean(sample["rhythm_stream_full_units"].float())
+    if "rhythm_reference_is_self" in sample:
+        ref_self_rate = _safe_mean(sample["rhythm_reference_is_self"].float())
+        metrics["rhythm_metric_reference_self_rate"] = ref_self_rate
+        metrics["rhythm_metric_reference_external_rate"] = (ref_self_rate * 0.0) + (1.0 - ref_self_rate)
 
 
 def _collect_plan_surface_metrics(
@@ -865,6 +873,10 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
             "stream_mean_clock_step_delta_abs": 0.0,
             "stream_max_clock_step_delta_abs": 0.0,
             "stream_mean_blank_ratio": 0.0,
+            "stream_phase_nonretro_available": 0.0,
+            "stream_phase_nonretro_rate": 0.0,
+            "stream_phase_delta_min": 0.0,
+            "stream_phase_nonretro_count": 0.0,
         }
     mel_deltas = [mel_lengths[0]]
     mel_deltas.extend(max(0, mel_lengths[idx] - mel_lengths[idx - 1]) for idx in range(1, len(mel_lengths)))
@@ -886,6 +898,9 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
             for idx in range(1, len(committed_lengths))
         )
     prefix_exec_deltas = list(getattr(stream_result, "prefix_exec_deltas", []))
+    phase_nonretro_total = float(getattr(stream_result, "phase_nonretro_total", 0.0) or 0.0)
+    phase_nonretro_count = float(getattr(stream_result, "phase_nonretro_count", 0.0) or 0.0)
+    phase_delta_min_history = list(getattr(stream_result, "phase_delta_min_history", []))
     rollback_threshold = 1e-4
     prefix_rollback_violations = sum(1 for value in prefix_exec_deltas if float(value) > rollback_threshold)
     backlog_step_deltas = [
@@ -917,4 +932,8 @@ def build_streaming_chunk_metrics(stream_result) -> dict[str, float]:
         "stream_mean_clock_step_delta_abs": float(sum(clock_step_deltas) / max(len(clock_step_deltas), 1)) if len(clock_step_deltas) > 0 else 0.0,
         "stream_max_clock_step_delta_abs": float(max(clock_step_deltas)) if len(clock_step_deltas) > 0 else 0.0,
         "stream_mean_blank_ratio": float(sum(blank_ratio_history) / max(len(blank_ratio_history), 1)) if len(blank_ratio_history) > 0 else 0.0,
+        "stream_phase_nonretro_available": float(phase_nonretro_count > 0.0),
+        "stream_phase_nonretro_rate": float(phase_nonretro_total / phase_nonretro_count) if phase_nonretro_count > 0.0 else 0.0,
+        "stream_phase_delta_min": float(min(phase_delta_min_history)) if len(phase_delta_min_history) > 0 else 0.0,
+        "stream_phase_nonretro_count": float(phase_nonretro_count),
     }

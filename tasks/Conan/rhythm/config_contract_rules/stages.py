@@ -6,6 +6,7 @@ from .context import RhythmStageValidationContext
 from .stage_legacy import validate_legacy_dual_mode_kd, validate_legacy_schedule_only
 from .stage_mainline import (
     validate_student_kd,
+    validate_student_ref_bootstrap,
     validate_student_retimed,
     validate_teacher_offline,
 )
@@ -23,9 +24,14 @@ LEGACY_STAGE_VALIDATORS: dict[str, StageValidator] = {
     "legacy_dual_mode_kd": validate_legacy_dual_mode_kd,
 }
 
+SPECIAL_STAGE_VALIDATORS: dict[str, StageValidator] = {
+    "student_ref_bootstrap": validate_student_ref_bootstrap,
+}
+
 STAGE_VALIDATORS: dict[str, StageValidator] = {
     **MAINTAINED_STAGE_VALIDATORS,
     **LEGACY_STAGE_VALIDATORS,
+    **SPECIAL_STAGE_VALIDATORS,
 }
 
 
@@ -43,6 +49,7 @@ def validate_stage_specific_rules(
 __all__ = [
     "MAINTAINED_STAGE_VALIDATORS",
     "LEGACY_STAGE_VALIDATORS",
+    "SPECIAL_STAGE_VALIDATORS",
     "STAGE_VALIDATORS",
     "validate_stage_specific_rules",
 ]

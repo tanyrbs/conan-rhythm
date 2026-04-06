@@ -18,6 +18,32 @@ class StreamingEvalResult:
     backlog_history: list[float]
     clock_history: list[float]
     blank_ratio_history: list[float]
+    phase_nonretro_total: float
+    phase_nonretro_count: float
+    phase_delta_min_history: list[float]
+
+
+def _collect_phase_progress_stats(state_prev, state_next) -> tuple[float, float, float | None]:
+    prev_phase = getattr(state_prev, "phase_ptr", None)
+    next_phase = getattr(state_next, "phase_ptr", None)
+    if prev_phase is None or next_phase is None:
+        return 0.0, 0.0, None
+    if not isinstance(prev_phase, torch.Tensor) or not isinstance(next_phase, torch.Tensor):
+        return 0.0, 0.0, None
+    prev_phase = prev_phase.detach().float().reshape(-1)
+    next_phase = next_phase.detach().float().reshape(-1)
+    common = min(int(prev_phase.numel()), int(next_phase.numel()))
+    if common <= 0:
+        return 0.0, 0.0, None
+    phase_delta = next_phase[:common] - prev_phase[:common]
+    valid_mask = torch.isfinite(phase_delta)
+    if not bool(valid_mask.any()):
+        return 0.0, 0.0, None
+    phase_delta = phase_delta[valid_mask]
+    nonretro_total = float((phase_delta >= -1e-6).float().sum().item())
+    nonretro_count = float(phase_delta.numel())
+    phase_delta_min = float(phase_delta.min().item())
+    return nonretro_total, nonretro_count, phase_delta_min
 
 
 def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4) -> StreamingEvalResult:
@@ -41,6 +67,9 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
     backlog_history = []
     clock_history = []
     blank_ratio_history = []
+    phase_nonretro_total = 0.0
+    phase_nonretro_count = 0.0
+    phase_delta_min_history = []
     prev_committed_len = 0
     prev_commit_units = 0
     prev_speech_exec = None
@@ -83,7 +112,14 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
             rhythm_ref_conditioning=rhythm_ref_conditioning,
         )
         del losses
-        rhythm_state = outputs.get("rhythm_state_next", rhythm_state)
+        state_prev = outputs.get("rhythm_state_prev", rhythm_state)
+        state_next = outputs.get("rhythm_state_next", rhythm_state)
+        nonretro_total, nonretro_count, phase_delta_min = _collect_phase_progress_stats(state_prev, state_next)
+        phase_nonretro_total += nonretro_total
+        phase_nonretro_count += nonretro_count
+        if phase_delta_min is not None:
+            phase_delta_min_history.append(phase_delta_min)
+        rhythm_state = state_next
         rhythm_ref_conditioning = outputs.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
         mel_out = outputs["mel_out"][0]
         mel_new, prev_committed_len = extract_incremental_committed_mel(
@@ -150,4 +186,7 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
         backlog_history=backlog_history,
         clock_history=clock_history,
         blank_ratio_history=blank_ratio_history,
+        phase_nonretro_total=phase_nonretro_total,
+        phase_nonretro_count=phase_nonretro_count,
+        phase_delta_min_history=phase_delta_min_history,
     )

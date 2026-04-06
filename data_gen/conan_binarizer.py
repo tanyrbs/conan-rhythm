@@ -568,9 +568,27 @@ class VCBinarizer(BaseBinarizer):
         #     oldp=os.path.join(hparams["processed_data_dir"], "phone_set.json")
         #     newp=hparams['binary_data_dir']
             # shutil.copy(oldp,newp)
-        self.process_data('valid')
-        self.process_data('test')
-        self.process_data('train')
+        requested_splits = self._resolve_requested_splits()
+        for split in requested_splits:
+            self.process_data(split)
+
+    @staticmethod
+    def _resolve_requested_splits():
+        raw_value = hparams.get('binarize_splits', '')
+        if raw_value in (None, '', []):
+            return ['valid', 'test', 'train']
+        if isinstance(raw_value, str):
+            normalized = raw_value.replace('|', ',').replace(';', ',')
+            splits = [part.strip().lower() for part in normalized.split(',') if part.strip()]
+        elif isinstance(raw_value, (list, tuple)):
+            splits = [str(part).strip().lower() for part in raw_value if str(part).strip()]
+        else:
+            splits = [str(raw_value).strip().lower()]
+        allowed = {'train', 'valid', 'test'}
+        invalid = [split for split in splits if split not in allowed]
+        if invalid:
+            raise BinarizationError(f"Unsupported binarize_splits={invalid}; allowed={sorted(allowed)}")
+        return splits
 
 
     def meta_data(self, prefix):

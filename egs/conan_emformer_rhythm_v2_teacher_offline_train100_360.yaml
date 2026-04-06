@@ -1,0 +1,24 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline.yaml
+
+# Formal AutoDL 100+360 stage-1 prep:
+# - train splits: LibriTTS train-clean-100 + train-clean-360
+# - valid split: dev-clean
+# - test split: test-clean
+processed_data_dir: data/processed/libritts_train100_360_formal
+binary_data_dir: data/binary/libritts_train100_360_formal_rhythm_v5
+
+# Metadata built by scripts/build_libritts_local_processed_metadata.py carries
+# canonical explicit split labels (`train` / `valid` / `test`), so prefix rules
+# are intentionally disabled for this dataset-specific preset.
+valid_prefixes: []
+test_prefixes: []
+test_ids: []
+
+# Current local mount does not yet include train-clean-360.
+# Keep a harmless placeholder here while `use_spk_id=false`; recompute after the
+# 100+360 metadata is actually rebuilt if speaker-id training is ever enabled.
+num_spk: 326
+
+# Recommended stage-1 warm-start for the first formal 100+360 GPU run.
+load_ckpt: checkpoints/Conan/model_ckpt_steps_200000.ckpt
+load_ckpt_strict: false

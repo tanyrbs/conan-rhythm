@@ -210,8 +210,56 @@ def validate_student_retimed(
         warnings.append("student_retimed usually disables mel-adversarial loss on retimed targets.")
 
 
+def validate_student_ref_bootstrap(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    knobs = ctx.knobs
+    if knobs.strict_mainline:
+        errors.append(
+            "student_ref_bootstrap is an experimental external-reference stage; keep rhythm_strict_mainline=false."
+        )
+    if knobs.target_mode != "runtime_only":
+        errors.append("student_ref_bootstrap should use rhythm_dataset_target_mode: runtime_only.")
+    if knobs.cached_reference_policy not in {"sample_ref", "paired", "external"}:
+        errors.append(
+            "student_ref_bootstrap should use an external rhythm reference policy "
+            "(sample_ref / paired / external)."
+        )
+    if not bool(ctx.hparams.get("rhythm_require_external_reference", False)):
+        errors.append(
+            "student_ref_bootstrap should set rhythm_require_external_reference: true "
+            "so singleton speaker pools fail fast instead of silently collapsing to self-reference."
+        )
+    if knobs.primary_target_surface != "teacher":
+        errors.append("student_ref_bootstrap should use rhythm_primary_target_surface: teacher.")
+    if ctx.policy.teacher_target_source != "algorithmic":
+        errors.append("student_ref_bootstrap should use rhythm_teacher_target_source: algorithmic.")
+    if knobs.distill_surface != "none":
+        errors.append("student_ref_bootstrap should keep rhythm_distill_surface: none.")
+    if knobs.lambda_distill > 0.0:
+        errors.append("student_ref_bootstrap should keep lambda_rhythm_distill: 0.")
+    if knobs.lambda_teacher_aux > 0.0:
+        errors.append("student_ref_bootstrap should keep lambda_rhythm_teacher_aux: 0.")
+    if knobs.lambda_guidance > 0.0:
+        errors.append("student_ref_bootstrap should keep lambda_rhythm_guidance: 0.")
+    if knobs.require_cached_teacher:
+        errors.append("student_ref_bootstrap should keep rhythm_require_cached_teacher: false.")
+    if knobs.require_retimed_cache:
+        errors.append("student_ref_bootstrap should keep rhythm_require_retimed_cache: false.")
+    if knobs.apply_train_override or knobs.apply_valid_override:
+        errors.append("student_ref_bootstrap should keep train/valid on the source-aligned canvas.")
+    if not knobs.optimize_module_only:
+        warnings.append(
+            "student_ref_bootstrap usually keeps rhythm_optimize_module_only: true to isolate "
+            "reference-driven control learning before stage-3 acoustic closure."
+        )
+
+
 __all__ = [
     "validate_teacher_offline",
     "validate_student_kd",
     "validate_student_retimed",
+    "validate_student_ref_bootstrap",
 ]

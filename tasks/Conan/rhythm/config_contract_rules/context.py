@@ -26,6 +26,7 @@ _DISTILL_COMPONENT_KEYS = (
 @dataclass(frozen=True)
 class RhythmStageKnobs:
     target_mode: str
+    cached_reference_policy: str
     primary_target_surface: str
     distill_surface: str
     require_cached_teacher: bool
@@ -141,6 +142,7 @@ def build_stage_validation_context(
         profile=detect_rhythm_profile(hparams, config_path),
         knobs=RhythmStageKnobs(
             target_mode=policy.target_mode,
+            cached_reference_policy=policy.cached_reference_policy,
             primary_target_surface=policy.primary_target_surface,
             distill_surface=policy.distill_surface,
             require_cached_teacher=policy.require_cached_teacher,

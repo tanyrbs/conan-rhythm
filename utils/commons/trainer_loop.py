@@ -228,6 +228,14 @@ class TrainerLoopMixin:
             epoch += 1
             if self.global_step >= self.max_updates:
                 break
+        if (
+            not self.testing
+            and getattr(self, 'proc_rank', 0) == 0
+            and self.global_step > 0
+            and getattr(self, 'last_saved_ckpt_step', None) != self.global_step
+        ):
+            print(f"| Saving final checkpoint at step {self.global_step} ..")
+            self.save_checkpoint(epoch=self.current_epoch, logs=None)
         task_ref.on_train_end()
 
     def run_training_batch(self, batch_idx, batch):

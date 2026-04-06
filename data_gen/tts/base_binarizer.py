@@ -97,9 +97,26 @@ class BaseBinarizer:
         for fn in ['phone_set.json', 'word_set.json', 'spk_map.json']:
             remove_file(f"{hparams['binary_data_dir']}/{fn}")
             copy_file(f"{hparams['processed_data_dir']}/{fn}", f"{hparams['binary_data_dir']}/{fn}")
-        self.process_data('valid')
-        self.process_data('test')
-        self.process_data('train')
+        for split in self._resolve_requested_splits():
+            self.process_data(split)
+
+    @staticmethod
+    def _resolve_requested_splits():
+        raw_value = hparams.get('binarize_splits', '')
+        if raw_value in (None, '', []):
+            return ['valid', 'test', 'train']
+        if isinstance(raw_value, str):
+            normalized = raw_value.replace('|', ',').replace(';', ',')
+            splits = [part.strip().lower() for part in normalized.split(',') if part.strip()]
+        elif isinstance(raw_value, (list, tuple)):
+            splits = [str(part).strip().lower() for part in raw_value if str(part).strip()]
+        else:
+            splits = [str(raw_value).strip().lower()]
+        allowed = {'train', 'valid', 'test'}
+        invalid = [split for split in splits if split not in allowed]
+        if invalid:
+            raise ValueError(f"Unsupported binarize_splits={invalid}; allowed={sorted(allowed)}")
+        return splits
 
     def process_data(self, prefix):
         data_dir = hparams['binary_data_dir']
