@@ -234,6 +234,9 @@ class RhythmDatasetTargetBuilder:
             "unit_mask": unit_mask,
             "ref_rhythm_stats": ref_conditioning["ref_rhythm_stats"],
             "ref_rhythm_trace": ref_conditioning["ref_rhythm_trace"],
+            "anchor_aware_trace_sampling": bool(
+                self.hparams.get("rhythm_trace_anchor_aware_sampling", False)
+            ),
             "rate_scale_min": float(self.hparams.get("rhythm_guidance_rate_scale_min", 0.60)),
             "rate_scale_max": float(self.hparams.get("rhythm_guidance_rate_scale_max", 1.80)),
             "local_rate_strength": float(self.hparams.get("rhythm_guidance_local_rate_strength", 0.35)),
@@ -250,6 +253,9 @@ class RhythmDatasetTargetBuilder:
             "source_boundary_cue": source_cache.get("source_boundary_cue", source_cache.get("boundary_confidence")),
             "ref_rhythm_stats": ref_conditioning["ref_rhythm_stats"],
             "ref_rhythm_trace": ref_conditioning["ref_rhythm_trace"],
+            "anchor_aware_trace_sampling": bool(
+                self.hparams.get("rhythm_trace_anchor_aware_sampling", False)
+            ),
             "rate_scale_min": float(self.hparams.get("rhythm_teacher_rate_scale_min", 0.55)),
             "rate_scale_max": float(self.hparams.get("rhythm_teacher_rate_scale_max", 1.95)),
             "local_rate_strength": float(self.hparams.get("rhythm_teacher_local_rate_strength", 0.45)),

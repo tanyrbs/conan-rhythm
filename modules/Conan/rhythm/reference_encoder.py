@@ -90,6 +90,7 @@ def sample_progress_trace(
     *,
     horizon: float = 0.35,
     visible_sizes: torch.Tensor | None = None,
+    anchor_durations: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if trace.dim() != 3:
         raise ValueError(f"trace must be [B, bins, dim], got {tuple(trace.shape)}")
@@ -103,24 +104,58 @@ def sample_progress_trace(
     horizon = float(max(0.01, min(1.0, horizon)))
     if window_size <= 0:
         positions = trace.new_zeros((batch_size, 0))
-    elif visible_sizes is None:
+    elif visible_sizes is None and anchor_durations is None:
         offsets = torch.linspace(0.0, horizon, window_size, device=trace.device)
         positions = (phase_ptr[:, None] + offsets[None, :]).clamp(0.0, 1.0)
     else:
-        visible_sizes = visible_sizes.long().to(device=trace.device)
-        if visible_sizes.dim() != 1 or visible_sizes.size(0) != batch_size:
-            raise ValueError(
-                f"visible_sizes must be [B], got {tuple(visible_sizes.shape)} for batch_size={batch_size}"
+        if visible_sizes is None:
+            visible_sizes = torch.full(
+                (batch_size,),
+                int(window_size),
+                dtype=torch.long,
+                device=trace.device,
             )
+        else:
+            visible_sizes = visible_sizes.long().to(device=trace.device)
+            if visible_sizes.dim() != 1 or visible_sizes.size(0) != batch_size:
+                raise ValueError(
+                    f"visible_sizes must be [B], got {tuple(visible_sizes.shape)} for batch_size={batch_size}"
+                )
         step_ids = torch.arange(window_size, device=trace.device, dtype=torch.float32)[None, :]
         denom = (visible_sizes.float().clamp_min(1.0) - 1.0).unsqueeze(-1)
         denom = torch.where(visible_sizes.unsqueeze(-1) > 1, denom, torch.ones_like(denom))
-        offsets = (step_ids / denom).clamp(0.0, 1.0) * horizon
-        offsets = torch.where(
+        uniform_offsets = (step_ids / denom).clamp(0.0, 1.0) * horizon
+        uniform_offsets = torch.where(
             visible_sizes.unsqueeze(-1) > 1,
-            offsets,
-            torch.zeros_like(offsets),
+            uniform_offsets,
+            torch.zeros_like(uniform_offsets),
         )
+        offsets = uniform_offsets
+        if anchor_durations is not None:
+            anchor_durations = anchor_durations.float().to(device=trace.device)
+            if anchor_durations.dim() == 1:
+                anchor_durations = anchor_durations.unsqueeze(0)
+            if anchor_durations.dim() != 2 or anchor_durations.size(0) != batch_size:
+                raise ValueError(
+                    f"anchor_durations must be [B,T] or [T], got {tuple(anchor_durations.shape)}"
+                )
+            if anchor_durations.size(1) < window_size:
+                pad = anchor_durations.new_zeros((batch_size, window_size - anchor_durations.size(1)))
+                anchor_durations = torch.cat([anchor_durations, pad], dim=1)
+            elif anchor_durations.size(1) > window_size:
+                anchor_durations = anchor_durations[:, :window_size]
+            visible_mask = step_ids < visible_sizes.unsqueeze(-1).float()
+            anchor_mass = anchor_durations.clamp_min(0.0) * visible_mask.float()
+            prefix_offsets = torch.cumsum(anchor_mass, dim=1) - anchor_mass
+            last_visible = (visible_sizes - 1).clamp_min(0)
+            last_prefix = prefix_offsets.gather(1, last_visible.unsqueeze(1))
+            valid_anchor = (visible_sizes > 1).unsqueeze(-1) & (last_prefix > 1.0e-6)
+            anchor_offsets = torch.where(
+                valid_anchor,
+                (prefix_offsets / last_prefix.clamp_min(1.0e-6)) * horizon,
+                uniform_offsets,
+            )
+            offsets = torch.where(visible_mask, anchor_offsets, torch.zeros_like(anchor_offsets))
         positions = (phase_ptr[:, None] + offsets).clamp(0.0, 1.0)
     scaled = positions * max(trace_bins - 1, 1)
     left = torch.floor(scaled).long().clamp(0, max(trace_bins - 1, 0))
@@ -236,6 +271,7 @@ class ReferenceRhythmEncoder(nn.Module):
         *,
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
+        anchor_durations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return sample_progress_trace(
             ref_rhythm_trace,
@@ -243,4 +279,5 @@ class ReferenceRhythmEncoder(nn.Module):
             window_size,
             horizon=self.trace_horizon if horizon is None else horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )

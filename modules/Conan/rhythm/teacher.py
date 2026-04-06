@@ -30,6 +30,7 @@ class AlgorithmicTeacherConfig:
     pause_topk_ratio: float = 0.30
     phrase_final_bonus: float = 0.20
     confidence_bonus: float = 0.05
+    anchor_aware_trace_sampling: bool = False
 
 
 def _ensure_batched_vector(x: torch.Tensor) -> torch.Tensor:
@@ -163,6 +164,11 @@ def build_algorithmic_teacher_targets(
         window_size=int(dur_anchor_src.size(1)),
         horizon=1.0,
         visible_sizes=visible_sizes,
+        anchor_durations=(
+            dur_anchor_src * unit_mask
+            if bool(cfg.anchor_aware_trace_sampling)
+            else None
+        ),
     ) * unit_mask.unsqueeze(-1)
 
     src_total = (dur_anchor_src * unit_mask).sum(dim=1, keepdim=True).clamp_min(1.0)

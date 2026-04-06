@@ -164,7 +164,7 @@ conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
 Result:
 
 - compileall: **passed**
-- rhythm unittests: **222 passed**
+- rhythm unittests: **243 passed**
 - maintained smoke test: **passed**
 - strict `teacher_offline` preflight + dry-run on smoke assets: **passed**
 - strict `student_kd` preflight + dry-run on the maintained smoke integration binary: **passed**
@@ -358,7 +358,7 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 | `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
 | `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
 | `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` | experimental | alias of the pairwise external-reference stage-2.5 config | no | no | no |
-| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream fallback profile for runtime trace exhaustion | no | no | no |
+| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream robustness profile with trace-reliability gating and anchor-aware trace sampling | no | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
 | `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
@@ -381,6 +381,11 @@ Current branch conclusion after code review, probes, and smoke integration:
   - descriptor-consistency against `global_rate / pause_ratio / local_rate_trace / boundary_trace`
   - same-`A` group contrastive matching when batch groups contain multiple references
 - `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
+- short-ref / longer-source robustness is now treated as a **separate opt-in profile**, not a silent mainline semantic change:
+  - full/global teacher remains intact
+  - runtime/student side now uses an explicit `trace_reliability` gate instead of mutating the raw trace values
+  - anchor-aware local trace sampling can be enabled so `dur_anchor_src` rather than flat unit count controls local progress spacing
+  - the fallback path prefers existing slow/global rhythm branches and suppresses phrase-final slow-memory bias when reference evidence is clearly exhausted
 
 Latest 2000-step smoke profile (`artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`) still says the same thing numerically:
 
@@ -412,7 +417,7 @@ Experimental notes:
 
 - `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
 - `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
-- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in runtime/training override for short-reference / long-stream regimes; it enables trace-exhaustion fallback toward slow/global rhythm summaries instead of endlessly replaying the reference tail
+- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in robustness profile for short-reference / long-stream regimes; it keeps the teacher global, leaves raw reference traces untouched, gates local/boundary trace paths by `trace_reliability`, enables anchor-aware local trace sampling, and lets slow/global rhythm memory take over when the reference tail keeps getting reused
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
 - maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
 

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
 from modules.Conan.rhythm.contracts import StreamingRhythmState
+from modules.Conan.rhythm.reference_encoder import sample_progress_trace
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.runtime_modes import build_rhythm_ref_conditioning
 
@@ -162,13 +163,14 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertIn("planner_slow_rhythm_summary", conditioning)
         self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_summary"], planner_summary))
 
-    def test_trace_exhaustion_fallback_blends_local_window_toward_slow_summary(self) -> None:
+    def test_trace_reliability_gate_preserves_raw_trace_and_downweights_local_paths(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
             {
                 "hidden_size": 16,
                 "rhythm_hidden_size": 16,
                 "rhythm_trace_bins": 8,
                 "rhythm_emit_reference_sidecar": True,
+                "rhythm_trace_reliability_enable": True,
                 "rhythm_trace_exhaustion_gap_start": 0.08,
                 "rhythm_trace_exhaustion_gap_end": 0.22,
                 "rhythm_trace_exhaustion_local_floor": 0.20,
@@ -185,7 +187,7 @@ class ReferenceSidecarTests(unittest.TestCase):
                 "planner_slow_rhythm_summary": torch.full((1, 2), 0.10, dtype=torch.float32),
             }
         )
-        trace_context, _ = module._sample_trace_pair(
+        trace_context, _, trace_reliability = module._sample_trace_pair(
             ref_conditioning=conditioning,
             phase_ptr=torch.tensor([0.95], dtype=torch.float32),
             window_size=4,
@@ -197,10 +199,37 @@ class ReferenceSidecarTests(unittest.TestCase):
                 clock_delta=torch.zeros((1,), dtype=torch.float32),
                 commit_frontier=torch.zeros((1,), dtype=torch.long),
                 phase_anchor=torch.tensor([[1.0, 4.0]], dtype=torch.float32),
+                trace_tail_reuse_count=torch.tensor([3], dtype=torch.long),
             ),
         )
-        self.assertLess(float(trace_context.mean()), 0.6)
-        self.assertGreater(float(trace_context.mean()), 0.30)
+        self.assertGreater(float(trace_context.mean()), 0.55)
+        self.assertAlmostEqual(float(trace_reliability.local_trace_path_weight.item()), 0.20, places=5)
+        self.assertLess(
+            float(trace_reliability.boundary_trace_path_weight.item()),
+            float(trace_reliability.local_trace_path_weight.item()),
+        )
+
+    def test_anchor_aware_trace_sampling_uses_duration_weighted_offsets(self) -> None:
+        trace = torch.linspace(0.0, 1.0, 5, dtype=torch.float32).view(1, 5, 1)
+        phase_ptr = torch.tensor([0.0], dtype=torch.float32)
+        visible_sizes = torch.tensor([4], dtype=torch.long)
+        uniform = sample_progress_trace(
+            trace,
+            phase_ptr=phase_ptr,
+            window_size=4,
+            horizon=1.0,
+            visible_sizes=visible_sizes,
+        )
+        anchored = sample_progress_trace(
+            trace,
+            phase_ptr=phase_ptr,
+            window_size=4,
+            horizon=1.0,
+            visible_sizes=visible_sizes,
+            anchor_durations=torch.tensor([[1.0, 3.0, 1.0, 1.0]], dtype=torch.float32),
+        )
+        self.assertLess(float(anchored[0, 1, 0]), float(uniform[0, 1, 0]))
+        self.assertGreater(float(anchored[0, 2, 0]), float(uniform[0, 2, 0]))
 
     def test_dataset_contract_rejects_partial_planner_sidecar(self) -> None:
         dataset = self._DummyDataset()

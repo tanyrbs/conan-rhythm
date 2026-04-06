@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import torch
 import torch.nn as nn
 
-from .contracts import RhythmTeacherTargets, StreamingRhythmState
+from .contracts import RhythmTeacherTargets, StreamingRhythmState, TraceReliabilityBundle
 from .offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
 from .projector import ProjectorConfig, StreamingRhythmProjector
 from .reference_descriptor import RefRhythmDescriptor
@@ -49,9 +51,14 @@ class StreamingRhythmModule(nn.Module):
         boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
         min_speech_frames: float = 1.0,
+        trace_reliability_enable: bool = False,
         trace_exhaustion_gap_start: float = 0.08,
         trace_exhaustion_gap_end: float = 0.22,
         trace_exhaustion_local_floor: float = 0.20,
+        trace_exhaustion_boundary_floor: float = 0.05,
+        trace_exhaustion_reuse_full_count: int = 3,
+        trace_exhaustion_final_cell_suppress: float = 0.65,
+        trace_anchor_aware_sampling: bool = False,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
         offline_teacher_config: OfflineTeacherConfig | None = None,
@@ -121,9 +128,16 @@ class StreamingRhythmModule(nn.Module):
         )
         self.projector = StreamingRhythmProjector(projector_config)
         self.teacher = AlgorithmicRhythmTeacher(teacher_config)
+        self.trace_reliability_enable = bool(trace_reliability_enable)
         self.trace_exhaustion_gap_start = float(max(0.0, trace_exhaustion_gap_start))
         self.trace_exhaustion_gap_end = float(max(self.trace_exhaustion_gap_start + 1.0e-6, trace_exhaustion_gap_end))
         self.trace_exhaustion_local_floor = float(min(max(trace_exhaustion_local_floor, 0.0), 1.0))
+        self.trace_exhaustion_boundary_floor = float(min(max(trace_exhaustion_boundary_floor, 0.0), 1.0))
+        self.trace_exhaustion_reuse_full_count = max(1, int(trace_exhaustion_reuse_full_count))
+        self.trace_exhaustion_final_cell_suppress = float(
+            min(max(trace_exhaustion_final_cell_suppress, 0.0), 1.0)
+        )
+        self.trace_anchor_aware_sampling = bool(trace_anchor_aware_sampling)
 
         # Compatibility aliases for the older V2 surface.
         self.reference_encoder = self.reference_descriptor.encoder
@@ -202,26 +216,92 @@ class StreamingRhythmModule(nn.Module):
             raise ValueError(f"{fallback_trace_key} must be [B,T,D], got {tuple(trace.shape)}")
         return trace.mean(dim=1)
 
-    def _blend_trace_fallback(
+    def _resolve_phase_gap(
         self,
         *,
-        sampled_trace: torch.Tensor,
-        fallback_summary: torch.Tensor,
+        phase_ptr: torch.Tensor,
+        dur_anchor_src: torch.Tensor | None,
+        unit_mask: torch.Tensor,
+        state: StreamingRhythmState | None,
+    ) -> torch.Tensor | None:
+        if state is None:
+            return None
+        if state.phase_anchor_progress is not None and dur_anchor_src is not None:
+            visible_total = (dur_anchor_src.float().clamp_min(0.0) * unit_mask.float()).sum(dim=1).clamp_min(1.0)
+            current_progress_ratio = state.phase_anchor_progress.float() / visible_total
+            return phase_ptr.float() - current_progress_ratio
+        return state.phase_ptr_gap
+
+    @staticmethod
+    def _resolve_tail_reuse_count(
+        state: StreamingRhythmState | None,
+        *,
+        phase_ptr: torch.Tensor,
+    ) -> torch.Tensor:
+        if state is None or state.trace_tail_reuse_count is None:
+            return torch.zeros_like(phase_ptr, dtype=torch.long)
+        reuse = state.trace_tail_reuse_count.long().to(device=phase_ptr.device)
+        if reuse.dim() == 0:
+            reuse = reuse.unsqueeze(0)
+        return reuse
+
+    def _build_trace_reliability(
+        self,
+        *,
         phase_ptr: torch.Tensor,
         phase_gap: torch.Tensor | None,
         horizon: float,
-    ) -> torch.Tensor:
-        if phase_gap is None or sampled_trace.numel() <= 0:
-            return sampled_trace
+        tail_reuse_count: torch.Tensor,
+    ) -> TraceReliabilityBundle:
+        phase_ptr = phase_ptr.float()
+        ones = torch.ones_like(phase_ptr)
+        zeros = torch.zeros_like(phase_ptr)
+        tail_start = max(0.0, 1.0 - float(horizon))
+        tail_alpha = ((phase_ptr - tail_start) / max(float(horizon), 1.0e-6)).clamp(0.0, 1.0)
+        if phase_gap is None:
+            phase_gap = zeros
         phase_gap = phase_gap.float().clamp_min(0.0)
         denom = max(self.trace_exhaustion_gap_end - self.trace_exhaustion_gap_start, 1.0e-6)
         gap_alpha = ((phase_gap - self.trace_exhaustion_gap_start) / denom).clamp(0.0, 1.0)
+        reuse_alpha = (
+            tail_reuse_count.float() / float(max(self.trace_exhaustion_reuse_full_count, 1))
+        ).clamp(0.0, 1.0)
+        if self.trace_reliability_enable:
+            trace_reliability = 1.0 - tail_alpha * gap_alpha * reuse_alpha
+            local_floor = phase_ptr.new_full(trace_reliability.shape, self.trace_exhaustion_local_floor)
+            boundary_floor = phase_ptr.new_full(trace_reliability.shape, self.trace_exhaustion_boundary_floor)
+            local_trace_path_weight = torch.maximum(trace_reliability, local_floor)
+            boundary_trace_path_weight = torch.maximum(trace_reliability.square(), boundary_floor)
+        else:
+            trace_reliability = ones
+            local_trace_path_weight = ones
+            boundary_trace_path_weight = ones
+        return TraceReliabilityBundle(
+            trace_reliability=trace_reliability,
+            local_trace_path_weight=local_trace_path_weight,
+            boundary_trace_path_weight=boundary_trace_path_weight,
+            phase_gap=phase_gap,
+            tail_alpha=tail_alpha,
+            gap_alpha=gap_alpha,
+            reuse_alpha=reuse_alpha,
+            tail_reuse_count=tail_reuse_count.float(),
+            tail_active=tail_alpha.gt(0.0).float(),
+        )
+
+    def _next_trace_tail_reuse_count(
+        self,
+        *,
+        state: StreamingRhythmState,
+        horizon: float,
+    ) -> torch.Tensor:
+        previous_count = (
+            state.trace_tail_reuse_count.long()
+            if state.trace_tail_reuse_count is not None
+            else torch.zeros_like(state.commit_frontier.long())
+        )
         tail_start = max(0.0, 1.0 - float(horizon))
-        tail_alpha = ((phase_ptr.float() - tail_start) / max(float(horizon), 1.0e-6)).clamp(0.0, 1.0)
-        blend = gap_alpha * tail_alpha
-        local_gate = 1.0 - blend * (1.0 - self.trace_exhaustion_local_floor)
-        fallback = fallback_summary.unsqueeze(1).expand(-1, sampled_trace.size(1), -1)
-        return sampled_trace * local_gate[:, None, None] + fallback * (1.0 - local_gate)[:, None, None]
+        tail_active = state.phase_ptr.float() >= (tail_start - 1.0e-6)
+        return torch.where(tail_active, previous_count + 1, torch.zeros_like(previous_count))
 
     def _sample_trace_pair(
         self,
@@ -233,15 +313,19 @@ class StreamingRhythmModule(nn.Module):
         dur_anchor_src: torch.Tensor | None = None,
         horizon: float | None,
         state: StreamingRhythmState | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, TraceReliabilityBundle]:
         visible_sizes = self._visible_sizes(unit_mask)
         effective_horizon = self.reference_descriptor.encoder.trace_horizon if horizon is None else float(horizon)
+        anchor_durations = None
+        if self.trace_anchor_aware_sampling and dur_anchor_src is not None:
+            anchor_durations = dur_anchor_src.float() * unit_mask.float()
         trace_context = self.sample_trace_window(
             ref_conditioning=ref_conditioning,
             phase_ptr=phase_ptr,
             window_size=window_size,
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
         planner_trace_context = self.sample_planner_trace_window(
             ref_conditioning=ref_conditioning,
@@ -249,37 +333,21 @@ class StreamingRhythmModule(nn.Module):
             window_size=window_size,
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
-        phase_gap = None
-        if state is not None and state.phase_anchor_progress is not None and dur_anchor_src is not None:
-            visible_total = (dur_anchor_src.float().clamp_min(0.0) * unit_mask.float()).sum(dim=1).clamp_min(1.0)
-            current_progress_ratio = state.phase_anchor_progress.float() / visible_total
-            phase_gap = state.phase_ptr.float() - current_progress_ratio
-        elif state is not None:
-            phase_gap = state.phase_ptr_gap
-        trace_context = self._blend_trace_fallback(
-            sampled_trace=trace_context,
-            fallback_summary=self._resolve_reference_summary(
-                ref_conditioning,
-                summary_key="slow_rhythm_summary",
-                fallback_trace_key="ref_rhythm_trace",
-            ),
+        phase_gap = self._resolve_phase_gap(
+            phase_ptr=phase_ptr,
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            state=state,
+        )
+        trace_reliability = self._build_trace_reliability(
             phase_ptr=phase_ptr,
             phase_gap=phase_gap,
             horizon=effective_horizon,
+            tail_reuse_count=self._resolve_tail_reuse_count(state, phase_ptr=phase_ptr),
         )
-        planner_trace_context = self._blend_trace_fallback(
-            sampled_trace=planner_trace_context,
-            fallback_summary=self._resolve_reference_summary(
-                ref_conditioning,
-                summary_key="planner_slow_rhythm_summary",
-                fallback_trace_key="planner_ref_trace",
-            ),
-            phase_ptr=phase_ptr,
-            phase_gap=phase_gap,
-            horizon=effective_horizon,
-        )
-        return trace_context, planner_trace_context
+        return trace_context, planner_trace_context, trace_reliability
 
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._finalize_reference_conditioning(self.reference_descriptor(ref_mel))
@@ -376,6 +444,7 @@ class StreamingRhythmModule(nn.Module):
         window_size: int,
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
+        anchor_durations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.reference_descriptor.sample_trace_window(
             ref_conditioning,
@@ -383,6 +452,7 @@ class StreamingRhythmModule(nn.Module):
             window_size=window_size,
             horizon=horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
 
     def sample_planner_trace_window(
@@ -393,6 +463,7 @@ class StreamingRhythmModule(nn.Module):
         window_size: int,
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
+        anchor_durations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.reference_descriptor.sample_planner_trace_window(
             ref_conditioning,
@@ -400,6 +471,7 @@ class StreamingRhythmModule(nn.Module):
             window_size=window_size,
             horizon=horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
 
     def forward(
@@ -439,14 +511,17 @@ class StreamingRhythmModule(nn.Module):
         if state is None:
             state = self.init_state(batch_size=content_units.size(0), device=content_units.device)
 
+        effective_trace_horizon = (
+            self.reference_descriptor.encoder.trace_horizon if trace_horizon is None else float(trace_horizon)
+        )
         unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
-        trace_context, planner_trace_context = self._sample_trace_pair(
+        trace_context, planner_trace_context, trace_reliability = self._sample_trace_pair(
             ref_conditioning=ref_conditioning,
             phase_ptr=state.phase_ptr,
             window_size=content_units.size(1),
             unit_mask=unit_mask,
             dur_anchor_src=dur_anchor_src,
-            horizon=trace_horizon,
+            horizon=effective_trace_horizon,
             state=state,
         )
         planner = self.scheduler(
@@ -458,6 +533,8 @@ class StreamingRhythmModule(nn.Module):
             planner_trace_context=planner_trace_context,
             state=state,
             source_boundary_cue=source_boundary_cue,
+            trace_reliability=trace_reliability,
+            trace_exhaustion_final_cell_suppress=self.trace_exhaustion_final_cell_suppress,
         )
         execution = self.projector(
             dur_anchor_src=dur_anchor_src,
@@ -473,6 +550,13 @@ class StreamingRhythmModule(nn.Module):
             reuse_prefix=projector_reuse_prefix,
             force_full_commit=projector_force_full_commit,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
+        )
+        execution.next_state = replace(
+            execution.next_state,
+            trace_tail_reuse_count=self._next_trace_tail_reuse_count(
+                state=execution.next_state,
+                horizon=effective_trace_horizon,
+            ),
         )
         return execution
 
@@ -651,7 +735,7 @@ class StreamingRhythmModule(nn.Module):
         )
         unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
         teacher_phase_ptr = unit_mask.new_zeros((unit_mask.size(0),))
-        trace_context, planner_trace_context = self._sample_trace_pair(
+        trace_context, planner_trace_context, _ = self._sample_trace_pair(
             ref_conditioning=ref_conditioning,
             phase_ptr=teacher_phase_ptr,
             window_size=content_units.size(1),

@@ -116,9 +116,16 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
+        trace_reliability_enable=bool(hparams.get('rhythm_trace_reliability_enable', False)),
         trace_exhaustion_gap_start=float(hparams.get('rhythm_trace_exhaustion_gap_start', 0.08)),
         trace_exhaustion_gap_end=float(hparams.get('rhythm_trace_exhaustion_gap_end', 0.22)),
         trace_exhaustion_local_floor=float(hparams.get('rhythm_trace_exhaustion_local_floor', 0.20)),
+        trace_exhaustion_boundary_floor=float(hparams.get('rhythm_trace_exhaustion_boundary_floor', 0.05)),
+        trace_exhaustion_reuse_full_count=int(hparams.get('rhythm_trace_exhaustion_reuse_full_count', 3)),
+        trace_exhaustion_final_cell_suppress=float(
+            hparams.get('rhythm_trace_exhaustion_final_cell_suppress', 0.65)
+        ),
+        trace_anchor_aware_sampling=bool(hparams.get('rhythm_trace_anchor_aware_sampling', False)),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),
@@ -140,5 +147,6 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
             pause_topk_ratio=float(hparams.get('rhythm_teacher_pause_topk_ratio', 0.30)),
             phrase_final_bonus=float(hparams.get('rhythm_teacher_phrase_final_bonus', 0.20)),
             confidence_bonus=float(hparams.get('rhythm_teacher_confidence_bonus', 0.05)),
+            anchor_aware_trace_sampling=bool(hparams.get('rhythm_trace_anchor_aware_sampling', False)),
         ),
     )

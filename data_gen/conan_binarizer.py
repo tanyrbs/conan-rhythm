@@ -26,6 +26,7 @@ def _rhythm_teacher_kwargs_from_hparams():
         'pause_budget_ratio_cap': float(hparams.get('rhythm_teacher_pause_budget_ratio_cap', 0.80)),
         'speech_smooth_kernel': int(hparams.get('rhythm_teacher_speech_smooth_kernel', 3)),
         'pause_topk_ratio': float(hparams.get('rhythm_teacher_pause_topk_ratio', 0.30)),
+        'anchor_aware_trace_sampling': bool(hparams.get('rhythm_trace_anchor_aware_sampling', False)),
     }
 
 

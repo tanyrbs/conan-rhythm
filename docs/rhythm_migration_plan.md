@@ -140,10 +140,20 @@ The maintained branch now includes these corrective changes:
   - `pause_ratio`
   - `local_rate_trace`
   - `boundary_trace`
-- runtime now also supports trace-exhaustion fallback for short-reference / long-stream regimes:
-  - `rhythm_trace_exhaustion_gap_start`
-  - `rhythm_trace_exhaustion_gap_end`
-  - `rhythm_trace_exhaustion_local_floor`
+- short-reference / long-stream robustness is now implemented as an **opt-in runtime profile**, not a silent rewrite of the maintained utterance-bounded mainline:
+  - keep the full/global teacher unchanged
+  - runtime/student side adds explicit `trace_reliability` gating instead of value-level blending of local trace with slow summary
+  - local trace sampling can be switched to anchor-aware spacing (`dur_anchor_src` aware) instead of flat unit-count spacing
+  - when trace evidence is clearly exhausted, planner slow-memory retrieval is preferred before plain summary fallback, and phrase-final slow-memory cells are downweighted
+  - config keys:
+    - `rhythm_trace_reliability_enable`
+    - `rhythm_trace_exhaustion_gap_start`
+    - `rhythm_trace_exhaustion_gap_end`
+    - `rhythm_trace_exhaustion_local_floor`
+    - `rhythm_trace_exhaustion_boundary_floor`
+    - `rhythm_trace_exhaustion_reuse_full_count`
+    - `rhythm_trace_exhaustion_final_cell_suppress`
+    - `rhythm_trace_anchor_aware_sampling`
   - helper override yaml: `egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml`
 
 ## 4. Validation actually run on this checkout
@@ -175,7 +185,7 @@ The following were run locally in the `conda` `conan` environment:
 
 Observed result summary:
 
-- unit coverage: **222 rhythm tests passed**
+- unit coverage: **243 rhythm tests passed**
 - latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, stage-freeze fail-fast guards, train-set contract hardening, and warm-start missing/unexpected-key observability: **passed**
 - teacher-offline probe: healthy loss descent and low gradient pressure
 - student-KD probe: healthy and fast on smoke student binary

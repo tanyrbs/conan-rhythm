@@ -54,7 +54,7 @@ python scripts/preflight_rhythm_v2.py \
 Observed result:
 
 - compileall: **passed**
-- rhythm tests: **222 passed**
+- rhythm tests: **243 passed**
 - maintained smoke test: **passed**
 - `teacher_offline` strict preflight + dry-run: **passed**
 - `student_kd` strict preflight + dry-run: **passed**
@@ -140,7 +140,7 @@ python -u scripts/smoke_test_rhythm_v2.py
 Expected:
 
 - compileall passes
-- tests stay at least at the local baseline order of magnitude (currently 222 rhythm tests)
+- tests stay at least at the local baseline order of magnitude (currently 243 rhythm tests)
 
 If you are building a LibriTTS processed metadata set for `train-clean-100 + train-clean-360`, the local metadata helper now supports repeated or comma-separated `--train_split` flags instead of forcing a single train split.
 - smoke still reports healthy closure signals such as:

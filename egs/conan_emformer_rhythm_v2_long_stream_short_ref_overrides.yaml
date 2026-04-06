@@ -6,11 +6,19 @@
 # instead of replaying the reference tail forever after local phase is exhausted.
 rhythm_emit_reference_sidecar: true
 
-# When source progress keeps growing after the aligned reference phase is effectively
-# exhausted, fade local trace control toward slow/global rhythm summaries.
+# Keep the raw local trace untouched, but explicitly gate the local/boundary trace
+# paths once the short prompt tail keeps getting reused.
+rhythm_trace_reliability_enable: true
 rhythm_trace_exhaustion_gap_start: 0.08
 rhythm_trace_exhaustion_gap_end: 0.22
 rhythm_trace_exhaustion_local_floor: 0.20
+rhythm_trace_exhaustion_boundary_floor: 0.05
+rhythm_trace_exhaustion_reuse_full_count: 3
+rhythm_trace_exhaustion_final_cell_suppress: 0.65
+
+# Use source anchor durations when laying the local trace window over the current
+# unit sequence so long units consume more of the local progress span than short ones.
+rhythm_trace_anchor_aware_sampling: true
 
 # Optional: slightly tighten the local reference window so near-tail phrase-final cues
 # do not dominate too much of the stream.

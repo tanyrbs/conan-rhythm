@@ -26,6 +26,7 @@ class StreamingRhythmState:
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
     phase_anchor: Optional[torch.Tensor] = None
+    trace_tail_reuse_count: Optional[torch.Tensor] = None
 
     @property
     def backlog(self) -> torch.Tensor:
@@ -64,6 +65,19 @@ class StreamingRhythmState:
 
 
 @dataclass
+class TraceReliabilityBundle:
+    trace_reliability: torch.Tensor
+    local_trace_path_weight: torch.Tensor
+    boundary_trace_path_weight: torch.Tensor
+    phase_gap: torch.Tensor
+    tail_alpha: torch.Tensor
+    gap_alpha: torch.Tensor
+    reuse_alpha: torch.Tensor
+    tail_reuse_count: torch.Tensor
+    tail_active: torch.Tensor
+
+
+@dataclass
 class RhythmPlannerOutputs:
     speech_budget_win: torch.Tensor
     pause_budget_win: torch.Tensor
@@ -72,6 +86,14 @@ class RhythmPlannerOutputs:
     boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
     source_boundary_cue: Optional[torch.Tensor] = None
+    trace_reliability: Optional[torch.Tensor] = None
+    local_trace_path_weight: Optional[torch.Tensor] = None
+    boundary_trace_path_weight: Optional[torch.Tensor] = None
+    trace_phase_gap: Optional[torch.Tensor] = None
+    trace_tail_reuse_count: Optional[torch.Tensor] = None
+    trace_tail_alpha: Optional[torch.Tensor] = None
+    trace_gap_alpha: Optional[torch.Tensor] = None
+    trace_reuse_alpha: Optional[torch.Tensor] = None
 
     @property
     def blank_budget_win(self) -> torch.Tensor:

@@ -379,6 +379,11 @@ def _update_state_metrics(
                 "rhythm_metric_clock_delta_abs_mean": _safe_mean(state_next.clock_delta.abs()),
             }
         )
+        trace_tail_reuse_count = getattr(state_next, "trace_tail_reuse_count", None)
+        if trace_tail_reuse_count is not None:
+            metrics["rhythm_metric_trace_tail_reuse_count_mean"] = _safe_mean(
+                trace_tail_reuse_count.float()
+            )
         progress_ratio = getattr(state_next, "phase_progress_ratio", None)
         phase_gap = getattr(state_next, "phase_ptr_gap", None)
         if progress_ratio is not None and phase_gap is not None:
@@ -406,6 +411,23 @@ def _update_reference_conditioning_metrics(metrics: dict[str, torch.Tensor], out
         metrics["rhythm_metric_selector_score_max"] = selector_scores.float().max()
     if slow_summary is not None:
         metrics["rhythm_metric_slow_summary_norm_mean"] = _safe_mean(torch.norm(slow_summary.float(), dim=-1))
+    planner = getattr(output.get("rhythm_execution"), "planner", None)
+    if planner is None:
+        planner = output.get("rhythm_planner")
+    if planner is not None:
+        for metric_key, field_name in (
+            ("rhythm_metric_trace_reliability_mean", "trace_reliability"),
+            ("rhythm_metric_trace_local_path_weight_mean", "local_trace_path_weight"),
+            ("rhythm_metric_trace_boundary_path_weight_mean", "boundary_trace_path_weight"),
+            ("rhythm_metric_trace_tail_alpha_mean", "trace_tail_alpha"),
+            ("rhythm_metric_trace_gap_alpha_mean", "trace_gap_alpha"),
+            ("rhythm_metric_trace_reuse_alpha_mean", "trace_reuse_alpha"),
+            ("rhythm_metric_trace_phase_gap_mean", "trace_phase_gap"),
+            ("rhythm_metric_trace_tail_reuse_from_planner_mean", "trace_tail_reuse_count"),
+        ):
+            value = getattr(planner, field_name, None)
+            if value is not None:
+                metrics[metric_key] = _safe_mean(value.float())
 
 
 def _update_teacher_alignment_metrics(

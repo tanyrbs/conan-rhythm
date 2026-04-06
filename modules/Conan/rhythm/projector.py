@@ -198,6 +198,7 @@ class StreamingRhythmProjector(nn.Module):
             previous_speech_exec=None,
             previous_pause_exec=None,
             phase_anchor=torch.stack([zeros.clone(), zeros.clone()], dim=-1),
+            trace_tail_reuse_count=torch.zeros(batch_size, dtype=torch.long, device=device),
         )
 
     @staticmethod
@@ -487,6 +488,11 @@ class StreamingRhythmProjector(nn.Module):
             previous_speech_exec=speech_duration_exec.detach(),
             previous_pause_exec=pause_after_exec.detach(),
             phase_anchor=next_phase_anchor,
+            trace_tail_reuse_count=(
+                state.trace_tail_reuse_count.long().detach().clone()
+                if state.trace_tail_reuse_count is not None
+                else torch.zeros_like(commit_frontier.long())
+            ),
         )
 
     def forward(
@@ -528,6 +534,14 @@ class StreamingRhythmProjector(nn.Module):
             boundary_score_unit=planner_boundary_score,
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
+            trace_reliability=getattr(planner, "trace_reliability", None),
+            local_trace_path_weight=getattr(planner, "local_trace_path_weight", None),
+            boundary_trace_path_weight=getattr(planner, "boundary_trace_path_weight", None),
+            trace_phase_gap=getattr(planner, "trace_phase_gap", None),
+            trace_tail_reuse_count=getattr(planner, "trace_tail_reuse_count", None),
+            trace_tail_alpha=getattr(planner, "trace_tail_alpha", None),
+            trace_gap_alpha=getattr(planner, "trace_gap_alpha", None),
+            trace_reuse_alpha=getattr(planner, "trace_reuse_alpha", None),
         )
         execution_planner.raw_speech_budget_win = getattr(
             planner,

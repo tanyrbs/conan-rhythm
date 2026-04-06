@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from .controller import UnitRedistributionHead, WindowBudgetController, masked_mean
-from .contracts import RhythmPlannerOutputs, StreamingRhythmState
+from .contracts import RhythmPlannerOutputs, StreamingRhythmState, TraceReliabilityBundle
 from .source_boundary import compose_boundary_score_unit
 
 
@@ -58,7 +58,45 @@ class MonotonicRhythmScheduler(nn.Module):
         ref_conditioning: dict[str, torch.Tensor],
         planner_trace_context: torch.Tensor,
         unit_mask: torch.Tensor,
+        trace_reliability: TraceReliabilityBundle | None = None,
+        trace_exhaustion_final_cell_suppress: float = 0.0,
     ) -> torch.Tensor:
+        planner_memory = ref_conditioning.get("planner_slow_rhythm_memory")
+        selector_scores = ref_conditioning.get("selector_meta_scores")
+        selector_indices = ref_conditioning.get("selector_meta_indices")
+        use_dynamic_memory = (
+            planner_memory is not None
+            and planner_memory.dim() == 3
+            and trace_reliability is not None
+            and bool((trace_reliability.trace_reliability.float() < 0.999).any().item())
+        )
+        if use_dynamic_memory:
+            if selector_scores is None:
+                weights = torch.ones(
+                    planner_memory.size(0),
+                    planner_memory.size(1),
+                    device=planner_memory.device,
+                    dtype=planner_memory.dtype,
+                )
+            else:
+                weights = 1.0 + selector_scores.float().to(device=planner_memory.device).clamp_min(0.0)
+                if weights.dim() == 1:
+                    weights = weights.unsqueeze(0)
+            if (
+                trace_reliability is not None
+                and float(trace_exhaustion_final_cell_suppress) > 0.0
+                and selector_indices is not None
+            ):
+                selector_indices = selector_indices.long().to(device=planner_memory.device)
+                final_index = selector_indices.max(dim=1, keepdim=True).values
+                final_mask = selector_indices.eq(final_index)
+                suppress = 1.0 - (
+                    (1.0 - trace_reliability.trace_reliability.float()).to(device=planner_memory.device).unsqueeze(1)
+                    * float(trace_exhaustion_final_cell_suppress)
+                )
+                weights = torch.where(final_mask, weights * suppress, weights)
+            denom = weights.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+            return (planner_memory.float() * weights.unsqueeze(-1)).sum(dim=1) / denom
         planner_slow = ref_conditioning.get("planner_slow_rhythm_summary")
         if planner_slow is not None:
             return planner_slow
@@ -81,18 +119,42 @@ class MonotonicRhythmScheduler(nn.Module):
         planner_trace_context: torch.Tensor,
         state: StreamingRhythmState,
         source_boundary_cue: torch.Tensor | None = None,
+        trace_reliability: TraceReliabilityBundle | None = None,
+        trace_exhaustion_final_cell_suppress: float = 0.0,
     ) -> RhythmPlannerOutputs:
         planner_ref_stats = self._resolve_planner_stats(ref_conditioning)
         slow_rhythm_summary = self._resolve_planner_slow_summary(
             ref_conditioning,
             planner_trace_context,
             unit_mask,
+            trace_reliability=trace_reliability,
+            trace_exhaustion_final_cell_suppress=trace_exhaustion_final_cell_suppress,
         )
+        local_trace_path_weight = (
+            trace_reliability.local_trace_path_weight.float()
+            if trace_reliability is not None
+            else torch.ones(
+                planner_trace_context.size(0),
+                device=planner_trace_context.device,
+                dtype=planner_trace_context.dtype,
+            )
+        )
+        boundary_trace_path_weight = (
+            trace_reliability.boundary_trace_path_weight.float()
+            if trace_reliability is not None
+            else torch.ones(
+                planner_trace_context.size(0),
+                device=planner_trace_context.device,
+                dtype=planner_trace_context.dtype,
+            )
+        )
+        effective_planner_trace_context = planner_trace_context * local_trace_path_weight[:, None, None]
         boundary_trace = (
-            planner_trace_context[:, :, 1]
-            if planner_trace_context.size(-1) > 1
-            else planner_trace_context.squeeze(-1)
+            effective_planner_trace_context[:, :, 1]
+            if effective_planner_trace_context.size(-1) > 1
+            else effective_planner_trace_context.squeeze(-1)
         )
+        boundary_trace = boundary_trace * boundary_trace_path_weight[:, None]
         boundary_score_unit = compose_boundary_score_unit(
             unit_mask=unit_mask,
             source_boundary_cue=source_boundary_cue,
@@ -104,7 +166,7 @@ class MonotonicRhythmScheduler(nn.Module):
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             planner_ref_stats=planner_ref_stats,
-            planner_trace_context=planner_trace_context,
+            planner_trace_context=effective_planner_trace_context,
             slow_rhythm_summary=slow_rhythm_summary,
             boundary_score_unit=boundary_score_unit,
             phase_ptr=state.phase_ptr,
@@ -113,7 +175,7 @@ class MonotonicRhythmScheduler(nn.Module):
         redistribution_outputs = self.unit_redistribution(
             unit_states=unit_states,
             dur_anchor_src=dur_anchor_src,
-            planner_trace_context=planner_trace_context,
+            planner_trace_context=effective_planner_trace_context,
             unit_mask=unit_mask,
             slow_rhythm_summary=slow_rhythm_summary,
             boundary_score_unit=boundary_score_unit,
@@ -126,6 +188,18 @@ class MonotonicRhythmScheduler(nn.Module):
             boundary_score_unit=boundary_score_unit,
             trace_context=trace_context,
             source_boundary_cue=source_boundary_cue,
+            trace_reliability=(
+                trace_reliability.trace_reliability if trace_reliability is not None else None
+            ),
+            local_trace_path_weight=local_trace_path_weight,
+            boundary_trace_path_weight=boundary_trace_path_weight,
+            trace_phase_gap=(trace_reliability.phase_gap if trace_reliability is not None else None),
+            trace_tail_reuse_count=(
+                trace_reliability.tail_reuse_count if trace_reliability is not None else None
+            ),
+            trace_tail_alpha=(trace_reliability.tail_alpha if trace_reliability is not None else None),
+            trace_gap_alpha=(trace_reliability.gap_alpha if trace_reliability is not None else None),
+            trace_reuse_alpha=(trace_reliability.reuse_alpha if trace_reliability is not None else None),
         )
         planner.raw_speech_budget_win = budget_outputs.get("raw_speech_budget_win", planner.speech_budget_win)
         planner.raw_pause_budget_win = budget_outputs.get("raw_pause_budget_win", planner.pause_budget_win)

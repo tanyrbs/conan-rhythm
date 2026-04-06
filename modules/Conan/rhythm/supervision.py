@@ -291,6 +291,7 @@ def build_reference_guided_targets(
     ref_rhythm_stats,
     ref_rhythm_trace,
     unit_mask=None,
+    anchor_aware_trace_sampling: bool = False,
     rate_scale_min: float = 0.60,
     rate_scale_max: float = 1.80,
     local_rate_strength: float = 0.35,
@@ -325,6 +326,11 @@ def build_reference_guided_targets(
         phase_ptr=torch.zeros(1, dtype=torch.float32),
         window_size=int(dur_anchor_src.size(0)),
         visible_sizes=torch.tensor([unit_count], dtype=torch.long),
+        anchor_durations=(
+            (dur_anchor_src * unit_mask).unsqueeze(0)
+            if bool(anchor_aware_trace_sampling)
+            else None
+        ),
     )[0]
     trace_context = trace_context * unit_mask.unsqueeze(-1)
 
@@ -381,6 +387,7 @@ def build_reference_teacher_targets(
     ref_rhythm_trace,
     unit_mask=None,
     source_boundary_cue=None,
+    anchor_aware_trace_sampling: bool = False,
     rate_scale_min: float = 0.55,
     rate_scale_max: float = 1.95,
     local_rate_strength: float = 0.45,
@@ -390,9 +397,7 @@ def build_reference_teacher_targets(
     pause_budget_ratio_cap: float = 0.80,
     speech_smooth_kernel: int = 3,
     pause_topk_ratio: float = 0.30,
-    **kwargs,
 ) -> dict[str, np.ndarray]:
-    del kwargs
     dur_anchor_src = torch.tensor(np.asarray(dur_anchor_src), dtype=torch.float32)
     ref_rhythm_stats = torch.tensor(np.asarray(ref_rhythm_stats), dtype=torch.float32)
     ref_rhythm_trace = torch.tensor(np.asarray(ref_rhythm_trace), dtype=torch.float32)
@@ -418,6 +423,7 @@ def build_reference_teacher_targets(
             pause_budget_ratio_cap=pause_budget_ratio_cap,
             speech_smooth_kernel=speech_smooth_kernel,
             pause_topk_ratio=pause_topk_ratio,
+            anchor_aware_trace_sampling=anchor_aware_trace_sampling,
         ),
     )
 

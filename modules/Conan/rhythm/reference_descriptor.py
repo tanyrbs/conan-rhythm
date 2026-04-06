@@ -193,6 +193,7 @@ class RefRhythmDescriptor(nn.Module):
         *,
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
+        anchor_durations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
@@ -201,6 +202,7 @@ class RefRhythmDescriptor(nn.Module):
             window_size=window_size,
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
 
     def sample_planner_trace_window(
@@ -211,6 +213,7 @@ class RefRhythmDescriptor(nn.Module):
         *,
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
+        anchor_durations: torch.Tensor | None = None,
     ) -> torch.Tensor:
         effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
@@ -219,4 +222,5 @@ class RefRhythmDescriptor(nn.Module):
             window_size=window_size,
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
+            anchor_durations=anchor_durations,
         )
