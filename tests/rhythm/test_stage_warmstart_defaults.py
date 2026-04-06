@@ -34,6 +34,17 @@ class StageWarmStartDefaultTests(unittest.TestCase):
                     msg=f"{config_path} should keep partial warm-start loading non-strict.",
                 )
 
+    def test_maintained_stage3_config_enables_conservative_acoustic_ramp(self) -> None:
+        hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_retimed.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_start"), 0.25)
+        self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_end"), 1.0)
+        self.assertEqual(hp.get("rhythm_stage3_acoustic_ramp_steps"), 10000)
+
 
 if __name__ == "__main__":
     unittest.main()

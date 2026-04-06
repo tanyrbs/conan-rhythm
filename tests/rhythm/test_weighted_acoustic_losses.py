@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from utils.commons.hparams import hparams
 from utils.metrics.ssim import ssim
 
 
@@ -21,6 +22,13 @@ class _DummyTask(RhythmConanTaskMixin):
 class WeightedAcousticLossTests(unittest.TestCase):
     def setUp(self) -> None:
         self.task = _DummyTask.__new__(_DummyTask)
+        self.task.global_step = 0
+        self.task.mel_losses = {"l1": 1.0}
+        self._hparams_backup = dict(hparams)
+
+    def tearDown(self) -> None:
+        hparams.clear()
+        hparams.update(self._hparams_backup)
 
     def test_expand_frame_weight_matches_target_shape(self) -> None:
         target = torch.zeros((2, 3, 4), dtype=torch.float32)
@@ -58,6 +66,121 @@ class WeightedAcousticLossTests(unittest.TestCase):
         expected = (ssim_loss * expanded).sum() / expanded.sum()
         actual = self.task._weighted_ssim_loss(decoder_output, target, frame_weight)
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-5))
+
+    def test_resolve_acoustic_loss_scale_ramps_only_for_training_retimed_targets(self) -> None:
+        hparams.clear()
+        hparams.update(
+            {
+                "rhythm_stage3_acoustic_weight_end": 1.0,
+                "rhythm_stage3_acoustic_weight_start": 0.25,
+                "rhythm_stage3_acoustic_ramp_steps": 10000,
+            }
+        )
+        self.task.global_step = 0
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            0.25,
+        )
+        self.task.global_step = 5000
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            0.625,
+        )
+        self.task.global_step = 20000
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=True,
+                test=False,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_kd",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=False,
+                infer=False,
+                test=False,
+            ),
+            1.0,
+        )
+
+    def test_add_acoustic_loss_applies_true_scalar_after_weighted_reduction(self) -> None:
+        mel_out = torch.ones((1, 2, 2), dtype=torch.float32)
+        target = torch.zeros_like(mel_out)
+        frame_weight = torch.full((1, 2), 0.5, dtype=torch.float32)
+        losses = {}
+        self.task._add_acoustic_loss(
+            mel_out,
+            target,
+            losses,
+            frame_weight=frame_weight,
+            loss_scale=0.25,
+        )
+        self.assertTrue(torch.allclose(losses["l1"], torch.tensor(0.25)))
+
+    def test_add_acoustic_loss_scales_unweighted_mel_terms_after_add_mel_loss(self) -> None:
+        def _fake_add_mel_loss(mel_out, target, losses):
+            losses["l1"] = torch.tensor(2.0)
+            losses["mse"] = torch.tensor(3.0)
+
+        self.task.mel_losses = {"l1": 1.0, "mse": 1.0}
+        self.task.add_mel_loss = _fake_add_mel_loss
+        losses = {}
+        self.task._add_acoustic_loss(
+            torch.zeros((1, 1, 1), dtype=torch.float32),
+            torch.zeros((1, 1, 1), dtype=torch.float32),
+            losses,
+            frame_weight=None,
+            loss_scale=0.5,
+        )
+        self.assertTrue(torch.allclose(losses["l1"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(losses["mse"], torch.tensor(1.5)))
+
+    def test_observability_passthrough_includes_retimed_acoustic_scale(self) -> None:
+        observability = self.task._collect_runtime_observability_outputs(
+            {
+                "rhythm_stage3_acoustic_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
+                "rhythm_retimed_acoustic_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
+            }
+        )
+        self.assertAlmostEqual(observability["rhythm_metric_stage3_acoustic_loss_scale"], 0.5)
+        self.assertAlmostEqual(observability["rhythm_metric_retimed_acoustic_loss_scale"], 0.5)
 
 
 if __name__ == "__main__":
