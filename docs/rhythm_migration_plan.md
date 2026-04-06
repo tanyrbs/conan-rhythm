@@ -62,6 +62,14 @@ cache contract instead of a simplified external view:
   - `boundary_events`
 - bundle-only inspections can keep it light with `--disable_audio_backfill`
   when raw time-axis reconstruction is unnecessary
+- corpus review can now emit a richer human-inspection pack:
+  - `*_global_dashboard.png`
+  - `*_progress_cards.png`
+  - regenerated per-sample panels via `--single_output_dir`
+  - copied review audio via `--export_audio_dir`
+
+This should be treated as a **qualitative review surface**, not as the final
+paper-grade sufficiency proof for the descriptor or source-compression design.
 
 ## 2. What the 6-agent training-prep audit actually covered
 
@@ -408,6 +416,36 @@ The audit found a few remaining gaps that were intentionally not over-corrected 
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
 - projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
 - loss balancing and context-matched KD are deliberately opt-in research knobs, not new maintained defaults
+- the current repo now has a much better qualitative review surface for
+  descriptor plots and linked audio, but it still lacks three important
+  evidence blocks if the goal is a stronger paper-level claim:
+  1. source-compression sufficiency
+     - beyond smoke / invariants, test whether the compressed unit sequence
+       preserves enough information relative to the uncompressed token/source
+       sequence for target-rhythm prediction
+  2. descriptor causal sufficiency
+     - intervention monotonicity:
+       - `global_rate` should mainly move speech budget / pacing
+       - `pause_ratio` should mainly move pause share
+       - `boundary_trace` should mainly move pause / boundary placement
+     - ablation specificity:
+       - removing one factor should selectively damage the matching capability
+         most tied to that factor
+     - leakage analysis:
+       - check whether a factor is silently carrying another factor's control
+         burden
+  3. descriptor-to-annotation correspondence
+     - correlation with human pause / boundary labels
+     - correlation with forced-alignment pause durations
+     - agreement with speaking-rate annotation or rating
+
+The current branch should therefore be described as having:
+
+- stronger local diagnostics
+- stronger qualitative review
+- better future-ablation scaffolding
+
+but **not yet** a complete causal / annotation-backed descriptor proof.
 
 These are follow-up / next-stage tasks, not blockers for the current minimal
 high-value landing. The current branch intentionally stops at the runtime-only

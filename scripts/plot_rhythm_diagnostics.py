@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -835,7 +837,7 @@ def plot_single_diagnostics(payload: RhythmPayload, *, cfg: PlotConfig, title: s
     ax = axes[0]
     if mel is not None:
         extent = [0.0, float(frame_axis[-1]) if frame_len > 0 else 0.0, 0, mel.shape[0]]
-        ax.imshow(mel, origin="lower", aspect="auto", interpolation="nearest", extent=extent)
+        ax.imshow(mel, origin="lower", aspect="auto", interpolation="nearest", extent=extent, cmap="magma")
         ax.set_ylabel("Mel bins")
         ax.set_title(title)
     else:
@@ -852,6 +854,17 @@ def plot_single_diagnostics(payload: RhythmPayload, *, cfg: PlotConfig, title: s
         energy_plot = _maybe_resample_to_len(payload.energy, frame_len)
         h2, = ax2.plot(frame_axis, energy_plot, linewidth=1.0, alpha=0.9, color="tab:orange", label="energy")
         legend_handles.append(h2)
+    if payload.pause_mask is not None and frame_len > 0:
+        pause_plot = _maybe_resample_to_len(payload.pause_mask, frame_len)
+        for idx in np.where(pause_plot > 0.5)[0]:
+            left = frame_axis[idx]
+            right = frame_axis[min(idx + 1, len(frame_axis) - 1)] if len(frame_axis) > 1 else left
+            ax.axvspan(float(left), float(right), color="white", alpha=0.08, linewidth=0)
+    if payload.boundary_events is not None and frame_len > 0:
+        event_plot = _maybe_resample_to_len(payload.boundary_events, frame_len)
+        event_positions = frame_axis[event_plot > 0.5]
+        for xpos in event_positions:
+            ax.axvline(float(xpos), color="cyan", alpha=0.2, linewidth=0.8)
     if legend_handles:
         ax2.legend(handles=legend_handles, loc="upper right")
     ax.set_xlabel("Time (s)")
@@ -935,6 +948,8 @@ def plot_single_diagnostics(payload: RhythmPayload, *, cfg: PlotConfig, title: s
         y = _maybe_resample_to_len(payload.boundary_events, frame_len or len(payload.boundary_events))
         x = _frame_axis(len(y), cfg.sample_rate, cfg.hop_size)
         ax.scatter(x[y > 0.5], y[y > 0.5], s=12, color="tab:red", label="boundary_events")
+        for xpos in x[y > 0.5]:
+            ax.axvline(float(xpos), color="tab:red", alpha=0.12, linewidth=0.8)
         plotted = True
     if plotted:
         ax.legend(loc="upper right")
@@ -953,6 +968,9 @@ def plot_single_diagnostics(payload: RhythmPayload, *, cfg: PlotConfig, title: s
     if payload.boundary_trace is not None:
         progress_b = payload.progress_bins if payload.progress_bins is not None else _progress_axis(len(payload.boundary_trace))
         ax.plot(progress_b, payload.boundary_trace, linewidth=1.8, label="boundary_trace")
+        peak_idx = np.argsort(payload.boundary_trace)[-3:]
+        peak_idx = np.sort(peak_idx)
+        ax.scatter(progress_b[peak_idx], payload.boundary_trace[peak_idx], color="tab:red", s=20, zorder=3)
     if payload.local_rate_trace is not None or payload.boundary_trace is not None:
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Progress")
@@ -1057,7 +1075,293 @@ def plot_triplet_compare(
     plt.close(fig)
 
 
-def plot_corpus_stats(items: list[RhythmPayload], *, save_prefix: str) -> None:
+def _payload_duration_sec(payload: RhythmPayload, sample_rate: int = 22050, hop_size: int = 256) -> Optional[float]:
+    duration = payload.metadata.get("duration_sec")
+    if duration is not None:
+        try:
+            return float(duration)
+        except Exception:
+            pass
+    if payload.mel is not None and payload.mel.shape[1] > 0:
+        return float(payload.mel.shape[1] * hop_size) / float(sample_rate)
+    return None
+
+
+def _plot_sorted_bar(
+    ax: plt.Axes,
+    items: list[RhythmPayload],
+    *,
+    metric_name: str,
+    value_getter,
+    color_map: str,
+) -> None:
+    filtered = [(item.label, value_getter(item)) for item in items if value_getter(item) is not None]
+    if not filtered:
+        ax.text(0.5, 0.5, f"No {metric_name}", ha="center", va="center", transform=ax.transAxes)
+        return
+    filtered = sorted(filtered, key=lambda x: x[1])
+    labels = [x[0] for x in filtered]
+    values = np.asarray([x[1] for x in filtered], dtype=np.float32)
+    cmap = plt.get_cmap(color_map)
+    if values.max() > values.min():
+        norm = (values - values.min()) / (values.max() - values.min())
+    else:
+        norm = np.zeros_like(values)
+    colors = [cmap(0.2 + 0.6 * float(v)) for v in norm]
+    y = np.arange(len(labels))
+    ax.barh(y, values, color=colors, edgecolor="black", alpha=0.9)
+    ax.set_yticks(y, labels)
+    ax.set_title(f"{metric_name} ranking")
+    ax.grid(True, axis="x", alpha=0.25)
+    for yi, value in enumerate(values):
+        ax.text(float(value), yi, f" {value:.4f}", va="center", ha="left", fontsize=8)
+
+
+def _plot_metric_heatmap(ax: plt.Axes, items: list[RhythmPayload], *, sample_rate: int, hop_size: int):
+    labels = []
+    raw_values = []
+    metric_names = ["duration_s", "global_rate", "pause_ratio", "boundary_ratio", "voiced_ratio"]
+    for item in items:
+        duration = _payload_duration_sec(item, sample_rate=sample_rate, hop_size=hop_size)
+        values = [duration, item.global_rate, item.pause_ratio, item.boundary_ratio, item.voiced_ratio]
+        if any(v is None for v in values):
+            continue
+        labels.append(item.label)
+        raw_values.append(np.asarray(values, dtype=np.float32))
+    if not raw_values:
+        ax.text(0.5, 0.5, "Need complete metric rows", ha="center", va="center", transform=ax.transAxes)
+        return None
+    raw_mat = np.stack(raw_values, axis=0)
+    mean = raw_mat.mean(axis=0, keepdims=True)
+    std = raw_mat.std(axis=0, keepdims=True)
+    std = np.where(std < 1e-6, 1.0, std)
+    z = (raw_mat - mean) / std
+    im = ax.imshow(z, aspect="auto", cmap="coolwarm", vmin=-2.5, vmax=2.5)
+    ax.set_title("metric overview (z-score)")
+    ax.set_xticks(np.arange(len(metric_names)), metric_names, rotation=20, ha="right")
+    ax.set_yticks(np.arange(len(labels)), labels)
+    for i in range(raw_mat.shape[0]):
+        for j in range(raw_mat.shape[1]):
+            ax.text(j, i, f"{raw_mat[i, j]:.3f}", ha="center", va="center", fontsize=7, color="black")
+    return im
+
+
+def _plot_progress_small_multiples(items: list[RhythmPayload], *, save_prefix: str) -> None:
+    valid = [x for x in items if x.local_rate_trace is not None and x.boundary_trace is not None]
+    if not valid:
+        return
+    ordered = sorted(valid, key=lambda x: (_payload_duration_sec(x) or float("inf"), x.label))
+    n = len(ordered)
+    fig, axes = plt.subplots(
+        nrows=n,
+        ncols=2,
+        figsize=(16, max(2.5 * n, 8)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    if n == 1:
+        axes = np.asarray([axes])
+    local_all = np.concatenate([x.local_rate_trace for x in ordered], axis=0)
+    boundary_all = np.concatenate([x.boundary_trace for x in ordered], axis=0)
+    local_lo, local_hi = _robust_ylim(local_all)
+    boundary_lo, boundary_hi = _robust_ylim(boundary_all, lower_q=0.0, upper_q=1.0, pad_ratio=0.05)
+    for row_idx, item in enumerate(ordered):
+        x = item.progress_bins if item.progress_bins is not None else _progress_axis(len(item.local_rate_trace))
+        ax_local = axes[row_idx, 0]
+        ax_local.plot(x, item.local_rate_trace, color="tab:blue", linewidth=2.0)
+        ax_local.fill_between(x, 0.0, item.local_rate_trace, color="tab:blue", alpha=0.18)
+        ax_local.set_ylim(local_lo, local_hi)
+        ax_local.grid(True, alpha=0.22)
+        if item.global_rate is not None and item.pause_ratio is not None:
+            desc = (
+                f"{item.label} | dur={(_payload_duration_sec(item) or float('nan')):.2f}s | "
+                f"gr={item.global_rate:.4f} | pr={item.pause_ratio:.3f}"
+            )
+        else:
+            desc = item.label
+        ax_local.text(0.01, 0.88, desc, transform=ax_local.transAxes, fontsize=9, ha="left", va="top")
+        if row_idx == 0:
+            ax_local.set_title("local_rate_trace cards")
+        if row_idx == n - 1:
+            ax_local.set_xlabel("Progress")
+        ax_local.set_ylabel("local")
+
+        ax_boundary = axes[row_idx, 1]
+        ax_boundary.plot(x, item.boundary_trace, color="tab:orange", linewidth=1.8)
+        ax_boundary.fill_between(x, 0.0, item.boundary_trace, color="tab:orange", alpha=0.2)
+        peak_idx = np.argsort(item.boundary_trace)[-3:]
+        peak_idx = np.sort(peak_idx)
+        ax_boundary.scatter(x[peak_idx], item.boundary_trace[peak_idx], color="tab:red", s=24, zorder=3)
+        ax_boundary.set_ylim(boundary_lo, boundary_hi)
+        ax_boundary.grid(True, alpha=0.22)
+        if row_idx == 0:
+            ax_boundary.set_title("boundary_trace cards")
+        if row_idx == n - 1:
+            ax_boundary.set_xlabel("Progress")
+        ax_boundary.set_ylabel("boundary")
+    fig.savefig(f"{save_prefix}_progress_cards.png", dpi=200)
+    plt.close(fig)
+
+
+def _plot_global_dashboard(items: list[RhythmPayload], *, save_prefix: str, sample_rate: int, hop_size: int) -> None:
+    fig = plt.figure(figsize=(16, 10), constrained_layout=True)
+    grid = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.1])
+    ax1 = fig.add_subplot(grid[0, 0])
+    ax2 = fig.add_subplot(grid[0, 1])
+    ax3 = fig.add_subplot(grid[1, 0])
+    ax4 = fig.add_subplot(grid[1, 1])
+
+    _plot_sorted_bar(ax1, items, metric_name="global_rate", value_getter=lambda x: x.global_rate, color_map="Blues")
+    _plot_sorted_bar(ax2, items, metric_name="pause_ratio", value_getter=lambda x: x.pause_ratio, color_map="Oranges")
+
+    scatter_items = [
+        x for x in items if x.mean_speech_frames is not None and x.pause_ratio is not None and x.global_rate is not None
+    ]
+    if scatter_items:
+        xs = np.asarray([x.mean_speech_frames for x in scatter_items], dtype=np.float32)
+        ys = np.asarray([x.pause_ratio for x in scatter_items], dtype=np.float32)
+        cs = np.asarray([x.global_rate for x in scatter_items], dtype=np.float32)
+        ss = np.asarray(
+            [max(60.0, ((_payload_duration_sec(x, sample_rate=sample_rate, hop_size=hop_size) or 1.0) * 35.0)) for x in scatter_items],
+            dtype=np.float32,
+        )
+        sc = ax3.scatter(xs, ys, c=cs, s=ss, cmap="viridis", alpha=0.9, edgecolors="black", linewidths=0.5)
+        for item, xval, yval in zip(scatter_items, xs, ys):
+            ax3.text(float(xval), float(yval), f" {item.label}", fontsize=8, va="center")
+        ax3.set_title("mean_speech_frames vs pause_ratio")
+        ax3.set_xlabel("mean_speech_frames")
+        ax3.set_ylabel("pause_ratio")
+        ax3.grid(True, alpha=0.25)
+        cb = fig.colorbar(sc, ax=ax3, fraction=0.05, pad=0.03)
+        cb.set_label("global_rate")
+    else:
+        ax3.text(0.5, 0.5, "Need mean_speech_frames + pause_ratio + global_rate", ha="center", va="center", transform=ax3.transAxes)
+
+    heatmap = _plot_metric_heatmap(ax4, items, sample_rate=sample_rate, hop_size=hop_size)
+    if heatmap is not None:
+        fig.colorbar(heatmap, ax=ax4, fraction=0.05, pad=0.03, label="z-score")
+
+    fig.savefig(f"{save_prefix}_global_dashboard.png", dpi=200)
+    plt.close(fig)
+
+
+def _plot_labeled_heatmap(
+    items: list[RhythmPayload],
+    *,
+    trace_name: str,
+    value_getter,
+    sort_key,
+    save_path: str,
+    title: str,
+) -> Optional[np.ndarray]:
+    valid = [x for x in items if value_getter(x) is not None]
+    if not valid:
+        return None
+    valid = sorted(valid, key=sort_key)
+    max_len = max(len(value_getter(x)) for x in valid)
+    mat = np.stack([_maybe_resample_to_len(value_getter(x), max_len) for x in valid], axis=0)
+    labels = [x.label for x in valid]
+    fig, ax = plt.subplots(figsize=(12, max(4.8, 0.48 * len(valid) + 2.5)), constrained_layout=True)
+    im = ax.imshow(mat, aspect="auto", interpolation="nearest", cmap="magma")
+    ax.set_title(title)
+    ax.set_xlabel("Progress bins")
+    ax.set_ylabel("Sample")
+    ax.set_yticks(np.arange(len(labels)), labels)
+    fig.colorbar(im, ax=ax, fraction=0.028, pad=0.02, label=trace_name)
+    fig.savefig(save_path, dpi=180)
+    plt.close(fig)
+    return mat
+
+
+def _plot_mean_std_from_matrix(mat: Optional[np.ndarray], *, save_path: str, title: str) -> None:
+    if mat is None:
+        return
+    fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
+    x = _progress_axis(mat.shape[1])
+    mean = mat.mean(axis=0)
+    std = mat.std(axis=0)
+    ax.plot(x, mean, linewidth=2.0)
+    ax.fill_between(x, mean - std, mean + std, alpha=0.25)
+    ax.set_title(title)
+    ax.set_xlabel("Progress")
+    ax.grid(True, alpha=0.25)
+    fig.savefig(save_path, dpi=180)
+    plt.close(fig)
+
+
+def export_audio_copies(
+    items: list[RhythmPayload],
+    *,
+    export_audio_dir: str,
+    sample_rate: int,
+    hop_size: int,
+) -> None:
+    export_dir = Path(export_audio_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    manifest_rows = []
+    playlist_paths = []
+    for item in items:
+        src = item.metadata.get("path")
+        if not isinstance(src, str) or not Path(src).is_file():
+            continue
+        src_path = Path(src)
+        target_name = f"{item.label}__{src_path.name}"
+        dst_path = export_dir / target_name
+        if not dst_path.exists() or src_path.stat().st_size != dst_path.stat().st_size:
+            shutil.copy2(src_path, dst_path)
+        playlist_paths.append(dst_path.name)
+        manifest_rows.append(
+            {
+                "sample_id": item.label,
+                "speaker": item.metadata.get("speaker", ""),
+                "utt": item.metadata.get("utt", ""),
+                "duration_sec": f"{(_payload_duration_sec(item, sample_rate=sample_rate, hop_size=hop_size) or 0.0):.4f}",
+                "global_rate": "" if item.global_rate is None else f"{item.global_rate:.6f}",
+                "pause_ratio": "" if item.pause_ratio is None else f"{item.pause_ratio:.6f}",
+                "source_path": str(src_path),
+                "exported_file": dst_path.name,
+            }
+        )
+
+    if manifest_rows:
+        manifest_path = export_dir / "audio_manifest.csv"
+        with manifest_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "sample_id",
+                    "speaker",
+                    "utt",
+                    "duration_sec",
+                    "global_rate",
+                    "pause_ratio",
+                    "source_path",
+                    "exported_file",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(manifest_rows)
+        playlist_path = export_dir / "selected_samples.m3u"
+        with playlist_path.open("w", encoding="utf-8", newline="\n") as f:
+            for entry in playlist_paths:
+                f.write(f"{entry}\n")
+
+
+def emit_single_diagnostics(items: list[RhythmPayload], *, cfg: PlotConfig, output_dir: str) -> None:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for item in items:
+        plot_single_diagnostics(item, cfg=cfg, title=item.label, save_path=str(out_dir / f"{item.label}.png"))
+
+
+def plot_corpus_stats(
+    items: list[RhythmPayload],
+    *,
+    save_prefix: str,
+    cfg: PlotConfig,
+    single_output_dir: Optional[str] = None,
+    export_audio_dir: Optional[str] = None,
+) -> None:
     if not items:
         raise RuntimeError("No payloads available for corpus plotting")
     out_dir = Path(save_prefix).parent
@@ -1098,57 +1402,41 @@ def plot_corpus_stats(items: list[RhythmPayload], *, save_prefix: str) -> None:
     fig.savefig(f"{save_prefix}_global_stats.png", dpi=180)
     plt.close(fig)
 
-    local_items = [x for x in items if x.local_rate_trace is not None]
-    if local_items:
-        local_items = sorted(local_items, key=lambda x: float("inf") if x.global_rate is None else x.global_rate)
-        max_len = max(len(x.local_rate_trace) for x in local_items)
-        mat = np.stack([_maybe_resample_to_len(x.local_rate_trace, max_len) for x in local_items], axis=0)
-        fig, ax = plt.subplots(figsize=(12, 6), constrained_layout=True)
-        im = ax.imshow(mat, aspect="auto", interpolation="nearest")
-        ax.set_title("local_rate_trace heatmap (sorted by global_rate)")
-        ax.set_xlabel("Progress bins")
-        ax.set_ylabel("Utterance index")
-        fig.colorbar(im, ax=ax, fraction=0.028, pad=0.02)
-        fig.savefig(f"{save_prefix}_local_rate_heatmap.png", dpi=180)
-        plt.close(fig)
+    _plot_global_dashboard(items, save_prefix=save_prefix, sample_rate=cfg.sample_rate, hop_size=cfg.hop_size)
+    _plot_progress_small_multiples(items, save_prefix=save_prefix)
 
-        fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
-        x = _progress_axis(max_len)
-        mean = mat.mean(axis=0)
-        std = mat.std(axis=0)
-        ax.plot(x, mean, linewidth=2.0)
-        ax.fill_between(x, mean - std, mean + std, alpha=0.25)
-        ax.set_title("local_rate_trace mean ± std")
-        ax.set_xlabel("Progress")
-        ax.grid(True, alpha=0.25)
-        fig.savefig(f"{save_prefix}_local_rate_mean_std.png", dpi=180)
-        plt.close(fig)
+    local_mat = _plot_labeled_heatmap(
+        items,
+        trace_name="local_rate_trace",
+        value_getter=lambda x: x.local_rate_trace,
+        sort_key=lambda x: float("inf") if x.global_rate is None else x.global_rate,
+        save_path=f"{save_prefix}_local_rate_heatmap.png",
+        title="local_rate_trace heatmap (sorted by global_rate)",
+    )
+    _plot_mean_std_from_matrix(
+        local_mat,
+        save_path=f"{save_prefix}_local_rate_mean_std.png",
+        title="local_rate_trace mean +/- std",
+    )
 
-    boundary_items = [x for x in items if x.boundary_trace is not None]
-    if boundary_items:
-        boundary_items = sorted(boundary_items, key=lambda x: float("inf") if x.pause_ratio is None else x.pause_ratio)
-        max_len = max(len(x.boundary_trace) for x in boundary_items)
-        mat = np.stack([_maybe_resample_to_len(x.boundary_trace, max_len) for x in boundary_items], axis=0)
-        fig, ax = plt.subplots(figsize=(12, 6), constrained_layout=True)
-        im = ax.imshow(mat, aspect="auto", interpolation="nearest")
-        ax.set_title("boundary_trace heatmap (sorted by pause_ratio)")
-        ax.set_xlabel("Progress bins")
-        ax.set_ylabel("Utterance index")
-        fig.colorbar(im, ax=ax, fraction=0.028, pad=0.02)
-        fig.savefig(f"{save_prefix}_boundary_heatmap.png", dpi=180)
-        plt.close(fig)
+    boundary_mat = _plot_labeled_heatmap(
+        items,
+        trace_name="boundary_trace",
+        value_getter=lambda x: x.boundary_trace,
+        sort_key=lambda x: float("inf") if x.pause_ratio is None else x.pause_ratio,
+        save_path=f"{save_prefix}_boundary_heatmap.png",
+        title="boundary_trace heatmap (sorted by pause_ratio)",
+    )
+    _plot_mean_std_from_matrix(
+        boundary_mat,
+        save_path=f"{save_prefix}_boundary_mean_std.png",
+        title="boundary_trace mean +/- std",
+    )
 
-        fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
-        x = _progress_axis(max_len)
-        mean = mat.mean(axis=0)
-        std = mat.std(axis=0)
-        ax.plot(x, mean, linewidth=2.0)
-        ax.fill_between(x, mean - std, mean + std, alpha=0.25)
-        ax.set_title("boundary_trace mean ± std")
-        ax.set_xlabel("Progress")
-        ax.grid(True, alpha=0.25)
-        fig.savefig(f"{save_prefix}_boundary_mean_std.png", dpi=180)
-        plt.close(fig)
+    if single_output_dir:
+        emit_single_diagnostics(items, cfg=cfg, output_dir=single_output_dir)
+    if export_audio_dir:
+        export_audio_copies(items, export_audio_dir=export_audio_dir, sample_rate=cfg.sample_rate, hop_size=cfg.hop_size)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1182,19 +1470,19 @@ def build_parser() -> argparse.ArgumentParser:
             help="Do not auto-load bundle/feature record path back into raw audio when mel/raw diagnostics are missing.",
         )
 
-    p1 = subparsers.add_parser("single", help="单条语音诊断图")
+    p1 = subparsers.add_parser("single", help="single-sample diagnostic panel")
     p1.add_argument("--input", required=True, help="audio / feature file / bundle selector, e.g. descriptors.json::sample_id=S01")
     p1.add_argument("--output", required=True, help="Output png path")
     add_common_plot_args(p1)
 
-    p2 = subparsers.add_parser("compare", help="source/ref/output 三方对照图")
+    p2 = subparsers.add_parser("compare", help="source/reference/output triplet comparison")
     p2.add_argument("--source", required=True)
     p2.add_argument("--reference", required=True)
     p2.add_argument("--output_input", required=True)
     p2.add_argument("--output_png", required=True)
     add_common_plot_args(p2)
 
-    p3 = subparsers.add_parser("corpus", help="批量统计图")
+    p3 = subparsers.add_parser("corpus", help="corpus-level dashboards / heatmaps")
     group = p3.add_mutually_exclusive_group(required=True)
     group.add_argument("--input_dir", help="Directory containing audio/features or a descriptors.json bundle")
     group.add_argument("--inputs", nargs="+", help="Explicit list of audio/features/bundle selectors")
@@ -1202,6 +1490,8 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--glob", default="*", help="Glob for directory scan; combine with --recursive for large trees")
     p3.add_argument("--recursive", action="store_true")
     p3.add_argument("--limit", type=int, default=-1, help="Optional cap on number of loaded items")
+    p3.add_argument("--single_output_dir", default=None, help="Optional directory for regenerated per-sample diagnostic panels")
+    p3.add_argument("--export_audio_dir", default=None, help="Optional directory to copy linked audio files plus audio manifest / m3u")
     add_common_plot_args(p3)
     return parser
 
@@ -1259,7 +1549,13 @@ def main() -> None:
         )
         if not items:
             raise RuntimeError("No valid items found for corpus plotting")
-        plot_corpus_stats(items, save_prefix=args.save_prefix)
+        plot_corpus_stats(
+            items,
+            save_prefix=args.save_prefix,
+            cfg=cfg,
+            single_output_dir=args.single_output_dir,
+            export_audio_dir=args.export_audio_dir,
+        )
         print(f"[OK] saved prefix: {args.save_prefix}")
         return
 

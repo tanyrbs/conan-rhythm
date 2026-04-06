@@ -200,6 +200,13 @@ python scripts/plot_rhythm_diagnostics.py compare \
 python scripts/plot_rhythm_diagnostics.py corpus \
   --input_dir artifacts/reference_descriptor_review/train_clean_100_20260407 \
   --save_prefix artifacts/reference_descriptor_review/train_clean_100_20260407/plots/diagnostic_bundle
+
+# richer review pack: enhanced dashboards + regenerated per-sample panels + copied audio
+python scripts/plot_rhythm_diagnostics.py corpus \
+  --input_dir artifacts/reference_descriptor_review/train_clean_100_20260407 \
+  --save_prefix artifacts/reference_descriptor_review/train_clean_100_20260407/plots/enhanced_review \
+  --single_output_dir artifacts/reference_descriptor_review/train_clean_100_20260407/plots/enhanced_single \
+  --export_audio_dir artifacts/reference_descriptor_review/train_clean_100_20260407/audio
 ```
 
 Plotting conventions:
@@ -220,6 +227,33 @@ Plotting conventions:
 For large exported bundles where you only want planner/global views, add
 `--disable_audio_backfill` so the script does not reopen each record's source
 audio just to reconstruct raw time-axis proxies.
+
+The enhanced corpus review path is aimed at **human diagnosis**:
+
+- `*_global_dashboard.png`: sorted bars + scatter + metric heatmap
+- `*_progress_cards.png`: per-sample local/boundary small multiples
+- `--single_output_dir`: regenerated sample-level panels
+- `--export_audio_dir`: copied review audio + `audio_manifest.csv` + `.m3u`
+
+That richer plotting / audio export improves qualitative inspection, but it is
+still **not** the same thing as paper-grade evidence for descriptor sufficiency.
+The main missing future ablations are:
+
+1. source-compression sufficiency:
+   - does the compressed unit sequence preserve enough information relative to
+     the uncompressed token/source sequence for target-rhythm prediction?
+2. descriptor causal sufficiency:
+   - intervention monotonicity
+   - ablation specificity
+   - leakage analysis
+3. descriptor-to-annotation alignment:
+   - correlation with human pause / boundary labels
+   - correlation with forced-alignment pause durations
+   - consistency with speaking-rate annotations
+
+Those evidence gaps are documented as future evaluation work in
+`docs/rhythm_migration_plan.md`; they are not claimed as solved by the current
+maintained branch.
 
 ## Conda `conan` environment validation actually run
 
