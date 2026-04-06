@@ -17,6 +17,8 @@ class StageWarmStartDefaultTests(unittest.TestCase):
             "egs/conan_emformer_rhythm_v2_teacher_offline.yaml",
             "egs/conan_emformer_rhythm_v2_student_kd.yaml",
             "egs/conan_emformer_rhythm_v2_student_kd_context_match.yaml",
+            "egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml",
+            "egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml",
             "egs/conan_emformer_rhythm_v2_student_retimed.yaml",
             "egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml",
         ]
@@ -44,6 +46,22 @@ class StageWarmStartDefaultTests(unittest.TestCase):
         self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_start"), 0.25)
         self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_end"), 1.0)
         self.assertEqual(hp.get("rhythm_stage3_acoustic_ramp_steps"), 10000)
+
+    def test_ref_bootstrap_config_externalizes_rhythm_supervision_without_cached_teacher(self) -> None:
+        hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        self.assertEqual(hp.get("rhythm_dataset_target_mode"), "runtime_only")
+        self.assertEqual(hp.get("rhythm_cached_reference_policy"), "sample_ref")
+        self.assertEqual(hp.get("rhythm_primary_target_surface"), "teacher")
+        self.assertEqual(hp.get("rhythm_teacher_target_source"), "algorithmic")
+        self.assertFalse(hp.get("rhythm_require_cached_teacher"))
+        self.assertFalse(hp.get("rhythm_binarize_teacher_targets"))
+        self.assertFalse(hp.get("rhythm_binarize_retimed_mel_targets"))
+        self.assertTrue(hp.get("rhythm_require_external_reference"))
 
 
 if __name__ == "__main__":

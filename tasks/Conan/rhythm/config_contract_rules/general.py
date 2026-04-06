@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from modules.Conan.rhythm.surface_metadata import RHYTHM_CACHE_VERSION
+from modules.Conan.rhythm.surface_metadata import RHYTHM_CACHE_VERSION, normalize_teacher_target_source
 
 from .compat import (
     validate_pause_boundary_alias_consistency,
@@ -286,13 +286,54 @@ def _validate_stage_hints(
             )
     if knobs.enable_dual_mode_teacher and knobs.lambda_distill <= 0.0:
         warnings.append("Dual-mode teacher is enabled but lambda_rhythm_distill == 0.")
-    if knobs.primary_target_surface == "teacher" and not knobs.binarize_teacher_targets:
+    if (
+        knobs.primary_target_surface == "teacher"
+        and not knobs.binarize_teacher_targets
+        and knobs.target_mode != "runtime_only"
+    ):
         warnings.append(
             "Primary rhythm target surface is teacher but rhythm_binarize_teacher_targets is false."
         )
     if ctx.stage in _MAINLINE_STAGES and knobs.lambda_plan > 0.0:
         warnings.append(
             f"{ctx.stage} usually keeps lambda_rhythm_plan: 0; treat rhythm_plan as an ablation/debug term rather than the maintained objective."
+        )
+
+
+def _validate_external_reference_supervision_consistency(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    policy = str(ctx.hparams.get("rhythm_cached_reference_policy", "self") or "self").strip().lower()
+    if policy not in {"sample_ref", "paired", "external"}:
+        return
+
+    knobs = ctx.knobs
+    teacher_source = normalize_teacher_target_source(
+        ctx.hparams.get("rhythm_teacher_target_source", "algorithmic")
+    )
+    if knobs.target_mode != "runtime_only":
+        errors.append(
+            "External rhythm reference policy currently requires rhythm_dataset_target_mode: runtime_only. "
+            "cached_only/prefer_cache would pair sampled-ref conditioning with source-item cached surfaces and "
+            "create supervision conflict that teaches the model to ignore the reference."
+        )
+    else:
+        if bool(ctx.hparams.get("rhythm_binarize_teacher_targets", False)):
+            warnings.append(
+                "runtime_only + external rhythm reference usually should not keep rhythm_binarize_teacher_targets=true. "
+                "That precomputes self-conditioned teacher surfaces that this stage does not consume and can blur the intended training semantics."
+            )
+        if bool(ctx.hparams.get("rhythm_binarize_retimed_mel_targets", False)):
+            warnings.append(
+                "runtime_only + external rhythm reference usually should not keep rhythm_binarize_retimed_mel_targets=true. "
+                "This stage is module-only and does not need cached retimed acoustic targets."
+            )
+    if knobs.target_mode == "runtime_only" and knobs.primary_target_surface == "teacher" and teacher_source != "algorithmic":
+        errors.append(
+            "runtime_only + external rhythm reference currently requires rhythm_teacher_target_source: algorithmic. "
+            "learned_offline teacher surfaces are cache-backed and cannot be regenerated online from the sampled ref."
         )
 
 
@@ -315,6 +356,7 @@ def validate_general_stage_rules(
     _validate_reporting_and_export_hints(ctx, warnings)
     _validate_strict_mainline(ctx, errors)
     _validate_stage_hints(ctx, errors, warnings)
+    _validate_external_reference_supervision_consistency(ctx, errors, warnings)
 
 
 __all__ = ["validate_general_stage_rules"]

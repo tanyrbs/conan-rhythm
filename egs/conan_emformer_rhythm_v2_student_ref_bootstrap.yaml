@@ -1,0 +1,6 @@
+base_config: egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml
+
+# Alias for the experimental stage-2.5 bootstrap path:
+# keep the existing pairwise external-reference runtime-teacher setup, but expose
+# the shorter name "student_ref_bootstrap" because that is the training role this
+# config is meant to play.

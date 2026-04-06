@@ -1,4 +1,4 @@
-# Rhythm Migration Plan (2026-04-05)
+# Rhythm Migration Plan (2026-04-06)
 
 This remains the maintained migration/audit note under `docs/`. Together with `README.md` and `docs/autodl_training_handoff.md`, it defines the current training path, the April 4-5 audit outcome, and the cloud-launch handoff.
 
@@ -11,8 +11,24 @@ The maintained rhythm path remains:
 1. `teacher_offline`
 2. export teacher targets / rebuild student cache
 3. `student_kd`
-4. prepare retimed cache + F0 side files
+4. optional upper-bound extension: `student_ref_bootstrap`
+5. prepare retimed cache + F0 side files
+6. `student_retimed`
+
+The default maintained claims in this checkout still refer to the shorter
+`teacher_offline -> student_kd -> student_retimed` chain. On April 6, 2026,
+the recommended practical upper-bound path became:
+
+1. `teacher_offline`
+2. export teacher targets / rebuild student cache
+3. `student_kd`
+4. `student_ref_bootstrap`
 5. `student_retimed`
+
+That stage-2.5 branch is experimental, but it fixes the most important
+remaining train/infer mismatch in the current repo: the acoustic path already
+uses external same-speaker references, while the formal rhythm supervision had
+still been largely self-conditioned.
 
 Critical code ownership is intentionally narrow:
 
@@ -95,6 +111,18 @@ The maintained branch now includes these corrective changes:
 - new experimental configs were added without changing the maintained default chain:
   - `egs/conan_emformer_rhythm_v2_student_kd_context_match.yaml`
   - `egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
+- a new experimental external-reference bootstrap stage is now available:
+  - `egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml`
+  - `egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml`
+- external-reference rhythm supervision is now protected against the most dangerous configuration mismatch:
+  - `sample_ref` / external rhythm policy can no longer silently pair with `cached_only` or `prefer_cache`
+  - that mismatch now raises a contract error instead of only warning
+- runtime-only teacher stages no longer falsely require cached teacher fields during cache-contract / preflight inspection
+- stage-2.5 can now fail fast when a same-speaker pool collapses to a singleton and would otherwise silently fall back to self reference:
+  - `rhythm_require_external_reference: true`
+- runtime batches and metrics now expose whether rhythm supervision really used an external reference:
+  - sample field: `rhythm_reference_is_self`
+  - metrics: `rhythm_metric_reference_self_rate`, `rhythm_metric_reference_external_rate`
 
 ## 4. Validation actually run on this checkout
 
@@ -112,6 +140,14 @@ The following were run locally in the `conda` `conan` environment:
 - 2000-step CPU probe for `teacher_offline`
 - 2000-step CPU probe for `student_kd`
 - 2000-step CPU smoke probe for `student_retimed`
+- focused April 6, 2026 regression rerun for the new external-reference bootstrap path:
+  - `tests/rhythm/test_cache_contracts.py`
+  - `tests/rhythm/test_dataset_target_builder.py`
+  - `tests/rhythm/test_policy_contract_and_loss_routing.py`
+  - `tests/rhythm/test_stage_warmstart_defaults.py`
+  - `tests/rhythm/test_reference_bootstrap_runtime.py`
+  - `tests/rhythm/test_metrics_masking.py`
+  - `tests/rhythm/test_reference_sidecar.py`
 
 Observed result summary:
 
@@ -129,6 +165,9 @@ Observed result summary:
   - `rhythm_metric_pitch_supervision_disabled`
   - `rhythm_metric_missing_retimed_pitch_target`
   - pre-align retimed-target mismatch / resample / trim signals
+- focused external-reference bootstrap regression rerun on April 6, 2026:
+  - **51 tests passed**
+  - validated stage-2.5 config defaults, contract hard-errors, runtime fail-fast against self fallback, and reference self/external observability metrics
 
 The newest rerun extended regression coverage specifically around:
 
@@ -194,6 +233,20 @@ Additional training-prep caution:
 - experimental branch available: `conan_emformer_rhythm_v2_student_kd_context_match.yaml`
 - maintained KD reminder: the real maintained signal is `teacher-main + shape-only KD`; exec/budget/prefix/allocation KD stay disabled in the default stage-2 config
 
+### `student_ref_bootstrap`
+
+- code path: **ready as experimental stage-2.5**
+- formal run from this checkout: **still blocked by real dataset assets**
+- purpose:
+  - switch rhythm supervision from self-conditioned cached surfaces to external same-speaker runtime teacher targets
+  - reduce the train/infer mismatch before `student_retimed`
+- important runtime rule:
+  - default config sets `rhythm_require_external_reference: true`
+  - if speaker filtering leaves only one item for a speaker, the run now fails fast instead of silently falling back to self
+- important monitoring rule:
+  - track `rhythm_metric_reference_self_rate`
+  - healthy formal stage-2.5 runs should keep self-rate near `0`
+
 ### `student_retimed`
 
 - code path: **closer to ready**
@@ -252,6 +305,11 @@ So the current state is:
 
 The main blocker is still assets, not the control-loss hot path.
 
+For the experimental stage-2.5 branch, there is one extra blocker beyond the
+usual dataset assets:
+
+- same-speaker train splits must still contain at least two usable items per speaker after filtering, otherwise `rhythm_require_external_reference: true` will stop the run as intended
+
 ## 6.1 Gradient / control audit notes
 
 - maintained optimization is still centered on the composite rhythm losses:
@@ -271,6 +329,11 @@ The main blocker is still assets, not the control-loss hot path.
 The audit found a few remaining gaps that were intentionally not over-corrected in the same round:
 
 - optimizer-scope coverage is now guarded against empty / foreign collector output, but it still benefits from more direct end-to-end param-group tests under real checkpoints
+- this repo still does not have a checked-in `teacher_joint_upper_bound` config; that remains the recommended next research branch when you want to audition the real teacher main branch and establish an audible upper bound
+- the real ceiling path is still a pairwise offline-cache path, not just runtime teacher synthesis:
+  - `teacher(A | B)`
+  - `retimed mel(A | B)`
+  - `retimed f0/uv(A | B)`
 - student-retimed needs a cleaner formal stage-3 integration smoke once real F0 assets exist
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
 - projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
@@ -288,3 +351,10 @@ Keep maintenance effort focused on changes that improve one of these four things
 - streaming stability / prefix consistency
 
 If a proposed change only exists in another branch's research path and does not have a real local analogue, do not port it by default.
+
+For this checkout specifically, the current priority order is:
+
+1. keep the maintained `teacher_offline -> student_kd -> student_retimed` path healthy
+2. use `student_ref_bootstrap` when you want a practical upper-bound extension for external-reference rhythm learning
+3. add a future `teacher_joint_upper_bound` branch only as a separate upper-bound proof path, not as a replacement for the clean teacher-surface stage
+4. treat pairwise offline cache as the real long-term ceiling project

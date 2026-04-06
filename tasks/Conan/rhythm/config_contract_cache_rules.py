@@ -118,6 +118,9 @@ def validate_cache_field_contract(
         str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
         == "cached_only"
     )
+    target_mode = str(hp.get("rhythm_dataset_target_mode", "prefer_cache") or "prefer_cache").strip().lower()
+    runtime_only = target_mode == "runtime_only"
+    retimed_source = str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower()
     distill_exec_weight = float(hp.get("rhythm_distill_exec_weight", 1.0))
     distill_budget_weight = float(hp.get("rhythm_distill_budget_weight", 0.5))
     distill_allocation_weight = float(hp.get("rhythm_distill_allocation_weight", 0.5))
@@ -133,11 +136,14 @@ def validate_cache_field_contract(
         expected_groups.extend(_CACHED_ONLY_META_FIELD_GROUPS)
     if primary == "guidance":
         expected_groups.extend(_GUIDANCE_FIELD_GROUPS)
+    needs_cached_teacher_core = (
+        bool(hp.get("rhythm_require_cached_teacher", False))
+        or (not runtime_only and primary == "teacher")
+        or (not runtime_only and bool(hp.get("rhythm_binarize_teacher_targets", False)))
+        or (not runtime_only and retimed_source == "teacher")
+    )
     if (
-        primary == "teacher"
-        or bool(hp.get("rhythm_require_cached_teacher", False))
-        or bool(hp.get("rhythm_binarize_teacher_targets", False))
-        or str(hp.get("rhythm_binarize_retimed_mel_source", "guidance") or "guidance").strip().lower() == "teacher"
+        needs_cached_teacher_core
     ):
         expected_groups.extend(_TEACHER_CORE_FIELD_GROUPS)
     if (
@@ -180,7 +186,7 @@ def validate_cache_field_contract(
         errors.append("Schedule-only stage should not enable train-time retimed rendering.")
     if cached_only and int(hp.get("rhythm_cache_version", -1)) <= 0:
         errors.append("cached_only requires a positive rhythm_cache_version.")
-    if primary == "teacher" and not bool(hp.get("rhythm_binarize_teacher_targets", False)):
+    if primary == "teacher" and not runtime_only and not bool(hp.get("rhythm_binarize_teacher_targets", False)):
         warnings.append("Primary surface is teacher but rhythm_binarize_teacher_targets is false.")
 
     return RhythmConfigContractReport(

@@ -36,6 +36,15 @@ class _DummyOwner:
             "rhythm_retimed_stretch_weight_min": 0.35,
         }
 
+    def _resolve_primary_target_surface(self):
+        return str(self.hparams.get("rhythm_primary_target_surface", "guidance"))
+
+    def _resolve_distill_surface(self):
+        return str(self.hparams.get("rhythm_distill_surface", "none"))
+
+    def _resolve_teacher_target_source(self):
+        return str(self.hparams.get("rhythm_teacher_target_source", "algorithmic"))
+
 
 class RhythmDatasetTargetBuilderTests(unittest.TestCase):
     def test_adapt_cached_targets_to_prefix_refreshes_budgets_and_teacher_prefix(self) -> None:
@@ -99,6 +108,49 @@ class RhythmDatasetTargetBuilderTests(unittest.TestCase):
         adapted = {"rhythm_speech_exec_tgt": np.asarray([1.0, 2.0], dtype=np.float32)}
         RhythmDatasetTargetBuilder._apply_prefix_tail_ratio(adapted, tail_ratio=-0.5)
         self.assertTrue(np.allclose(adapted["rhythm_speech_exec_tgt"], np.asarray([1.0, 0.0], dtype=np.float32)))
+
+    def test_runtime_only_pairwise_teacher_builds_online_teacher_targets_from_reference(self) -> None:
+        owner = _DummyOwner()
+        owner.hparams.update(
+            {
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_distill_surface": "none",
+                "rhythm_teacher_target_source": "algorithmic",
+                "rhythm_dataset_build_teacher_from_ref": True,
+                "rhythm_dataset_build_guidance_from_ref": False,
+                "rhythm_require_cached_teacher": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_distill": 0.0,
+            }
+        )
+        builder = RhythmDatasetTargetBuilder(owner)
+        source_cache = {
+            "dur_anchor_src": np.asarray([3.0, 2.0, 4.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.0, 1.0, 0.5], dtype=np.float32),
+        }
+        ref_conditioning = {
+            "ref_rhythm_stats": np.asarray([0.20, 2.0, 4.0, 0.10, 0.30, 0.80], dtype=np.float32),
+            "ref_rhythm_trace": np.stack(
+                [
+                    np.full((8,), 0.10, dtype=np.float32),
+                    np.linspace(0.0, 1.0, 8, dtype=np.float32),
+                    np.linspace(1.0, 0.0, 8, dtype=np.float32),
+                    np.linspace(-0.2, 0.2, 8, dtype=np.float32),
+                    np.ones((8,), dtype=np.float32),
+                ],
+                axis=-1,
+            ),
+        }
+
+        runtime_targets = builder.build_runtime_rhythm_targets(source_cache, ref_conditioning)
+
+        self.assertIn("rhythm_teacher_speech_exec_tgt", runtime_targets)
+        self.assertIn("rhythm_teacher_pause_exec_tgt", runtime_targets)
+        self.assertIn("rhythm_teacher_speech_budget_tgt", runtime_targets)
+        self.assertIn("rhythm_teacher_pause_budget_tgt", runtime_targets)
+        self.assertIn("rhythm_teacher_confidence", runtime_targets)
+        self.assertNotIn("rhythm_guidance_speech_tgt", runtime_targets)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,38 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertIn(("rhythm_teacher_confidence_allocation",), groups)
         self.assertIn(("rhythm_teacher_confidence_shape",), groups)
 
+    def test_runtime_only_teacher_stage_does_not_require_cached_teacher_fields(self) -> None:
+        hparams = {
+            "rhythm_enable_v2": True,
+            "rhythm_stage": "transitional",
+            "rhythm_strict_mainline": False,
+            "rhythm_cache_version": 5,
+            "rhythm_dataset_target_mode": "runtime_only",
+            "rhythm_primary_target_surface": "teacher",
+            "rhythm_teacher_target_source": "algorithmic",
+            "rhythm_distill_surface": "none",
+            "rhythm_require_cached_teacher": False,
+            "rhythm_binarize_teacher_targets": False,
+            "rhythm_enable_dual_mode_teacher": False,
+            "rhythm_enable_learned_offline_teacher": False,
+            "rhythm_runtime_enable_learned_offline_teacher": False,
+            "rhythm_teacher_as_main": False,
+            "lambda_rhythm_guidance": 0.0,
+            "lambda_rhythm_plan": 0.0,
+            "lambda_rhythm_distill": 0.0,
+            "lambda_rhythm_teacher_aux": 0.0,
+        }
+        context = build_contract_context(hparams, model_dry_run=True)
+        report = validate_cache_field_contract(context)
+        groups = set(report.required_field_groups)
+
+        self.assertNotIn(("rhythm_teacher_speech_exec_tgt",), groups)
+        self.assertNotIn(("rhythm_teacher_speech_budget_tgt",), groups)
+        self.assertNotIn(("rhythm_teacher_confidence",), groups)
+        self.assertFalse(
+            any("Primary surface is teacher but rhythm_binarize_teacher_targets is false." in warning for warning in report.warnings)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

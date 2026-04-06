@@ -120,6 +120,9 @@ class RhythmConanDatasetMixin:
         "rhythm_stream_visible_units",
         "rhythm_stream_full_units",
     )
+    _RHYTHM_RUNTIME_REFERENCE_META_KEYS = (
+        "rhythm_reference_is_self",
+    )
     _RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS = (
         "rhythm_offline_content_units",
         "rhythm_offline_dur_anchor_src",
@@ -399,6 +402,7 @@ class RhythmConanDatasetMixin:
             "rhythm_stream_prefix_ratio": ("float", 0.0),
             "rhythm_stream_visible_units": ("float", 0.0),
             "rhythm_stream_full_units": ("float", 0.0),
+            "rhythm_reference_is_self": ("float", 0.0),
             "rhythm_offline_teacher_speech_exec_tgt": ("float", 0.0),
             "rhythm_offline_teacher_pause_exec_tgt": ("float", 0.0),
             "rhythm_offline_teacher_speech_budget_tgt": ("float", 0.0),
@@ -407,7 +411,11 @@ class RhythmConanDatasetMixin:
         }
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
-        keys = list(self._RHYTHM_RUNTIME_MINIMAL_KEYS + self._resolve_runtime_target_export_keys())
+        keys = list(
+            self._RHYTHM_RUNTIME_MINIMAL_KEYS
+            + self._RHYTHM_RUNTIME_REFERENCE_META_KEYS
+            + self._resolve_runtime_target_export_keys()
+        )
         if self._should_export_streaming_prefix_meta():
             keys.extend(self._RHYTHM_STREAMING_PREFIX_META_KEYS)
         if self._should_export_streaming_offline_sidecars():

@@ -31,6 +31,7 @@ class RhythmDatasetSampleAssembler:
             "rhythm_stream_prefix_ratio",
             "rhythm_stream_visible_units",
             "rhythm_stream_full_units",
+            "rhythm_reference_is_self",
         } or "stats" in key or "budget" in key:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
@@ -141,6 +142,17 @@ class RhythmDatasetSampleAssembler:
                 dtype=np.float32,
             )
         rhythm_ref_item = item if self.owner._should_use_self_rhythm_reference(item, target_mode=target_mode) else ref_item
+        reference_is_self = bool(rhythm_ref_item is item or rhythm_ref_item is None)
+        if reference_is_self and bool(self.hparams.get("rhythm_require_external_reference", False)):
+            raise RuntimeError(
+                f"Rhythm stage requires an external reference, but {item_name} resolved to self-conditioning. "
+                "This usually means the speaker pool collapsed to a singleton after filtering. "
+                "Relax rhythm_require_external_reference or rebuild the split with at least two items per speaker."
+            )
+        rhythm_runtime_fields["rhythm_reference_is_self"] = np.asarray(
+            [1.0 if reference_is_self else 0.0],
+            dtype=np.float32,
+        )
         ref_conditioning = self.owner._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
         rhythm_runtime_fields.update(source_cache)
         rhythm_runtime_fields.update(ref_conditioning)

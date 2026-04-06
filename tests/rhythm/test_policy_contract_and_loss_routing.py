@@ -258,6 +258,87 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_external_reference_policy_errors_when_cached_targets_stay_self_conditioned(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "transitional",
+                "rhythm_strict_mainline": False,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_cached_reference_policy": "sample_ref",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": True,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+            }
+        )
+        self.assertTrue(any("requires rhythm_dataset_target_mode: runtime_only" in error for error in errors))
+
+    def test_runtime_only_external_teacher_requires_algorithmic_source(self) -> None:
+        _, errors, _ = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "transitional",
+                "rhythm_strict_mainline": False,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "runtime_only",
+                "rhythm_cached_reference_policy": "sample_ref",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "learned_offline",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": False,
+                "rhythm_binarize_teacher_targets": False,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+            }
+        )
+        self.assertTrue(any("requires rhythm_teacher_target_source: algorithmic" in error for error in errors))
+
+    def test_runtime_only_external_reference_warns_about_stale_cached_surface_binarization_flags(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "transitional",
+                "rhythm_strict_mainline": False,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "runtime_only",
+                "rhythm_cached_reference_policy": "sample_ref",
+                "rhythm_primary_target_surface": "teacher",
+                "rhythm_teacher_target_source": "algorithmic",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": False,
+                "rhythm_binarize_teacher_targets": True,
+                "rhythm_binarize_retimed_mel_targets": True,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": False,
+                "rhythm_runtime_enable_learned_offline_teacher": False,
+                "rhythm_teacher_as_main": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+            }
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(any("rhythm_binarize_teacher_targets" in warning for warning in warnings))
+        self.assertTrue(any("rhythm_binarize_retimed_mel_targets" in warning for warning in warnings))
+
     def test_lambda_distill_requires_active_component_weight(self) -> None:
         _, errors, _ = validate_stage_contract(
             {

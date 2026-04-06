@@ -760,6 +760,10 @@ def _update_sample_supervision_metrics(
         metrics["rhythm_metric_stream_visible_units"] = _safe_mean(sample["rhythm_stream_visible_units"].float())
     if "rhythm_stream_full_units" in sample:
         metrics["rhythm_metric_stream_full_units"] = _safe_mean(sample["rhythm_stream_full_units"].float())
+    if "rhythm_reference_is_self" in sample:
+        ref_self_rate = _safe_mean(sample["rhythm_reference_is_self"].float())
+        metrics["rhythm_metric_reference_self_rate"] = ref_self_rate
+        metrics["rhythm_metric_reference_external_rate"] = (ref_self_rate * 0.0) + (1.0 - ref_self_rate)
 
 
 def _collect_plan_surface_metrics(

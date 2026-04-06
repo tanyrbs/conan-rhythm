@@ -18,6 +18,8 @@ Current maintained priorities:
   - `teacher_offline`
   - `student_kd`
   - `student_retimed`
+- experimental upper-bound extension:
+  - `student_ref_bootstrap` between `student_kd` and `student_retimed`
 - cache-backed reproducibility, preflight checks, and retimed closure
 
 Canonical documentation is intentionally reduced to:
@@ -37,10 +39,19 @@ Recommended maintained stage order:
 3. export learned-offline teacher targets
 4. rebuild student-facing cache from exported teacher assets
 5. run `student_kd`
-6. prepare retimed cache + F0 side files
-7. run `student_retimed`
+6. optional upper-bound extension: run `student_ref_bootstrap`
+7. prepare retimed cache + F0 side files
+8. run `student_retimed`
 
 Formal student runs are not meaningful until the teacher export and cache rebuild are complete.
+
+If your goal is specifically to improve reference-driven rhythm transfer instead of just preserving the maintained baseline, the recommended practical chain on April 6, 2026 is:
+
+1. `teacher_offline`
+2. export teacher targets / rebuild student cache
+3. `student_kd`
+4. `student_ref_bootstrap`
+5. `student_retimed`
 
 For the practical AutoDL launch sequence, see `docs/autodl_training_handoff.md`.
 
@@ -84,7 +95,7 @@ This shared checkout still does **not** contain the maintained formal dataset as
 - `data/teacher_targets/...` is absent
 - dedicated formal retimed cache / F0 side files for `student_retimed` are absent
 
-So formal `teacher_offline -> student_kd -> student_retimed` runs are still blocked by data, not by code.
+So formal `teacher_offline -> student_kd -> student_retimed` runs are still blocked by data, not by code. The same asset caveat also applies to the experimental `student_ref_bootstrap` stage; it additionally needs same-speaker splits that do not collapse to singletons after filtering.
 
 ### Local smoke / probe assets that do exist
 
@@ -283,6 +294,24 @@ Example with required overrides:
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --exp_name conan_rhythm_v2_teacher_kd   --reset   -hp "binary_data_dir='data/binary/your_stage2_binary',processed_data_dir='data/processed/your_dataset',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2'"
 ```
 
+Student external-reference bootstrap template:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml   --exp_name conan_rhythm_v2_student_ref_bootstrap   --reset
+```
+
+Example with required overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml   --exp_name conan_rhythm_v2_student_ref_bootstrap   --reset   -hp "binary_data_dir='data/binary/your_stage2_binary',processed_data_dir='data/processed/your_dataset',load_ckpt='checkpoints/your_student_kd_ckpt',load_ckpt_strict=False"
+```
+
+Notes:
+
+- this stage is intentionally `runtime_only + sample_ref + teacher/algorithmic`
+- it hard-fails by default when sampled same-speaker reference collapses back to self (`rhythm_require_external_reference: true`)
+- monitor `rhythm_metric_reference_self_rate` / `rhythm_metric_reference_external_rate`; a healthy formal run should keep self-rate near `0`
+
 Student retimed template:
 
 ```bash
@@ -298,6 +327,7 @@ intended chain is partial-load warm-start, not exact-architecture resume:
 
 - `teacher_offline` can warm-start from a base Conan checkpoint that has no Rhythm V2 modules
 - `student_kd` can warm-start from `teacher_offline`, which includes offline-teacher-only params that stage-2 does not instantiate
+- `student_ref_bootstrap` can warm-start from `student_kd`, but it intentionally switches the rhythm path from cached self-conditioned supervision to runtime external-reference teacher targets
 - `student_retimed` can warm-start from `student_kd`, which may have been trained with `use_pitch_embed=false`, so stage-3 pitch embed / predictor weights may be missing
 
 When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched keys:
@@ -313,6 +343,8 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 | `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | learned offline teacher stage | no | no | usually no |
 | `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | student runtime + cached teacher supervision; maintained path usually keeps KD shape-only | yes | no | no |
 | `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
+| `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
+| `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` | experimental | alias of the pairwise external-reference stage-2.5 config | no | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
 | `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
@@ -326,6 +358,7 @@ Current branch conclusion after code review, probes, and smoke integration:
 
 - `teacher_offline`: **code-ready**, but the checked-in smoke `valid` split is defective
 - `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
+- `student_ref_bootstrap`: **code-ready as an experimental stage-2.5**, but meaningful runs require real same-speaker pools plus external-reference coverage monitoring
 - `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
 
 Latest 2000-step smoke profile (`artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`) still says the same thing numerically:
@@ -350,12 +383,14 @@ So the next formal sequence should be:
 2. export teacher targets for `train/valid/test`
 3. rebuild stage-2 binary from that export
 4. validate `student_kd`
-5. prepare dedicated retimed cache + F0 side files
-6. re-check `student_retimed` with real assets before long training
+5. if you want better reference-driven rhythm transfer, run `student_ref_bootstrap` and verify `rhythm_metric_reference_self_rate ~= 0`
+6. prepare dedicated retimed cache + F0 side files
+7. re-check `student_retimed` with real assets before long training
 
 Experimental notes:
 
 - `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
+- `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
 - maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
 
