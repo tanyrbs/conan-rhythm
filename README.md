@@ -149,6 +149,78 @@ python scripts/integration_teacher_export_student_kd.py --help
 python scripts/preflight_rhythm_v2.py --help
 ```
 
+## Reference descriptor diagnostics
+
+The maintained repo now includes `scripts/plot_rhythm_diagnostics.py` for
+descriptor inspection. This script is intentionally aligned with the **actual**
+local reference contract:
+
+- maintained cache contract:
+  - `ref_rhythm_stats`: 6-D
+  - `ref_rhythm_trace`: 5-D
+- compact planner-facing contract derived from it:
+  - `global_rate`
+  - `pause_ratio`
+  - `local_rate_trace`
+  - `boundary_trace`
+
+In other words, it does **not** assume the simplified external layout
+`ref_rhythm_stats=[global_rate, pause_ratio]` or `ref_rhythm_trace=[local, boundary]`
+as the canonical on-disk format.
+
+Supported inputs:
+
+- direct audio (`.wav`, `.flac`, ...)
+- feature bundles (`.npz`, `.pt`, `.pth`, `.json`)
+- descriptor bundle selectors such as:
+  - `artifacts/.../descriptors.json::sample_id=S01`
+  - `artifacts/.../descriptors.json::index=0`
+
+Typical usage:
+
+```bash
+# single-sample diagnostics from a bundle record
+python scripts/plot_rhythm_diagnostics.py single \
+  --input artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S01 \
+  --output artifacts/reference_descriptor_review/train_clean_100_20260407/plots/single_S01.png
+
+# direct audio path: raw time-axis diagnostics + planner traces
+python scripts/plot_rhythm_diagnostics.py single \
+  --input G:/streamVC/LibriTTS_local/LibriTTS/train-clean-100/7067/76047/7067_76047_000046_000009.wav \
+  --output artifacts/reference_descriptor_review/train_clean_100_20260407/plots/single_audio_S01.png
+
+# source / ref / output triplet comparison
+python scripts/plot_rhythm_diagnostics.py compare \
+  --source artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S01 \
+  --reference artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S02 \
+  --output_input artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S03 \
+  --output_png artifacts/reference_descriptor_review/train_clean_100_20260407/plots/triplet_compare.png
+
+# corpus-level distributions / heatmaps
+python scripts/plot_rhythm_diagnostics.py corpus \
+  --input_dir artifacts/reference_descriptor_review/train_clean_100_20260407 \
+  --save_prefix artifacts/reference_descriptor_review/train_clean_100_20260407/plots/diagnostic_bundle
+```
+
+Plotting conventions:
+
+- `global_rate`, `pause_ratio`: scalar distribution view
+- `local_rate_trace`, `boundary_trace`: progress-domain curve / heatmap view
+- mel: background layer only
+- if direct audio or mel is available, the script also renders repo-aligned raw
+  diagnostics:
+  - `energy_z`
+  - `delta`
+  - `pause_mask`
+  - `voiced`
+  - `local_rate_raw`
+  - `boundary_strength`
+  - `boundary_events`
+
+For large exported bundles where you only want planner/global views, add
+`--disable_audio_backfill` so the script does not reopen each record's source
+audio just to reconstruct raw time-axis proxies.
+
 ## Conda `conan` environment validation actually run
 
 The following checks were run in the `conan` environment on April 4-5, 2026.
@@ -318,6 +390,14 @@ Notes:
   - `lambda_rhythm_ref_descriptor_trace`
   - `lambda_rhythm_ref_group_contrastive`
 - monitor `rhythm_metric_reference_self_rate` / `rhythm_metric_reference_external_rate`; a healthy formal run should keep self-rate near `0`
+- keep scope discipline: the current maintained high-value landing is still the
+  runtime-only stage-2.5 bootstrap, not the full future ceiling stack. The
+  following are intentionally documented as later research / engineering
+  directions rather than current rollout requirements:
+  - `teacher_pairwise_refine`
+  - pairwise offline cache / export
+  - `teacher_pairwise_joint_upper_bound`
+  - full runtime-matched teacher export pipeline
 
 If you need the short-reference / long-stream safety profile, copy the values from
 `egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` into your run
@@ -419,6 +499,11 @@ Experimental notes:
 - `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
 - `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in robustness profile for short-reference / long-stream regimes; it keeps the teacher global, leaves raw reference traces untouched, gates local/boundary trace paths by `trace_reliability`, enables anchor-aware local trace sampling, and lets slow/global rhythm memory take over when the reference tail keeps getting reused
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
+- future ceiling directions are explicitly **not** part of the current minimal maintained landing:
+  - `teacher_pairwise_refine`
+  - pairwise offline cache / export
+  - `teacher_pairwise_joint_upper_bound`
+  - full runtime-matched teacher export pipeline
 - maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
 
 ## Inference boundary

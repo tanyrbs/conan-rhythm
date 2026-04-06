@@ -39,6 +39,29 @@ Critical code ownership is intentionally narrow:
   - `scripts/preflight_rhythm_v2.py`
   - `scripts/cpu_probe_rhythm_train.py`
   - `scripts/integration_teacher_export_student_kd.py`
+  - `scripts/plot_rhythm_diagnostics.py`
+
+The new descriptor plotting utility is deliberately aligned with the maintained
+cache contract instead of a simplified external view:
+
+- reads or derives from `ref_rhythm_stats[6]` / `ref_rhythm_trace[5]`
+- exposes the compact planner-facing slice
+  - `global_rate`
+  - `pause_ratio`
+  - `local_rate_trace`
+  - `boundary_trace`
+- supports direct audio, feature bundles, and `descriptors.json::sample_id=...`
+  style bundle selectors
+- for audio or mel-backed inputs, also renders raw repo-aligned proxy signals:
+  - `energy_z`
+  - `delta`
+  - `pause_mask`
+  - `voiced`
+  - `local_rate_raw`
+  - `boundary_strength`
+  - `boundary_events`
+- bundle-only inspections can keep it light with `--disable_audio_backfill`
+  when raw time-axis reconstruction is unnecessary
 
 ## 2. What the 6-agent training-prep audit actually covered
 
@@ -365,13 +388,13 @@ usual dataset assets:
   - detached prefix reuse
 - so retimed acoustic targets do **not** backprop through frame-plan/control decisions; the explicit rhythm losses remain the control-learning path
 
-## 7. Remaining engineering gaps after this audit
+## 7. Remaining engineering gaps / future directions after this audit
 
 The audit found a few remaining gaps that were intentionally not over-corrected in the same round:
 
 - optimizer-scope coverage is now guarded against empty / foreign collector output, but it still benefits from more direct end-to-end param-group tests under real checkpoints
-- this repo still does not have a checked-in `teacher_joint_upper_bound` config; that remains the recommended next research branch when you want to audition the real teacher main branch and establish an audible upper bound
-- the real ceiling path is still a pairwise offline-cache path, not just runtime teacher synthesis:
+- this repo still does not have a checked-in `teacher_pairwise_joint_upper_bound` config; that remains a next-stage research branch when you want to audition the real teacher main branch and establish an audible upper bound
+- the real ceiling path is still a pairwise offline-cache / export path, not just runtime teacher synthesis:
   - `teacher(A | B)`
   - `retimed mel(A | B)`
   - `retimed f0/uv(A | B)`
@@ -379,11 +402,17 @@ The audit found a few remaining gaps that were intentionally not over-corrected 
 - `teacher_pairwise_refine` is still the recommended next ceiling step after runtime-only bootstrap:
   - export fixed `(A,B)` pairwise offline surfaces from an EMA bootstrap teacher
   - then shift supervision from pure algorithmic oracle imitation toward pair-cache + descriptor + ranking losses
+- a full runtime-matched teacher export pipeline is still future work:
+  - do not treat privileged full-teacher internals as the long-term student export truth
+  - eventually export student-visible/runtime-shaped control targets explicitly
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
 - projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
 - loss balancing and context-matched KD are deliberately opt-in research knobs, not new maintained defaults
 
-These are follow-up tasks, not blockers for merging the current cleanup.
+These are follow-up / next-stage tasks, not blockers for the current minimal
+high-value landing. The current branch intentionally stops at the runtime-only
+stage-2.5 bootstrap plus robustness fixes, instead of trying to land the whole
+ceiling stack in one round.
 
 ## 8. Training rule of thumb
 
@@ -400,5 +429,6 @@ For this checkout specifically, the current priority order is:
 
 1. keep the maintained `teacher_offline -> student_kd -> student_retimed` path healthy
 2. use `student_ref_bootstrap` when you want a practical upper-bound extension for external-reference rhythm learning
-3. add a future `teacher_joint_upper_bound` branch only as a separate upper-bound proof path, not as a replacement for the clean teacher-surface stage
-4. treat pairwise offline cache as the real long-term ceiling project
+3. treat `teacher_pairwise_refine` as the next-stage ceiling step after runtime-only bootstrap, not as part of the current minimum rollout
+4. add a future `teacher_pairwise_joint_upper_bound` branch only as a separate upper-bound proof path, not as a replacement for the clean teacher-surface stage
+5. treat pairwise offline cache / export plus full runtime-matched teacher export as the real long-term ceiling project
