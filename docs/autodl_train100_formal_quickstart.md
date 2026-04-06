@@ -1,40 +1,57 @@
-# AutoDL 当前可执行 quickstart
+# AutoDL 当前快速操作手册
 
-更新日期：2026-04-06 UTC
+更新时间：2026-04-06 UTC
 
-## 1. 当前项目状态
+## 1. 先看现在到哪一步了
 
 ### 已完成
 
-- `train100` formal processed/binary 已完成
-- stage-1 warmup 已完成到 **20000**
-- warmup export smoke 已完成
+- `train100` formal processed / binary 已完成
+- `teacher_offline_train100_warmup` 已到 **20k**
+- warmup 关键结论：
+  - `exec_total_corr = 0.8907`
+  - `pause_event_f1 = 0.5957`
+  - `prefix_drift_l1 = 25.7781`
+  - stage flags 全是 `1.0`
+- export smoke 已通过
 
-关键路径：
+### 正在进行
 
-- warmup ckpt：
-  - `checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
-- train100 processed：
-  - `data/processed/libritts_train100_formal`
-- train100 binary：
-  - `data/binary/libritts_train100_formal_rhythm_v5`
+- `train360` metadata 分片构建
+- 当前大约 **64.5%**
+- ETA 约：
+  - **2026-04-06 18:03 UTC**
 
-### 进行中
+### 还没开始
 
-- `train360` metadata 分片恢复中
-- 当前后台脚本：
+- `train360` train-only binary
+- mixed `train100|train360` preflight
+- formal Stage-1 `teacher_offline_train100_360_stage1`
+
+## 2. 当前最重要的文件
+
+### warmup 证据
+
+- `logs/stage1_warmup20k_formal100360_pipeline_20260406_075555.report.json`
+- `artifacts/warmup20k_export_smoke/manifest.json`
+- `artifacts/warmup_20k_evidence/`
+
+### 当前运行中的 train360 metadata 进程
+
+- launcher：
   - `logs/stage1_recovery_mixed100360_v2_20260406_091257.sh`
+- status：
+  - `logs/stage1_recovery_mixed100360_v2_20260406_091257.status`
+- shard 日志：
+  - `logs/prepare_train360_shards/shard_*.log`
 
-### 接下来
+### train360 metadata 完成后的接管脚本
 
-- 分片完成后切到：
-  - `logs/stage1_takeover_from_existing_train360_metadata_trainonly.sh`
-- 目标是开启 formal：
-  - `teacher_offline_train100_360_stage1`
+- `logs/stage1_takeover_from_existing_train360_metadata_trainonly.sh`
 
-## 2. 现在最重要的命令
+## 3. 监控命令
 
-### 2.1 看 train360 恢复状态
+### 看 train360 当前状态
 
 ```bash
 cd /root/autodl-tmp/project-1/conan-rhythm
@@ -42,101 +59,156 @@ cat logs/stage1_recovery_mixed100360_v2_20260406_091257.status
 tail -n 40 logs/live_recovery_monitor.log
 ```
 
-### 2.2 分片完成后接管
+### 看 shard 进度
 
 ```bash
 cd /root/autodl-tmp/project-1/conan-rhythm
-nohup bash logs/stage1_takeover_from_existing_train360_metadata_trainonly.sh \
-  > logs/stage1_takeover_from_existing_train360_metadata_trainonly.log 2>&1 < /dev/null &
+for f in logs/prepare_train360_shards/shard_*.log; do
+  echo "### $f"
+  tail -n 2 "$f"
+done
 ```
 
-这个 takeover 会自动做：
+### 看磁盘
 
-1. merge train360 metadata shards
-2. train360 `train-only` binarize
-3. train360 preflight
-4. mixed `train100|train360` preflight
-5. mixed real smoke
-6. formal stage-1 启动
+```bash
+df -h /root /root/autodl-tmp /mnt
+du -sh data/binary/libritts_train100_formal_rhythm_v5
+du -sh /root/autodl-tmp/data/LibriTTS/train-clean-360
+```
 
-## 3. 正式 Stage-1 训练语义
+## 4. 当前 teacher formal 的正确开法
 
-当前不是生成一个统一超大 binary，而是：
+当前 teacher formal 仍然应该这样理解：
 
-- `binary_data_dir = train100`
-- `train_sets = train100|train360`
+- warmup `20k` 只是初始化
+- formal Stage-1 要新开 exp
+- 不要直接 resume 旧 warmup exp
 
-即：
+核心原则：
 
-- valid/test 继续锚定在 `train100`
-- train360 只作为额外训练集暴露量
+- 新 exp_name
+- `--reset`
+- `load_ckpt='checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt'`
+- `load_ckpt_strict=True`
+- mixed train 用：
+  - `train_sets='train100|train360'`
 
-这条路在当前磁盘条件下是工程上更合理的折中。
+## 5. 当前 takeover 脚本是否要重写
 
-## 4. 为什么 train360 改成 train-only
+结论：
+
+- **teacher formal 这一步暂时不用重写**
 
 原因：
 
-- mixed validation/test 仍然走 `train100` 的 `valid/test`
-- train360 在 formal stage-1 里只通过 `train_sets` 提供训练样本
+- upstream 最新改动主要增强的是：
+  - `student_retimed`
+  - `student_ref_bootstrap`
+- 当前正在执行的是：
+  - `teacher_offline` 的 100+360 formal 准备
 
-所以：
+所以现有：
 
-- **不需要**再给 train360 单独构建 `valid/test`
-- 这样能省磁盘、省时间，也不影响当前 formal Stage-1 训练
+- `scripts/autodl_train_stage1.sh`
+- `logs/stage1_takeover_from_existing_train360_metadata_trainonly.sh`
 
-## 5. warmup 是否正常
+在 teacher formal 这条链上仍然可以继续用。
 
-以 `19000` valid 为准，当前判断是 **正常**：
+## 6. 但要注意一个现实坑：磁盘
 
-- 三个 stage flag 都是 `1.0`
-- `exec_total_corr = 0.8907`
-- `pause_event_f1 = 0.5957`
-- `prefix_drift_l1 = 25.7781`
-- `budget_projection_repair_ratio_mean = 0.0`
+当前磁盘：
 
-注意：
+- `/root/autodl-tmp` 空余约 **37G**
+- overlay `/root`/`/mnt` 空余约 **12G**
 
-- `phase_nonretro_rate` 目前不适合作为标准 val 的硬 gate
-- 真要看它，应看 chunkwise / streaming 审计
+批判性判断：
 
-## 6. 升级后的训练路线
+- train360 **train-only** 是正确的
+- 但仅靠“不给 train360 单独建 valid/test”并不自动代表磁盘一定够
+- 真正的大头仍然是：
+  - raw `train-clean-360`
+  - 新 train360 binary
+  - 现有 train100 binary
 
-### 默认正式路线
+因此在 metadata 完成后、真的开 `train360` binarize 前，要再检查一次：
 
-先做强 teacher：
+- `/root/autodl-tmp` 可用空间如果还低于 **46~50G**
+- 先不要硬开
 
-1. `teacher_offline`
-2. `student_kd`
-3. `student_retimed`
+优先动作：
 
-### 更高上限实验路线
+1. 删 `dev-clean` / `test-clean`
+2. 必要时把部分 `train100` binary 临时挪到 overlay `/root` 或 `/mnt`
+3. 再开 train360 binarize
 
-在 `student_kd` 和 `student_retimed` 之间，可插：
+## 7. 当前和 upstream main 比，已经吸收了什么
 
-4. `student_pairwise_ref_runtime_teacher`
-   - alias：`student_ref_bootstrap`
+已经吸收/保留的关键点：
 
-它和旧主线的关键区别是：
-
-- 不再只用 self-conditioned cached rhythm target
-- 改成 external same-speaker ref 驱动的 runtime teacher supervision
-
-## 7. 当前已经吸收的主线改进
-
-- external-reference bootstrap 配置
-- external-reference fail-fast
-- `reference_self_rate / reference_external_rate` 观测
 - stage-3 acoustic scalar ramp
-- chunkwise phase_nonretro 流式审计增强
+- stage-2.5 external-reference bootstrap
+- external-reference 与 self-cache supervision conflict 的硬错误
+- `rhythm_require_external_reference: true`
+- reference self/external 监控指标
+- 本地额外保留：
+  - explicit `student_ref_bootstrap` stage 名称
+  - streaming phase-nonretro chunk metrics
 
-## 8. git / 分支建议
+## 8. 下一步的正式顺序
 
-当前建议在新分支上整理本地 AutoDL 工作：
+### 现在
 
-```bash
-cd /root/autodl-tmp/project-1/conan-rhythm
-git checkout -b autodl
-```
+1. 等 train360 metadata 分片结束
+2. takeover 做：
+   - merge
+   - train-only binarize
+   - preflight
+   - mixed preflight
+   - mixed real smoke
+3. 开 formal teacher Stage-1
 
-然后只针对明确文件做定向提交，不要 `git add -A`。
+### 之后
+
+teacher 完成后，再走：
+
+1. teacher export
+2. rebuild student cache
+3. `student_kd`
+4. 可选 upper-bound：`student_ref_bootstrap`
+5. `student_retimed`
+
+## 9. 关于“先跳过 student_kd”
+
+短期可以：
+
+- 现在先专注 teacher
+
+但长期不是：
+
+- `student_kd` 不是永久删除
+
+更准确说法是：
+
+- **teacher 先行**
+- `student_kd` 延后，不是取消
+
+## 10. 后面如果要冲更高上限，应该怎么做
+
+不要只做：
+
+- `rhythm_cached_reference_policy=self -> sample_ref`
+
+正确做法是：
+
+- 用 runtime-only external-reference teacher 路线
+- 也就是：
+  - `egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml`
+  - 或
+  - `egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml`
+
+这是因为：
+
+- 只换 ref，不换 target
+- 会变成 external ref 条件去拟合 self cache target
+- 容易把模型训成“忽略 reference”
