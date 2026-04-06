@@ -10,6 +10,9 @@ _AUX_REPORTING_KEYS = {
     "rhythm_guidance": "lambda_rhythm_guidance",
     "rhythm_distill": "lambda_rhythm_distill",
     "rhythm_teacher_aux_loss": "lambda_rhythm_teacher_aux",
+    "rhythm_descriptor_consistency": "lambda_rhythm_descriptor_consistency",
+    "rhythm_pairwise_contrastive": "lambda_rhythm_pairwise_contrastive",
+    "rhythm_pairwise_diversity": "lambda_rhythm_pairwise_diversity",
 }
 
 
@@ -272,6 +275,41 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     losses["L_guidance"] = (
         losses.get("rhythm_guidance", zero).detach()
         if isinstance(losses.get("rhythm_guidance"), torch.Tensor)
+        else zero
+    )
+    losses["L_descriptor_consistency"] = (
+        losses.get("rhythm_descriptor_consistency", zero).detach()
+        if isinstance(losses.get("rhythm_descriptor_consistency"), torch.Tensor)
+        else zero
+    )
+    losses["L_descriptor_global"] = (
+        losses.get("rhythm_descriptor_global", zero).detach()
+        if isinstance(losses.get("rhythm_descriptor_global"), torch.Tensor)
+        else zero
+    )
+    losses["L_descriptor_pause"] = (
+        losses.get("rhythm_descriptor_pause", zero).detach()
+        if isinstance(losses.get("rhythm_descriptor_pause"), torch.Tensor)
+        else zero
+    )
+    losses["L_descriptor_local_trace"] = (
+        losses.get("rhythm_descriptor_local_trace", zero).detach()
+        if isinstance(losses.get("rhythm_descriptor_local_trace"), torch.Tensor)
+        else zero
+    )
+    losses["L_descriptor_boundary_trace"] = (
+        losses.get("rhythm_descriptor_boundary_trace", zero).detach()
+        if isinstance(losses.get("rhythm_descriptor_boundary_trace"), torch.Tensor)
+        else zero
+    )
+    losses["L_pairwise_contrastive"] = (
+        losses.get("rhythm_pairwise_contrastive", zero).detach()
+        if isinstance(losses.get("rhythm_pairwise_contrastive"), torch.Tensor)
+        else zero
+    )
+    losses["L_pairwise_diversity"] = (
+        losses.get("rhythm_pairwise_diversity", zero).detach()
+        if isinstance(losses.get("rhythm_pairwise_diversity"), torch.Tensor)
         else zero
     )
     losses["L_prefix_clock"] = (

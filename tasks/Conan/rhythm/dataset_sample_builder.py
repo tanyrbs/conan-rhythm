@@ -32,6 +32,7 @@ class RhythmDatasetSampleAssembler:
             "rhythm_stream_visible_units",
             "rhythm_stream_full_units",
             "rhythm_reference_is_self",
+            "rhythm_pair_is_identity",
         } or "stats" in key or "budget" in key:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
@@ -69,6 +70,8 @@ class RhythmDatasetSampleAssembler:
             "rhythm_reference_mode_id",
             "rhythm_teacher_target_source_id",
             "rhythm_retimed_target_source_id",
+            "rhythm_pair_group_id",
+            "rhythm_pair_rank",
         }:
             return torch.tensor(value, dtype=torch.long)
         if key == "rhythm_retimed_mel_tgt":
@@ -143,16 +146,47 @@ class RhythmDatasetSampleAssembler:
             )
         rhythm_ref_item = item if self.owner._should_use_self_rhythm_reference(item, target_mode=target_mode) else ref_item
         reference_is_self = bool(rhythm_ref_item is item or rhythm_ref_item is None)
-        if reference_is_self and bool(self.hparams.get("rhythm_require_external_reference", False)):
+        pair_group_id = sample.get("pair_group_id", sample.get("rhythm_pair_group_id"))
+        pair_group_slot = sample.get("pair_group_slot", sample.get("rhythm_pair_rank"))
+        identity_flag = sample.get("pair_is_identity", sample.get("rhythm_pair_is_identity", 0.0))
+        if isinstance(identity_flag, torch.Tensor):
+            explicit_identity_pair = bool(
+                sample.get("_pair_manifest_entry", sample.get("_rhythm_pair_manifest_entry", False))
+                and float(identity_flag.reshape(-1)[0].item()) > 0.5
+            )
+        else:
+            explicit_identity_pair = bool(
+                sample.get("_pair_manifest_entry", sample.get("_rhythm_pair_manifest_entry", False))
+                and float(identity_flag) > 0.5
+            )
+        allow_identity_pair = bool(self.hparams.get("rhythm_allow_identity_pairs", False))
+        if (
+            reference_is_self
+            and bool(self.hparams.get("rhythm_require_external_reference", False))
+            and not (explicit_identity_pair and allow_identity_pair)
+        ):
             raise RuntimeError(
                 f"Rhythm stage requires an external reference, but {item_name} resolved to self-conditioning. "
                 "This usually means the speaker pool collapsed to a singleton after filtering. "
-                "Relax rhythm_require_external_reference or rebuild the split with at least two items per speaker."
+                "Relax rhythm_require_external_reference, enable rhythm_allow_identity_pairs for explicit A|A anchors, "
+                "or rebuild the split with at least two items per speaker."
             )
         rhythm_runtime_fields["rhythm_reference_is_self"] = np.asarray(
             [1.0 if reference_is_self else 0.0],
             dtype=np.float32,
         )
+        if pair_group_id is not None:
+            sample["pair_group_id"] = pair_group_id
+            sample["rhythm_pair_group_id"] = pair_group_id
+        if pair_group_slot is not None:
+            sample["pair_group_slot"] = pair_group_slot
+            sample["rhythm_pair_rank"] = pair_group_slot
+        if "pair_is_identity" in sample or "rhythm_pair_is_identity" in sample:
+            sample["pair_is_identity"] = identity_flag
+            sample["rhythm_pair_is_identity"] = identity_flag
+        if sample.get("_pair_manifest_entry", False) or sample.get("_rhythm_pair_manifest_entry", False):
+            sample["_pair_manifest_entry"] = True
+            sample["_rhythm_pair_manifest_entry"] = True
         ref_conditioning = self.owner._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
         rhythm_runtime_fields.update(source_cache)
         rhythm_runtime_fields.update(ref_conditioning)

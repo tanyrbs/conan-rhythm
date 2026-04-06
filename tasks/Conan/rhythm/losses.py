@@ -57,6 +57,24 @@ class RhythmLossTargets:
     budget_exec_weight: float = 0.25
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
+    ref_global_rate: Optional[torch.Tensor] = None
+    ref_pause_ratio: Optional[torch.Tensor] = None
+    ref_local_rate_trace: Optional[torch.Tensor] = None
+    ref_boundary_trace: Optional[torch.Tensor] = None
+    pair_group_id: Optional[torch.Tensor] = None
+    pair_group_slot: Optional[torch.Tensor] = None
+    pair_is_identity: Optional[torch.Tensor] = None
+    pair_weight: Optional[torch.Tensor] = None
+    descriptor_consistency_weight: float = 0.0
+    descriptor_global_weight: float = 1.0
+    descriptor_pause_weight: float = 1.0
+    descriptor_local_trace_weight: float = 0.5
+    descriptor_boundary_trace_weight: float = 0.5
+    pairwise_contrastive_weight: float = 0.0
+    pairwise_diversity_weight: float = 0.0
+    pairwise_contrastive_margin: float = 0.05
+    pairwise_diversity_margin_scale: float = 0.50
+    pairwise_min_ref_gap: float = 0.05
 
     @property
     def blank_exec_tgt(self) -> torch.Tensor:
@@ -162,6 +180,404 @@ def _batch_l1(pred: torch.Tensor, tgt: torch.Tensor, batch_weight: Optional[torc
     if loss.dim() > 1:
         loss = loss.reshape(loss.size(0), -1).mean(dim=1)
     return _reduce_batch_loss(loss, batch_weight)
+
+
+def _batch_trace_l1(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    loss = (pred.float() - tgt.float()).abs()
+    if loss.dim() > 1:
+        loss = loss.reshape(loss.size(0), -1).mean(dim=1)
+    return _reduce_batch_loss(loss, batch_weight)
+
+
+def _coerce_optional_batch_scalar(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if not isinstance(value, torch.Tensor):
+        value = torch.as_tensor(value, dtype=torch.float32)
+    value = value.float()
+    if value.dim() == 0:
+        return value.view(1, 1)
+    if value.dim() == 1:
+        return value[:, None]
+    return value.reshape(value.size(0), -1)[:, :1]
+
+
+def _coerce_optional_batch_trace(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if not isinstance(value, torch.Tensor):
+        value = torch.as_tensor(value, dtype=torch.float32)
+    value = value.float()
+    if value.dim() == 2:
+        return value.unsqueeze(-1)
+    if value.dim() == 3:
+        return value
+    raise ValueError(f"Expected rank-2/3 descriptor trace, got {tuple(value.shape)}")
+
+
+def _resample_visible_unit_track(
+    track: torch.Tensor,
+    unit_mask: torch.Tensor,
+    target_len: int,
+) -> torch.Tensor:
+    if target_len <= 0:
+        return track.new_zeros((track.size(0), 0))
+    track = track.float()
+    unit_mask = unit_mask.float()
+    outputs = []
+    for batch_idx in range(track.size(0)):
+        visible_units = int(unit_mask[batch_idx].sum().item())
+        if visible_units <= 0:
+            outputs.append(track.new_zeros((target_len,)))
+            continue
+        visible_track = track[batch_idx, :visible_units].reshape(1, 1, visible_units)
+        if visible_units == 1:
+            resized = visible_track.expand(1, 1, target_len)
+        else:
+            resized = F.interpolate(
+                visible_track,
+                size=target_len,
+                mode="linear",
+                align_corners=False,
+            )
+        outputs.append(resized.reshape(target_len))
+    return torch.stack(outputs, dim=0)
+
+
+def build_predicted_reference_descriptor_bundle(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
+    unit_mask = targets.unit_mask.float()
+    speech_exec = execution.speech_duration_exec.float()
+    blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec).float()
+    visible_units = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+    speech_total = (speech_exec * unit_mask).sum(dim=1, keepdim=True).clamp_min(1e-6)
+    pause_total = (blank_exec * unit_mask).sum(dim=1, keepdim=True).clamp_min(0.0)
+    total_exec = (speech_total + pause_total).clamp_min(1e-6)
+    global_rate = visible_units / speech_total
+    pause_ratio = pause_total / total_exec
+
+    speech_fill = speech_total / visible_units
+    speech_visible = torch.where(unit_mask > 0.0, speech_exec, speech_fill.expand_as(speech_exec))
+    speech_log = torch.log1p(speech_visible.clamp_min(0.0))
+    speech_mean = (speech_log * unit_mask).sum(dim=1, keepdim=True) / visible_units
+    speech_centered = (speech_log - speech_mean) * unit_mask
+    speech_std = torch.sqrt(
+        (speech_centered.pow(2).sum(dim=1, keepdim=True) / visible_units).clamp_min(1e-6)
+    )
+    local_rate_unit = (speech_centered / speech_std.clamp_min(1e-6)) * unit_mask
+    boundary_unit = resolve_boundary_score_unit(execution.planner).float() * unit_mask
+
+    local_rate_trace_tgt = _coerce_optional_batch_trace(targets.ref_local_rate_trace)
+    boundary_trace_tgt = _coerce_optional_batch_trace(targets.ref_boundary_trace)
+    trace_len = 0
+    if local_rate_trace_tgt is not None:
+        trace_len = int(local_rate_trace_tgt.size(1))
+    elif boundary_trace_tgt is not None:
+        trace_len = int(boundary_trace_tgt.size(1))
+    if trace_len > 0:
+        local_rate_trace = _resample_visible_unit_track(local_rate_unit, unit_mask, trace_len).unsqueeze(-1)
+        boundary_trace = _resample_visible_unit_track(boundary_unit, unit_mask, trace_len).unsqueeze(-1)
+    else:
+        local_rate_trace = speech_exec.new_zeros((speech_exec.size(0), 0, 1))
+        boundary_trace = speech_exec.new_zeros((speech_exec.size(0), 0, 1))
+
+    return {
+        "global_rate": global_rate,
+        "pause_ratio": pause_ratio,
+        "local_rate_trace": local_rate_trace,
+        "boundary_trace": boundary_trace,
+    }
+
+
+def build_reference_descriptor_target_bundle(
+    targets: RhythmLossTargets,
+    *,
+    device: Optional[torch.device] = None,
+) -> dict[str, Optional[torch.Tensor]]:
+    device = device or targets.unit_mask.device
+    ref_global_rate = _coerce_optional_batch_scalar(targets.ref_global_rate)
+    ref_pause_ratio = _coerce_optional_batch_scalar(targets.ref_pause_ratio)
+    ref_local_rate_trace = _coerce_optional_batch_trace(targets.ref_local_rate_trace)
+    ref_boundary_trace = _coerce_optional_batch_trace(targets.ref_boundary_trace)
+    bundle = {
+        "global_rate": ref_global_rate.to(device=device) if isinstance(ref_global_rate, torch.Tensor) else None,
+        "pause_ratio": (
+            ref_pause_ratio.to(device=device).clamp(0.0, 1.0)
+            if isinstance(ref_pause_ratio, torch.Tensor)
+            else None
+        ),
+        "local_rate_trace": (
+            ref_local_rate_trace.to(device=device)
+            if isinstance(ref_local_rate_trace, torch.Tensor)
+            else None
+        ),
+        "boundary_trace": (
+            ref_boundary_trace.to(device=device)
+            if isinstance(ref_boundary_trace, torch.Tensor)
+            else None
+        ),
+    }
+    return bundle
+
+
+def compute_descriptor_bundle_distance(
+    lhs_bundle: dict[str, Optional[torch.Tensor]],
+    rhs_bundle: dict[str, Optional[torch.Tensor]],
+    *,
+    global_weight: float = 1.0,
+    pause_weight: float = 1.0,
+    local_trace_weight: float = 0.5,
+    boundary_trace_weight: float = 0.5,
+) -> Optional[torch.Tensor]:
+    component_terms = []
+    weight_terms = []
+
+    def _append_component(
+        lhs_value: Optional[torch.Tensor],
+        rhs_value: Optional[torch.Tensor],
+        weight: float,
+        *,
+        log_space: bool = False,
+    ) -> None:
+        if lhs_value is None or rhs_value is None or float(weight) <= 0.0:
+            return
+        lhs_tensor = lhs_value.float()
+        rhs_tensor = rhs_value.float().to(device=lhs_tensor.device)
+        if log_space:
+            lhs_tensor = torch.log1p(lhs_tensor.clamp_min(0.0))
+            rhs_tensor = torch.log1p(rhs_tensor.clamp_min(0.0))
+        component = (lhs_tensor - rhs_tensor).abs().reshape(lhs_tensor.size(0), -1).mean(dim=1)
+        component_terms.append(component * float(weight))
+        weight_terms.append(component.new_full((component.size(0),), float(weight)))
+
+    _append_component(lhs_bundle.get("global_rate"), rhs_bundle.get("global_rate"), global_weight, log_space=True)
+    _append_component(lhs_bundle.get("pause_ratio"), rhs_bundle.get("pause_ratio"), pause_weight)
+    _append_component(lhs_bundle.get("local_rate_trace"), rhs_bundle.get("local_rate_trace"), local_trace_weight)
+    _append_component(lhs_bundle.get("boundary_trace"), rhs_bundle.get("boundary_trace"), boundary_trace_weight)
+    if not component_terms:
+        return None
+    total = torch.stack(component_terms, dim=0).sum(dim=0)
+    total_weight = torch.stack(weight_terms, dim=0).sum(dim=0).clamp_min(1e-6)
+    return total / total_weight
+
+
+def _index_descriptor_bundle(
+    bundle: dict[str, Optional[torch.Tensor]],
+    indexer,
+) -> dict[str, Optional[torch.Tensor]]:
+    indexed: dict[str, Optional[torch.Tensor]] = {}
+    for key, value in bundle.items():
+        indexed[key] = value[indexer] if isinstance(value, torch.Tensor) else None
+    return indexed
+
+
+def _compute_descriptor_consistency_losses(
+    execution,
+    targets: RhythmLossTargets,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    pred_bundle = build_predicted_reference_descriptor_bundle(execution, targets)
+    ref_bundle = build_reference_descriptor_target_bundle(
+        targets,
+        device=execution.speech_duration_exec.device,
+    )
+    zero = execution.speech_duration_exec.new_zeros(())
+    losses = {
+        "rhythm_descriptor_global": zero,
+        "rhythm_descriptor_pause": zero,
+        "rhythm_descriptor_local_trace": zero,
+        "rhythm_descriptor_boundary_trace": zero,
+        "rhythm_descriptor_consistency": zero,
+    }
+    if float(targets.descriptor_consistency_weight) <= 0.0:
+        return losses, pred_bundle
+
+    batch_weight = _merge_batch_weight(targets.sample_confidence, targets.pair_weight, execution.speech_duration_exec)
+    total = zero
+    if ref_bundle["global_rate"] is not None and float(targets.descriptor_global_weight) > 0.0:
+        losses["rhythm_descriptor_global"] = _batch_l1(
+            torch.log1p(pred_bundle["global_rate"].clamp_min(0.0)),
+            torch.log1p(ref_bundle["global_rate"].clamp_min(0.0)),
+            batch_weight=batch_weight,
+        )
+        total = total + float(targets.descriptor_global_weight) * losses["rhythm_descriptor_global"]
+    if ref_bundle["pause_ratio"] is not None and float(targets.descriptor_pause_weight) > 0.0:
+        losses["rhythm_descriptor_pause"] = _batch_l1(
+            pred_bundle["pause_ratio"],
+            ref_bundle["pause_ratio"],
+            batch_weight=batch_weight,
+        )
+        total = total + float(targets.descriptor_pause_weight) * losses["rhythm_descriptor_pause"]
+    if (
+        ref_bundle["local_rate_trace"] is not None
+        and pred_bundle["local_rate_trace"].numel() > 0
+        and float(targets.descriptor_local_trace_weight) > 0.0
+    ):
+        losses["rhythm_descriptor_local_trace"] = _batch_trace_l1(
+            pred_bundle["local_rate_trace"],
+            ref_bundle["local_rate_trace"],
+            batch_weight=batch_weight,
+        )
+        total = total + float(targets.descriptor_local_trace_weight) * losses["rhythm_descriptor_local_trace"]
+    if (
+        ref_bundle["boundary_trace"] is not None
+        and pred_bundle["boundary_trace"].numel() > 0
+        and float(targets.descriptor_boundary_trace_weight) > 0.0
+    ):
+        losses["rhythm_descriptor_boundary_trace"] = _batch_trace_l1(
+            pred_bundle["boundary_trace"],
+            ref_bundle["boundary_trace"],
+            batch_weight=batch_weight,
+        )
+        total = total + float(targets.descriptor_boundary_trace_weight) * losses["rhythm_descriptor_boundary_trace"]
+    losses["rhythm_descriptor_consistency"] = float(targets.descriptor_consistency_weight) * total
+    return losses, pred_bundle
+
+
+def _compute_pairwise_group_losses(
+    pred_descriptor_bundle: dict[str, torch.Tensor],
+    targets: RhythmLossTargets,
+) -> dict[str, torch.Tensor]:
+    pair_group_id = targets.pair_group_id
+    zero = pred_descriptor_bundle["global_rate"].new_zeros(())
+    losses = {
+        "rhythm_pairwise_contrastive": zero,
+        "rhythm_pairwise_diversity": zero,
+        "rhythm_pairwise_groups_in_batch": zero,
+    }
+    ref_descriptor_bundle = build_reference_descriptor_target_bundle(
+        targets,
+        device=pred_descriptor_bundle["global_rate"].device,
+    )
+    has_reference_descriptor = compute_descriptor_bundle_distance(
+        ref_descriptor_bundle,
+        ref_descriptor_bundle,
+        global_weight=float(targets.descriptor_global_weight),
+        pause_weight=float(targets.descriptor_pause_weight),
+        local_trace_weight=float(targets.descriptor_local_trace_weight),
+        boundary_trace_weight=float(targets.descriptor_boundary_trace_weight),
+    )
+    if (
+        pair_group_id is None
+        or has_reference_descriptor is None
+        or (
+            float(targets.pairwise_contrastive_weight) <= 0.0
+            and float(targets.pairwise_diversity_weight) <= 0.0
+        )
+    ):
+        return losses
+    if not isinstance(pair_group_id, torch.Tensor):
+        pair_group_id = torch.as_tensor(
+            pair_group_id,
+            dtype=torch.long,
+            device=pred_descriptor_bundle["global_rate"].device,
+        )
+    else:
+        pair_group_id = pair_group_id.long().to(device=pred_descriptor_bundle["global_rate"].device)
+    pair_group_id = pair_group_id.reshape(-1)
+    pair_group_slot = targets.pair_group_slot
+    if isinstance(pair_group_slot, torch.Tensor):
+        pair_group_slot = pair_group_slot.long().reshape(-1).to(device=pair_group_id.device)
+    elif pair_group_slot is not None:
+        pair_group_slot = torch.as_tensor(pair_group_slot, dtype=torch.long, device=pair_group_id.device).reshape(-1)
+    pair_weight = _prepare_batch_weight(
+        _merge_batch_weight(targets.sample_confidence, targets.pair_weight, pred_descriptor_bundle["global_rate"]),
+        pred_descriptor_bundle["global_rate"],
+    )
+    contrastive_terms = []
+    contrastive_scales = []
+    diversity_terms = []
+    diversity_scales = []
+    active_groups = 0.0
+    unique_groups = torch.unique(pair_group_id)
+    for group_id in unique_groups.tolist():
+        group_indices = torch.nonzero(pair_group_id == int(group_id), as_tuple=False).reshape(-1)
+        if int(group_indices.numel()) < 2:
+            continue
+        if isinstance(pair_group_slot, torch.Tensor):
+            order = torch.argsort(pair_group_slot[group_indices], stable=True)
+            group_indices = group_indices[order]
+        active_groups += 1.0
+        pred_group = _index_descriptor_bundle(pred_descriptor_bundle, group_indices)
+        ref_group = _index_descriptor_bundle(ref_descriptor_bundle, group_indices)
+        group_weight = pair_weight[group_indices] if pair_weight is not None else None
+        for anchor_idx in range(int(group_indices.numel())):
+            pos_vector = compute_descriptor_bundle_distance(
+                _index_descriptor_bundle(pred_group, slice(anchor_idx, anchor_idx + 1)),
+                _index_descriptor_bundle(ref_group, slice(anchor_idx, anchor_idx + 1)),
+                global_weight=float(targets.descriptor_global_weight),
+                pause_weight=float(targets.descriptor_pause_weight),
+                local_trace_weight=float(targets.descriptor_local_trace_weight),
+                boundary_trace_weight=float(targets.descriptor_boundary_trace_weight),
+            )
+            if pos_vector is None:
+                continue
+            pos = pos_vector.mean()
+            anchor_scale = (
+                group_weight[anchor_idx].clamp_min(0.0)
+                if group_weight is not None
+                else pos.new_tensor(1.0)
+            )
+            for other_idx in range(int(group_indices.numel())):
+                if anchor_idx == other_idx:
+                    continue
+                ref_gap_vector = compute_descriptor_bundle_distance(
+                    _index_descriptor_bundle(ref_group, slice(anchor_idx, anchor_idx + 1)),
+                    _index_descriptor_bundle(ref_group, slice(other_idx, other_idx + 1)),
+                    global_weight=float(targets.descriptor_global_weight),
+                    pause_weight=float(targets.descriptor_pause_weight),
+                    local_trace_weight=float(targets.descriptor_local_trace_weight),
+                    boundary_trace_weight=float(targets.descriptor_boundary_trace_weight),
+                )
+                if ref_gap_vector is None:
+                    continue
+                ref_gap = ref_gap_vector.mean()
+                if float(ref_gap.item()) <= float(targets.pairwise_min_ref_gap):
+                    continue
+                neg_vector = compute_descriptor_bundle_distance(
+                    _index_descriptor_bundle(pred_group, slice(anchor_idx, anchor_idx + 1)),
+                    _index_descriptor_bundle(ref_group, slice(other_idx, other_idx + 1)),
+                    global_weight=float(targets.descriptor_global_weight),
+                    pause_weight=float(targets.descriptor_pause_weight),
+                    local_trace_weight=float(targets.descriptor_local_trace_weight),
+                    boundary_trace_weight=float(targets.descriptor_boundary_trace_weight),
+                )
+                if neg_vector is None:
+                    continue
+                neg = neg_vector.mean()
+                if float(targets.pairwise_contrastive_weight) > 0.0:
+                    contrastive_terms.append(
+                        F.relu(float(targets.pairwise_contrastive_margin) + pos - neg) * anchor_scale
+                    )
+                    contrastive_scales.append(anchor_scale)
+                if float(targets.pairwise_diversity_weight) > 0.0:
+                    pred_gap_vector = compute_descriptor_bundle_distance(
+                        _index_descriptor_bundle(pred_group, slice(anchor_idx, anchor_idx + 1)),
+                        _index_descriptor_bundle(pred_group, slice(other_idx, other_idx + 1)),
+                        global_weight=float(targets.descriptor_global_weight),
+                        pause_weight=float(targets.descriptor_pause_weight),
+                        local_trace_weight=float(targets.descriptor_local_trace_weight),
+                        boundary_trace_weight=float(targets.descriptor_boundary_trace_weight),
+                    )
+                    if pred_gap_vector is None:
+                        continue
+                    pred_gap = pred_gap_vector.mean()
+                    diversity_terms.append(
+                        F.relu(float(targets.pairwise_diversity_margin_scale) * ref_gap - pred_gap) * anchor_scale
+                    )
+                    diversity_scales.append(anchor_scale)
+    if contrastive_terms:
+        losses["rhythm_pairwise_contrastive"] = (
+            torch.stack(contrastive_terms).sum() / torch.stack(contrastive_scales).sum().clamp_min(1e-6)
+        ) * float(targets.pairwise_contrastive_weight)
+    if diversity_terms:
+        losses["rhythm_pairwise_diversity"] = (
+            torch.stack(diversity_terms).sum() / torch.stack(diversity_scales).sum().clamp_min(1e-6)
+        ) * float(targets.pairwise_diversity_weight)
+    losses["rhythm_pairwise_groups_in_batch"] = zero.new_tensor(active_groups)
+    return losses
 
 
 def _masked_cumsum(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -809,6 +1225,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     l_plan_local, l_plan_cum, l_plan = _compute_plan_losses(execution, targets, state)
     l_guidance = _compute_guidance_loss(execution, targets, state)
     distill_losses = _compute_distill_losses(execution, targets, state)
+    descriptor_losses, pred_descriptor_bundle = _compute_descriptor_consistency_losses(execution, targets)
+    pairwise_losses = _compute_pairwise_group_losses(pred_descriptor_bundle, targets)
     # Maintained compatibility alias: public cumplan/prefix_state supervision maps
     # to prefix carry/backlog alignment, while `rhythm_plan_cum` is the separate
     # cumulative execution proxy loss.
@@ -835,7 +1253,9 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_plan_cum': l_plan_cum,
         'rhythm_plan': l_plan,
         'rhythm_guidance': l_guidance,
+        **descriptor_losses,
         **distill_losses,
+        **pairwise_losses,
         'rhythm_distill_same_source_exec': kd_same_source_exec,
         'rhythm_distill_same_source_budget': kd_same_source_budget,
         'rhythm_distill_same_source_prefix': kd_same_source_prefix,
@@ -855,5 +1275,16 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             if isinstance(targets.distill_context_match, torch.Tensor)
             else {}
         ),
-        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + distill_losses['rhythm_distill'],
+        'rhythm_total': (
+            l_exec_speech
+            + l_exec_pause
+            + l_budget
+            + l_carry
+            + l_plan
+            + l_guidance
+            + descriptor_losses['rhythm_descriptor_consistency']
+            + pairwise_losses['rhythm_pairwise_contrastive']
+            + pairwise_losses['rhythm_pairwise_diversity']
+            + distill_losses['rhythm_distill']
+        ),
     }

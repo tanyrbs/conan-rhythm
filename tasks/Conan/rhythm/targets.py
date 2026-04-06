@@ -31,6 +31,16 @@ class RhythmTargetBuildConfig:
     distill_context_floor: float = 0.35
     distill_context_power: float = 1.0
     distill_context_open_run_penalty: float = 0.50
+    lambda_descriptor_consistency: float = 0.0
+    descriptor_global_weight: float = 1.0
+    descriptor_pause_weight: float = 1.0
+    descriptor_local_trace_weight: float = 0.5
+    descriptor_boundary_trace_weight: float = 0.5
+    lambda_pairwise_contrastive: float = 0.0
+    lambda_pairwise_diversity: float = 0.0
+    pairwise_contrastive_margin: float = 0.05
+    pairwise_diversity_margin_scale: float = 0.50
+    pairwise_min_ref_gap: float = 0.05
 
     @property
     def use_guidance(self) -> bool:
@@ -162,6 +172,170 @@ def _resolve_sample_confidence(sample: dict, *, primary_target_surface: str):
             sample.get("rhythm_teacher_confidence", sample.get("rhythm_target_confidence"))
         )
     return _detach_optional(sample.get("rhythm_target_confidence"))
+
+
+def _coerce_reference_descriptor_scalar(
+    value,
+    *,
+    detach: bool,
+) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach() if detach else value
+    else:
+        tensor = torch.as_tensor(value, dtype=torch.float32)
+    tensor = tensor.float()
+    if tensor.dim() == 0:
+        return tensor.view(1, 1)
+    if tensor.dim() == 1:
+        return tensor[:, None]
+    return tensor.reshape(tensor.size(0), -1)[:, :1]
+
+
+def _coerce_reference_descriptor_trace(
+    value,
+    *,
+    detach: bool,
+) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach() if detach else value
+    else:
+        tensor = torch.as_tensor(value, dtype=torch.float32)
+    tensor = tensor.float()
+    if tensor.dim() == 1:
+        return tensor.view(1, -1, 1)
+    if tensor.dim() == 2:
+        return tensor.unsqueeze(-1)
+    if tensor.dim() == 3:
+        return tensor
+    raise ValueError(f"Expected rank-1/2/3 descriptor trace, got {tuple(tensor.shape)}")
+
+
+def _fill_missing_reference_descriptor_targets_from_planner(
+    sample: dict,
+    *,
+    detach: bool,
+    ref_global_rate,
+    ref_pause_ratio,
+    ref_local_rate_trace,
+    ref_boundary_trace,
+) -> tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]:
+    planner_ref_stats = sample.get("planner_ref_stats")
+    planner_ref_trace = sample.get("planner_ref_trace")
+    if isinstance(planner_ref_stats, torch.Tensor):
+        planner_ref_stats = planner_ref_stats.detach() if detach else planner_ref_stats
+        planner_ref_stats = planner_ref_stats.float().reshape(planner_ref_stats.size(0), -1)
+        if ref_global_rate is None and planner_ref_stats.size(1) >= 1:
+            ref_global_rate = planner_ref_stats[:, :1]
+        if ref_pause_ratio is None and planner_ref_stats.size(1) >= 2:
+            ref_pause_ratio = planner_ref_stats[:, 1:2]
+    if isinstance(planner_ref_trace, torch.Tensor):
+        planner_ref_trace = planner_ref_trace.detach() if detach else planner_ref_trace
+        planner_ref_trace = planner_ref_trace.float()
+        if planner_ref_trace.dim() == 2:
+            planner_ref_trace = planner_ref_trace.unsqueeze(-1)
+        if planner_ref_trace.dim() == 3:
+            if ref_local_rate_trace is None and planner_ref_trace.size(-1) >= 1:
+                ref_local_rate_trace = planner_ref_trace[:, :, :1]
+            if ref_boundary_trace is None and planner_ref_trace.size(-1) >= 2:
+                ref_boundary_trace = planner_ref_trace[:, :, 1:2]
+    return (
+        ref_global_rate,
+        ref_pause_ratio,
+        ref_local_rate_trace,
+        ref_boundary_trace,
+    )
+
+
+def resolve_reference_descriptor_targets_from_sample(
+    sample: dict,
+    *,
+    detach: bool = True,
+) -> tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]:
+    ref_global_rate = _coerce_reference_descriptor_scalar(sample.get("global_rate"), detach=detach)
+    ref_pause_ratio = _coerce_reference_descriptor_scalar(sample.get("pause_ratio"), detach=detach)
+    ref_local_rate_trace = _coerce_reference_descriptor_trace(sample.get("local_rate_trace"), detach=detach)
+    ref_boundary_trace = _coerce_reference_descriptor_trace(sample.get("boundary_trace"), detach=detach)
+    (
+        ref_global_rate,
+        ref_pause_ratio,
+        ref_local_rate_trace,
+        ref_boundary_trace,
+    ) = _fill_missing_reference_descriptor_targets_from_planner(
+        sample,
+        detach=detach,
+        ref_global_rate=ref_global_rate,
+        ref_pause_ratio=ref_pause_ratio,
+        ref_local_rate_trace=ref_local_rate_trace,
+        ref_boundary_trace=ref_boundary_trace,
+    )
+    if (
+        ref_global_rate is not None
+        and ref_pause_ratio is not None
+        and ref_local_rate_trace is not None
+        and ref_boundary_trace is not None
+    ):
+        return (
+            ref_global_rate,
+            ref_pause_ratio,
+            ref_local_rate_trace,
+            ref_boundary_trace,
+        )
+
+    ref_stats = sample.get("ref_rhythm_stats")
+    ref_trace = sample.get("ref_rhythm_trace")
+    if not isinstance(ref_stats, torch.Tensor) or not isinstance(ref_trace, torch.Tensor):
+        return (
+            ref_global_rate,
+            ref_pause_ratio,
+            ref_local_rate_trace,
+            ref_boundary_trace,
+        )
+    from modules.Conan.rhythm.reference_descriptor import RefRhythmDescriptor
+
+    stats_tensor = ref_stats.detach() if detach else ref_stats
+    trace_tensor = ref_trace.detach() if detach else ref_trace
+    compact = RefRhythmDescriptor.from_stats_trace(
+        stats_tensor.float(),
+        trace_tensor.float(),
+        selector=None,
+        include_sidecar=False,
+    )
+    if ref_global_rate is None:
+        ref_global_rate = _coerce_reference_descriptor_scalar(compact.get("global_rate"), detach=False)
+    if ref_pause_ratio is None:
+        ref_pause_ratio = _coerce_reference_descriptor_scalar(compact.get("pause_ratio"), detach=False)
+    if ref_local_rate_trace is None:
+        ref_local_rate_trace = _coerce_reference_descriptor_trace(compact.get("local_rate_trace"), detach=False)
+    if ref_boundary_trace is None:
+        ref_boundary_trace = _coerce_reference_descriptor_trace(compact.get("boundary_trace"), detach=False)
+    return (
+        ref_global_rate,
+        ref_pause_ratio,
+        ref_local_rate_trace,
+        ref_boundary_trace,
+    )
+
+
+def resolve_pair_batch_field(sample: dict, *keys: str, default=None):
+    for key in keys:
+        value = sample.get(key)
+        if value is not None:
+            return value
+    return default
 
 
 def _normalize_optional_confidence(
@@ -741,6 +915,12 @@ def build_rhythm_loss_targets_from_sample(
         config=config,
         unit_batch=unit_batch,
     )
+    (
+        ref_global_rate,
+        ref_pause_ratio,
+        ref_local_rate_trace,
+        ref_boundary_trace,
+    ) = resolve_reference_descriptor_targets_from_sample(sample)
 
     return RhythmLossTargets(
         speech_exec_tgt=sample[keys.target_speech_key],
@@ -784,6 +964,41 @@ def build_rhythm_loss_targets_from_sample(
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
+        ref_global_rate=ref_global_rate,
+        ref_pause_ratio=ref_pause_ratio,
+        ref_local_rate_trace=ref_local_rate_trace,
+        ref_boundary_trace=ref_boundary_trace,
+        pair_group_id=resolve_pair_batch_field(
+            sample,
+            "pair_group_id",
+            "rhythm_pair_group_id",
+            "group_id",
+        ),
+        pair_group_slot=resolve_pair_batch_field(
+            sample,
+            "pair_group_slot",
+            "rhythm_pair_group_slot",
+            "rhythm_pair_rank",
+            "pair_rank",
+            "group_slot",
+        ),
+        pair_is_identity=resolve_pair_batch_field(
+            sample,
+            "pair_is_identity",
+            "rhythm_pair_is_identity",
+            "identity_anchor",
+        ),
+        pair_weight=resolve_pair_batch_field(sample, "pair_weight", "rhythm_pair_weight"),
+        descriptor_consistency_weight=float(config.lambda_descriptor_consistency),
+        descriptor_global_weight=float(config.descriptor_global_weight),
+        descriptor_pause_weight=float(config.descriptor_pause_weight),
+        descriptor_local_trace_weight=float(config.descriptor_local_trace_weight),
+        descriptor_boundary_trace_weight=float(config.descriptor_boundary_trace_weight),
+        pairwise_contrastive_weight=float(config.lambda_pairwise_contrastive),
+        pairwise_diversity_weight=float(config.lambda_pairwise_diversity),
+        pairwise_contrastive_margin=float(config.pairwise_contrastive_margin),
+        pairwise_diversity_margin_scale=float(config.pairwise_diversity_margin_scale),
+        pairwise_min_ref_gap=float(config.pairwise_min_ref_gap),
     )
 
 
@@ -817,6 +1032,16 @@ def build_identity_rhythm_loss_targets(
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
+        descriptor_consistency_weight=float(config.lambda_descriptor_consistency),
+        descriptor_global_weight=float(config.descriptor_global_weight),
+        descriptor_pause_weight=float(config.descriptor_pause_weight),
+        descriptor_local_trace_weight=float(config.descriptor_local_trace_weight),
+        descriptor_boundary_trace_weight=float(config.descriptor_boundary_trace_weight),
+        pairwise_contrastive_weight=float(config.lambda_pairwise_contrastive),
+        pairwise_diversity_weight=float(config.lambda_pairwise_diversity),
+        pairwise_contrastive_margin=float(config.pairwise_contrastive_margin),
+        pairwise_diversity_margin_scale=float(config.pairwise_diversity_margin_scale),
+        pairwise_min_ref_gap=float(config.pairwise_min_ref_gap),
     )
 
 
@@ -855,9 +1080,14 @@ def scale_rhythm_loss_terms(
     lambda_distill = float(hparams.get("lambda_rhythm_distill", 0.0) or 0.0)
     lambda_plan = float(hparams.get("lambda_rhythm_plan", 0.0) or 0.0)
     lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0)
+    lambda_descriptor_consistency = float(hparams.get("lambda_rhythm_descriptor_consistency", 0.0) or 0.0)
     plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
     plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
+    descriptor_global_weight = float(hparams.get("rhythm_descriptor_global_weight", 1.0))
+    descriptor_pause_weight = float(hparams.get("rhythm_descriptor_pause_weight", 1.0))
+    descriptor_local_trace_weight = float(hparams.get("rhythm_descriptor_local_trace_weight", 0.5))
+    descriptor_boundary_trace_weight = float(hparams.get("rhythm_descriptor_boundary_trace_weight", 0.5))
     prefix_state = _resolve_prefix_state_loss()
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
@@ -907,6 +1137,25 @@ def scale_rhythm_loss_terms(
         "rhythm_plan_local": (rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight).detach(),
         "rhythm_plan_cum": (rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight).detach(),
         "rhythm_guidance": rhythm_losses["rhythm_guidance"] * lambda_guidance,
+        "rhythm_descriptor_consistency": rhythm_losses["rhythm_descriptor_consistency"],
+        "rhythm_descriptor_global": _scaled_detached(
+            "rhythm_descriptor_global",
+            lambda_descriptor_consistency * descriptor_global_weight,
+        ),
+        "rhythm_descriptor_pause": _scaled_detached(
+            "rhythm_descriptor_pause",
+            lambda_descriptor_consistency * descriptor_pause_weight,
+        ),
+        "rhythm_descriptor_local_trace": _scaled_detached(
+            "rhythm_descriptor_local_trace",
+            lambda_descriptor_consistency * descriptor_local_trace_weight,
+        ),
+        "rhythm_descriptor_boundary_trace": _scaled_detached(
+            "rhythm_descriptor_boundary_trace",
+            lambda_descriptor_consistency * descriptor_boundary_trace_weight,
+        ),
+        "rhythm_pairwise_contrastive": rhythm_losses["rhythm_pairwise_contrastive"],
+        "rhythm_pairwise_diversity": rhythm_losses["rhythm_pairwise_diversity"],
         "rhythm_distill": scaled_distill,
         "rhythm_distill_student": scaled_distill.detach(),
         "rhythm_distill_exec": _scaled_detached("rhythm_distill_exec", lambda_distill),
@@ -951,6 +1200,9 @@ def scale_rhythm_loss_terms(
             lambda_distill * float(hparams.get("rhythm_distill_allocation_weight", 0.5)),
         ),
     }
+    pairwise_groups = rhythm_losses.get("rhythm_pairwise_groups_in_batch")
+    if isinstance(pairwise_groups, torch.Tensor):
+        scaled["rhythm_pairwise_groups_in_batch"] = pairwise_groups.detach()
     for key in (
         "rhythm_distill_same_source_exec",
         "rhythm_distill_same_source_budget",

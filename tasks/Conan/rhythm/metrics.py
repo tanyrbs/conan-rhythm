@@ -7,6 +7,14 @@ import torch
 
 from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
 from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
+from tasks.Conan.rhythm.losses import (
+    build_predicted_reference_descriptor_bundle,
+    compute_descriptor_bundle_distance,
+)
+from tasks.Conan.rhythm.targets import (
+    resolve_pair_batch_field,
+    resolve_reference_descriptor_targets_from_sample,
+)
 
 
 def _safe_mean(x: torch.Tensor) -> torch.Tensor:
@@ -410,6 +418,120 @@ def _update_reference_conditioning_metrics(metrics: dict[str, torch.Tensor], out
         metrics["rhythm_metric_selector_score_max"] = selector_scores.float().max()
     if slow_summary is not None:
         metrics["rhythm_metric_slow_summary_norm_mean"] = _safe_mean(torch.norm(slow_summary.float(), dim=-1))
+
+
+def _update_reference_alignment_metrics(
+    metrics: dict[str, torch.Tensor],
+    output: dict[str, Any],
+    sample: dict[str, Any] | None,
+    ctx: RhythmMetricContext,
+) -> None:
+    if sample is None:
+        return
+    execution = output.get("rhythm_execution")
+    if execution is None:
+        return
+    (
+        ref_global_rate,
+        ref_pause_ratio,
+        ref_local_rate_trace,
+        ref_boundary_trace,
+    ) = resolve_reference_descriptor_targets_from_sample(sample, detach=False)
+    if ref_global_rate is None and ref_pause_ratio is None and ref_local_rate_trace is None and ref_boundary_trace is None:
+        return
+
+    class _MetricTargets:
+        pass
+
+    targets = _MetricTargets()
+    targets.unit_mask = ctx.unit_mask
+    targets.ref_local_rate_trace = ref_local_rate_trace
+    targets.ref_boundary_trace = ref_boundary_trace
+    pred_bundle = build_predicted_reference_descriptor_bundle(execution, targets)
+    ref_bundle = {
+        "global_rate": ref_global_rate.float().to(device=ctx.unit_mask.device)
+        if isinstance(ref_global_rate, torch.Tensor)
+        else None,
+        "pause_ratio": ref_pause_ratio.float().to(device=ctx.unit_mask.device)
+        if isinstance(ref_pause_ratio, torch.Tensor)
+        else None,
+        "local_rate_trace": ref_local_rate_trace.float().to(device=ctx.unit_mask.device)
+        if isinstance(ref_local_rate_trace, torch.Tensor)
+        else None,
+        "boundary_trace": ref_boundary_trace.float().to(device=ctx.unit_mask.device)
+        if isinstance(ref_boundary_trace, torch.Tensor)
+        else None,
+    }
+    if ref_global_rate is not None:
+        metrics["rhythm_metric_ref_global_rate_l1"] = _safe_mean(
+            (pred_bundle["global_rate"] - ref_bundle["global_rate"]).abs()
+        )
+    if ref_pause_ratio is not None:
+        metrics["rhythm_metric_ref_pause_ratio_l1"] = _safe_mean(
+            (pred_bundle["pause_ratio"] - ref_bundle["pause_ratio"]).abs()
+        )
+    if ref_local_rate_trace is not None and pred_bundle["local_rate_trace"].numel() > 0:
+        metrics["rhythm_metric_ref_local_rate_trace_l1"] = _safe_mean(
+            (pred_bundle["local_rate_trace"] - ref_bundle["local_rate_trace"]).abs()
+        )
+    if ref_boundary_trace is not None and pred_bundle["boundary_trace"].numel() > 0:
+        metrics["rhythm_metric_ref_boundary_trace_l1"] = _safe_mean(
+            (pred_bundle["boundary_trace"] - ref_bundle["boundary_trace"]).abs()
+        )
+    pair_group_id = resolve_pair_batch_field(sample, "pair_group_id", "rhythm_pair_group_id")
+    if pair_group_id is not None:
+        if not isinstance(pair_group_id, torch.Tensor):
+            pair_group_id = torch.as_tensor(pair_group_id, dtype=torch.long, device=ctx.unit_mask.device)
+        else:
+            pair_group_id = pair_group_id.long().to(device=ctx.unit_mask.device)
+        pair_group_id = pair_group_id.reshape(-1)
+        unique_groups = torch.unique(pair_group_id)
+        active_groups = sum(
+            1.0
+            for group_id in unique_groups.tolist()
+            if int(torch.sum(pair_group_id == int(group_id)).item()) > 1
+        )
+        metrics["rhythm_metric_pairwise_groups_in_batch"] = ctx.unit_mask.new_tensor(active_groups)
+        pair_is_identity = resolve_pair_batch_field(sample, "pair_is_identity", "rhythm_pair_is_identity")
+        if pair_is_identity is not None:
+            if not isinstance(pair_is_identity, torch.Tensor):
+                pair_is_identity = torch.as_tensor(
+                    pair_is_identity,
+                    dtype=torch.float32,
+                    device=ctx.unit_mask.device,
+                )
+            else:
+                pair_is_identity = pair_is_identity.float().to(device=ctx.unit_mask.device)
+            metrics["rhythm_metric_pairwise_identity_rate"] = _safe_mean(pair_is_identity)
+        if active_groups > 0:
+            ref_gaps = []
+            pred_gaps = []
+            for group_id in unique_groups.tolist():
+                group_indices = torch.nonzero(pair_group_id == int(group_id), as_tuple=False).reshape(-1)
+                if int(group_indices.numel()) < 2:
+                    continue
+                for anchor_idx in range(int(group_indices.numel())):
+                    for other_idx in range(anchor_idx + 1, int(group_indices.numel())):
+                        ref_gap = compute_descriptor_bundle_distance(
+                            {key: value[group_indices[anchor_idx:anchor_idx + 1]] if isinstance(value, torch.Tensor) else None for key, value in ref_bundle.items()},
+                            {key: value[group_indices[other_idx:other_idx + 1]] if isinstance(value, torch.Tensor) else None for key, value in ref_bundle.items()},
+                        )
+                        pred_gap = compute_descriptor_bundle_distance(
+                            {key: value[group_indices[anchor_idx:anchor_idx + 1]] if isinstance(value, torch.Tensor) else None for key, value in pred_bundle.items()},
+                            {key: value[group_indices[other_idx:other_idx + 1]] if isinstance(value, torch.Tensor) else None for key, value in pred_bundle.items()},
+                        )
+                        if ref_gap is not None:
+                            ref_gaps.append(ref_gap.mean())
+                        if pred_gap is not None:
+                            pred_gaps.append(pred_gap.mean())
+            if ref_gaps:
+                metrics["rhythm_metric_pairwise_ref_gap_mean"] = torch.stack(ref_gaps).mean()
+            if pred_gaps:
+                metrics["rhythm_metric_pairwise_pred_gap_mean"] = torch.stack(pred_gaps).mean()
+            if ref_gaps and pred_gaps and len(ref_gaps) == len(pred_gaps):
+                metrics["rhythm_metric_pairwise_gap_delta_mean"] = (
+                    torch.stack(pred_gaps) - torch.stack(ref_gaps)
+                ).mean()
 
 
 def _update_teacher_alignment_metrics(
@@ -834,7 +956,9 @@ def build_rhythm_metric_sections(
         "observability": _collect_observability_metrics(output, ctx),
     }
     if sample is not None:
-        sections["sample_supervision"] = _collect_sample_supervision_metric_dict(sample, ctx)
+        sample_metrics = _collect_sample_supervision_metric_dict(sample, ctx)
+        _update_reference_alignment_metrics(sample_metrics, output, sample, ctx)
+        sections["sample_supervision"] = sample_metrics
     return sections
 
 

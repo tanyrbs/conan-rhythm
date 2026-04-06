@@ -42,6 +42,9 @@ class RhythmTaskRuntimeSupport:
         return tuple(self.owner.mel_losses.keys())
 
     def build_rhythm_target_build_config(self) -> RhythmTargetBuildConfig:
+        def _nonnegative_float(name: str, default: float) -> float:
+            return max(0.0, float(hparams.get(name, default) or default))
+
         plan_local_weight, plan_cum_weight = self.owner._resolve_rhythm_plan_weights()
         return RhythmTargetBuildConfig(
             primary_target_surface=self.owner._resolve_rhythm_primary_target_surface(),
@@ -69,6 +72,16 @@ class RhythmTaskRuntimeSupport:
             distill_context_open_run_penalty=float(
                 hparams.get("rhythm_distill_context_open_run_penalty", 0.50)
             ),
+            lambda_descriptor_consistency=_nonnegative_float("lambda_rhythm_descriptor_consistency", 0.0),
+            descriptor_global_weight=_nonnegative_float("rhythm_descriptor_global_weight", 1.0),
+            descriptor_pause_weight=_nonnegative_float("rhythm_descriptor_pause_weight", 1.0),
+            descriptor_local_trace_weight=_nonnegative_float("rhythm_descriptor_local_trace_weight", 0.5),
+            descriptor_boundary_trace_weight=_nonnegative_float("rhythm_descriptor_boundary_trace_weight", 0.5),
+            lambda_pairwise_contrastive=_nonnegative_float("lambda_rhythm_pairwise_contrastive", 0.0),
+            lambda_pairwise_diversity=_nonnegative_float("lambda_rhythm_pairwise_diversity", 0.0),
+            pairwise_contrastive_margin=_nonnegative_float("rhythm_pairwise_contrastive_margin", 0.05),
+            pairwise_diversity_margin_scale=_nonnegative_float("rhythm_pairwise_diversity_margin_scale", 0.50),
+            pairwise_min_ref_gap=_nonnegative_float("rhythm_pairwise_min_ref_gap", 0.05),
         )
 
     def build_offline_confidence_outputs(self, confidence) -> dict:
