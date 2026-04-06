@@ -310,7 +310,20 @@ Notes:
 
 - this stage is intentionally `runtime_only + sample_ref + teacher/algorithmic`
 - it hard-fails by default when sampled same-speaker reference collapses back to self (`rhythm_require_external_reference: true`)
+- for true one-to-many bootstrap, add a fixed `rhythm_pair_manifest_path` so the dataset expands explicit `A|A + A|B_fast + A|B_mid + A|B_slow/...` pairs instead of relying on random same-speaker sampling
+- pair-manifest runs now keep same-`A` groups contiguous in `ordered_indices()`, so grouped batches are much more likely to contain the full one-to-many bundle
+- explicit identity anchors are now supported with `rhythm_allow_identity_pairs: true`, so `A|A` can coexist with the external-reference fail-fast guard
+- stage-2.5 now exposes extra anti-collapse supervision:
+  - `lambda_rhythm_ref_descriptor_stats`
+  - `lambda_rhythm_ref_descriptor_trace`
+  - `lambda_rhythm_ref_group_contrastive`
 - monitor `rhythm_metric_reference_self_rate` / `rhythm_metric_reference_external_rate`; a healthy formal run should keep self-rate near `0`
+
+If you need the short-reference / long-stream safety profile, copy the values from
+`egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` into your run
+config or a small derived override yaml. That profile enables slow-memory sidecars
+plus trace-exhaustion fallback so runtime does not keep replaying the reference tail
+forever once the local phase has effectively run out.
 
 Student retimed template:
 
@@ -345,6 +358,7 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 | `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
 | `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
 | `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` | experimental | alias of the pairwise external-reference stage-2.5 config | no | no | no |
+| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream fallback profile for runtime trace exhaustion | no | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
 | `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
@@ -359,6 +373,13 @@ Current branch conclusion after code review, probes, and smoke integration:
 - `teacher_offline`: **code-ready**, but the checked-in smoke `valid` split is defective
 - `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
 - `student_ref_bootstrap`: **code-ready as an experimental stage-2.5**, but meaningful runs require real same-speaker pools plus external-reference coverage monitoring
+- fixed pair-manifest bootstrap is now supported:
+  - explicit one-to-many pair expansion
+  - grouped batch ordering for same-`A` bundles
+  - optional `A|A` identity anchors without disabling the external-reference fail-fast guard
+- stage-2.5 also now has explicit anti-collapse supervision beyond `L_algo`:
+  - descriptor-consistency against `global_rate / pause_ratio / local_rate_trace / boundary_trace`
+  - same-`A` group contrastive matching when batch groups contain multiple references
 - `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
 
 Latest 2000-step smoke profile (`artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`) still says the same thing numerically:
@@ -391,6 +412,7 @@ Experimental notes:
 
 - `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
 - `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
+- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in runtime/training override for short-reference / long-stream regimes; it enables trace-exhaustion fallback toward slow/global rhythm summaries instead of endlessly replaying the reference tail
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
 - maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
 

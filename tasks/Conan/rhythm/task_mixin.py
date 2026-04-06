@@ -32,6 +32,12 @@ from tasks.Conan.rhythm.runtime_modes import (
     resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
     resolve_task_runtime_state,
 )
+from tasks.Conan.rhythm.reference_regularization import (
+    build_predicted_compact_reference_descriptor,
+    build_target_compact_reference_descriptor,
+    compute_descriptor_consistency_loss,
+    compute_group_reference_contrastive_loss,
+)
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 from tasks.Conan.rhythm.task_config import (
@@ -318,6 +324,50 @@ class RhythmConanTaskMixin:
             float(hparams.get("rhythm_plan_local_weight", 0.5)),
             float(hparams.get("rhythm_plan_cum_weight", 1.0)),
         )
+
+    @staticmethod
+    def _build_reference_descriptor_bundle(output, sample):
+        target = build_target_compact_reference_descriptor(sample)
+        if target is None:
+            return None, None
+        pred = build_predicted_compact_reference_descriptor(
+            output,
+            trace_bins=int(target.local_rate_trace.size(1)),
+        )
+        return pred, target
+
+    def _add_reference_descriptor_regularization(self, output, sample, losses):
+        lambda_stats = float(hparams.get("lambda_rhythm_ref_descriptor_stats", 0.0) or 0.0)
+        lambda_trace = float(hparams.get("lambda_rhythm_ref_descriptor_trace", 0.0) or 0.0)
+        lambda_group = float(hparams.get("lambda_rhythm_ref_group_contrastive", 0.0) or 0.0)
+        if lambda_stats <= 0.0 and lambda_trace <= 0.0 and lambda_group <= 0.0:
+            return
+        pred, target = self._build_reference_descriptor_bundle(output, sample)
+        if pred is None or target is None:
+            return
+        descriptor_losses = compute_descriptor_consistency_loss(
+            pred,
+            target,
+            local_weight=float(hparams.get("rhythm_ref_descriptor_local_weight", 1.0)),
+            boundary_weight=float(hparams.get("rhythm_ref_descriptor_boundary_weight", 1.0)),
+        )
+        if lambda_stats > 0.0:
+            losses["L_ref_desc_stats"] = descriptor_losses["stats"] * lambda_stats
+        if lambda_trace > 0.0:
+            losses["L_ref_desc_trace"] = (
+                descriptor_losses["local_trace"]
+                + float(hparams.get("rhythm_ref_descriptor_boundary_loss_weight", 1.0))
+                * descriptor_losses["boundary_trace"]
+            ) * lambda_trace
+        if lambda_group > 0.0 and "rhythm_pair_group_id" in sample:
+            group_loss = compute_group_reference_contrastive_loss(
+                pred,
+                target,
+                sample["rhythm_pair_group_id"],
+                temperature=float(hparams.get("rhythm_ref_group_contrastive_temperature", 0.10)),
+            )
+            if group_loss is not None:
+                losses["L_ref_group_contrast"] = group_loss * lambda_group
 
     @staticmethod
     def _build_runtime_distill_confidence_bundle(output):
@@ -956,6 +1006,7 @@ class RhythmConanTaskMixin:
         )
         scaled_rhythm_losses = self._maybe_balance_rhythm_loss_terms(scaled_rhythm_losses)
         losses.update(scaled_rhythm_losses)
+        self._add_reference_descriptor_regularization(output, sample, losses)
 
         runtime_teacher = output.get("rhythm_offline_execution")
         lambda_teacher_aux = float(hparams.get("lambda_rhythm_teacher_aux", 0.0) or 0.0)

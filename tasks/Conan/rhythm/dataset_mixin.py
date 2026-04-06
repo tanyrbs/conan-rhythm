@@ -122,6 +122,9 @@ class RhythmConanDatasetMixin:
     )
     _RHYTHM_RUNTIME_REFERENCE_META_KEYS = (
         "rhythm_reference_is_self",
+        "rhythm_pair_group_id",
+        "rhythm_pair_rank",
+        "rhythm_pair_is_identity",
     )
     _RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS = (
         "rhythm_offline_content_units",
@@ -403,6 +406,9 @@ class RhythmConanDatasetMixin:
             "rhythm_stream_visible_units": ("float", 0.0),
             "rhythm_stream_full_units": ("float", 0.0),
             "rhythm_reference_is_self": ("float", 0.0),
+            "rhythm_pair_group_id": ("long", 0),
+            "rhythm_pair_rank": ("long", 0),
+            "rhythm_pair_is_identity": ("float", 0.0),
             "rhythm_offline_teacher_speech_exec_tgt": ("float", 0.0),
             "rhythm_offline_teacher_pause_exec_tgt": ("float", 0.0),
             "rhythm_offline_teacher_speech_budget_tgt": ("float", 0.0),

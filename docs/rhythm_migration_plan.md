@@ -123,6 +123,28 @@ The maintained branch now includes these corrective changes:
 - runtime batches and metrics now expose whether rhythm supervision really used an external reference:
   - sample field: `rhythm_reference_is_self`
   - metrics: `rhythm_metric_reference_self_rate`, `rhythm_metric_reference_external_rate`
+- fixed one-to-many pair-manifest bootstrap is now supported:
+  - `rhythm_pair_manifest_path`
+  - `rhythm_pair_manifest_prefixes`
+  - `rhythm_pair_manifest_group_batches`
+  - grouped same-`A` entries stay contiguous in dataset ordering, so batch construction is much more likely to preserve the intended one-to-many bundle
+- explicit `A|A` identity anchors can now coexist with the external-reference fail-fast guard:
+  - `rhythm_allow_identity_pairs: true`
+  - sample / metric field: `rhythm_pair_is_identity`
+- stage-2.5 can now add supervision that explicitly punishes "ignore B" collapse instead of relying on algorithmic teacher imitation alone:
+  - `lambda_rhythm_ref_descriptor_stats`
+  - `lambda_rhythm_ref_descriptor_trace`
+  - `lambda_rhythm_ref_group_contrastive`
+- descriptor-consistency is now implemented against the compact maintained reference contract:
+  - `global_rate`
+  - `pause_ratio`
+  - `local_rate_trace`
+  - `boundary_trace`
+- runtime now also supports trace-exhaustion fallback for short-reference / long-stream regimes:
+  - `rhythm_trace_exhaustion_gap_start`
+  - `rhythm_trace_exhaustion_gap_end`
+  - `rhythm_trace_exhaustion_local_floor`
+  - helper override yaml: `egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml`
 
 ## 4. Validation actually run on this checkout
 
@@ -148,6 +170,8 @@ The following were run locally in the `conda` `conan` environment:
   - `tests/rhythm/test_reference_bootstrap_runtime.py`
   - `tests/rhythm/test_metrics_masking.py`
   - `tests/rhythm/test_reference_sidecar.py`
+  - `tests/rhythm/test_pair_manifest_sampler.py`
+  - `tests/rhythm/test_reference_regularization.py`
 
 Observed result summary:
 
@@ -166,8 +190,8 @@ Observed result summary:
   - `rhythm_metric_missing_retimed_pitch_target`
   - pre-align retimed-target mismatch / resample / trim signals
 - focused external-reference bootstrap regression rerun on April 6, 2026:
-  - **51 tests passed**
-  - validated stage-2.5 config defaults, contract hard-errors, runtime fail-fast against self fallback, and reference self/external observability metrics
+  - **57 tests passed**
+  - validated stage-2.5 config defaults, contract hard-errors, pair-manifest expansion, identity-anchor allowance, descriptor regularization helpers, runtime fail-fast against accidental self fallback, reference self/external observability metrics, and trace-exhaustion fallback wiring
 
 The newest rerun extended regression coverage specifically around:
 
@@ -243,9 +267,16 @@ Additional training-prep caution:
 - important runtime rule:
   - default config sets `rhythm_require_external_reference: true`
   - if speaker filtering leaves only one item for a speaker, the run now fails fast instead of silently falling back to self
+- one-to-many bootstrap rule:
+  - if you want real pairwise bootstrap instead of random same-speaker refs, provide a fixed `rhythm_pair_manifest_path`
+  - include `A|A` plus descriptor-diverse `A|B_*` entries in the manifest
+  - keep `rhythm_pair_manifest_group_batches: true` so grouped batch construction sees the one-to-many bundle
 - important monitoring rule:
   - track `rhythm_metric_reference_self_rate`
   - healthy formal stage-2.5 runs should keep self-rate near `0`
+- anti-collapse rule:
+  - stage-2.5 no longer has to rely only on `L_algo`
+  - descriptor-consistency and same-`A` group contrastive loss are now available so the model is explicitly pushed to preserve `A` while still responding to `B`
 
 ### `student_retimed`
 
@@ -335,6 +366,9 @@ The audit found a few remaining gaps that were intentionally not over-corrected 
   - `retimed mel(A | B)`
   - `retimed f0/uv(A | B)`
 - student-retimed needs a cleaner formal stage-3 integration smoke once real F0 assets exist
+- `teacher_pairwise_refine` is still the recommended next ceiling step after runtime-only bootstrap:
+  - export fixed `(A,B)` pairwise offline surfaces from an EMA bootstrap teacher
+  - then shift supervision from pure algorithmic oracle imitation toward pair-cache + descriptor + ranking losses
 - some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
 - projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
 - loss balancing and context-matched KD are deliberately opt-in research knobs, not new maintained defaults

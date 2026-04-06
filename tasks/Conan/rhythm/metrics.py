@@ -764,6 +764,14 @@ def _update_sample_supervision_metrics(
         ref_self_rate = _safe_mean(sample["rhythm_reference_is_self"].float())
         metrics["rhythm_metric_reference_self_rate"] = ref_self_rate
         metrics["rhythm_metric_reference_external_rate"] = (ref_self_rate * 0.0) + (1.0 - ref_self_rate)
+    if "rhythm_pair_is_identity" in sample:
+        metrics["rhythm_metric_pair_identity_rate"] = _safe_mean(sample["rhythm_pair_is_identity"].float())
+    if "rhythm_pair_group_id" in sample:
+        group_ids = sample["rhythm_pair_group_id"].long().reshape(sample["rhythm_pair_group_id"].size(0), -1)[:, 0]
+        metrics["rhythm_metric_pair_group_count"] = torch.tensor(
+            float(torch.unique(group_ids).numel()),
+            device=group_ids.device,
+        )
 
 
 def _collect_plan_surface_metrics(

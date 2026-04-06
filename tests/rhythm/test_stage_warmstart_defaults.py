@@ -62,6 +62,10 @@ class StageWarmStartDefaultTests(unittest.TestCase):
         self.assertFalse(hp.get("rhythm_binarize_teacher_targets"))
         self.assertFalse(hp.get("rhythm_binarize_retimed_mel_targets"))
         self.assertTrue(hp.get("rhythm_require_external_reference"))
+        self.assertTrue(hp.get("rhythm_allow_identity_pairs"))
+        self.assertEqual(hp.get("lambda_rhythm_ref_descriptor_stats"), 0.10)
+        self.assertEqual(hp.get("lambda_rhythm_ref_descriptor_trace"), 0.05)
+        self.assertEqual(hp.get("lambda_rhythm_ref_group_contrastive"), 0.05)
 
 
 if __name__ == "__main__":

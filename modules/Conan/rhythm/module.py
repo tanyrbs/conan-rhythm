@@ -49,6 +49,9 @@ class StreamingRhythmModule(nn.Module):
         boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
         min_speech_frames: float = 1.0,
+        trace_exhaustion_gap_start: float = 0.08,
+        trace_exhaustion_gap_end: float = 0.22,
+        trace_exhaustion_local_floor: float = 0.20,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
         offline_teacher_config: OfflineTeacherConfig | None = None,
@@ -118,6 +121,9 @@ class StreamingRhythmModule(nn.Module):
         )
         self.projector = StreamingRhythmProjector(projector_config)
         self.teacher = AlgorithmicRhythmTeacher(teacher_config)
+        self.trace_exhaustion_gap_start = float(max(0.0, trace_exhaustion_gap_start))
+        self.trace_exhaustion_gap_end = float(max(self.trace_exhaustion_gap_start + 1.0e-6, trace_exhaustion_gap_end))
+        self.trace_exhaustion_local_floor = float(min(max(trace_exhaustion_local_floor, 0.0), 1.0))
 
         # Compatibility aliases for the older V2 surface.
         self.reference_encoder = self.reference_descriptor.encoder
@@ -179,6 +185,44 @@ class StreamingRhythmModule(nn.Module):
     def _visible_sizes(unit_mask: torch.Tensor) -> torch.Tensor:
         return unit_mask.float().sum(dim=1).long().clamp_min(1)
 
+    @staticmethod
+    def _resolve_reference_summary(
+        ref_conditioning: dict[str, torch.Tensor],
+        *,
+        summary_key: str,
+        fallback_trace_key: str,
+    ) -> torch.Tensor:
+        summary = ref_conditioning.get(summary_key)
+        if summary is not None:
+            if summary.dim() != 2:
+                raise ValueError(f"{summary_key} must be [B,D], got {tuple(summary.shape)}")
+            return summary
+        trace = ref_conditioning[fallback_trace_key]
+        if trace.dim() != 3:
+            raise ValueError(f"{fallback_trace_key} must be [B,T,D], got {tuple(trace.shape)}")
+        return trace.mean(dim=1)
+
+    def _blend_trace_fallback(
+        self,
+        *,
+        sampled_trace: torch.Tensor,
+        fallback_summary: torch.Tensor,
+        phase_ptr: torch.Tensor,
+        phase_gap: torch.Tensor | None,
+        horizon: float,
+    ) -> torch.Tensor:
+        if phase_gap is None or sampled_trace.numel() <= 0:
+            return sampled_trace
+        phase_gap = phase_gap.float().clamp_min(0.0)
+        denom = max(self.trace_exhaustion_gap_end - self.trace_exhaustion_gap_start, 1.0e-6)
+        gap_alpha = ((phase_gap - self.trace_exhaustion_gap_start) / denom).clamp(0.0, 1.0)
+        tail_start = max(0.0, 1.0 - float(horizon))
+        tail_alpha = ((phase_ptr.float() - tail_start) / max(float(horizon), 1.0e-6)).clamp(0.0, 1.0)
+        blend = gap_alpha * tail_alpha
+        local_gate = 1.0 - blend * (1.0 - self.trace_exhaustion_local_floor)
+        fallback = fallback_summary.unsqueeze(1).expand(-1, sampled_trace.size(1), -1)
+        return sampled_trace * local_gate[:, None, None] + fallback * (1.0 - local_gate)[:, None, None]
+
     def _sample_trace_pair(
         self,
         *,
@@ -186,22 +230,54 @@ class StreamingRhythmModule(nn.Module):
         phase_ptr: torch.Tensor,
         window_size: int,
         unit_mask: torch.Tensor,
+        dur_anchor_src: torch.Tensor | None = None,
         horizon: float | None,
+        state: StreamingRhythmState | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         visible_sizes = self._visible_sizes(unit_mask)
+        effective_horizon = self.reference_descriptor.encoder.trace_horizon if horizon is None else float(horizon)
         trace_context = self.sample_trace_window(
             ref_conditioning=ref_conditioning,
             phase_ptr=phase_ptr,
             window_size=window_size,
-            horizon=horizon,
+            horizon=effective_horizon,
             visible_sizes=visible_sizes,
         )
         planner_trace_context = self.sample_planner_trace_window(
             ref_conditioning=ref_conditioning,
             phase_ptr=phase_ptr,
             window_size=window_size,
-            horizon=horizon,
+            horizon=effective_horizon,
             visible_sizes=visible_sizes,
+        )
+        phase_gap = None
+        if state is not None and state.phase_anchor_progress is not None and dur_anchor_src is not None:
+            visible_total = (dur_anchor_src.float().clamp_min(0.0) * unit_mask.float()).sum(dim=1).clamp_min(1.0)
+            current_progress_ratio = state.phase_anchor_progress.float() / visible_total
+            phase_gap = state.phase_ptr.float() - current_progress_ratio
+        elif state is not None:
+            phase_gap = state.phase_ptr_gap
+        trace_context = self._blend_trace_fallback(
+            sampled_trace=trace_context,
+            fallback_summary=self._resolve_reference_summary(
+                ref_conditioning,
+                summary_key="slow_rhythm_summary",
+                fallback_trace_key="ref_rhythm_trace",
+            ),
+            phase_ptr=phase_ptr,
+            phase_gap=phase_gap,
+            horizon=effective_horizon,
+        )
+        planner_trace_context = self._blend_trace_fallback(
+            sampled_trace=planner_trace_context,
+            fallback_summary=self._resolve_reference_summary(
+                ref_conditioning,
+                summary_key="planner_slow_rhythm_summary",
+                fallback_trace_key="planner_ref_trace",
+            ),
+            phase_ptr=phase_ptr,
+            phase_gap=phase_gap,
+            horizon=effective_horizon,
         )
         return trace_context, planner_trace_context
 
@@ -369,7 +445,9 @@ class StreamingRhythmModule(nn.Module):
             phase_ptr=state.phase_ptr,
             window_size=content_units.size(1),
             unit_mask=unit_mask,
+            dur_anchor_src=dur_anchor_src,
             horizon=trace_horizon,
+            state=state,
         )
         planner = self.scheduler(
             unit_states=unit_embed,
@@ -578,6 +656,7 @@ class StreamingRhythmModule(nn.Module):
             phase_ptr=teacher_phase_ptr,
             window_size=content_units.size(1),
             unit_mask=unit_mask,
+            dur_anchor_src=dur_anchor_src,
             horizon=1.0,
         )
         planner, confidence = self.offline_teacher(

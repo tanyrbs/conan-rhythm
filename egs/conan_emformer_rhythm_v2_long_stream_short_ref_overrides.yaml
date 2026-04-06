@@ -1,0 +1,17 @@
+# Conservative runtime/config overrides for the short-reference + long-stream regime.
+# Apply on top of egs/conan_emformer_rhythm_v2*.yaml when source streams are materially
+# longer than the reference prompt.
+
+# Expose slow-memory sidecars so the module can fall back to global/slow rhythm cues
+# instead of replaying the reference tail forever after local phase is exhausted.
+rhythm_emit_reference_sidecar: true
+
+# When source progress keeps growing after the aligned reference phase is effectively
+# exhausted, fade local trace control toward slow/global rhythm summaries.
+rhythm_trace_exhaustion_gap_start: 0.08
+rhythm_trace_exhaustion_gap_end: 0.22
+rhythm_trace_exhaustion_local_floor: 0.20
+
+# Optional: slightly tighten the local reference window so near-tail phrase-final cues
+# do not dominate too much of the stream.
+rhythm_trace_horizon: 0.30

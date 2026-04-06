@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
+from modules.Conan.rhythm.contracts import StreamingRhythmState
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.runtime_modes import build_rhythm_ref_conditioning
 
@@ -160,6 +161,46 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertIn("planner_slow_rhythm_memory", conditioning)
         self.assertIn("planner_slow_rhythm_summary", conditioning)
         self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_summary"], planner_summary))
+
+    def test_trace_exhaustion_fallback_blends_local_window_toward_slow_summary(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_emit_reference_sidecar": True,
+                "rhythm_trace_exhaustion_gap_start": 0.08,
+                "rhythm_trace_exhaustion_gap_end": 0.22,
+                "rhythm_trace_exhaustion_local_floor": 0.20,
+            }
+        )
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        trace[:, :, 1] = 1.0
+        trace[:, :, 2] = 1.0
+        conditioning = module.build_reference_conditioning(
+            ref_conditioning={
+                "ref_rhythm_stats": stats,
+                "ref_rhythm_trace": trace,
+                "slow_rhythm_summary": torch.full((1, 5), 0.25, dtype=torch.float32),
+                "planner_slow_rhythm_summary": torch.full((1, 2), 0.10, dtype=torch.float32),
+            }
+        )
+        trace_context, _ = module._sample_trace_pair(
+            ref_conditioning=conditioning,
+            phase_ptr=torch.tensor([0.95], dtype=torch.float32),
+            window_size=4,
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            dur_anchor_src=torch.ones((1, 4), dtype=torch.float32),
+            horizon=0.35,
+            state=StreamingRhythmState(
+                phase_ptr=torch.tensor([0.95], dtype=torch.float32),
+                clock_delta=torch.zeros((1,), dtype=torch.float32),
+                commit_frontier=torch.zeros((1,), dtype=torch.long),
+                phase_anchor=torch.tensor([[1.0, 4.0]], dtype=torch.float32),
+            ),
+        )
+        self.assertLess(float(trace_context.mean()), 0.6)
+        self.assertGreater(float(trace_context.mean()), 0.30)
 
     def test_dataset_contract_rejects_partial_planner_sidecar(self) -> None:
         dataset = self._DummyDataset()

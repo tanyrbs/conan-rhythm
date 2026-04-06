@@ -16,8 +16,11 @@ from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
 class _AssemblerOwner:
-    def __init__(self, *, require_external_reference: bool) -> None:
-        self.hparams = {"rhythm_require_external_reference": require_external_reference}
+    def __init__(self, *, require_external_reference: bool, allow_identity_pairs: bool = False) -> None:
+        self.hparams = {
+            "rhythm_require_external_reference": require_external_reference,
+            "rhythm_allow_identity_pairs": allow_identity_pairs,
+        }
 
     @staticmethod
     def _coerce_content_sequence(content) -> list[int]:
@@ -133,6 +136,24 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
                 ref_item=item,
                 item_name="singleton",
             )
+
+    def test_explicit_identity_pair_can_bypass_external_reference_fail_fast_when_enabled(self) -> None:
+        owner = _AssemblerOwner(require_external_reference=True, allow_identity_pairs=True)
+        assembler = RhythmDatasetSampleAssembler(owner)
+        item = self._build_item("identity")
+        sample = self._build_sample()
+        sample["rhythm_pair_is_identity"] = torch.tensor([1.0], dtype=torch.float32)
+        sample["_rhythm_pair_manifest_entry"] = True
+
+        built = assembler.assemble(
+            sample=sample,
+            item=item,
+            ref_item=item,
+            item_name="identity",
+        )
+
+        self.assertIn("rhythm_reference_is_self", built)
+        self.assertTrue(torch.allclose(built["rhythm_reference_is_self"], torch.tensor([1.0])))
 
     def test_metrics_expose_reference_self_and_external_rates(self) -> None:
         planner = type(

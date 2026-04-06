@@ -27,6 +27,7 @@ rhythm_compact_joint_loss: false
 rhythm_dataset_target_mode: runtime_only
 rhythm_cached_reference_policy: sample_ref
 rhythm_require_external_reference: true
+rhythm_allow_identity_pairs: true
 rhythm_primary_target_surface: teacher
 rhythm_teacher_target_source: algorithmic
 rhythm_require_cached_teacher: false
@@ -50,14 +51,24 @@ lambda_rhythm_exec_speech: 1.0
 lambda_rhythm_exec_pause: 1.0
 lambda_rhythm_budget: 0.08
 lambda_rhythm_cumplan: 0.12
+lambda_rhythm_ref_descriptor_stats: 0.10
+lambda_rhythm_ref_descriptor_trace: 0.05
+lambda_rhythm_ref_group_contrastive: 0.05
 lambda_rhythm_plan: 0.0
 lambda_mel_adv: 0.0
 rhythm_pause_boundary_weight: 0.35
 rhythm_feasible_debt_weight: 0.05
+rhythm_ref_descriptor_local_weight: 1.0
+rhythm_ref_descriptor_boundary_weight: 1.0
+rhythm_ref_descriptor_boundary_loss_weight: 1.0
+rhythm_ref_group_contrastive_temperature: 0.10
+rhythm_pair_manifest_group_batches: true
 
 # Keep stage-2.5 light and stable like existing module-only stages.
 # Enforce true external-reference training semantics; if a speaker collapses to a
 # singleton after filtering, fail fast instead of silently falling back to self.
+# For true one-to-many bootstrap, point rhythm_pair_manifest_path at a fixed pair
+# manifest containing A|A + A|B_fast + A|B_mid + A|B_slow / pause-rich entries.
 use_pitch_embed: false
 binarization_args:
   with_f0: false

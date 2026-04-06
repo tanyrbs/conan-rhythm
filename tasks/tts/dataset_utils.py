@@ -4,6 +4,7 @@ import torch
 from utils.commons.dataset_utils import BaseDataset, collate_1d_or_2d
 from utils.commons.indexed_datasets import IndexedDataset
 from utils.audio.pitch.utils import norm_interp_f0
+from tasks.Conan.rhythm.pair_manifest import load_pair_manifest
 
 
 class BaseSpeechDataset(BaseDataset):
@@ -33,15 +34,108 @@ class BaseSpeechDataset(BaseDataset):
 
         self.spk2indices = None
         self._spk_map_ready = False
+        self._pair_entries = None
+        self._pair_group_to_indices = None
+        self._maybe_enable_pair_manifest()
 
     def _open_indexed_ds_if_needed(self):
         if self.indexed_ds is None:
             self.indexed_ds = IndexedDataset(f"{self.data_dir}/{self.prefix}")
 
+    @staticmethod
+    def _normalize_manifest_prefixes(value) -> set[str]:
+        if value is None:
+            return {"train"}
+        if isinstance(value, str):
+            return {part.strip() for part in value.split(",") if part.strip()}
+        if isinstance(value, (list, tuple, set)):
+            return {str(part).strip() for part in value if str(part).strip()}
+        return {str(value).strip()}
+
+    def _should_use_pair_manifest(self) -> bool:
+        path = self.hparams.get("rhythm_pair_manifest_path")
+        if not path:
+            return False
+        enabled_prefixes = self._normalize_manifest_prefixes(
+            self.hparams.get("rhythm_pair_manifest_prefixes", {"train"})
+        )
+        return self.prefix in enabled_prefixes
+
+    def _item_name_to_local_index(self):
+        self._open_indexed_ds_if_needed()
+        mapping = {}
+        for local_idx, global_idx in enumerate(self.avail_idxs):
+            item = self.indexed_ds[global_idx]
+            item_name = str(item["item_name"])
+            if item_name in mapping:
+                raise RuntimeError(
+                    f"Pair manifest requires unique item_name values inside split '{self.prefix}', "
+                    f"but found a duplicate: {item_name!r}."
+                )
+            mapping[item_name] = local_idx
+        return mapping
+
+    def _maybe_enable_pair_manifest(self):
+        if not self._should_use_pair_manifest():
+            return
+        manifest_path = self.hparams.get("rhythm_pair_manifest_path")
+        strict = bool(self.hparams.get("rhythm_pair_manifest_strict", True))
+        item_name_to_local = self._item_name_to_local_index()
+        raw_entries = load_pair_manifest(manifest_path, prefix=self.prefix)
+        if not raw_entries:
+            raise RuntimeError(
+                f"Pair manifest '{manifest_path}' resolved no entries for split '{self.prefix}'."
+            )
+        base_sizes = list(self.sizes)
+        pair_entries = []
+        group_to_indices = {}
+        group_to_numeric = {}
+        next_group_id = 0
+        for entry in raw_entries:
+            source_name = entry["source_item_name"]
+            ref_name = entry["ref_item_name"]
+            src_local = item_name_to_local.get(source_name)
+            ref_local = item_name_to_local.get(ref_name)
+            if src_local is None or ref_local is None:
+                if strict:
+                    raise RuntimeError(
+                        f"Pair manifest entry ({source_name!r}, {ref_name!r}) is missing from split '{self.prefix}' "
+                        "after filtering. Rebuild the manifest or relax rhythm_pair_manifest_strict."
+                    )
+                continue
+            group_label = str(entry.get("group_id", source_name))
+            if group_label not in group_to_numeric:
+                group_to_numeric[group_label] = next_group_id
+                next_group_id += 1
+            pair_index = len(pair_entries)
+            numeric_group = group_to_numeric[group_label]
+            pair_entries.append(
+                {
+                    "src_local": int(src_local),
+                    "ref_local": int(ref_local),
+                    "group_id": int(numeric_group),
+                    "pair_rank": int(entry.get("pair_rank", 0)),
+                    "is_identity": bool(src_local == ref_local),
+                }
+            )
+            group_to_indices.setdefault(numeric_group, []).append(pair_index)
+        if not pair_entries:
+            raise RuntimeError(
+                f"Pair manifest '{manifest_path}' yielded zero usable entries for split '{self.prefix}'."
+            )
+        self._pair_entries = pair_entries
+        self._pair_group_to_indices = group_to_indices
+        self.sizes = [base_sizes[entry["src_local"]] for entry in pair_entries]
+
     def _get_item(self, local_idx):
         global_idx = self.avail_idxs[local_idx] if self.avail_idxs is not None else local_idx
         self._open_indexed_ds_if_needed()
         return self.indexed_ds[global_idx]
+
+    def _resolve_pair_entry(self, index):
+        if self._pair_entries is None:
+            return None
+        return self._pair_entries[index]
 
     def _mel_to_tensor(self, mel, *, max_frames: int):
         spec = torch.as_tensor(mel, dtype=torch.float32)
@@ -92,15 +186,20 @@ class BaseSpeechDataset(BaseDataset):
 
     def __getitem__(self, index):
         self._build_speaker_map()
-        item = self._get_item(index)
+        pair_entry = self._resolve_pair_entry(index)
+        item_local = int(pair_entry["src_local"]) if pair_entry is not None else int(index)
+        item = self._get_item(item_local)
         hparams = self.hparams
 
         spec = self._mel_to_tensor(item['mel'], max_frames=hparams['max_frames'])
 
         spk_id = int(item['spk_id'])
-        cand_locals = self.spk2indices[spk_id]
-        ref_local = self._sample_reference_local_index(cand_locals, index)
-        ref_item = item if ref_local == index else self._get_item(ref_local)
+        if pair_entry is not None:
+            ref_local = int(pair_entry["ref_local"])
+        else:
+            cand_locals = self.spk2indices[spk_id]
+            ref_local = self._sample_reference_local_index(cand_locals, item_local)
+        ref_item = item if ref_local == item_local else self._get_item(ref_local)
         ref_spec = self._mel_to_tensor(ref_item['mel'], max_frames=hparams['max_frames'])
 
         sample = {
@@ -113,6 +212,14 @@ class BaseSpeechDataset(BaseDataset):
             '_raw_item': item,
             '_raw_ref_item': ref_item,
         }
+        if pair_entry is not None:
+            sample['rhythm_pair_group_id'] = torch.tensor([int(pair_entry["group_id"])], dtype=torch.long)
+            sample['rhythm_pair_rank'] = torch.tensor([int(pair_entry["pair_rank"])], dtype=torch.long)
+            sample['rhythm_pair_is_identity'] = torch.tensor(
+                [1.0 if bool(pair_entry["is_identity"]) else 0.0],
+                dtype=torch.float32,
+            )
+            sample['_rhythm_pair_manifest_entry'] = True
 
         if hparams.get('use_spk_embed', False):
             embed = item['spk_embed']
@@ -155,6 +262,23 @@ class BaseSpeechDataset(BaseDataset):
             batch['spk_ids'] = torch.tensor([s['spk_id'] for s in samples], dtype=torch.long)
 
         return batch
+
+    def ordered_indices(self):
+        if self._pair_entries is None or not bool(self.hparams.get("rhythm_pair_manifest_group_batches", True)):
+            return super().ordered_indices()
+        group_to_indices = self._pair_group_to_indices or {}
+        if not group_to_indices:
+            return super().ordered_indices()
+        group_ids = np.array(list(group_to_indices.keys()), dtype=np.int64)
+        if self.shuffle:
+            group_ids = np.random.permutation(group_ids)
+            if self.sort_by_len:
+                group_sizes = np.array([max(self._sizes[idx] for idx in group_to_indices[int(gid)]) for gid in group_ids])
+                group_ids = group_ids[np.argsort(group_sizes, kind='mergesort')]
+        indices = []
+        for group_id in group_ids.tolist():
+            indices.extend(group_to_indices[int(group_id)])
+        return np.asarray(indices, dtype=np.int64)
 
 
 class FastSpeechDataset(BaseSpeechDataset):
