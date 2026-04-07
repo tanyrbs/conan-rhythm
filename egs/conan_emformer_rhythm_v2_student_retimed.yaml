@@ -14,8 +14,8 @@ rhythm_apply_valid_override: true
 rhythm_train_render_start_steps: 0
 rhythm_valid_render_start_steps: 0
 rhythm_retimed_target_start_steps: 0
-rhythm_retimed_target_mode: hybrid
-rhythm_online_retimed_target_start_steps: 0
+rhythm_retimed_target_mode: cached
+rhythm_online_retimed_target_start_steps: 40000
 rhythm_use_retimed_pitch_target: true
 rhythm_disable_pitch_loss_when_retimed: false
 rhythm_disable_mel_adv_when_retimed: true
@@ -27,9 +27,18 @@ rhythm_joint_cumplan_macro_weight: 0.65
 # Conservative stage-3 curriculum:
 # early student_retimed updates should not be fully acoustic-dominated before
 # the explicit rhythm controller stabilizes on the retimed canvas.
-rhythm_stage3_acoustic_weight_start: 0.25
+rhythm_stage3_acoustic_weight_start: 0.10
 rhythm_stage3_acoustic_weight_end: 1.0
-rhythm_stage3_acoustic_ramp_steps: 10000
+rhythm_stage3_acoustic_ramp_steps: 30000
+# Keep pitch supervision on the same curriculum by default so early stage-3
+# warm-starts do not get mel-scaled but pitch-dominated.
+rhythm_stage3_scale_pitch_loss: true
+
+# Make stage-3 projector behavior explicit instead of depending on inherited
+# defaults.
+rhythm_projector_pause_selection_mode: sparse
+rhythm_projector_use_boundary_commit_guard: true
+rhythm_projector_build_render_plan: true
 
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none

@@ -126,7 +126,13 @@ class RefRhythmDescriptor(nn.Module):
         include_sidecar: bool = False,
     ) -> dict[str, torch.Tensor]:
         RefRhythmDescriptor._validate_cached_contract(ref_rhythm_stats, ref_rhythm_trace)
-        global_rate = torch.reciprocal(ref_rhythm_stats[:, 2:3].clamp_min(1.0))
+        mean_speech_frames = ref_rhythm_stats[:, 2:3]
+        has_speech = mean_speech_frames > 0
+        global_rate = torch.where(
+            has_speech,
+            torch.reciprocal(mean_speech_frames.clamp_min(1.0)),
+            torch.zeros_like(mean_speech_frames),
+        )
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
         boundary_trace = ref_rhythm_trace[:, :, 2:3]

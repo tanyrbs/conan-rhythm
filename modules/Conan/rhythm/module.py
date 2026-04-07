@@ -336,7 +336,7 @@ class StreamingRhythmModule(nn.Module):
             ),
             local_gate=reliability["local_gate"],
         )
-        return trace_context, planner_trace_context
+        return trace_context, planner_trace_context, reliability
 
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._finalize_reference_conditioning(self.reference_descriptor(ref_mel))

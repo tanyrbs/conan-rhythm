@@ -133,7 +133,12 @@ def _sync_raw_reference_contract(ref_conditioning: dict[str, Any]) -> None:
             )[:, :1].to(device=synced_stats.device, dtype=synced_stats.dtype)
         global_rate = ref_conditioning.get("global_rate")
         if isinstance(global_rate, torch.Tensor):
-            mean_speech = torch.reciprocal(global_rate.float().clamp_min(1e-6)).reshape(batch_size, -1)[:, :1]
+            global_rate = global_rate.float().reshape(batch_size, -1)[:, :1]
+            mean_speech = torch.where(
+                global_rate > 0,
+                torch.reciprocal(global_rate.clamp_min(1e-6)),
+                torch.zeros_like(global_rate),
+            )
             synced_stats[:, _REF_STATS_MEAN_SPEECH_IDX:_REF_STATS_MEAN_SPEECH_IDX + 1] = mean_speech.to(
                 device=synced_stats.device,
                 dtype=synced_stats.dtype,

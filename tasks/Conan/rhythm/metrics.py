@@ -639,6 +639,8 @@ def _update_acoustic_target_metrics(
     for metric_key, field_name in (
         ("rhythm_metric_pitch_supervision_disabled", "rhythm_pitch_supervision_disabled"),
         ("rhythm_metric_missing_retimed_pitch_target", "rhythm_missing_retimed_pitch_target"),
+        ("rhythm_metric_stage3_pitch_loss_scale", "rhythm_stage3_pitch_loss_scale"),
+        ("rhythm_metric_retimed_pitch_loss_scale", "rhythm_retimed_pitch_loss_scale"),
     ):
         scalar = _optional_scalar(output.get(field_name), ctx.execution.speech_duration_exec.device)
         if scalar is not None:

@@ -1,420 +1,428 @@
-﻿# AutoDL Training Handoff (2026-04-05)
+# AutoDL Training Handoff（2026-04-07 UTC）
 
-Validated local baseline before writing this handoff: `67bd85b` (`Add retimed pitch handoff regression coverage`).
+这份文档只回答 3 个问题：
 
-This document is the practical launch handoff for moving the maintained rhythm path onto an AutoDL Linux GPU instance. It is intentionally operational: what to copy, what to run, what must pass, and what signals mean "stop".
+1. **项目现在到底进行到哪里了？**
+2. **每个训练阶段的目的是什么？**
+3. **我们现在为什么先不走 `student_kd`，而是 teacher 后优先上 v2.5？**
 
-## 1. Go / no-go summary
+---
 
-### Ready to launch once real assets are mounted
+## 1. 当前项目真实状态
 
-- `teacher_offline`
-- `student_kd` (only after a real teacher export + rebuilt stage-2 binary)
+### 1.0 本次相对 `origin/main` 的代码侧结论
 
-### Do **not** bless yet from the shared smoke assets
+这轮没有盲目追 main，而是做了“吸收 upstream 明显优点 + 保留本地更保守训练策略”的组合：
 
-- `student_retimed` with the default maintained config
+- **吸收 upstream**
+  - stage-3 projector 显式默认切到 `sparse + boundary_commit_guard + render_plan`
+- **本地补强**
+  - `_sample_trace_pair()` 三返回值 contract 修复
+  - stage-3 acoustic ramp 改成 runtime 锚点，而不是绝对 `global_step`
+  - stage-3 pitch loss 默认跟随 acoustic curriculum
+  - algorithmic teacher 的 pause top-k 改成 per-sample row-wise
+  - online retimed target 权重接入 `trace_reliability.local_gate`
+  - zero-speech descriptor robustness 修复
+- **需要注意**
+  - soft `boundary_trace` 已改到代码，但**只有重建 binary/cache 后才会生效**
+  - 当前正在跑的 stage-1 teacher 不会自动吃到这项 cache 侧更新
 
-Reason: the checked-in smoke `student_binary` still lacks real F0, and the formal maintained stage-3 config keeps `use_pitch_embed=true` / `with_f0=true`.
+### 1.1 已经完成的资产
 
-## 2. Fresh local checks rerun on this checkout
+#### train100
 
-These were rerun locally before writing this handoff:
+- processed：`data/processed/libritts_train100_formal`
+- binary：`data/binary/libritts_train100_formal_rhythm_v5`
+- warmup checkpoint：`checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
+
+#### train360
+
+- processed：`data/processed/libritts_train360_formal_trainset`
+- binary：`data/binary/libritts_train360_formal_trainset_rhythm_v5`
+
+#### 当前保留的关键大小
+
+- `data/processed/libritts_train100_formal`：约 `140M`
+- `data/binary/libritts_train100_formal_rhythm_v5`：约 `13G`
+- `data/processed/libritts_train360_formal_trainset`：约 `375M`
+- `data/binary/libritts_train360_formal_trainset_rhythm_v5`：约 `33G`
+
+### 1.2 已经删掉的东西
+
+为防止磁盘再次溢出，下面这些 raw 音频已经删除：
+
+- `/root/autodl-tmp/data/LibriTTS/train-clean-100`
+- `/root/autodl-tmp/data/LibriTTS/train-clean-360`
+
+这意味着：
+
+- **继续跑 mixed stage-1 训练没有问题**，因为它复用现成 binary
+- **如果要重做 train100 / train360 metadata 或 binarize，就必须重新挂载 raw 音频**
+
+### 1.3 当前没有在跑的东西
+
+截至 **2026-04-07 UTC**，没有检测到正在运行的：
+
+- mixed100+360 stage-1 正式训练
+- preflight
+- binarize
+
+也就是说：
+
+> **现在不是“训练已经结束”，而是“mixed formal stage-1 还没真正启动起来”。**
+
+---
+
+## 2. 最近一次失败到底是什么
+
+最近一次恢复流水线：
+
+- `logs/stage1_recovery_mixed100360_v2_20260406_091257.sh`
+
+最终状态：
+
+- `logs/stage1_recovery_mixed100360_v2_20260406_091257.status`
+- 内容：`2026-04-06T18:19:23Z PIPELINE_FAILED rc=1`
+
+### 2.1 它失败在什么地方
+
+不是失败在：
+
+- train360 metadata
+- train360 binarize
+
+而是失败在：
+
+- **mixed preflight 的 model dry-run**
+
+日志关键错误：
+
+- `Model dry-run failed for split 'train': not enough values to unpack (expected 3, got 2)`
+
+### 2.2 根因
+
+根因已定位：
+
+- 文件：`modules/Conan/rhythm/module.py`
+- 函数：`_sample_trace_pair()`
+
+问题是：
+
+- 调用方期望返回 `3` 个值
+- 实际函数只返回 `2` 个值
+
+### 2.3 当前修复状态
+
+本地已经补了修复：
+
+- `_sample_trace_pair()` 现在返回：
+  - `trace_context`
+  - `planner_trace_context`
+  - `reliability`
+
+同时本地新增了更安全的恢复脚本：
+
+- `scripts/autodl_recovery_mixed100360_v3_trainonly.sh`
+
+它的关键作用是：
+
+- **直接复用已经完成的 train360 processed / binary**
+- 跳过已经做完的 metadata / binarize
+- 继续执行：
+  - `TRAIN360_PREFLIGHT`
+  - `MIXED_PREFLIGHT`
+  - `MIXED_REAL_SMOKE`
+  - `FORMAL_STAGE1_RUN`
+
+---
+
+## 3. 现在训练的真正目的是什么
+
+当前不是泛泛而谈“训练模型”，而是有明确阶段目标。
+
+### 3.1 Stage 1：`teacher_offline`
+
+配置主入口：
+
+- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
+- 当前 mixed 入口：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360.yaml`
+
+#### 这个阶段的目的
+
+- 先把 **offline teacher** 学出来
+- 先把：
+  - scheduler
+  - controller
+  - projector
+  - prefix consistency
+  - budget / execution 结构
+  学稳
+- 保留 full/global teacher 的全局规划能力
+- 为后续 external-ref student 阶段提供强初始化
+
+#### 这个阶段不是干什么
+
+- 不是最终部署模型
+- 不是最终 acoustic closure
+- 不是 external-ref 上限实验本身
+
+#### 当前这一阶段的真实目标
+
+> 用现有 `train100` + `train360` binary 跑通 mixed formal stage-1，拿到真正可用的 teacher checkpoint。
+
+---
+
+### 3.2 为什么 teacher 后先不走 `student_kd`
+
+这是当前策略变化里最重要的一点。
+
+#### 先说结论
+
+对我们现在的核心目标，**teacher 之后优先上 `student_ref_bootstrap`，比先上 `student_kd` 更对焦。**
+
+#### 原因
+
+因为当前真正想回答的问题不是：
+
+- student 能不能稳定复现 cached/self-conditioned teacher surface
+
+而是：
+
+- 模型是否真的使用了外部 `B`
+- one-to-many 下会不会 collapse 成平均计划
+- descriptor 语义是否真的跟着 `B` 变化
+
+而 `student_kd` 当前更偏向：
+
+- `cached_only`
+- `teacher_target_source: learned_offline`
+- `distill_surface: cache`
+
+它更适合作为：
+
+- baseline
+- ablation
+- 稳定性对照
+
+但**不是当前最直接回答 external-reference 问题的第一 student 阶段。**
+
+---
+
+### 3.3 teacher 结束后，优先进入的阶段：`student_ref_bootstrap`
+
+配置：
+
+- `egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml`
+- `egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml`
+
+#### 这个阶段的目的
+
+- external reference / pairwise bootstrap
+- 检查模型是否真的根据外部 `B` 改变 rhythm，而不是：
+  - 输出平均计划
+  - 轻度依赖 B 但不够强
+  - 干脆忽略 B
+- 把它作为 **teacher 之后的第一 student-facing distillation / bootstrap 阶段**
+
+#### 为什么它现在更该优先做
+
+因为它已经正面对准了：
+
+- `runtime_only`
+- `sample_ref`
+- `rhythm_require_external_reference: true`
+- `lambda_rhythm_descriptor_consistency`
+- `lambda_rhythm_pairwise_contrastive`
+- `lambda_rhythm_pairwise_diversity`
+
+也就是说，它已经不只是“换个 ref”，而是在训练机制上开始逼模型：
+
+- 输出的 rhythm semantics 要像 `B`
+- same-A 面对不同 `B` 时必须分开
+- 不能塌成平均答案
+
+#### 但必须说清楚的限制
+
+当前这一步要说严谨：
+
+- 它仍然是 `runtime_only`
+- `rhythm_teacher_target_source` 仍然是 `algorithmic`
+
+所以更准确地说，它是：
+
+> **teacher warm-start + external-ref bootstrap / first student-facing distillation stage**
+
+而**还不是**完全摆脱 algorithmic ceiling 的最终 learned-teacher distill 终局。
+
+这点文档里必须说清楚，不能自我催眠。
+
+---
+
+### 3.4 `student_kd` 现在在项目中的定位
+
+配置：
+
+- `egs/conan_emformer_rhythm_v2_student_kd.yaml`
+
+#### 这个阶段现在还保不保留
+
+保留。
+
+#### 但它现在不再是什么
+
+它**不再是 teacher 之后的默认下一步**。
+
+#### 它现在更像什么
+
+- baseline
+- ablation
+- 稳定性验证分支
+- 对照“cached teacher surface 能蒸到什么程度”
+
+所以当前更准确的说法是：
+
+- `student_kd` 不是被删除
+- 而是从“主链默认下一步”降级成“辅助支线”
+
+---
+
+### 3.5 Stage 3：`student_retimed`
+
+配置：
+
+- `egs/conan_emformer_rhythm_v2_student_retimed.yaml`
+
+#### 这个阶段的目的
+
+- 把 rhythm control 真正闭环到 retimed acoustic canvas 上
+- 让输出声学结果也服从节奏控制，而不只是控制层指标好看
+
+#### 为什么它不是现在要做的事
+
+因为：
+
+- 它依赖前面 teacher / v2.5 student 路径先成立
+- 它还依赖 retimed mel / F0 sidecar 等更重的资产合同
+- 当前真正卡住的，不是 stage-3，而是 mixed stage-1 还没正式跑起来
+
+---
+
+## 4. 当前最重要的批判性结论
+
+### 4.1 我们现在不是“数据没准备好”
+
+不是。
+
+至少对 mixed stage-1 来说：
+
+- train100 binary 已有
+- train360 binary 已有
+
+所以现在的 blocker 不是数据准备，而是：
+
+- v2 脚本在 mixed preflight model dry-run 上挂掉
+- 需要切到本地修过 bug 的 v3 流程
+
+### 4.2 我们现在也不是“该切 student 了”
+
+也不是。
+
+因为当前最关键的 teacher formal mixed stage-1 还没跑起来。
+
+所以现在如果跳 student，会把训练链条打乱。
+
+### 4.3 当前正确叙述
+
+最准确的说法应该是：
+
+> `train100` warmup 已完成，`train360` processed/binary 已完成；当前下一步是启动并跑通 mixed `teacher_offline` formal stage-1。教师训练好后，优先进入 `student_ref_bootstrap`，而不是先跑 `student_kd`。
+
+---
+
+## 5. 现在就该怎么做
+
+### 5.1 立即动作
 
 ```bash
-python -m compileall -q modules tasks scripts tests utils data_gen
-python -m unittest discover -s tests/rhythm -p "test_*.py"
-python -u scripts/smoke_test_rhythm_v2.py
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-  --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4 \
-  --processed_data_dir data/processed/libritts_local_real_smoke \
-  --splits train \
-  --inspect_items 2 \
-  --model_dry_run \
-  --strict_processed_data_dir
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
-  --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary \
-  --processed_data_dir data/processed/libritts_local_real_smoke \
-  --splits train valid \
-  --inspect_items 2 \
-  --model_dry_run \
-  --strict_processed_data_dir
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-  --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary \
-  --processed_data_dir data/processed/libritts_local_real_smoke \
-  --splits train \
-  --inspect_items 2 \
-  --model_dry_run \
-  --strict_processed_data_dir
+cd /root/autodl-tmp/project-1/conan-rhythm
+bash scripts/autodl_recovery_mixed100360_v3_trainonly.sh
 ```
 
-Observed result:
-
-- compileall: **passed**
-- rhythm tests: **222 passed**
-- maintained smoke test: **passed**
-- `teacher_offline` strict preflight + dry-run: **passed**
-- `student_kd` strict preflight + dry-run: **passed**
-- default `student_retimed` strict preflight + dry-run: **failed as expected** on missing `f0`
-
-The stage-3 smoke counter-check also still works only under a non-formal override:
+### 5.2 监控
 
 ```bash
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-  --hparams use_pitch_embed=False,binarization_args.with_f0=False \
-  --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary \
-  --processed_data_dir data/processed/libritts_local_real_smoke \
-  --splits train \
-  --inspect_items 2 \
-  --model_dry_run \
-  --strict_processed_data_dir
+tail -f logs/stage1_recovery_mixed100360_v3_trainonly.status
 ```
 
-That override passes structurally, but it is **smoke-only** and must not be treated as a formal stage-3 readiness signal.
-
-## 3. What must exist on the AutoDL machine
-
-Use Linux paths, but keep the same logical contract.
-
-### Required runtime assets
-
-| Surface | Must exist |
-|---|---|
-| repo | cloned checkout of this branch |
-| conda env | Python 3.10 + `pip install -r requirements.txt` |
-| base checkpoints | `checkpoints/Emformer`, `checkpoints/hifigan_vc`, and any path-specific optional ckpts you actually use |
-| formal processed corpus | real `data/processed/<dataset>`; not the placeholder `data/processed/vc/example_metadata.json` |
-| formal binary cache | real `data/binary/<dataset>` with non-empty `train` and `valid` splits |
-| teacher export dir for stage-2/3 | `data/teacher_targets/<run_name>` |
-| retimed stage-3 assets | rebuilt binary containing retimed mel targets **and** matched F0/UV side data |
-
-### Asset rules that matter
-
-- Formal training should use rhythm cache **v5**.
-- The checked-in `libritts_single_smoke_rhythm_v4` is compatibility smoke only.
-- The checked-in `artifacts/rhythm_teacher_export_student_kd/...` chain is smoke only because the teacher checkpoint is `bootstrap_random_init`.
-- Do not start `student_kd` until teacher export covers `train`, `valid`, and `test`.
-- Do not start default `student_retimed` unless the rebuilt stage-3 binary really contains usable F0/UV for the retimed path.
-- Even though `train_sets` is now checked more strictly, the first formal AutoDL baseline should still prefer one unified binary over concatenating multiple separately-binarized train roots.
-
-## 4. AutoDL environment bootstrap
-
-Recommended first-time setup on the cloud instance:
+如果你是用 shell 重定向方式启动，例如：
 
 ```bash
-cd /root/autodl-tmp
-git clone git@github.com:tanyrbs/conan-rhythm.git
-cd conan-rhythm
-conda create -n conan python=3.10 -y
-conda activate conan
-pip install -r requirements.txt
+bash scripts/autodl_recovery_mixed100360_v3_trainonly.sh > logs/stage1_recovery_mixed100360_v3_trainonly.log 2>&1 &
 ```
 
-Then sync or mount your real data/checkpoint assets into the repo-relative paths you plan to use.
-
-Recommended first launch posture:
-
-- start with **single-GPU** training first
-- keep maintained configs unchanged on the first long run
-- avoid turning on experimental knobs (`context_match`, `balanced`) before the default chain is clean
-- use a **fresh `exp_name`** or `--reset` for fresh runs, so stale saved config does not silently override the current YAML
-- the maintained stage configs intentionally pin `load_ckpt_strict: false` for cross-stage warm-start; still inspect startup logs so only expected Rhythm V2 / offline-teacher / pitch keys are missing
-
-## 5. Pre-launch checklist on AutoDL
-
-Run these in order.
-
-### 5.1 Code / environment sanity
+那么再看：
 
 ```bash
-conda activate conan
-python -m compileall -q modules tasks scripts tests utils data_gen
-python -m unittest discover -s tests/rhythm -p "test_*.py"
-python -u scripts/smoke_test_rhythm_v2.py
+tail -f logs/stage1_recovery_mixed100360_v3_trainonly.log
 ```
 
-Expected:
-
-- compileall passes
-- tests stay at least at the local baseline order of magnitude (currently 222 rhythm tests)
-
-If you are building a LibriTTS processed metadata set for `train-clean-100 + train-clean-360`, the local metadata helper now supports repeated or comma-separated `--train_split` flags instead of forcing a single train split.
-- smoke still reports healthy closure signals such as:
-  - `metric exec total corr = 1.0`
-  - `metric prefix drift l1 = 0.0`
-  - very small `budget projection repair ratio`
-
-### 5.2 Strict preflight before every stage
-
-Always use `--strict_processed_data_dir` for formal cloud launches.
-
-#### Stage 1: `teacher_offline`
+如果外层 wrapper 需要：
 
 ```bash
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-  --binary_data_dir data/binary/<teacher_binary> \
-  --processed_data_dir data/processed/<dataset> \
-  --splits train valid \
-  --inspect_items 4 \
-  --model_dry_run \
-  --strict_processed_data_dir
+bash logs/stage1_recovery_mixed100360_v3_trainonly.sh
 ```
 
-Pass criteria:
-
-- non-empty `train` and `valid`
-- no placeholder processed path warning/error
-- dry-run succeeds
-- because the maintained teacher config sets `rhythm_teacher_as_main: true`, this path is still allowed to emit `mel_out` for teacher audition/export semantics
-
-#### Stage 2: `student_kd`
-
-```bash
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
-  --binary_data_dir data/binary/<student_kd_binary> \
-  --processed_data_dir data/processed/<dataset> \
-  --hparams rhythm_teacher_target_dir='data/teacher_targets/<teacher_export>' \
-  --splits train valid \
-  --inspect_items 4 \
-  --model_dry_run \
-  --strict_processed_data_dir
-```
-
-Pass criteria:
-
-- cached teacher fields present on both `train` and `valid`
-- dry-run succeeds
-- module-only objective is still the active stage contract
-
-#### Stage 3: `student_retimed`
-
-```bash
-python scripts/preflight_rhythm_v2.py \
-  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-  --binary_data_dir data/binary/<student_retimed_binary> \
-  --processed_data_dir data/processed/<dataset> \
-  --hparams rhythm_teacher_target_dir='data/teacher_targets/<teacher_export>' \
-  --splits train valid \
-  --inspect_items 4 \
-  --model_dry_run \
-  --strict_processed_data_dir
-```
+### 5.3 预期正确的状态推进
 
-Pass criteria:
-
-- retimed mel target fields present
-- real F0/UV present
-- dry-run succeeds **without** `use_pitch_embed=False`
-
-If this command only passes after disabling pitch embed, stop. That means your stage-3 asset contract is still smoke-grade, not formal.
-
-## 6. Training commands to hand off
-
-Use these as the maintained launch templates.
-
-Warm-start rule:
-
-- `teacher_offline` should normally warm-start from a base Conan checkpoint
-- `student_kd` should normally warm-start from the finished `teacher_offline` checkpoint
-- `student_retimed` should normally warm-start from the finished `student_kd` checkpoint
-- for the **first formal stage-3 run**, prefer `rhythm_retimed_target_mode='cached'` as the safer debug baseline before you A/B `hybrid`
+应依次看到：
 
-### 6.1 `teacher_offline`
+1. `RECOVERY_V3_TRAINONLY_START`
+2. `TRAIN360_REUSE_EXISTING_ARTIFACTS`
+3. `TRAIN360_PREFLIGHT_DONE`
+4. `MIXED_PREFLIGHT_DONE`
+5. `MIXED_REAL_SMOKE_DONE`
+6. `FORMAL_STAGE1_RUN_START`
 
-```bash
-conda activate conan
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-  --exp_name conan_rhythm_v2_teacher_offline \
-  --reset \
-  -hp "load_ckpt='checkpoints/<original_conan_ckpt_or_dir>',binary_data_dir='data/binary/<teacher_binary>',processed_data_dir='data/processed/<dataset>'"
-```
-
-What this stage is for:
+如果最终正式训练在跑，说明当前主阻塞已经解除。
 
-- learn the offline teacher surfaces
-- keep teacher as the main branch
-- keep audio-export / audition semantics intact
+---
 
-### 6.2 Export teacher targets
+## 6. stage 之后到底要干什么
 
-```bash
-conda activate conan
-CUDA_VISIBLE_DEVICES=0 python scripts/export_rhythm_teacher_targets.py \
-  --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml \
-  --ckpt checkpoints/conan_rhythm_v2_teacher_offline \
-  --output_dir data/teacher_targets/conan_rhythm_v2_teacher_offline \
-  --binary_data_dir data/binary/<teacher_binary> \
-  --processed_data_dir data/processed/<dataset> \
-  --splits train valid test \
-  --device cuda \
-  --overwrite
-```
+这是当前最容易被说乱的地方。
 
-Hard rule:
+### 当前项目优先总链路
 
-- export all of `train valid test`
-- do not move to stage-2 on a partial export
+1. `teacher_offline`
+2. 固化 teacher checkpoint / 准备 pair manifest / grouped batch
+3. `student_ref_bootstrap`
+4. `student_retimed`
+5. `student_kd`（可选 baseline / ablation / 稳定性分支）
 
-### 6.3 Rebuild the stage-2 binary
+### 一句话理解
 
-```bash
-conda activate conan
-python -m data_gen.tts.runs.binarize \
-  --reset \
-  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
-  --exp_name bin_student_kd_<run_tag> \
-  -hp "processed_data_dir='data/processed/<dataset>',binary_data_dir='data/binary/<student_kd_binary>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline'"
-```
+- `teacher_offline`：先把老师练强
+- `student_ref_bootstrap`：先逼 student 真正学会用外部 ref
+- `student_retimed`：把节奏控制闭环到最终声学输出
+- `student_kd`：作为 cached/self-conditioned 对照支线保留
 
-After rebuild, rerun stage-2 preflight before training.
+### teacher export 现在还要不要做
 
-### 6.4 `student_kd`
+要，但要说清楚它的定位：
 
-```bash
-conda activate conan
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-  --config egs/conan_emformer_rhythm_v2_student_kd.yaml \
-  --exp_name conan_rhythm_v2_student_kd \
-  --reset \
-  -hp "load_ckpt='checkpoints/conan_rhythm_v2_teacher_offline',binary_data_dir='data/binary/<student_kd_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline'"
-```
+- **建议做**，因为它有利于审计、对照和后续 cached-teacher baseline
+- 但它**不再是 v2.5 启动的硬前置条件**
+- 它仍然是 `student_kd` 的硬前置
 
-Maintained expectation:
+---
 
-- this is still a module-only stage
-- the maintained KD path is effectively teacher-main + shape-only KD
-- do not open the experimental context-match branch on the first formal run
+## 7. 当前最短结论
 
-### 6.5 Rebuild / verify the stage-3 binary
+截至 **2026-04-07 UTC**：
 
-Before stage-3, the rebuilt binary must contain:
-
-- teacher targets
-- retimed mel targets
-- matched F0/UV that stay valid for retimed supervision
-
-If needed, rebuild the binary with the stage-3 config and the appropriate side assets mounted; then rerun strict preflight.
-
-### 6.6 `student_retimed`
-
-```bash
-conda activate conan
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
-  --config egs/conan_emformer_rhythm_v2_student_retimed.yaml \
-  --exp_name conan_rhythm_v2_student_retimed \
-  --reset \
-  -hp "load_ckpt='checkpoints/conan_rhythm_v2_student_kd',binary_data_dir='data/binary/<student_retimed_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline',rhythm_retimed_target_mode='cached'"
-```
-
-First formal stage-3 launch rules:
-
-- keep the maintained config unchanged
-- do **not** start from `student_retimed_balanced`
-- do **not** disable pitch embed just to get a run started
-- if strict preflight fails on F0 or matched retimed pitch, fix assets first
-
-## 7. What to watch during training
-
-### 7.1 Global watch items
-
-Watch these in logs / TensorBoard / probe summaries:
-
-- `total_loss`
-- `L_base`
-- `L_rhythm_exec`
-- `L_stream_state`
-- `L_pitch`
-- `grad_norm_before_clip`
-- validation `val_loss`
-
-### 7.2 Stage-1 / stage-2 watch items
-
-For module-only stages (`teacher_offline`, `student_kd`):
-
-- `L_base` should stay effectively off / zero-dominated
-- acoustic objectives should not silently come back during validation
-- if you see mel/pitch dominating these stages, stop and inspect stage semantics
-
-Useful runtime flags if exported by probes/logs:
-
-- `rhythm_metric_module_only_objective`
-- `rhythm_metric_skip_acoustic_objective`
-- `rhythm_metric_disable_acoustic_train_path`
-
-### 7.3 Stage-3 watch items
-
-These are the most important stage-3 observability signals:
-
-- `rhythm_metric_pitch_supervision_disabled`
-- `rhythm_metric_missing_retimed_pitch_target`
-- `acoustic_target_length_mismatch_abs_before_align`
-- `acoustic_target_resampled_to_output`
-- `acoustic_target_trimmed_to_output`
-- `rhythm_metric_acoustic_target_is_retimed`
-
-Interpretation:
-
-- formal stage-3 should **not** live in a state where `rhythm_metric_pitch_supervision_disabled=1`
-- if `rhythm_metric_missing_retimed_pitch_target=1`, your retimed pitch assets are not ready
-- repeated large length mismatch / resample / trim activity means your retimed target contract needs inspection
-
-### 7.4 Known stage-3 risk pattern
-
-The latest 2000-step smoke probe still shows a bad imbalance pattern:
-
-- `L_base.mean ~= 6.53`
-- `L_rhythm_exec.mean ~= 0.00279`
-- `L_stream_state.mean ~= 0.000746`
-- `grad_norm_before_clip.mean ~= 158.86`
-- `grad_norm_before_clip.max ~= 275.92`
-
-So for the first real stage-3 run, actively watch whether:
-
-- `L_base` overwhelms control losses for too long
-- gradients stay clip-heavy for many thousands of steps
-- pitch supervision is silently disabled
-
-If those persist, stop and inspect before wasting a long AutoDL run.
-
-## 8. Stop conditions
-
-Stop the run and inspect assets/code if any of these happen:
-
-- strict preflight only passes after weakening the maintained config
-- module-only stages show meaningful acoustic/pitch objective activity
-- stage-3 logs say pitch supervision is disabled or matched retimed pitch is missing
-- stage-3 keeps resampling/trimming retimed targets on a large fraction of batches
-- losses go `nan` / `inf`
-- grad norm is persistently huge and clipping dominates progress
-- you accidentally launched on smoke assets or smoke teacher export
-
-## 9. Practical handoff notes for the next operator
-
-- Keep the maintained chain narrow: `teacher_offline -> export -> student_kd -> retimed rebuild -> student_retimed`.
-- Do not treat the smoke assets in this repo as formal training data.
-- Keep `teacher_offline` as `teacher_as_main` if you need audio/audition outputs from the teacher stage.
-- Use fresh `exp_name`s for new launches; reuse an old run only when you intentionally want to continue it.
-- For the first AutoDL launch, prefer correctness over speed: single GPU, maintained config, strict preflight, no experimental flags.
-- After every stage transition, rerun strict preflight before starting the next long job.
-
-## 10. Minimal "first day on AutoDL" checklist
-
-1. Clone repo and create `conan` env.
-2. Mount/sync real processed data, binary cache, and checkpoints.
-3. Run compileall + rhythm tests + maintained smoke.
-4. Run strict teacher preflight.
-5. Launch `teacher_offline`.
-6. Export teacher targets for `train/valid/test`.
-7. Rebuild stage-2 binary.
-8. Run strict stage-2 preflight.
-9. Launch `student_kd`.
-10. Prepare stage-3 retimed/F0 assets.
-11. Run strict stage-3 preflight with the default maintained config.
-12. Only then launch `student_retimed`.
+- `train100` binary：**完成**
+- `train360` binary：**完成**
+- mixed `teacher_offline` formal stage-1：**尚未正式启动成功**
+- 当前正确动作：**切到 v3，复用现有 train360 资产，启动 mixed stage-1**
+- teacher 之后的当前项目优先顺序：**student_ref_bootstrap -> student_retimed**
+- `student_kd`：**保留，但不作为默认下一步**

@@ -276,23 +276,32 @@ class ReferenceRhythmEncoder(nn.Module):
             boundary_strength = boundary_strength[:, : energy.size(1)]
 
         speech_progress = speech_mask.float().cumsum(dim=1)
-        speech_total = speech_progress[:, -1:].clamp_min(1.0)
-        progress = speech_progress / speech_total
+        speech_total = speech_progress[:, -1:]
         uniform = torch.linspace(0.0, 1.0, energy.size(1), device=energy.device)[None, :]
+        progress = speech_progress / speech_total.clamp_min(1.0)
+        no_speech = speech_total <= 0
+        progress = torch.where(no_speech.expand_as(progress), uniform.expand_as(progress), progress)
         segment_duration_bias = progress - uniform
 
-        boundary_events = boundary_strength >= torch.quantile(
+        boundary_threshold = torch.quantile(
             boundary_strength,
             self.boundary_quantile,
             dim=1,
             keepdim=True,
         )
+        boundary_events = boundary_strength >= boundary_threshold
+        # Keep a continuous boundary trace for planning while preserving the
+        # binary event rate in the global stats. This gives the planner a
+        # graded notion of boundary salience instead of a hard 0/1 trace.
+        boundary_mean = boundary_strength.mean(dim=1, keepdim=True)
+        boundary_std = boundary_strength.std(dim=1, keepdim=True).clamp_min(1e-6)
+        boundary_strength_soft = torch.sigmoid((boundary_strength - boundary_mean) / boundary_std)
 
         feature_track = torch.stack(
             [
                 pause_mask.float(),
                 local_rate,
-                boundary_events.float(),
+                boundary_strength_soft,
                 segment_duration_bias,
                 voiced,
             ],

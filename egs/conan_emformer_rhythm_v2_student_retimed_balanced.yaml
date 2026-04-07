@@ -4,7 +4,8 @@ base_config: egs/conan_emformer_rhythm_v2_student_retimed.yaml
 load_ckpt_strict: false
 
 # Conservative experimental stage-3 variant:
-# keep maintained stage semantics, but enable bounded EMA group balancing.
+# inherit the safer cached stage-3 baseline, then additionally enable bounded
+# EMA group balancing when acoustic dominance is still too strong.
 rhythm_loss_balance_mode: ema_group
 rhythm_loss_balance_beta: 0.98
 rhythm_loss_balance_alpha: 0.50

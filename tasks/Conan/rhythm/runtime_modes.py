@@ -244,6 +244,26 @@ def _apply_online_retimed_repair_gate(frame_weight, model_out):
     return frame_weight * repair_gate
 
 
+def _apply_online_retimed_trace_reliability_gate(frame_weight, model_out):
+    if frame_weight is None or model_out is None:
+        return frame_weight
+    execution = model_out.get("rhythm_execution")
+    trace_reliability = getattr(execution, "trace_reliability", None) if execution is not None else None
+    if not isinstance(trace_reliability, dict):
+        return frame_weight
+    local_gate = trace_reliability.get("local_gate")
+    if local_gate is None:
+        return frame_weight
+    if not torch.is_tensor(local_gate):
+        local_gate = torch.as_tensor(local_gate, dtype=frame_weight.dtype, device=frame_weight.device)
+    else:
+        local_gate = local_gate.to(device=frame_weight.device, dtype=frame_weight.dtype)
+    local_gate = local_gate.clamp(0.0, 1.0)
+    while local_gate.dim() < frame_weight.dim():
+        local_gate = local_gate.unsqueeze(-1)
+    return frame_weight * local_gate
+
+
 def resolve_acoustic_target_post_model(
     sample,
     model_out,
@@ -283,6 +303,7 @@ def resolve_acoustic_target_post_model(
                 confidence_floor=float(hparams.get("rhythm_retimed_confidence_floor", 0.05)),
             )
             online_weight = _apply_online_retimed_repair_gate(online_weight, model_out)
+            online_weight = _apply_online_retimed_trace_reliability_gate(online_weight, model_out)
             return (
                 online_target,
                 True,

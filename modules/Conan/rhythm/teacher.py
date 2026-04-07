@@ -73,11 +73,15 @@ def _smooth_1d(x: torch.Tensor, kernel_size: int) -> torch.Tensor:
     return y
 
 
-def _sparsify_scores(x: torch.Tensor, mask: torch.Tensor, *, topk_ratio: float) -> torch.Tensor:
+def _sparsify_scores(x: torch.Tensor, mask: torch.Tensor, *, topk_ratio: float | torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     out = x.new_zeros(x.shape)
-    ratio = max(0.0, min(1.0, float(topk_ratio)))
     for batch_idx in range(x.size(0)):
+        if torch.is_tensor(topk_ratio):
+            ratio = float(topk_ratio[batch_idx].item())
+        else:
+            ratio = float(topk_ratio)
+        ratio = max(0.0, min(1.0, ratio))
         visible = int(mask[batch_idx].sum().item())
         if visible <= 0:
             continue
@@ -203,10 +207,14 @@ def build_algorithmic_teacher_targets(
         cfg=cfg,
     )
     pause_scores = torch.exp(pause_seed) * unit_mask
+    pause_topk_ratio = torch.maximum(
+        boundary_ratio.squeeze(-1),
+        pause_scores.new_full((pause_scores.size(0),), float(cfg.pause_topk_ratio)),
+    )
     pause_scores = _sparsify_scores(
         pause_scores,
         unit_mask,
-        topk_ratio=max(float(cfg.pause_topk_ratio), float(boundary_ratio.max().item())),
+        topk_ratio=pause_topk_ratio,
     )
     pause_scores = _masked_normalize(pause_scores, unit_mask)
     pause_exec = pause_scores * pause_budget

@@ -1,290 +1,174 @@
-# Rhythm Migration Plan (2026-04-05)
+# Rhythm Migration Plan（2026-04-07 UTC）
 
-This remains the maintained migration/audit note under `docs/`. Together with `README.md` and `docs/autodl_training_handoff.md`, it defines the current training path, the April 4-5 audit outcome, and the cloud-launch handoff.
+这份文档只保留当前仍然有效的迁移结论，不再复述已经失效的“train360 仍在分片中”之类状态。
 
-## 1. Maintained path and code boundaries
+## 1. 代码层有哪些 stage
 
-AutoDL handoff note: if you are about to launch the real cloud run, read `docs/autodl_training_handoff.md` first; this file stays focused on migration status and audit conclusions.
+当前仓库里明确支持的关键 stage 有：
 
-The maintained rhythm path remains:
+- `teacher_offline`
+- `student_kd`
+- `student_ref_bootstrap`
+- `student_retimed`
+
+## 2. 当前项目优先训练链
+
+批判性更新后，当前项目优先训练链不再写成：
+
+- `teacher_offline -> student_kd -> student_retimed`
+
+而是写成：
 
 1. `teacher_offline`
-2. export teacher targets / rebuild student cache
-3. `student_kd`
-4. prepare retimed cache + F0 side files
-5. `student_retimed`
+2. `student_ref_bootstrap`
+3. `student_retimed`
+4. `student_kd`（可选 baseline / ablation / 稳定性支线）
 
-Critical code ownership is intentionally narrow:
+## 3. 为什么当前先不走 `student_kd`
 
-- timing / feasibility / projector logic: `modules/Conan/rhythm/`
-- stage contracts, targets, losses, metrics, preflight: `tasks/Conan/rhythm/`
-- maintained validation entrypoints:
-  - `scripts/smoke_test_rhythm_v2.py`
-  - `scripts/preflight_rhythm_v2.py`
-  - `scripts/cpu_probe_rhythm_train.py`
-  - `scripts/integration_teacher_export_student_kd.py`
+因为当前真正要回答的问题是：
 
-## 2. What the 6-agent training-prep audit actually covered
+- external ref 是否真的被使用
+- one-to-many 下会不会平均化 / collapse
+- descriptor semantics 是否真的跟着 `B` 变化
 
-The April 4-5 audit was split across six concrete surfaces:
+而 `student_kd` 当前更适合回答的是：
 
-- parameter / contract defaults
-- inference / runtime edge cases
-- training losses / gradients / probe behavior
-- data / cache / preflight assets
-- docs / stage guidance
-- optimizer scope / test coverage
+- cached/self-conditioned teacher surface 能不能稳定蒸给 student
 
-That audit was used to update code, not just write commentary.
+所以：
 
-## 3. High-value fixes already absorbed into the local mainline
+- `student_kd` 不是被删掉
+- 它只是从“主链默认下一步”降级成“辅助对照支线”
 
-The maintained branch now includes these corrective changes:
+## 4. 对 v2.5 的严谨表述
 
-- explicit zero-confidence stays hard-off for component KD and retimed confidence weighting
-- factor intervention syncs compact edits back into `ref_rhythm_stats` / `ref_rhythm_trace` and drops stale sidecars
-- budget supervision and feasibility-debt accounting are cleaner under repair-heavy cases
-- online retimed acoustic targets now inherit sample confidence and projector-repair gating instead of being implicitly trusted at weight `1.0`
-- module-only stages now keep train/valid objectives aligned instead of reintroducing acoustic/pitch losses only during validation
-- `teacher_offline` validation now uses the real offline-teacher branch instead of silently falling back to the student/runtime path
-- `teacher_offline` preflight dry-run now distinguishes:
-  - `teacher_only` / module-only runtime, where `mel_out` is optional
-  - `teacher_as_main` runtime, where `mel_out` is still required for audition / export semantics
-- preflight orchestration and rhythm diagnostics are split into smaller units instead of monoliths
-- preflight can now escalate missing or placeholder processed paths with `--strict_processed_data_dir`
-- the local deprecated TorchScript helper in `modules/Conan/diff/net.py` is gone
-- the acoustic runtime no longer touches pitch-embed branches when `use_pitch_embed=false`
-- flow components in `modules/Conan/Conan.py` now lazy-load `torchdyn`, so non-flow rhythm checks do not fail at import time
-- RMVPE / torchaudio loading is more lazy, so optional dependency failures happen only on the paths that really need them
-- rhythm-only imports no longer require the English text frontend or tensorboard at import time
-- inference helpers tolerate `f0_denorm_pred=None` instead of indexing into a missing tensor
-- Conan / Emformer export paths also tolerate missing source or predicted F0 instead of indexing blindly
-- weighted retimed acoustic losses now normalize by the full broadcasted weight mass instead of frame count only
-- retimed mel supervision now disables pitch loss when matched `retimed_f0_tgt` / `retimed_uv_tgt` are missing, unless source-axis fallback is explicitly opted in
-- retimed mel / weight alignment now keeps `retimed_f0_tgt`, `retimed_uv_tgt`, and `tgt_nonpadding` on the same time axis as `mel_out`, with linear resize for `retimed_f0_tgt`, nearest / binary-preserving resize for `retimed_uv_tgt`, and trim-mode parity with the aligned mel target
-- integration export now covers `train/valid/test` by default for the teacher->student KD smoke chain
-- stage-validation defaults now match runtime defaults for:
-  - `rhythm_enable_learned_offline_teacher`
-  - `rhythm_disable_pitch_loss_when_retimed`
-- frame-plan construction now uses masked sum-preserving rounding for speech slots, blank slots, and `dur_anchor_src`, so integerization no longer leaks or drops total frame mass on fractional edge cases
-- projector outer hot paths are more vectorized in:
-  - `_allocate_pause_budget`
-  - `_project_pause_impl`
-  - `_compute_commit_frontier`
-  - `_advance_state`
-- stage-specific optimizer scope no longer silently falls back to full-model training:
-  - empty collectors now fail fast
-  - post-freeze zero-trainable states now fail fast
-  - foreign / stale params from the wrong model instance now fail fast
-- maintained stage configs now pin `load_ckpt_strict: false` so cross-stage warm-start behaves like partial restore instead of exact-architecture resume:
-  - base Conan -> `teacher_offline`
-  - `teacher_offline` -> `student_kd`
-  - `student_kd` -> `student_retimed`
-- non-strict checkpoint load now reports missing / unexpected key counts with a preview instead of only logging shape mismatches
-- `content_lengths` is now propagated explicitly through the rhythm dataset collater, runtime forward kwargs, and streaming evaluation instead of quietly reusing `mel_lengths`
-- teacher target export now accepts either `rhythm_teacher_as_main` or `rhythm_teacher_only_stage` runtime semantics, while still rejecting shadow `rhythm_offline_execution` on the export path
-- the local LibriTTS metadata helper now supports repeated or comma-separated `--train_split` values, so `train-clean-100 + train-clean-360` can be built in one processed metadata pass
-- a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
-  - `rhythm_loss_balance_mode: ema_group`
-  - maintained default stays `none`
-- context-matched KD gating now exists as an opt-in stage-2 research path:
-  - `rhythm_enable_distill_context_match`
-  - `rhythm_distill_context_floor`
-  - `rhythm_distill_context_power`
-  - `rhythm_distill_context_open_run_penalty`
-- new experimental configs were added without changing the maintained default chain:
-  - `egs/conan_emformer_rhythm_v2_student_kd_context_match.yaml`
-  - `egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
+当前 `student_ref_bootstrap` 应该被描述为：
 
-## 4. Validation actually run on this checkout
+- teacher warm-start
+- runtime-only external-reference bootstrap
+- first student-facing distillation / bootstrap stage
 
-The following were run locally in the `conda` `conan` environment:
+但不能夸张说成：
 
-- `conda run -n conan python -m compileall -q modules tasks scripts tests utils data_gen`
-- `conda run -n conan python -m unittest discover -s tests/rhythm -p "test_*.py"`
-- `conda run -n conan python -u scripts/smoke_test_rhythm_v2.py`
-- teacher-offline smoke preflight / dry-run on `train`
-- teacher-offline smoke preflight / dry-run on `train valid` to confirm the known empty-split failure
-- teacher export -> student KD integration smoke
-- 1-step `student_retimed` CPU probe with default `use_pitch_embed=true`
-- 1-step `student_retimed` CPU probe with `--hparams use_pitch_embed=False`
-- 2-step `student_retimed` CPU probe after probe-observability wiring to confirm runtime summaries are exported
-- 2000-step CPU probe for `teacher_offline`
-- 2000-step CPU probe for `student_kd`
-- 2000-step CPU smoke probe for `student_retimed`
+- 最终 fully learned-teacher distill 终局
 
-Observed result summary:
+因为当前它仍然：
 
-- unit coverage: **222 rhythm tests passed**
-- latest compile/unit/smoke rerun after the teacher-offline preflight fix, online-retimed confidence/repair gating, stage-freeze fail-fast guards, train-set contract hardening, and warm-start missing/unexpected-key observability: **passed**
-- teacher-offline probe: healthy loss descent and low gradient pressure
-- student-KD probe: healthy and fast on smoke student binary
-- student-retimed smoke: structurally runnable, but still high-risk because `L_base` dominates and gradients are large / clip-heavy
-- fresh stage-3 spot-check: default `student_retimed` probe fails immediately on missing `f0` in the smoke `student_binary`
-- fresh stage-3 spot-check with `use_pitch_embed=False`: runs, but still shows large one-step gradient pressure (`grad_norm_before_clip ~= 274`)
-- CPU probe now also exports runtime observability summaries for:
-  - `rhythm_metric_disable_acoustic_train_path`
-  - `rhythm_metric_module_only_objective`
-  - `rhythm_metric_skip_acoustic_objective`
-  - `rhythm_metric_pitch_supervision_disabled`
-  - `rhythm_metric_missing_retimed_pitch_target`
-  - pre-align retimed-target mismatch / resample / trim signals
+- `rhythm_dataset_target_mode: runtime_only`
+- `rhythm_teacher_target_source: algorithmic`
 
-The newest rerun extended regression coverage specifically around:
+所以它还没有完全摆脱 algorithmic ceiling。
 
-- preserved-sum frame-plan rounding
-- projector invariants after hot-path vectorization
-- target-builder context-match gating / dedupe semantics
-- conservative rhythm-loss balancing
-- module-only train/valid objective alignment
-- teacher-offline validation routing
-- teacher-offline preflight semantics for `teacher_only` vs `teacher_as_main`
-- optional dependency guards for text frontend / tensorboard imports
-- optional dependency guards for `torchdyn` on non-flow rhythm paths
-- weighted acoustic-loss normalization over broadcasted weight mass
-- retimed pitch fallback suppression, missing-target detection, post-align length parity with `mel_out`, and the `attach_acoustic_target_bundle(...) -> add_pitch_loss(...)` no-mismatch handoff
-- online retimed target confidence / repair gating
-- stage-specific parameter freeze guards and foreign-param detection
-- validation / smoke observability for skipped acoustic objectives and missing matched retimed pitch targets
+## 5. 当前项目处于哪一步
 
-Important asset-level caveats from the same audit:
+当前项目实际停在：
 
-- `data/binary/libritts_single_smoke_rhythm_v4` is train-only in practice:
-  - `valid.data` is empty
-  - `test.data` is empty
-- the checked-in LibriTTS smoke binary is rhythm-cache **v4 compatibility smoke**, not maintained v5 training data
-- the current teacher->student KD integration artifact under `artifacts/rhythm_teacher_export_student_kd/...` is smoke-only because its teacher ckpt mode is `bootstrap_random_init`
-- the generated stage-2 smoke `student_binary` already contains learned-offline teacher + retimed targets, but it still does **not** include F0
-- formal stage-3 still needs real F0 side files; the smoke probe used `--hparams use_pitch_embed=False` only to avoid claiming a false formal pass
+- **stage-1 mixed `teacher_offline` 启动前**
 
-Additional training-prep caution:
+更准确地说：
 
-- `train_sets` is now better guarded, but it is still not the preferred first-formal-run path
-- the safer baseline remains: merge raw data first, then preprocess / binarize once into a single `binary_data_dir`
-- multi-binary concatenation is best treated as an advanced path, not the default maintained launch recipe
-- if you do choose multi-binary training, preflight now checks extra train-side indexed sidecars plus shared JSON / known condition maps before the run starts
+- train100 processed / binary：完成
+- train360 processed / binary：完成
+- mixed stage-1：尚未正式跑起来
 
-## 4.1 Training-prep audit notes that matter before you launch
+## 6. 当前训练目标
 
-- `scripts/preflight_rhythm_v2.py` is only a thin wrapper; the real validation lives in `tasks/Conan/rhythm/preflight_support.py`
-- preflight is **binary-cache-first**, not a full processed-corpus validator:
-  - it strongly checks indexed cache fields / contracts
-  - by default it still only lightly checks `processed_data_dir`
-  - for formal readiness runs, `--strict_processed_data_dir` now escalates missing or placeholder processed paths into hard errors
-- `teacher_offline` preflight now intentionally treats runtime semantics, not just stage name, as the source of truth:
-  - `teacher_only` / module-only dry-runs may omit `mel_out`
-  - `teacher_as_main` dry-runs must still emit `mel_out`, because that path is also used for teacher audition / export
-- `scripts/cpu_probe_rhythm_train.py` is a throughput / gradient probe, not a full cache-contract validator
-- `scripts/integration_teacher_export_student_kd.py` exports `train/valid/test`, but the post-export smoke assertions are still centered on `train/valid`
-- on the checked-in LibriTTS smoke corpus, integration split inference relies on the generated `build_summary.json`
+### 6.1 眼前目标
 
-## 5. Training-readiness conclusion by stage
+把 mixed `teacher_offline` formal stage-1 跑起来。
+
+目的：
+
+- 学强 offline teacher
+- 得到后续 v2.5 warm-start 所需的 teacher checkpoint
+
+### 6.2 紧接着的目标
+
+做 `student_ref_bootstrap`。
+
+目的：
+
+- 先验证 student 是否真的学会 external-reference-driven rhythm transfer
+- 先解决 same-A / multi-B collapse 风险
+
+### 6.3 再下一步目标
+
+做 `student_retimed`。
+
+目的：
+
+- 把 rhythm control 闭环到最终 acoustic canvas
+
+### 6.4 `student_kd` 的定位
+
+- baseline
+- ablation
+- 稳定性对照
+- cached-teacher 支线
+
+## 7. 当前真正的技术阻塞
+
+当前不是数据阻塞，而是运行链阻塞。
+
+最近一次失败发生在：
+
+- mixed preflight model dry-run
+
+根因：
+
+- `modules/Conan/rhythm/module.py`
+- `_sample_trace_pair()` 返回值个数不一致
+
+这也是为什么当前优先级是：
+
+- 修复 runtime contract
+- 复用现成 binary
+- 直接启动 v3 mixed stage-1
+
+## 8. 训练阶段的职责边界
 
 ### `teacher_offline`
 
-- code path: **ready**
-- smoke training path: **ready**
-- formal run from this checkout: **blocked by real dataset assets**
+职责：
 
-### `student_kd`
+- 训练 learned-offline teacher
+- 稳住 planner / controller / projector / prefix consistency
+- 给后续 v2.5 提供强初始化
 
-- code path: **ready**
-- teacher-export integration chain: **ready as smoke**
-- formal run from this checkout: **blocked by missing real learned teacher export / rebuilt cache**
-- experimental branch available: `conan_emformer_rhythm_v2_student_kd_context_match.yaml`
-- maintained KD reminder: the real maintained signal is `teacher-main + shape-only KD`; exec/budget/prefix/allocation KD stay disabled in the default stage-2 config
+### `student_ref_bootstrap`
+
+职责：
+
+- external reference / pairwise bootstrap
+- 验证模型是否真的使用外部 `B`
+- 通过 descriptor-consistency / pairwise contrastive / diversity 约束降低 collapse 风险
 
 ### `student_retimed`
 
-- code path: **closer to ready**
-- smoke path: **runs**
-- formal run from this checkout: **not ready to bless**
-- experimental branch available: `conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
+职责：
 
-Why stage-3 is still guarded:
+- 把 rhythm control 真正闭环到 acoustic canvas
+- 解决最终声学输出是否服从节奏控制
 
-- smoke requires `use_pitch_embed=False`
-- the smoke binary already has retimed targets, but default stage-3 still fails because it lacks F0
-- retimed mel no longer silently falls back to source-axis pitch; missing matched retimed pitch now disables pitch supervision first, and aligned retimed pitch tracks are kept on the same time axis as `mel_out`
-- `L_base` dominates the current smoke objective
-- `grad_norm_before_clip` stays very high for long stretches
-- the real F0 / retimed asset contract is not present in this shared checkout
+### `student_kd`
 
-Concrete 2000-step smoke numbers from `artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`:
+职责：
 
-- `L_base.mean ~= 6.5258`
-- `L_rhythm_exec.mean ~= 0.00279`
-- `L_stream_state.mean ~= 0.000746`
-- `L_pitch.mean = 0.0` because that smoke probe had to force `use_pitch_embed=False`
-- `grad_norm_before_clip.mean ~= 158.86`
-- `grad_norm_before_clip.max ~= 275.92`
+- cached/self-conditioned teacher surface 的稳定蒸馏
+- 作为 baseline / ablation / 稳定性支线保留
 
-That is roughly:
+## 9. 当前建议
 
-- `L_base / L_rhythm_exec ~= 2342x`
-- `L_base / L_stream_state ~= 8745x`
+### 现在就做
 
-So the current stage-3 smoke result is not "mildly imbalanced"; it is still overwhelmingly acoustic-dominated.
+```bash
+bash scripts/autodl_recovery_mixed100360_v3_trainonly.sh
+```
 
-The new probe-observability wiring was also validated on a fresh 2-step `student_retimed` CPU probe:
+### 现在不要做
 
-- `rhythm_metric_pitch_supervision_disabled = 1.0`
-- `rhythm_metric_skip_acoustic_objective = 0.0`
-- `rhythm_metric_acoustic_target_is_retimed = 1.0`
-
-So the probe can now distinguish "pitch was intentionally disabled because matched retimed pitch is unavailable" from "the whole acoustic objective got skipped".
-
-## 6. Remaining blockers before formal training
-
-This shared checkout is still missing the real maintained training assets:
-
-- `data/binary/vc_6layer/{train,valid}.{data,idx}`
-- a real `data/processed/vc`
-- exported `data/teacher_targets/...`
-- dedicated formal retimed cache / side files for `student_retimed`
-- F0 side files when `with_f0=true`
-
-So the current state is:
-
-- code readiness: **yes**
-- smoke/probe readiness in `conda` env: **yes**
-- formal maintained training readiness on this checkout: **no**
-
-The main blocker is still assets, not the control-loss hot path.
-
-## 6.1 Gradient / control audit notes
-
-- maintained optimization is still centered on the composite rhythm losses:
-  - execution
-  - budget
-  - prefix-state / carry
-- many logged subterms are reporting surfaces after scaling, not independent optimizer-driving objectives
-- projector / frame-plan behavior is intentionally discrete:
-  - rounding
-  - top-k / thresholding
-  - monotonic commit frontiers
-  - detached prefix reuse
-- so retimed acoustic targets do **not** backprop through frame-plan/control decisions; the explicit rhythm losses remain the control-learning path
-
-## 7. Remaining engineering gaps after this audit
-
-The audit found a few remaining gaps that were intentionally not over-corrected in the same round:
-
-- optimizer-scope coverage is now guarded against empty / foreign collector output, but it still benefits from more direct end-to-end param-group tests under real checkpoints
-- student-retimed needs a cleaner formal stage-3 integration smoke once real F0 assets exist
-- some legacy / research-stage paths still exist outside the maintained mainline, even though the maintained docs now stop centering them
-- projector still keeps the row-wise bounded-simplex core as the conservative speech-path solver; only the outer hot paths were vectorized in this round
-- loss balancing and context-matched KD are deliberately opt-in research knobs, not new maintained defaults
-
-These are follow-up tasks, not blockers for merging the current cleanup.
-
-## 8. Training rule of thumb
-
-Keep maintenance effort focused on changes that improve one of these four things:
-
-- projector trust / feasible execution
-- cache reproducibility / fail-fast validation
-- retimed supervision consistency
-- streaming stability / prefix consistency
-
-If a proposed change only exists in another branch's research path and does not have a real local analogue, do not port it by default.
+- 不要重做 train100 / train360 binarize
+- 不要先跳到 `student_kd`
+- 不要把 `student_retimed` 当成当前主阻塞
+- 不要把“teacher 后优先 v2.5”错误说成“已经完成了最终 teacher distill”
