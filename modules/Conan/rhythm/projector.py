@@ -27,6 +27,21 @@ class ProjectorConfig:
     build_render_plan: bool = True
 
 
+def _apply_pause_boundary_gain(
+    scores: torch.Tensor,
+    *,
+    boundary_score_unit: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_min_boundary_weight: float,
+    pause_boundary_bias_weight: float,
+) -> torch.Tensor:
+    unit_mask_f = unit_mask.float()
+    boundary_gain = 1.0 + float(pause_boundary_bias_weight) * (
+        float(pause_min_boundary_weight) + boundary_score_unit.float().clamp_min(0.0)
+    )
+    return scores.float().clamp_min(0.0) * boundary_gain * unit_mask_f
+
+
 def _pad_or_truncate_rows(values: torch.Tensor, *, target_size: int) -> torch.Tensor:
     if values.size(1) == target_size:
         return values
@@ -135,17 +150,28 @@ def _project_pause_impl(
             if pause_allocation_weight_unit is not None
             else pause_weight_unit.float().clamp_min(0.0)
         )
-        boundary_gain = 1.0 + pause_boundary_bias_weight * (
-            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        ranking_scores = _apply_pause_boundary_gain(
+            support_scores,
+            boundary_score_unit=boundary_score_unit,
+            unit_mask=unit_mask,
+            pause_min_boundary_weight=pause_min_boundary_weight,
+            pause_boundary_bias_weight=pause_boundary_bias_weight,
         )
-        ranking_scores = support_scores * boundary_gain * unit_mask_f
-        candidate_scores = allocation_scores * support_scores * boundary_gain * unit_mask_f
+        candidate_scores = _apply_pause_boundary_gain(
+            allocation_scores * support_scores,
+            boundary_score_unit=boundary_score_unit,
+            unit_mask=unit_mask,
+            pause_min_boundary_weight=pause_min_boundary_weight,
+            pause_boundary_bias_weight=pause_boundary_bias_weight,
+        )
     else:
-        ranking_scores = pause_weight_unit.float().clamp_min(0.0)
-        boundary_bias = pause_boundary_bias_weight * (
-            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        ranking_scores = _apply_pause_boundary_gain(
+            pause_weight_unit,
+            boundary_score_unit=boundary_score_unit,
+            unit_mask=unit_mask,
+            pause_min_boundary_weight=pause_min_boundary_weight,
+            pause_boundary_bias_weight=pause_boundary_bias_weight,
         )
-        ranking_scores = (ranking_scores + boundary_bias) * unit_mask_f
         candidate_scores = ranking_scores
     visible = unit_mask.float().sum(dim=1).long()
     topk = torch.round(visible.float() * float(topk_ratio)).long()
@@ -193,7 +219,6 @@ def _project_pause_simple_impl(
     pause_support_prob_unit: torch.Tensor | None = None,
     pause_allocation_weight_unit: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    unit_mask_f = unit_mask.float()
     use_split = pause_support_prob_unit is not None or pause_allocation_weight_unit is not None
     if use_split:
         support_scores = (
@@ -206,16 +231,21 @@ def _project_pause_simple_impl(
             if pause_allocation_weight_unit is not None
             else pause_weight_unit.float().clamp_min(0.0)
         )
-        boundary_gain = 1.0 + pause_boundary_bias_weight * (
-            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        scores = _apply_pause_boundary_gain(
+            allocation_scores * support_scores,
+            boundary_score_unit=boundary_score_unit,
+            unit_mask=unit_mask,
+            pause_min_boundary_weight=pause_min_boundary_weight,
+            pause_boundary_bias_weight=pause_boundary_bias_weight,
         )
-        scores = allocation_scores * support_scores * boundary_gain * unit_mask_f
     else:
-        scores = pause_weight_unit.float().clamp_min(0.0)
-        boundary_bias = pause_boundary_bias_weight * (
-            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        scores = _apply_pause_boundary_gain(
+            pause_weight_unit,
+            boundary_score_unit=boundary_score_unit,
+            unit_mask=unit_mask,
+            pause_min_boundary_weight=pause_min_boundary_weight,
+            pause_boundary_bias_weight=pause_boundary_bias_weight,
         )
-        scores = (scores + boundary_bias) * unit_mask_f
     return _allocate_pause_budget(
         candidate_scores=scores,
         unit_mask=unit_mask,

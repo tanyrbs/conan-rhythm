@@ -19,7 +19,12 @@ from modules.Conan.rhythm.prefix_state import (
     build_prefix_state_from_exec_numpy,
     build_prefix_state_from_exec_torch,
 )
-from modules.Conan.rhythm.projector import ProjectorConfig, StreamingRhythmProjector, _project_pause_impl
+from modules.Conan.rhythm.projector import (
+    ProjectorConfig,
+    StreamingRhythmProjector,
+    _project_pause_impl,
+    _project_pause_simple_impl,
+)
 from modules.Conan.rhythm.scheduler import MonotonicRhythmScheduler
 
 
@@ -243,6 +248,39 @@ class ProjectorInvariantTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(pause[:, :1], torch.tensor([[2.0]], dtype=torch.float32)))
         self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([3.0], dtype=torch.float32)))
+
+    def test_sparse_pause_boundary_gain_does_not_create_absolute_floor(self) -> None:
+        pause = _project_pause_impl(
+            pause_weight_unit=torch.tensor([[0.020, 0.000, 0.019, 0.018]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            previous_pause_exec=None,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            reuse_prefix=False,
+            soft_pause_selection=False,
+            topk_ratio=0.25,
+            pause_min_boundary_weight=0.10,
+            pause_boundary_bias_weight=0.18,
+            temperature=0.12,
+        )
+        self.assertGreater(float(pause[0, 0].item()), 0.99)
+        self.assertAlmostEqual(float(pause[0, 1].item()), 0.0, places=7)
+
+    def test_simple_pause_boundary_gain_does_not_create_absolute_floor(self) -> None:
+        pause = _project_pause_simple_impl(
+            pause_weight_unit=torch.tensor([[0.020, 0.000, 0.019, 0.018]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            previous_pause_exec=None,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            reuse_prefix=False,
+            pause_min_boundary_weight=0.10,
+            pause_boundary_bias_weight=0.18,
+        )
+        self.assertAlmostEqual(float(pause[0, 1].item()), 0.0, places=7)
+        self.assertGreater(float(pause[0, 0].item()), float(pause[0, 2].item()))
 
     def test_prefix_state_torch_numpy_parity(self) -> None:
         speech_exec = torch.tensor([[2.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
