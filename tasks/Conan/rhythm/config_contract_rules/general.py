@@ -138,6 +138,8 @@ def _validate_projector_schedule_ranges(
         errors.append("rhythm_projector_pause_topk_ratio_anneal_steps must be >= 0.")
     if knobs.pause_topk_ratio_warmup_steps < 0:
         errors.append("rhythm_projector_pause_topk_ratio_warmup_steps must be >= 0.")
+    if knobs.pause_topk_anchor_step < 0:
+        errors.append("rhythm_projector_pause_topk_anchor_step must be >= 0.")
     if knobs.pause_topk_ratio_train_start < knobs.pause_topk_ratio_train_end:
         warnings.append(
             "pause top-k anneal is configured sparse->dense; maintained path usually uses dense->sparse."

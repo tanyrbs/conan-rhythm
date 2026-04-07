@@ -1,0 +1,33 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# Gentle resume variant for the train360-only teacher line.
+# Use this when a checkpoint already sits in a good precision/recall region and
+# we only want to open pause support slightly without a hard mid-run config cut.
+#
+# Intended launch pattern:
+#   PAUSE_TOPK_ANCHOR_STEP=auto
+# so the top-k schedule restarts from the copied checkpoint step instead of
+# reusing absolute global_step from the old lineage.
+
+# Keep the proven pause losses from the conservative pause-recall branch.
+rhythm_pause_event_weight: 0.15
+rhythm_pause_support_weight: 0.05
+rhythm_pause_event_threshold: 0.50
+rhythm_pause_event_temperature: 0.20
+rhythm_pause_event_pos_weight: 2.0
+
+# Explicitly keep sparse selection active so top-k scheduling remains meaningful.
+rhythm_projector_pause_selection_mode: sparse
+
+# Resume-safe, small-capacity opening:
+# stay near the old good operating point (0.40) and only widen a little.
+rhythm_projector_pause_topk_ratio: 0.42
+rhythm_projector_pause_topk_ratio_train_start: 0.40
+rhythm_projector_pause_topk_ratio_train_end: 0.42
+rhythm_projector_pause_topk_ratio_anneal_steps: 10000
+
+# Keep boundary encouragement at the conservative branch level; the failed
+# capacity branch showed that pushing both of these higher can over-concentrate
+# pauses onto a few strong boundaries and hurt recall/prefix drift.
+rhythm_projector_pause_boundary_bias_weight: 0.18
+rhythm_pause_boundary_weight: 0.45

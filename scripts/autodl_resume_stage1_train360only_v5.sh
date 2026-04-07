@@ -22,6 +22,8 @@ VAL_CHECK_INTERVAL="${VAL_CHECK_INTERVAL:-2500}"
 MAX_SENTENCES="${MAX_SENTENCES:-8}"
 MAX_TOKENS="${MAX_TOKENS:-12000}"
 DS_WORKERS="${DS_WORKERS:-4}"
+SOURCE_STEP_OVERRIDE="${SOURCE_STEP_OVERRIDE:-}"
+PAUSE_TOPK_ANCHOR_STEP="${PAUSE_TOPK_ANCHOR_STEP:-}"
 STOP_EXISTING="${STOP_EXISTING:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 HP_EXTRA="${HP_EXTRA:-}"
@@ -155,7 +157,15 @@ verify_binary_cache_version "${TRAIN360_BIN}/train" "train360/train"
 verify_binary_cache_version "${TRAIN360_BIN}/valid" "train360/valid"
 verify_binary_cache_version "${TRAIN360_BIN}/test" "train360/test"
 
-LATEST_STEP="$(latest_step)"
+if [[ -n "$SOURCE_STEP_OVERRIDE" ]]; then
+  if [[ ! "$SOURCE_STEP_OVERRIDE" =~ ^[0-9]+$ ]]; then
+    echo "[train360only-v5] SOURCE_STEP_OVERRIDE must be an integer, got: $SOURCE_STEP_OVERRIDE" >&2
+    exit 1
+  fi
+  LATEST_STEP="$SOURCE_STEP_OVERRIDE"
+else
+  LATEST_STEP="$(latest_step)"
+fi
 if [[ -z "$LATEST_STEP" ]]; then
   echo "[train360only-v5] no source checkpoint found under ${SOURCE_WORK_DIR}" >&2
   exit 1
@@ -167,6 +177,16 @@ require_file "$SOURCE_CKPT"
 copy_seed_checkpoint "$SOURCE_CKPT" "$TARGET_CKPT"
 
 DEFAULT_HP_EXTRA="binary_data_dir='${TRAIN360_BIN}',processed_data_dir='${TRAIN360_PROC}',train_sets='${TRAIN360_BIN}',load_ckpt='',rhythm_cache_version=${LEGACY_CACHE_VERSION},rhythm_allow_legacy_cache_resume=True"
+if [[ "$PAUSE_TOPK_ANCHOR_STEP" == "auto" ]]; then
+  PAUSE_TOPK_ANCHOR_STEP="$LATEST_STEP"
+fi
+if [[ -n "$PAUSE_TOPK_ANCHOR_STEP" ]]; then
+  if [[ ! "$PAUSE_TOPK_ANCHOR_STEP" =~ ^[0-9]+$ ]]; then
+    echo "[train360only-v5] PAUSE_TOPK_ANCHOR_STEP must be an integer or 'auto', got: $PAUSE_TOPK_ANCHOR_STEP" >&2
+    exit 1
+  fi
+  DEFAULT_HP_EXTRA="${DEFAULT_HP_EXTRA},rhythm_projector_pause_topk_anchor_step=${PAUSE_TOPK_ANCHOR_STEP}"
+fi
 if [[ -n "$HP_EXTRA" ]]; then
   HP_EXTRA="${DEFAULT_HP_EXTRA},${HP_EXTRA}"
 else
@@ -195,6 +215,8 @@ cat > "$NOTE_PATH" <<EOF
 - config: ${CONFIG}
 - source_ckpt: ${SOURCE_CKPT}
 - copied_ckpt: ${TARGET_CKPT}
+- source_step_override: ${SOURCE_STEP_OVERRIDE:-N/A}
+- pause_topk_anchor_step: ${PAUSE_TOPK_ANCHOR_STEP:-N/A}
 - train_binary: ${TRAIN360_BIN}
 - processed_data_dir: ${TRAIN360_PROC}
 - cache_lineage: legacy_v5_train360_only

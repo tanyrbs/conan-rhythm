@@ -75,6 +75,7 @@ class RhythmStageKnobs:
     pause_topk_ratio_train_end: float
     pause_topk_ratio_anneal_steps: int
     pause_topk_ratio_warmup_steps: int
+    pause_topk_anchor_step: int
     distill_conf_floor: float
     distill_conf_power: float
     source_boundary_scale: float
@@ -226,6 +227,9 @@ def build_stage_validation_context(
             ),
             pause_topk_ratio_warmup_steps=int(
                 hparams.get("rhythm_projector_pause_topk_ratio_warmup_steps", 0) or 0
+            ),
+            pause_topk_anchor_step=int(
+                hparams.get("rhythm_projector_pause_topk_anchor_step", 0) or 0
             ),
             distill_conf_floor=float(hparams.get("rhythm_distill_confidence_floor", 0.05)),
             distill_conf_power=float(hparams.get("rhythm_distill_confidence_power", 1.0)),

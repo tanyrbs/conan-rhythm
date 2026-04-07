@@ -79,13 +79,15 @@ class ConanRhythmAdapter(nn.Module):
         end_ratio = float(self.hparams.get("rhythm_projector_pause_topk_ratio_train_end", final_ratio))
         warmup_steps = int(self.hparams.get("rhythm_projector_pause_topk_ratio_warmup_steps", 0) or 0)
         anneal_steps = int(self.hparams.get("rhythm_projector_pause_topk_ratio_anneal_steps", 20000) or 0)
+        anchor_step = int(self.hparams.get("rhythm_projector_pause_topk_anchor_step", 0) or 0)
         start_ratio = float(max(0.0, min(1.0, start_ratio)))
         end_ratio = float(max(0.0, min(1.0, end_ratio)))
+        schedule_step = max(int(global_steps) - max(anchor_step, 0), 0)
         if anneal_steps <= 0:
             return end_ratio
-        if global_steps <= warmup_steps:
+        if schedule_step <= warmup_steps:
             return start_ratio
-        progress = min(max((int(global_steps) - warmup_steps) / float(anneal_steps), 0.0), 1.0)
+        progress = min(max((schedule_step - warmup_steps) / float(anneal_steps), 0.0), 1.0)
         return float(start_ratio + (end_ratio - start_ratio) * progress)
 
     def _resolve_source_boundary_scale(
