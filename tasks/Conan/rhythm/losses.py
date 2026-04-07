@@ -58,6 +58,7 @@ class RhythmLossTargets:
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
     pause_event_weight: float = 0.0
+    pause_support_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
@@ -469,6 +470,37 @@ def _compute_pause_event_loss(
     return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
 
 
+def _compute_pause_support_loss(
+    execution,
+    pause_exec_tgt: torch.Tensor,
+    pause_mask: torch.Tensor,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Supervise planner-side pause support before projector sparsification.
+
+    `pause_event` helps the executed output fire more pause events, but recall
+    can still be capped when the planner's pause distribution collapses early
+    and the sparse projector only redistributes mass among poor candidates.
+    This term lightly aligns `planner.pause_shape_unit` with the target pause
+    distribution, so the projector starts from a better support prior.
+    """
+    planner = getattr(execution, "planner", None)
+    pause_shape_unit = getattr(planner, "pause_shape_unit", None) if planner is not None else None
+    if pause_shape_unit is None:
+        return pause_exec_tgt.new_zeros(())
+    pause_mask = pause_mask.float().clamp_min(0.0)
+    target_pause = pause_exec_tgt.float().clamp_min(0.0)
+    support_gate = _positive_mass_gate(target_pause, pause_mask)
+    support_batch_weight = _merge_batch_weight(batch_weight, support_gate, target_pause)
+    return _batch_kl_div(
+        pause_shape_unit.float().clamp_min(0.0),
+        target_pause,
+        pause_mask,
+        batch_weight=support_batch_weight,
+    )
+
+
 def _compute_feasible_debt_penalty(
     execution,
     *,
@@ -794,7 +826,17 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             pos_weight=float(targets.pause_event_pos_weight),
             batch_weight=targets.sample_confidence,
         )
-    l_exec_pause = l_exec_pause_value + float(targets.pause_event_weight) * l_pause_event
+    l_pause_event = float(targets.pause_event_weight) * l_pause_event
+    l_pause_support = blank_exec.new_tensor(0.0)
+    if float(targets.pause_support_weight) > 0.0:
+        l_pause_support = _compute_pause_support_loss(
+            execution,
+            pause_exec_tgt,
+            pause_mask,
+            batch_weight=targets.sample_confidence,
+        )
+    l_pause_support = float(targets.pause_support_weight) * l_pause_support
+    l_exec_pause = l_exec_pause_value + l_pause_event + l_pause_support
     (
         l_budget,
         l_budget_raw,
@@ -872,7 +914,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_exec_pause_value': l_exec_pause_value.detach(),
-        'rhythm_pause_event': (float(targets.pause_event_weight) * l_pause_event).detach(),
+        'rhythm_pause_event': l_pause_event.detach(),
+        'rhythm_pause_support': l_pause_support.detach(),
         'rhythm_budget': l_budget,
         'rhythm_budget_raw_surface': l_budget_raw,
         'rhythm_budget_exec_surface': l_budget_exec,

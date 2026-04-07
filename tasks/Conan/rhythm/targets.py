@@ -27,6 +27,7 @@ class RhythmTargetBuildConfig:
     budget_exec_weight: float
     feasible_debt_weight: float
     pause_event_weight: float = 0.0
+    pause_support_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
@@ -789,6 +790,7 @@ def build_rhythm_loss_targets_from_sample(
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
+        pause_support_weight=float(config.pause_support_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -826,6 +828,7 @@ def build_identity_rhythm_loss_targets(
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
+        pause_support_weight=float(config.pause_support_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -852,15 +855,26 @@ def scale_rhythm_loss_terms(
         scale: float,
         *,
         fallback_key: str | None = None,
+        allow_missing: bool = False,
     ) -> torch.Tensor:
+        def _zero_like_losses() -> torch.Tensor:
+            for candidate in rhythm_losses.values():
+                if isinstance(candidate, torch.Tensor):
+                    return candidate.new_tensor(0.0)
+            return torch.tensor(0.0)
+
         value = rhythm_losses.get(key)
         if not isinstance(value, torch.Tensor):
-            if fallback_key is None:
+            if fallback_key is not None:
+                fallback = rhythm_losses.get(fallback_key)
+                if not isinstance(fallback, torch.Tensor) and fallback_key == "rhythm_prefix_state":
+                    fallback = _resolve_prefix_state_loss()
+                if isinstance(fallback, torch.Tensor):
+                    value = fallback
+            if not isinstance(value, torch.Tensor):
+                if allow_missing:
+                    return _zero_like_losses()
                 raise KeyError(key)
-            fallback = rhythm_losses.get(fallback_key)
-            if not isinstance(fallback, torch.Tensor) and fallback_key == "rhythm_prefix_state":
-                fallback = _resolve_prefix_state_loss()
-            value = fallback
         return (value * float(scale)).detach()
 
     lambda_budget = float(hparams.get("lambda_rhythm_budget", 0.25))
@@ -876,6 +890,21 @@ def scale_rhythm_loss_terms(
     scaled = {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+        "rhythm_exec_pause_value": _scaled_detached(
+            "rhythm_exec_pause_value",
+            float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+            fallback_key="rhythm_exec_pause",
+        ),
+        "rhythm_pause_event": _scaled_detached(
+            "rhythm_pause_event",
+            float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_pause_support": _scaled_detached(
+            "rhythm_pause_support",
+            float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+            allow_missing=True,
+        ),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * lambda_budget,
         "rhythm_budget_raw_surface": _scaled_detached(
             "rhythm_budget_raw_surface",

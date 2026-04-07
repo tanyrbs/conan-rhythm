@@ -83,6 +83,10 @@ class RhythmStageKnobs:
     source_boundary_scale_warmup_steps: int
     teacher_source_boundary_scale: float
     pause_boundary_weight: float
+    pause_boundary_bias_weight: float
+    pause_selection_mode: str
+    pause_event_weight: float
+    pause_support_weight: float
     export_cache_audit_to_sample: bool
     public_losses: tuple[str, ...]
     configured_cache_version: int
@@ -244,6 +248,14 @@ def build_stage_validation_context(
                 hparams.get("rhythm_teacher_source_boundary_scale", source_boundary_scale)
             ),
             pause_boundary_weight=float(resolve_pause_boundary_weight(hparams)),
+            pause_boundary_bias_weight=float(
+                hparams.get("rhythm_projector_pause_boundary_bias_weight", 0.15)
+            ),
+            pause_selection_mode=str(
+                hparams.get("rhythm_projector_pause_selection_mode", "sparse") or "sparse"
+            ).strip().lower(),
+            pause_event_weight=float(hparams.get("rhythm_pause_event_weight", 0.0) or 0.0),
+            pause_support_weight=float(hparams.get("rhythm_pause_support_weight", 0.0) or 0.0),
             export_cache_audit_to_sample=bool(
                 hparams.get("rhythm_export_cache_audit_to_sample", False)
             ),

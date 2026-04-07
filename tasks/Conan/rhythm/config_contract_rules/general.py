@@ -132,6 +132,38 @@ def _validate_projector_schedule_ranges(
         errors.append("rhythm_distill_confidence_power must be > 0.")
 
 
+def _validate_pause_recall_support_controls(
+    ctx: RhythmStageValidationContext,
+    warnings: list[str],
+) -> None:
+    knobs = ctx.knobs
+    pause_recall_aux_enabled = (
+        knobs.pause_event_weight > 0.0
+        or knobs.pause_support_weight > 0.0
+    )
+    if not pause_recall_aux_enabled:
+        return
+    if knobs.pause_selection_mode != "sparse":
+        warnings.append(
+            "pause-recall auxiliaries are enabled but rhythm_projector_pause_selection_mode is not 'sparse'; "
+            "the projector will not use top-k support selection, so recall-oriented capacity tuning may not take effect."
+        )
+    if knobs.pause_topk_ratio_train_end < 0.40:
+        warnings.append(
+            "pause-recall auxiliaries are enabled while rhythm_projector_pause_topk_ratio_train_end < 0.40; "
+            "sparse projector capacity may still cap pause recall."
+        )
+    if (
+        knobs.pause_boundary_weight < 0.45
+        and knobs.pause_boundary_bias_weight < 0.20
+    ):
+        warnings.append(
+            "pause-recall auxiliaries are enabled but both rhythm_pause_boundary_weight and "
+            "rhythm_projector_pause_boundary_bias_weight remain conservative; "
+            "boundary-aligned pause support may still be underpowered."
+        )
+
+
 def _validate_supervision_overlap(
     ctx: RhythmStageValidationContext,
     errors: list[str],
@@ -350,6 +382,7 @@ def validate_general_stage_rules(
     validate_prefix_lambda_alias_consistency(ctx.hparams, errors, warnings)
     _validate_runtime_teacher_configuration(ctx, errors, warnings)
     _validate_projector_schedule_ranges(ctx, errors, warnings)
+    _validate_pause_recall_support_controls(ctx, warnings)
     _validate_supervision_overlap(ctx, errors, warnings)
     _validate_source_boundary_controls(ctx, errors, warnings)
     _validate_retimed_target_controls(ctx, errors, warnings)

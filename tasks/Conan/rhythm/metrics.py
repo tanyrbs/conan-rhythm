@@ -616,6 +616,9 @@ def _update_alias_metrics(
     alias_keys = {
         "L_exec_speech": "rhythm_metric_alias_L_exec_speech",
         "L_exec_pause": "rhythm_metric_alias_L_exec_pause",
+        "L_exec_pause_value": "rhythm_metric_alias_L_exec_pause_value",
+        "L_pause_event": "rhythm_metric_alias_L_pause_event",
+        "L_pause_support": "rhythm_metric_alias_L_pause_support",
         "L_budget": "rhythm_metric_alias_L_budget",
         "L_cumplan": "rhythm_metric_alias_L_cumplan",
         "L_prefix_state": "rhythm_metric_alias_L_prefix_state",
@@ -700,6 +703,25 @@ def _update_sample_supervision_metrics(
         metrics["rhythm_metric_pause_event_precision"] = pause_p
         metrics["rhythm_metric_pause_event_recall"] = pause_r
         metrics["rhythm_metric_pause_event_f1"] = pause_f1
+        planner_pause_shape = getattr(ctx.planner, "pause_shape_unit", None)
+        if isinstance(planner_pause_shape, torch.Tensor):
+            metrics["rhythm_metric_planner_pause_support_kl"] = _masked_kl(
+                planner_pause_shape,
+                sample[pause_target_key],
+                ctx.unit_mask,
+            )
+            planner_pause_dist = _masked_distribution(planner_pause_shape, ctx.unit_mask)
+            target_pause_event = (
+                sample[pause_target_key].float() > 0.5
+            ).float() * ctx.unit_mask.float()
+            target_has_pause = target_pause_event.sum(dim=1) > 0
+            if bool(target_has_pause.any()):
+                support_mass_on_target = (planner_pause_dist * target_pause_event).sum(dim=1)
+                metrics["rhythm_metric_planner_pause_support_mass_on_target"] = (
+                    support_mass_on_target[target_has_pause].mean()
+                )
+            else:
+                metrics["rhythm_metric_planner_pause_support_mass_on_target"] = planner_pause_dist.new_tensor(0.0)
     if "rhythm_speech_exec_tgt" in sample and pause_target_key in sample:
         metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
             ctx.execution.speech_duration_exec + ctx.blank_exec,

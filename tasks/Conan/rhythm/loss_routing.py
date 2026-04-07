@@ -163,11 +163,13 @@ def _compact_base_optimizer_losses(losses, *, mel_loss_names, hparams, schedule_
         value = losses.get(loss_name)
         if isinstance(value, torch.Tensor):
             base_keys.append(loss_name)
-            if value.requires_grad:
-                base_terms.append(value)
+            base_terms.append(value)
     if not base_terms:
         return
-    losses["base"] = sum(base_terms)
+    total = base_terms[0]
+    for term in base_terms[1:]:
+        total = total + term
+    losses["base"] = total
     for key in base_keys:
         _detach_loss_value(losses, key)
 
@@ -181,11 +183,13 @@ def _compact_pitch_optimizer_losses(losses, *, hparams, schedule_only_stage: boo
         value = losses.get(key)
         if isinstance(value, torch.Tensor):
             pitch_keys.append(key)
-            if value.requires_grad:
-                pitch_terms.append(value)
+            pitch_terms.append(value)
     if not pitch_terms:
         return
-    losses["pitch"] = sum(pitch_terms)
+    total = pitch_terms[0]
+    for term in pitch_terms[1:]:
+        total = total + term
+    losses["pitch"] = total
     for key in pitch_keys:
         _detach_loss_value(losses, key)
 
@@ -203,21 +207,26 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
         value = losses.get(key)
         if isinstance(value, torch.Tensor):
             exec_keys.append(key)
-            if value.requires_grad:
-                exec_terms.append(value)
+            exec_terms.append(value)
     if exec_terms:
-        losses["rhythm_exec"] = sum(exec_terms)
+        total = exec_terms[0]
+        for term in exec_terms[1:]:
+            total = total + term
+        losses["rhythm_exec"] = total
         for key in exec_keys:
             _detach_loss_value(losses, key)
     budget = losses.get("rhythm_budget")
     prefix_state = _resolve_prefix_state_value(losses)
     state_terms = []
-    if isinstance(budget, torch.Tensor) and budget.requires_grad:
+    if isinstance(budget, torch.Tensor):
         state_terms.append(float(hparams.get("rhythm_joint_budget_macro_weight", 0.35)) * budget)
-    if isinstance(prefix_state, torch.Tensor) and prefix_state.requires_grad:
+    if isinstance(prefix_state, torch.Tensor):
         state_terms.append(float(hparams.get("rhythm_joint_cumplan_macro_weight", 0.65)) * prefix_state)
     if state_terms:
-        losses["rhythm_stream_state"] = sum(state_terms)
+        total = state_terms[0]
+        for term in state_terms[1:]:
+            total = total + term
+        losses["rhythm_stream_state"] = total
     _detach_loss_value(losses, "rhythm_budget")
     for key in _PREFIX_STATE_KEYS:
         if key in losses:
@@ -262,6 +271,11 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     losses["L_pause_event"] = (
         losses.get("rhythm_pause_event", zero).detach()
         if isinstance(losses.get("rhythm_pause_event"), torch.Tensor)
+        else zero
+    )
+    losses["L_pause_support"] = (
+        losses.get("rhythm_pause_support", zero).detach()
+        if isinstance(losses.get("rhythm_pause_support"), torch.Tensor)
         else zero
     )
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero

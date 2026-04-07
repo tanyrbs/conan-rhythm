@@ -82,6 +82,46 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertTrue(any("rhythm_pause_exec_boundary_boost and rhythm_pause_boundary_weight" in e for e in errors))
         self.assertTrue(any("lambda_rhythm_plan > 0 re-enables the optional planner proxy loss" in w for w in warnings))
 
+    def test_pause_recall_aux_warns_when_sparse_capacity_is_still_too_conservative(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "teacher_offline",
+                "rhythm_strict_mainline": False,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "guidance",
+                "rhythm_teacher_target_source": "algorithmic",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": False,
+                "rhythm_binarize_teacher_targets": False,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": True,
+                "rhythm_runtime_enable_learned_offline_teacher": True,
+                "rhythm_teacher_as_main": True,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_pause_event_weight": 0.20,
+                "rhythm_pause_support_weight": 0.05,
+                "rhythm_projector_pause_selection_mode": "simple",
+                "rhythm_projector_pause_topk_ratio_train_end": 0.35,
+                "rhythm_projector_pause_boundary_bias_weight": 0.15,
+                "rhythm_pause_boundary_weight": 0.35,
+            }
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(any("pause-recall auxiliaries are enabled but rhythm_projector_pause_selection_mode is not 'sparse'" in w for w in warnings))
+        self.assertTrue(any("pause-recall auxiliaries are enabled while rhythm_projector_pause_topk_ratio_train_end < 0.40" in w for w in warnings))
+        self.assertTrue(any("boundary-aligned pause support may still be underpowered" in w for w in warnings))
+
     def test_strict_mainline_rejects_cached_teacher_distill_without_dedupe(self) -> None:
         _, errors, _ = validate_stage_contract(
             {
@@ -653,6 +693,41 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
         self.assertTrue(any("inactive KD config clutter" in w for w in warnings))
+
+    def test_route_compaction_materializes_weighted_stream_macro_under_no_grad(self) -> None:
+        losses = {
+            "rhythm_exec_speech": torch.tensor(1.0),
+            "rhythm_exec_pause": torch.tensor(2.0),
+            "rhythm_budget": torch.tensor(4.0),
+            "rhythm_prefix_state": torch.tensor(5.0),
+        }
+        hparams = {
+            "rhythm_compact_joint_loss": True,
+            "rhythm_joint_budget_macro_weight": 0.35,
+            "rhythm_joint_cumplan_macro_weight": 0.65,
+            "rhythm_enable_aux_optimizer_losses": False,
+            "lambda_rhythm_plan": 0.0,
+            "lambda_rhythm_guidance": 0.0,
+            "lambda_rhythm_distill": 0.0,
+            "lambda_rhythm_teacher_aux": 0.0,
+        }
+        route_conan_optimizer_losses(
+            losses,
+            mel_loss_names=(),
+            hparams=hparams,
+            schedule_only_stage=False,
+        )
+        update_public_loss_aliases(losses, mel_loss_names=())
+        self.assertTrue(torch.allclose(losses["rhythm_exec"], torch.tensor(3.0)))
+        self.assertTrue(torch.allclose(losses["rhythm_stream_state"], torch.tensor(4.65)))
+        self.assertTrue(torch.allclose(losses["L_stream_state"], torch.tensor(4.65)))
+        total = compute_reporting_total_loss(
+            losses,
+            mel_loss_names=(),
+            hparams=hparams,
+            schedule_only_stage=False,
+        )
+        self.assertTrue(torch.allclose(total, torch.tensor(7.65)))
 
 
 if __name__ == "__main__":

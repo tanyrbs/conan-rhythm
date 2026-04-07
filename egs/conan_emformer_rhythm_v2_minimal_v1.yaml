@@ -42,3 +42,11 @@ rhythm_distill_speech_shape_weight: 0.0
 rhythm_distill_pause_shape_weight: 0.0
 rhythm_pause_boundary_weight: 0.35
 rhythm_feasible_debt_weight: 0.05
+# Optional support-first pause event term. Keep the maintained baseline off by
+# default and only enable it when pause precision is acceptable but recall is
+# clearly lagging.
+rhythm_pause_event_weight: 0.0
+rhythm_pause_support_weight: 0.0
+rhythm_pause_event_threshold: 0.5
+rhythm_pause_event_temperature: 0.25
+rhythm_pause_event_pos_weight: 2.0
