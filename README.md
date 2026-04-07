@@ -575,6 +575,10 @@ Recent branch work improved the maintained path around:
 - removal of a deprecated local TorchScript helper in `modules/Conan/diff/net.py`
 - weighted retimed acoustic losses now normalize by full broadcasted weight mass instead of frame count only
 - retimed mel supervision now blocks accidental source-axis pitch fallback unless explicitly allowed for debugging
+- pause supervision can now optionally use a **support-first** auxiliary event loss (`rhythm_pause_event_*`) for the common regime where pause precision is acceptable but pause recall is too low:
+  - keep the original pause-magnitude regression as the main term
+  - add a BCE-style pause-event objective on `pause_exec_tgt > threshold`
+  - expose `L_exec_pause_value` and `L_pause_event` so operators can separate "pause amount" from "pause support / recall"
 - CPU probe summaries now surface runtime observability flags for:
   - module-only / acoustic-skip stages
   - retimed pitch supervision disablement
@@ -586,6 +590,48 @@ Recent branch work also added opt-in experimental surfaces:
 
 - bounded `ema_group` rhythm-loss balancing (`rhythm_loss_balance_mode: none` remains the default)
 - context-matched KD gating for prefix-truncated stage-2 experiments (`rhythm_enable_distill_context_match: false` remains the default)
+
+### Pause-support troubleshooting note
+
+If a stage-1 / stage-2 run shows a pattern like:
+
+- `pause_event_precision >> pause_event_recall`
+- `L_exec_pause` improves only slowly
+- `prefix_drift_l1` also falls slowly
+
+then the more likely bottleneck is **pause support / event recall**, not `L_budget`.
+
+Interpretation:
+
+- the model is not "stopping everywhere"
+- it is usually stopping only at a few high-confidence locations
+- many target pause events are still missing, which also slows prefix-clock closure
+
+The maintained code now supports an opt-in auxiliary loss for this case:
+
+- `rhythm_pause_event_weight`
+- `rhythm_pause_event_threshold`
+- `rhythm_pause_event_temperature`
+- `rhythm_pause_event_pos_weight`
+
+Recommended conservative starting point:
+
+```yaml
+rhythm_pause_event_weight: 0.20
+rhythm_pause_event_threshold: 0.5
+rhythm_pause_event_temperature: 0.20
+rhythm_pause_event_pos_weight: 2.5
+```
+
+What to watch after enabling it:
+
+- `L_exec_pause_value`: the original pause-magnitude regression term
+- `L_pause_event`: the new support / recall term
+- `pause_event_precision`
+- `pause_event_recall`
+- `pause_event_f1`
+
+If recall improves offline but streaming behavior is still conservative, the next lever is usually not more budget weight; it is pause-support capacity in the projector, for example `rhythm_projector_pause_topk_ratio` and boundary-biased support placement.
 
 Current performance headroom is still mostly in:
 

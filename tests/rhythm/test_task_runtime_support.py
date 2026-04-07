@@ -116,6 +116,10 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
                 "rhythm_budget_raw_weight": 1.0,
                 "rhythm_budget_exec_weight": 0.25,
                 "rhythm_feasible_debt_weight": 0.05,
+                "rhythm_pause_event_weight": 0.20,
+                "rhythm_pause_event_threshold": 0.60,
+                "rhythm_pause_event_temperature": 0.15,
+                "rhythm_pause_event_pos_weight": 2.75,
                 "rhythm_suppress_duplicate_primary_distill": True,
             },
             clear=True,
@@ -123,6 +127,10 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             config = support.build_rhythm_target_build_config()
         self.assertTrue(config.dedupe_primary_teacher_cache_distill)
         self.assertEqual(config.distill_exec_weight, 0.0)
+        self.assertEqual(config.pause_event_weight, 0.20)
+        self.assertEqual(config.pause_event_threshold, 0.60)
+        self.assertEqual(config.pause_event_temperature, 0.15)
+        self.assertEqual(config.pause_event_pos_weight, 2.75)
 
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:

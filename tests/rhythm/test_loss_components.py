@@ -123,6 +123,53 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["rhythm_plan_cum"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_plan"], torch.tensor(0.0)))
 
+    def test_pause_event_aux_penalizes_missed_pause_support(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause_pred = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+        pause_tgt = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32)
+        execution = self._execution(speech, pause_pred)
+        common_kwargs = dict(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+        )
+        base_losses = build_rhythm_loss_dict(execution, RhythmLossTargets(**common_kwargs))
+        event_losses = build_rhythm_loss_dict(
+            execution,
+            RhythmLossTargets(
+                **common_kwargs,
+                pause_event_weight=0.20,
+                pause_event_threshold=0.5,
+                pause_event_temperature=0.20,
+                pause_event_pos_weight=2.5,
+            ),
+        )
+        self.assertGreater(float(event_losses["rhythm_pause_event"].item()), 0.0)
+        self.assertGreater(
+            float(event_losses["rhythm_exec_pause"].item()),
+            float(base_losses["rhythm_exec_pause"].item()),
+        )
+        self.assertTrue(
+            torch.allclose(
+                event_losses["rhythm_exec_pause_value"],
+                base_losses["rhythm_exec_pause"],
+            )
+        )
+        update_public_loss_aliases(event_losses, mel_loss_names=())
+        self.assertTrue(torch.allclose(event_losses["L_exec_pause"], event_losses["rhythm_exec_pause"]))
+        self.assertTrue(
+            torch.allclose(
+                event_losses["L_exec_pause_value"],
+                event_losses["rhythm_exec_pause_value"],
+            )
+        )
+        self.assertTrue(torch.allclose(event_losses["L_pause_event"], event_losses["rhythm_pause_event"]))
+
     def test_feasible_debt_penalizes_budget_redistribution_repairs(self) -> None:
         speech = torch.tensor([[4.0, 4.0]], dtype=torch.float32)
         pause = torch.tensor([[1.0, 1.0]], dtype=torch.float32)

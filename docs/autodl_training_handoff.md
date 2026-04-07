@@ -370,6 +370,45 @@ Useful runtime flags if exported by probes/logs:
 - `rhythm_metric_skip_acoustic_objective`
 - `rhythm_metric_disable_acoustic_train_path`
 
+Pause-specific interpretation:
+
+- if `pause_event_precision` is clearly higher than `pause_event_recall`, the model is usually **too conservative about where to place pauses**
+- that is more of a **pause support / event recall** problem than a pure `L_budget` problem
+- a common companion pattern is:
+  - `L_exec_pause` decreases slowly
+  - `prefix_drift_l1` also decreases slowly because missed pauses keep the cumulative clock behind
+
+The maintained code now exposes two separate pause views:
+
+- `L_exec_pause_value`: the original pause-magnitude regression term
+- `L_pause_event`: the auxiliary support-first event term
+
+Recommended first response when recall is the clear bottleneck:
+
+```yaml
+rhythm_pause_event_weight: 0.20
+rhythm_pause_event_threshold: 0.5
+rhythm_pause_event_temperature: 0.20
+rhythm_pause_event_pos_weight: 2.5
+```
+
+Why this is the preferred first move:
+
+- it keeps the original pause amount regression intact
+- it directly penalizes missed pause events (`FN`) instead of only matching pause magnitude
+- it makes the run easier to interpret because "pause amount" and "pause support" are now separated in logs
+
+What to watch after enabling it:
+
+- `pause_event_precision`
+- `pause_event_recall`
+- `pause_event_f1`
+- `L_exec_pause_value`
+- `L_pause_event`
+- `prefix_drift_l1`
+
+If recall improves offline but streaming pause placement still looks conservative, the next lever is usually projector support capacity rather than more budget weight, e.g. `rhythm_projector_pause_topk_ratio` or stronger boundary-biased pause support.
+
 ### 7.3 Stage-3 watch items
 
 These are the most important stage-3 observability signals:

@@ -57,6 +57,10 @@ class RhythmLossTargets:
     budget_exec_weight: float = 0.25
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
+    pause_event_weight: float = 0.0
+    pause_event_threshold: float = 0.5
+    pause_event_temperature: float = 0.25
+    pause_event_pos_weight: float = 2.0
 
     @property
     def blank_exec_tgt(self) -> torch.Tensor:
@@ -431,6 +435,40 @@ def _resolve_pause_exec_mask(
     return unit_mask * (1.0 + float(boundary_weight) * boundary_norm)
 
 
+def _compute_pause_event_loss(
+    blank_exec: torch.Tensor,
+    pause_exec_tgt: torch.Tensor,
+    pause_mask: torch.Tensor,
+    *,
+    threshold: float,
+    temperature: float,
+    pos_weight: float,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Support-first auxiliary loss for missed pause events.
+
+    The primary pause loss still regresses pause magnitude. This auxiliary term
+    answers a different question: whether a pause event should fire at all.
+    That makes it a better fit for the common "precision > recall" failure mode,
+    where support is too sparse even when aggregate pause budget is acceptable.
+    """
+    pause_mask = pause_mask.float().clamp_min(0.0)
+    target_event = (pause_exec_tgt.float() > float(threshold)).float()
+    logits = (blank_exec.float() - float(threshold)) / max(float(temperature), 1e-4)
+    loss = F.binary_cross_entropy_with_logits(logits, target_event, reduction='none')
+    if float(pos_weight) > 1.0:
+        positive_scale = torch.where(
+            target_event > 0.5,
+            loss.new_full(target_event.shape, float(pos_weight)),
+            loss.new_ones(target_event.shape),
+        )
+        pause_mask = pause_mask * positive_scale
+    reduce_dims = tuple(range(1, loss.dim()))
+    masked_loss = (loss * pause_mask).sum(dim=reduce_dims)
+    masked_denom = pause_mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
+
+
 def _compute_feasible_debt_penalty(
     execution,
     *,
@@ -738,12 +776,25 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         unit_mask,
         boundary_weight=float(targets.pause_boundary_weight),
     )
-    l_exec_pause = _masked_log_huber(
+    pause_exec_tgt = targets.pause_exec_tgt.float()
+    l_exec_pause_value = _masked_log_huber(
         blank_exec,
-        targets.pause_exec_tgt.float(),
+        pause_exec_tgt,
         pause_mask,
         batch_weight=targets.sample_confidence,
     )
+    l_pause_event = blank_exec.new_tensor(0.0)
+    if float(targets.pause_event_weight) > 0.0:
+        l_pause_event = _compute_pause_event_loss(
+            blank_exec,
+            pause_exec_tgt,
+            pause_mask,
+            threshold=float(targets.pause_event_threshold),
+            temperature=float(targets.pause_event_temperature),
+            pos_weight=float(targets.pause_event_pos_weight),
+            batch_weight=targets.sample_confidence,
+        )
+    l_exec_pause = l_exec_pause_value + float(targets.pause_event_weight) * l_pause_event
     (
         l_budget,
         l_budget_raw,
@@ -820,6 +871,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     return {
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
+        'rhythm_exec_pause_value': l_exec_pause_value.detach(),
+        'rhythm_pause_event': (float(targets.pause_event_weight) * l_pause_event).detach(),
         'rhythm_budget': l_budget,
         'rhythm_budget_raw_surface': l_budget_raw,
         'rhythm_budget_exec_surface': l_budget_exec,

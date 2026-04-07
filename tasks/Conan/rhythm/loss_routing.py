@@ -254,6 +254,16 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
     if "rhythm_exec_pause" in losses:
         losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
+    losses["L_exec_pause_value"] = (
+        losses.get("rhythm_exec_pause_value", zero).detach()
+        if isinstance(losses.get("rhythm_exec_pause_value"), torch.Tensor)
+        else zero
+    )
+    losses["L_pause_event"] = (
+        losses.get("rhythm_pause_event", zero).detach()
+        if isinstance(losses.get("rhythm_pause_event"), torch.Tensor)
+        else zero
+    )
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
     prefix_state = _resolve_prefix_state_value(losses)
     losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero
