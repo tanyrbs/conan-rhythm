@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from tasks.Conan.rhythm.reference_regularization import (
     CompactReferenceDescriptor,
+    _compute_group_gap_scales,
     build_predicted_compact_reference_descriptor,
     build_target_compact_reference_descriptor,
     compute_descriptor_consistency_loss,
@@ -21,21 +22,30 @@ from tasks.Conan.rhythm.reference_regularization import (
 
 class ReferenceRegularizationTests(unittest.TestCase):
     @staticmethod
-    def _build_output():
+    def _build_output(boundary_score=None, blank_duration=None):
         planner = type(
             "Planner",
             (),
             {
-                "boundary_score_unit": torch.tensor([[0.0, 1.0, 0.2]], dtype=torch.float32),
+                "boundary_score_unit": (
+                    torch.tensor([[0.0, 1.0, 0.2]], dtype=torch.float32)
+                    if boundary_score is None
+                    else torch.tensor(boundary_score, dtype=torch.float32)
+                ),
             },
         )()
+        blank_duration = (
+            torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32)
+            if blank_duration is None
+            else torch.tensor(blank_duration, dtype=torch.float32)
+        )
         execution = type(
             "Execution",
             (),
             {
                 "speech_duration_exec": torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32),
-                "blank_duration_exec": torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
-                "pause_after_exec": torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+                "blank_duration_exec": blank_duration,
+                "pause_after_exec": blank_duration,
                 "planner": planner,
             },
         )()
@@ -66,6 +76,35 @@ class ReferenceRegularizationTests(unittest.TestCase):
         self.assertLess(float(losses["stats"]), 1.0e-6)
         self.assertLess(float(losses["local_trace"]), 1.0e-6)
         self.assertLess(float(losses["boundary_trace"]), 1.0e-6)
+
+    def test_predicted_boundary_descriptor_ignores_planner_boundary_score_shortcut(self) -> None:
+        output_a = self._build_output(
+            boundary_score=[[0.0, 1.0, 0.2]],
+            blank_duration=[[0.0, 1.0, 0.0]],
+        )
+        output_b = self._build_output(
+            boundary_score=[[1.0, 0.0, 1.0]],
+            blank_duration=[[0.0, 1.0, 0.0]],
+        )
+
+        pred_a = build_predicted_compact_reference_descriptor(output_a, trace_bins=6)
+        pred_b = build_predicted_compact_reference_descriptor(output_b, trace_bins=6)
+
+        self.assertIsNotNone(pred_a)
+        self.assertIsNotNone(pred_b)
+        self.assertTrue(torch.allclose(pred_a.boundary_trace, pred_b.boundary_trace))
+
+    def test_predicted_boundary_descriptor_tracks_executed_pause_structure(self) -> None:
+        output = self._build_output(
+            boundary_score=[[0.0, 0.0, 0.0]],
+            blank_duration=[[0.0, 2.5, 0.0]],
+        )
+        pred = build_predicted_compact_reference_descriptor(output, trace_bins=6)
+
+        self.assertIsNotNone(pred)
+        self.assertGreater(float(pred.boundary_trace.max().item()), 0.5)
+        self.assertLess(float(pred.boundary_trace[:, 0].max().item()), 0.2)
+        self.assertLess(float(pred.boundary_trace[:, -1].max().item()), 0.2)
 
     def test_group_contrastive_prefers_matching_reference(self) -> None:
         pred = CompactReferenceDescriptor(
@@ -98,6 +137,25 @@ class ReferenceRegularizationTests(unittest.TestCase):
         self.assertIsNotNone(loss_match)
         self.assertIsNotNone(loss_swap)
         self.assertLess(float(loss_match), float(loss_swap))
+
+    def test_group_gap_scale_is_larger_for_more_separated_targets(self) -> None:
+        near = torch.tensor(
+            [[1.0, 0.0], [0.98, 0.02], [0.97, 0.03]],
+            dtype=torch.float32,
+        )
+        near = torch.nn.functional.normalize(near, dim=-1)
+        far = torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]],
+            dtype=torch.float32,
+        )
+        far = torch.nn.functional.normalize(far, dim=-1)
+
+        near_scale = _compute_group_gap_scales(near, gap_floor=0.10, min_scale=0.50, gap_power=1.0)
+        far_scale = _compute_group_gap_scales(far, gap_floor=0.10, min_scale=0.50, gap_power=1.0)
+
+        self.assertLess(float(near_scale.mean()), float(far_scale.mean()))
+        self.assertGreaterEqual(float(near_scale.min()), 0.50)
+        self.assertLessEqual(float(far_scale.max()), 1.0)
 
 
 if __name__ == "__main__":

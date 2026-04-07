@@ -111,6 +111,8 @@ The maintained branch now includes these corrective changes:
 - inference helpers tolerate `f0_denorm_pred=None` instead of indexing into a missing tensor
 - Conan / Emformer export paths also tolerate missing source or predicted F0 instead of indexing blindly
 - weighted retimed acoustic losses now normalize by the full broadcasted weight mass instead of frame count only
+- retimed blank-frame inference no longer copies a single argmin mel frame:
+  - pause fill now uses a small bottom-k low-energy pool average, which is less likely to leak voiced color into cached / online retimed targets
 - retimed mel supervision now disables pitch loss when matched `retimed_f0_tgt` / `retimed_uv_tgt` are missing, unless source-axis fallback is explicitly opted in
 - retimed mel / weight alignment now keeps `retimed_f0_tgt`, `retimed_uv_tgt`, and `tgt_nonpadding` on the same time axis as `mel_out`, with linear resize for `retimed_f0_tgt`, nearest / binary-preserving resize for `retimed_uv_tgt`, and trim-mode parity with the aligned mel target
 - integration export now covers `train/valid/test` by default for the teacher->student KD smoke chain
@@ -180,6 +182,11 @@ The maintained branch now includes these corrective changes:
   - `lambda_rhythm_ref_descriptor_stats`
   - `lambda_rhythm_ref_descriptor_trace`
   - `lambda_rhythm_ref_group_contrastive`
+- predicted descriptor boundary traces used by descriptor-consistency / bootstrap supervision are now execution-derived:
+  - they use executed blank mass as a boundary proxy instead of replaying `planner.boundary_score_unit`
+  - this avoids leaking reference/source conditioning directly into the predicted descriptor branch
+- same-`A` group contrastive supervision is now gap-aware instead of pure thresholded:
+  - descriptor pairs that are clearly farther apart in target space receive stronger contrastive pressure than near-threshold pairs
 - descriptor-consistency is now implemented against the compact maintained reference contract:
   - `global_rate`
   - `pause_ratio`
@@ -328,6 +335,18 @@ Additional training-prep caution:
 - code path: **ready**
 - smoke training path: **ready**
 - formal run from this checkout: **blocked by real dataset assets**
+- maintained semantics note:
+  - the checked-in stage-1 config is a **cached-guidance bootstrap** for the
+    offline teacher branch
+  - it keeps `rhythm_dataset_target_mode: cached_only`,
+    `rhythm_primary_target_surface: guidance`, and
+    `rhythm_dataset_build_teacher_from_ref: false`
+  - so the honest story is "offline teacher branch first learns on the cached
+    guidance floor", not "stage-1 already makes the offline teacher directly
+    learn from runtime algorithmic-teacher targets"
+- research note:
+  - a true runtime algorithmic-teacher-supervised offline-teacher stage remains
+    a separate upper-bound / paper-facing ablation, not the maintained default
 
 ### `student_kd`
 
@@ -366,6 +385,11 @@ Additional training-prep caution:
 - anti-collapse rule:
   - stage-2.5 no longer has to rely only on `L_algo`
   - descriptor-consistency and same-`A` group contrastive loss are now available so the model is explicitly pushed to preserve `A` while still responding to `B`
+  - current implementation note:
+    - group contrastive now scales with target descriptor gap, so clearly different `B` references are emphasized more than near-threshold pairs
+- identity-anchor monitoring rule:
+  - `A|A` anchors remain allowed, but keep watching `rhythm_metric_pair_identity_rate`
+  - if identity pairs become too frequent, they can dilute the external-reference signal even without any explicit loss bug
 
 ### `student_retimed`
 
@@ -382,6 +406,12 @@ Additional training-prep caution:
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` remains as a
   compatibility alias / research handle, but it is no longer the only place
   carrying the conservative stage-3 balancer defaults
+- an extra upper-bound A/B config now exists when you want to probe the small
+  train/test gap between cached retimed targets and the current student
+  execution:
+  - `conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml`
+  - keeps the maintained cached-first warmup, then switches to `hybrid`
+    retimed targets after `rhythm_online_retimed_target_start_steps`
 
 Why stage-3 is still guarded:
 

@@ -66,6 +66,33 @@ def _resolve_runtime_offline_teacher_enable(hparams) -> bool:
     return resolve_runtime_offline_teacher_enable(hparams)
 
 
+def _trace_exhaustion_fallback_requested(hparams) -> bool:
+    return bool(
+        hparams.get(
+            'rhythm_trace_reliability_enable',
+            hparams.get('rhythm_enable_trace_exhaustion_fallback', False),
+        )
+    )
+
+
+def _should_auto_enable_reference_sidecar(hparams) -> bool:
+    cached_reference_policy = str(hparams.get('rhythm_cached_reference_policy', '') or '').strip().lower()
+    descriptor_bootstrap_active = any(
+        float(hparams.get(key, 0.0) or 0.0) > 0.0
+        for key in (
+            'lambda_rhythm_ref_descriptor_stats',
+            'lambda_rhythm_ref_descriptor_trace',
+            'lambda_rhythm_ref_group_contrastive',
+        )
+    )
+    return (
+        bool(hparams.get('rhythm_require_external_reference', False))
+        or cached_reference_policy == 'sample_ref'
+        or descriptor_bootstrap_active
+        or _trace_exhaustion_fallback_requested(hparams)
+    )
+
+
 def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
     phrase_kernels = hparams.get('rhythm_offline_teacher_phrase_kernels', (3, 7))
     if isinstance(phrase_kernels, int):
@@ -98,6 +125,12 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
     )
     if emit_reference_sidecar is not None:
         emit_reference_sidecar = bool(emit_reference_sidecar)
+    else:
+        # Keep the maintained utterance-bounded default lean, but do not require
+        # every external-reference / descriptor-bootstrap config to remember the
+        # sidecar knob manually. Those regimes are the ones that benefit most
+        # from slow-memory summaries and trace-exhaustion fallback.
+        emit_reference_sidecar = _should_auto_enable_reference_sidecar(hparams)
     return StreamingRhythmModule(
         num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
@@ -120,7 +153,7 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
-        trace_reliability_enable=bool(hparams.get('rhythm_trace_reliability_enable', False)),
+        trace_reliability_enable=_trace_exhaustion_fallback_requested(hparams),
         trace_exhaustion_gap_start=float(hparams.get('rhythm_trace_exhaustion_gap_start', 0.08)),
         trace_exhaustion_gap_end=float(hparams.get('rhythm_trace_exhaustion_gap_end', 0.22)),
         trace_exhaustion_local_floor=float(hparams.get('rhythm_trace_exhaustion_local_floor', 0.20)),

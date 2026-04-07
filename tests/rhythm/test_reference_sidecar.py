@@ -58,6 +58,45 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertTrue(module.reference_descriptor.emit_reference_sidecar)
         self.assertIsNotNone(module.reference_descriptor.selector)
 
+    def test_factory_auto_enables_reference_sidecar_for_external_reference_bootstrap(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_cached_reference_policy": "sample_ref",
+                "rhythm_require_external_reference": True,
+            }
+        )
+        self.assertTrue(module.reference_descriptor.emit_reference_sidecar)
+        self.assertIsNotNone(module.reference_descriptor.selector)
+
+    def test_factory_explicit_sidecar_flag_overrides_external_reference_auto_enable(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_cached_reference_policy": "sample_ref",
+                "rhythm_require_external_reference": True,
+                "rhythm_emit_reference_sidecar": False,
+            }
+        )
+        self.assertFalse(module.reference_descriptor.emit_reference_sidecar)
+        self.assertIsNone(module.reference_descriptor.selector)
+
+    def test_factory_legacy_trace_exhaustion_alias_enables_sidecar_and_reliability(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_enable_trace_exhaustion_fallback": True,
+            }
+        )
+        self.assertTrue(module.reference_descriptor.emit_reference_sidecar)
+        self.assertTrue(module.trace_reliability_enable)
+
     def test_build_reference_conditioning_from_cached_surfaces_emits_sidecar_when_enabled(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
             {

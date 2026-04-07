@@ -1,0 +1,11 @@
+base_config: egs/conan_emformer_rhythm_v2_student_retimed.yaml
+
+# Experimental stage-3 A/B branch:
+# keep the maintained cached-first curriculum, but after the configured online
+# start let the current student execution participate in the retimed acoustic
+# supervision path. This is an upper-bound / train-test-gap probe, not the
+# maintained default baseline.
+load_ckpt_strict: false
+
+rhythm_retimed_target_mode: hybrid
+rhythm_online_retimed_target_start_steps: 40000

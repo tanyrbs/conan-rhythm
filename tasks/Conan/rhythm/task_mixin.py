@@ -367,6 +367,9 @@ class RhythmConanTaskMixin:
                 target,
                 sample["rhythm_pair_group_id"],
                 temperature=float(hparams.get("rhythm_ref_group_contrastive_temperature", 0.10)),
+                gap_floor=float(hparams.get("rhythm_ref_group_contrastive_gap_floor", 0.10)),
+                min_scale=float(hparams.get("rhythm_ref_group_contrastive_min_scale", 0.50)),
+                gap_power=float(hparams.get("rhythm_ref_group_contrastive_gap_power", 1.0)),
             )
             if group_loss is not None:
                 losses["L_ref_group_contrast"] = group_loss * lambda_group

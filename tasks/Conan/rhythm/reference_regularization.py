@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from modules.Conan.rhythm.reference_encoder import _resample_by_progress
 from modules.Conan.rhythm.reference_descriptor import mean_speech_frames_to_global_rate
-from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
 
 
 @dataclass(frozen=True)
@@ -39,6 +38,41 @@ def _normalize_unit_mask(unit_mask: torch.Tensor) -> torch.Tensor:
     if unit_mask.dim() == 3 and unit_mask.size(-1) == 1:
         unit_mask = unit_mask.squeeze(-1)
     return unit_mask.float()
+
+
+def _build_executed_boundary_proxy(
+    *,
+    pause_exec: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Build a planner-independent boundary proxy from executed pause mass.
+
+    Descriptor consistency should describe the *executed* rhythm. Using
+    `planner.boundary_score_unit` here leaks planner-side conditioning because
+    that score already mixes source-boundary cues with reference boundary
+    evidence. For pairwise/external-reference bootstrap, that creates a shortcut:
+    the model can look descriptor-consistent without really executing B-like
+    boundary placement.
+
+    We therefore derive the predicted boundary trace from executed blank mass
+    only. The proxy is intentionally shape-oriented:
+
+      - log1p keeps long pauses from dominating
+      - mean-centering removes the global pause budget, which is already covered
+        by `pause_ratio`
+      - positive-only normalization highlights relative boundary peaks instead
+        of replaying planner-side priors
+    """
+
+    pause_exec = pause_exec.float().clamp_min(0.0) * unit_mask
+    visible = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+    pause_feature = torch.log1p(pause_exec)
+    pause_mean = (pause_feature * unit_mask).sum(dim=1, keepdim=True) / visible
+    boundary_positive = (pause_feature - pause_mean).clamp_min(0.0) * unit_mask
+    boundary_scale = boundary_positive.amax(dim=1, keepdim=True)
+    has_boundary_variation = boundary_scale > 1.0e-6
+    normalized = boundary_positive / boundary_scale.clamp_min(1.0e-6)
+    return torch.where(has_boundary_variation, normalized, torch.zeros_like(normalized))
 
 
 def build_target_compact_reference_descriptor(sample: dict) -> CompactReferenceDescriptor | None:
@@ -101,12 +135,10 @@ def build_predicted_compact_reference_descriptor(
     mean_relative_speech = (relative_speech * unit_mask).sum(dim=1, keepdim=True) / active_units
     local_rate_unit = relative_speech / mean_relative_speech.clamp_min(1.0e-6)
 
-    boundary_score = resolve_boundary_score_unit(execution.planner)
-    if boundary_score is None:
-        boundary_score = (pause_exec > 1.0e-3).float()
-    if boundary_score.dim() == 3 and boundary_score.size(-1) == 1:
-        boundary_score = boundary_score.squeeze(-1)
-    boundary_score = boundary_score.float().reshape(unit_mask.shape).clamp(0.0, 1.0) * unit_mask
+    boundary_score = _build_executed_boundary_proxy(
+        pause_exec=pause_exec,
+        unit_mask=unit_mask,
+    )
 
     trace_bins = int(trace_bins or 0)
     if trace_bins <= 0:
@@ -132,6 +164,26 @@ def _normalize_trace_shape(trace: torch.Tensor) -> torch.Tensor:
     centered = trace.float() - trace.float().mean(dim=1, keepdim=True)
     scale = centered.abs().mean(dim=1, keepdim=True).clamp_min(1.0e-4)
     return centered / scale
+
+
+def _compute_group_gap_scales(
+    target_vec: torch.Tensor,
+    *,
+    gap_floor: float,
+    min_scale: float,
+    gap_power: float,
+) -> torch.Tensor:
+    if target_vec.size(0) <= 1:
+        return target_vec.new_ones((target_vec.size(0),))
+    similarity = target_vec @ target_vec.transpose(0, 1)
+    gap = (1.0 - similarity).clamp_min(0.0)
+    eye = torch.eye(gap.size(0), device=gap.device, dtype=torch.bool)
+    gap = gap.masked_fill(eye, 0.0)
+    mean_gap = gap.sum(dim=1) / float(max(gap.size(0) - 1, 1))
+    denom = mean_gap + max(float(gap_floor), 1.0e-6)
+    scaled = (mean_gap / denom.clamp_min(1.0e-6)).clamp(0.0, 1.0)
+    scaled = scaled.pow(max(float(gap_power), 1.0e-6))
+    return scaled.clamp(min=float(min_scale), max=1.0).detach()
 
 
 def compute_descriptor_consistency_loss(
@@ -172,6 +224,9 @@ def compute_group_reference_contrastive_loss(
     group_ids: torch.Tensor | None,
     *,
     temperature: float = 0.10,
+    gap_floor: float = 0.10,
+    min_scale: float = 0.50,
+    gap_power: float = 1.0,
 ) -> torch.Tensor | None:
     if group_ids is None:
         return None
@@ -185,9 +240,22 @@ def compute_group_reference_contrastive_loss(
         indices = torch.nonzero(group_ids == group_id, as_tuple=False).reshape(-1)
         if indices.numel() <= 1:
             continue
-        sim = pred_vec.index_select(0, indices) @ tgt_vec.index_select(0, indices).transpose(0, 1)
+        group_pred = pred_vec.index_select(0, indices)
+        group_tgt = tgt_vec.index_select(0, indices)
+        sim = group_pred @ group_tgt.transpose(0, 1)
         sim = sim / max(float(temperature), 1.0e-6)
-        losses.append(F.cross_entropy(sim, torch.arange(indices.numel(), device=sim.device)))
+        per_anchor_loss = F.cross_entropy(
+            sim,
+            torch.arange(indices.numel(), device=sim.device),
+            reduction="none",
+        )
+        gap_scale = _compute_group_gap_scales(
+            group_tgt,
+            gap_floor=float(gap_floor),
+            min_scale=float(min_scale),
+            gap_power=float(gap_power),
+        )
+        losses.append((per_anchor_loss * gap_scale).sum() / gap_scale.sum().clamp_min(1.0e-6))
     if not losses:
         return None
     return torch.stack(losses).mean()

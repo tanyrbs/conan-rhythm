@@ -21,6 +21,7 @@ class StageWarmStartDefaultTests(unittest.TestCase):
             "egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml",
             "egs/conan_emformer_rhythm_v2_student_retimed.yaml",
             "egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml",
+            "egs/conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml",
         ]
         for config_path in config_paths:
             with self.subTest(config=config_path):
@@ -89,6 +90,34 @@ class StageWarmStartDefaultTests(unittest.TestCase):
         self.assertGreater(
             balanced_hp.get("rhythm_loss_balance_max_scale"),
             maintained_hp.get("rhythm_loss_balance_max_scale"),
+        )
+
+    def test_hybrid_stage3_ablation_switches_target_mode_without_touching_warmstart_gate(self) -> None:
+        maintained_hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_retimed.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        hybrid_hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        self.assertEqual(maintained_hp.get("rhythm_retimed_target_mode"), "cached")
+        self.assertEqual(hybrid_hp.get("rhythm_retimed_target_mode"), "hybrid")
+        self.assertEqual(
+            hybrid_hp.get("rhythm_online_retimed_target_start_steps"),
+            maintained_hp.get("rhythm_online_retimed_target_start_steps"),
+        )
+        self.assertEqual(
+            hybrid_hp.get("rhythm_stage3_acoustic_weight_start"),
+            maintained_hp.get("rhythm_stage3_acoustic_weight_start"),
+        )
+        self.assertEqual(
+            hybrid_hp.get("rhythm_stage3_acoustic_ramp_steps"),
+            maintained_hp.get("rhythm_stage3_acoustic_ramp_steps"),
         )
 
     def test_ref_bootstrap_config_externalizes_rhythm_supervision_without_cached_teacher(self) -> None:

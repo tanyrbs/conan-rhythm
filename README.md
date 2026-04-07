@@ -376,6 +376,16 @@ Teacher stage template:
 CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --exp_name conan_rhythm_v2_teacher_offline   --reset
 ```
 
+Maintained stage-1 semantics note:
+
+- `teacher_offline` is currently a **cached-guidance bootstrap** for the learned
+  offline teacher branch
+- it keeps `rhythm_dataset_target_mode: cached_only` and
+  `rhythm_primary_target_surface: guidance`
+- so do **not** oversell the checked-in config as "offline teacher directly
+  learns from runtime algorithmic teacher targets"; that is a separate research
+  direction, not the maintained default in this repo
+
 For real runs, also override the actual dataset roots, for example:
 
 ```bash
@@ -467,7 +477,7 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 
 | Config | Status | Purpose | Needs teacher cache | Needs retimed cache | Needs F0 |
 |---|---|---|---:|---:|---:|
-| `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | learned offline teacher stage | no | no | usually no |
+| `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | cached-guidance bootstrap for the learned offline teacher stage | no | no | usually no |
 | `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | student runtime + cached teacher supervision; maintained path usually keeps KD shape-only | yes | no | no |
 | `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
 | `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
@@ -475,6 +485,7 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 | `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream robustness profile with trace-reliability gating and anchor-aware trace sampling | no | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
+| `conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml` | experimental | cached-first stage-3 branch that switches to hybrid online retimed targets after the configured warmup | yes | yes | yes |
 | `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
 | `conan_emformer_rhythm_v2.yaml` | transitional | migration / debug path | optional | optional | stage-dependent |
 | `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | schedule-only ablation; not part of maintained training prep | optional | no | no |

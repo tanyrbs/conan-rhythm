@@ -248,6 +248,13 @@ What this stage is for:
 - learn the offline teacher surfaces
 - keep teacher as the main branch
 - keep audio-export / audition semantics intact
+- maintained semantics note:
+  - the checked-in `teacher_offline` config is still a **cached-guidance
+    bootstrap** (`cached_only + primary guidance`)
+  - it is not yet the research variant where the offline teacher directly uses
+    runtime algorithmic-teacher surfaces as the primary target
+  - keep the external story aligned with the YAML unless you introduce a
+    separate ablation config and validate it explicitly
 
 ### 6.2 Export teacher targets
 
@@ -319,6 +326,14 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
   --reset \
   -hp "load_ckpt='checkpoints/conan_rhythm_v2_student_kd',binary_data_dir='data/binary/<student_retimed_binary>',processed_data_dir='data/processed/<dataset>',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2_teacher_offline',rhythm_retimed_target_mode='cached'"
 ```
+
+Optional upper-bound A/B after the maintained cached baseline is stable:
+
+- `egs/conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml`
+- keeps the same conservative stage-3 warm-start / ramp defaults
+- switches `rhythm_retimed_target_mode` from `cached` to `hybrid`
+- still waits until `rhythm_online_retimed_target_start_steps` before trusting
+  online retimed targets
 
 First formal stage-3 launch rules:
 

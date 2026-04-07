@@ -7,8 +7,12 @@ base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 load_ckpt_strict: false
 
 # Formal stage-1 maintained path:
-# train the learned offline planner teacher as the primary execution branch,
-# then export learned_offline teacher surfaces for student_kd / student_retimed.
+# keep the learned offline planner teacher as the primary execution branch, but
+# bootstrap it on the cached guidance/self floor first. In other words, the
+# maintained stage-1 is *not* yet the research variant where the offline teacher
+# directly learns from runtime algorithmic-teacher targets.
+# After this stage stabilizes, export learned_offline teacher surfaces for
+# student_kd / student_retimed.
 rhythm_stage: teacher_offline
 rhythm_minimal_v1_profile: false
 rhythm_strict_mainline: false
@@ -28,6 +32,10 @@ rhythm_enable_dual_mode_teacher: false
 rhythm_enable_learned_offline_teacher: true
 rhythm_runtime_enable_learned_offline_teacher: true
 rhythm_enable_algorithmic_teacher: false
+# Maintained stage-1 keeps runtime teacher synthesis off and reuses the cached
+# guidance floor for stability / asset compatibility. A future research config
+# can flip these knobs if you want a true "teacher learns from runtime teacher"
+# ablation, but that is intentionally not the maintained default here.
 rhythm_dataset_build_teacher_from_ref: false
 rhythm_dataset_build_guidance_from_ref: false
 rhythm_binarize_teacher_targets: false
