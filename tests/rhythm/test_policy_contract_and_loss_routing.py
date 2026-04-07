@@ -53,7 +53,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -88,7 +88,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -120,7 +120,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "transitional",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -151,7 +151,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -189,7 +189,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -225,7 +225,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -258,13 +258,56 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_scale_rhythm_loss_terms_allows_missing_optional_descriptor_and_pairwise_terms(self) -> None:
+        base = torch.tensor(1.0)
+        scaled = scale_rhythm_loss_terms(
+            {
+                "rhythm_exec_speech": base,
+                "rhythm_exec_pause": base,
+                "rhythm_budget": base,
+                "rhythm_budget_raw_surface": base,
+                "rhythm_budget_exec_surface": base,
+                "rhythm_budget_total_surface": base,
+                "rhythm_budget_pause_share_surface": base,
+                "rhythm_feasible_debt": base,
+                "rhythm_carry": base,
+                "rhythm_plan": base,
+                "rhythm_plan_local": base,
+                "rhythm_plan_cum": base,
+                "rhythm_guidance": base,
+                "rhythm_distill": base,
+                "rhythm_distill_exec": base,
+                "rhythm_distill_budget": base,
+                "rhythm_distill_budget_raw_surface": base,
+                "rhythm_distill_budget_exec_surface": base,
+                "rhythm_distill_budget_total_surface": base,
+                "rhythm_distill_budget_pause_share_surface": base,
+                "rhythm_distill_prefix": base,
+                "rhythm_distill_speech_shape": base,
+                "rhythm_distill_pause_shape": base,
+                "rhythm_distill_allocation": base,
+            },
+            hparams={
+                "lambda_rhythm_budget": 0.08,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_descriptor_consistency": 0.10,
+            },
+            cumplan_lambda=0.12,
+        )
+        self.assertTrue(torch.allclose(scaled["rhythm_descriptor_consistency"], torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(scaled["rhythm_descriptor_global"], torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(scaled["rhythm_pairwise_contrastive"], torch.tensor(0.0)))
+        self.assertTrue(torch.allclose(scaled["rhythm_pairwise_diversity"], torch.tensor(0.0)))
+
     def test_lambda_distill_requires_active_component_weight(self) -> None:
         _, errors, _ = validate_stage_contract(
             {
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -302,7 +345,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -339,6 +382,8 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
             {
                 "rhythm_exec_speech": torch.tensor(1.0),
                 "rhythm_exec_pause": torch.tensor(2.0),
+                "rhythm_exec_pause_value": torch.tensor(1.5),
+                "rhythm_pause_event": torch.tensor(0.5),
                 "rhythm_budget": torch.tensor(3.0),
                 "rhythm_budget_raw_surface": torch.tensor(3.1),
                 "rhythm_budget_exec_surface": torch.tensor(3.2),
@@ -389,10 +434,14 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertIn("rhythm_plan_cum", scaled)
         self.assertIn("rhythm_distill_student", scaled)
         self.assertIn("rhythm_distill_same_source_any", scaled)
+        self.assertIn("rhythm_exec_pause_value", scaled)
+        self.assertIn("rhythm_pause_event", scaled)
         self.assertTrue(torch.allclose(scaled["rhythm_plan_local"], torch.tensor(0.6)))
         self.assertTrue(torch.allclose(scaled["rhythm_plan_cum"], torch.tensor(1.4)))
         self.assertTrue(torch.allclose(scaled["rhythm_distill_student"], torch.tensor(3.6)))
         self.assertTrue(torch.allclose(scaled["rhythm_distill_same_source_any"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(scaled["rhythm_exec_pause_value"], torch.tensor(1.5)))
+        self.assertTrue(torch.allclose(scaled["rhythm_pause_event"], torch.tensor(0.5)))
 
     def test_public_aliases_expose_plan_and_teacher_aux(self) -> None:
         losses = {
@@ -470,7 +519,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
             {
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -506,7 +555,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_kd",
                 "rhythm_strict_mainline": True,
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",
@@ -544,7 +593,7 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
             {
                 "rhythm_enable_v2": True,
                 "rhythm_stage": "student_retimed",
-                "rhythm_cache_version": 5,
+                "rhythm_cache_version": 6,
                 "rhythm_dataset_target_mode": "cached_only",
                 "rhythm_primary_target_surface": "teacher",
                 "rhythm_teacher_target_source": "learned_offline",

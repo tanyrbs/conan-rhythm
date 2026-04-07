@@ -1,6 +1,6 @@
 # Streaming inference notes
 
-This file is a helper note for runtime/eval utilities. It is **not** the maintained training-prep source of truth; use root `README.md` and `docs/rhythm_migration_plan.md` for current training readiness.
+This file is a helper note for runtime/eval utilities. It is **not** the maintained training-prep source of truth; use root `README.md` and `docs/training_plan.md` for current training readiness.
 
 This directory now exposes a small runtime utility layer for the Conan streaming path.
 

@@ -21,8 +21,9 @@ def _infer_silence_frame(mel: torch.Tensor) -> torch.Tensor:
     if mel.size(0) <= 0:
         return mel.new_zeros((mel.size(-1),))
     energy = mel.mean(dim=-1)
-    min_idx = int(torch.argmin(energy).item())
-    return mel[min_idx]
+    low_k = max(1, min(int(mel.size(0)), max(3, int(round(float(mel.size(0)) * 0.10)))))
+    _, low_idx = torch.topk(energy, k=low_k, largest=False)
+    return mel[low_idx].mean(dim=0)
 
 
 def _as_runtime_batched_tensor(value, *, dtype=torch.float32) -> torch.Tensor:

@@ -14,7 +14,12 @@ _GROUP_LOSS_KEYS = {
 }
 
 _GROUP_APPLY_KEYS = {
-    "exec": ("rhythm_exec_speech", "rhythm_exec_pause"),
+    "exec": (
+        "rhythm_exec_speech",
+        "rhythm_exec_pause",
+        "rhythm_exec_pause_value",
+        "rhythm_pause_event",
+    ),
     "state": (
         "rhythm_budget",
         "rhythm_budget_raw_surface",

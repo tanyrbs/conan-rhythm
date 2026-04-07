@@ -57,6 +57,10 @@ class RhythmLossTargets:
     budget_exec_weight: float = 0.25
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
+    pause_event_weight: float = 0.0
+    pause_event_threshold: float = 0.5
+    pause_event_temperature: float = 0.25
+    pause_event_pos_weight: float = 2.0
     ref_global_rate: Optional[torch.Tensor] = None
     ref_pause_ratio: Optional[torch.Tensor] = None
     ref_local_rate_trace: Optional[torch.Tensor] = None
@@ -268,7 +272,25 @@ def build_predicted_reference_descriptor_bundle(execution, targets: RhythmLossTa
         (speech_centered.pow(2).sum(dim=1, keepdim=True) / visible_units).clamp_min(1e-6)
     )
     local_rate_unit = (speech_centered / speech_std.clamp_min(1e-6)) * unit_mask
-    boundary_unit = resolve_boundary_score_unit(execution.planner).float() * unit_mask
+    # Descriptor consistency should describe the executed result instead of
+    # replaying planner-side conditioning. planner.boundary_score_unit blends
+    # source cue and reference trace, which would leak conditions into the
+    # descriptor target. Use executed blank mass to build a boundary proxy.
+    pause_fill = pause_total / visible_units
+    pause_visible = torch.where(unit_mask > 0.0, blank_exec, pause_fill.expand_as(blank_exec))
+    pause_log = torch.log1p(pause_visible.clamp_min(0.0))
+    pause_mean = (pause_log * unit_mask).sum(dim=1, keepdim=True) / visible_units
+    pause_centered = (pause_log - pause_mean) * unit_mask
+    pause_std = torch.sqrt(
+        (pause_centered.pow(2).sum(dim=1, keepdim=True) / visible_units).clamp_min(1e-6)
+    )
+    boundary_unit = torch.sigmoid(pause_centered / pause_std.clamp_min(1e-6))
+    pause_has_variation = pause_centered.abs().sum(dim=1, keepdim=True) > 1e-6
+    boundary_unit = torch.where(
+        pause_has_variation.expand_as(boundary_unit),
+        boundary_unit,
+        boundary_unit.new_zeros(boundary_unit.shape),
+    ) * unit_mask
 
     local_rate_trace_tgt = _coerce_optional_batch_trace(targets.ref_local_rate_trace)
     boundary_trace_tgt = _coerce_optional_batch_trace(targets.ref_boundary_trace)
@@ -547,11 +569,15 @@ def _compute_pairwise_group_losses(
                 if neg_vector is None:
                     continue
                 neg = neg_vector.mean()
+                pair_scale = anchor_scale * _resolve_pairwise_gap_scale(
+                    ref_gap,
+                    min_ref_gap=float(targets.pairwise_min_ref_gap),
+                )
                 if float(targets.pairwise_contrastive_weight) > 0.0:
                     contrastive_terms.append(
-                        F.relu(float(targets.pairwise_contrastive_margin) + pos - neg) * anchor_scale
+                        F.relu(float(targets.pairwise_contrastive_margin) + pos - neg) * pair_scale
                     )
-                    contrastive_scales.append(anchor_scale)
+                    contrastive_scales.append(pair_scale)
                 if float(targets.pairwise_diversity_weight) > 0.0:
                     pred_gap_vector = compute_descriptor_bundle_distance(
                         _index_descriptor_bundle(pred_group, slice(anchor_idx, anchor_idx + 1)),
@@ -565,9 +591,9 @@ def _compute_pairwise_group_losses(
                         continue
                     pred_gap = pred_gap_vector.mean()
                     diversity_terms.append(
-                        F.relu(float(targets.pairwise_diversity_margin_scale) * ref_gap - pred_gap) * anchor_scale
+                        F.relu(float(targets.pairwise_diversity_margin_scale) * ref_gap - pred_gap) * pair_scale
                     )
-                    diversity_scales.append(anchor_scale)
+                    diversity_scales.append(pair_scale)
     if contrastive_terms:
         losses["rhythm_pairwise_contrastive"] = (
             torch.stack(contrastive_terms).sum() / torch.stack(contrastive_scales).sum().clamp_min(1e-6)
@@ -578,6 +604,13 @@ def _compute_pairwise_group_losses(
         ) * float(targets.pairwise_diversity_weight)
     losses["rhythm_pairwise_groups_in_batch"] = zero.new_tensor(active_groups)
     return losses
+
+
+def _resolve_pairwise_gap_scale(ref_gap: torch.Tensor, *, min_ref_gap: float) -> torch.Tensor:
+    denom = ref_gap.new_tensor(max(float(min_ref_gap), 1e-6))
+    # Keep near-threshold pairs active but lighter, and let clearly different
+    # references contribute more strongly against descriptor collapse.
+    return (ref_gap / (ref_gap + denom)).clamp(0.5, 1.0).detach()
 
 
 def _masked_cumsum(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -863,6 +896,33 @@ def _compute_feasible_debt_penalty(
         repair_mass = repair_mass / source_total
     debt = torch.log1p(repair_mass)
     return _reduce_batch_loss(debt, batch_weight)
+
+
+def _compute_pause_event_loss(
+    blank_exec: torch.Tensor,
+    pause_exec_tgt: torch.Tensor,
+    pause_mask: torch.Tensor,
+    *,
+    threshold: float,
+    temperature: float,
+    pos_weight: float,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    pause_mask = pause_mask.float().clamp_min(0.0)
+    target_event = (pause_exec_tgt.float() > float(threshold)).float()
+    logits = (blank_exec.float() - float(threshold)) / max(float(temperature), 1.0e-4)
+    loss = F.binary_cross_entropy_with_logits(logits, target_event, reduction="none")
+    if float(pos_weight) > 1.0:
+        positive_scale = torch.where(
+            target_event > 0.5,
+            loss.new_full(target_event.shape, float(pos_weight)),
+            loss.new_ones(target_event.shape),
+        )
+        pause_mask = pause_mask * positive_scale
+    reduce_dims = tuple(range(1, loss.dim()))
+    masked_loss = (loss * pause_mask).sum(dim=reduce_dims)
+    masked_denom = pause_mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
 
 
 def _scalar_flag(ref: torch.Tensor, enabled: bool) -> torch.Tensor:
@@ -1154,12 +1214,25 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         unit_mask,
         boundary_weight=float(targets.pause_boundary_weight),
     )
-    l_exec_pause = _masked_log_huber(
+    l_exec_pause_value = _masked_log_huber(
         blank_exec,
         targets.pause_exec_tgt.float(),
         pause_mask,
         batch_weight=targets.sample_confidence,
     )
+    l_pause_event = blank_exec.new_tensor(0.0)
+    if float(targets.pause_event_weight) > 0.0:
+        l_pause_event = _compute_pause_event_loss(
+            blank_exec,
+            targets.pause_exec_tgt.float(),
+            pause_mask,
+            threshold=float(targets.pause_event_threshold),
+            temperature=float(targets.pause_event_temperature),
+            pos_weight=float(targets.pause_event_pos_weight),
+            batch_weight=targets.sample_confidence,
+        )
+    l_pause_event = float(targets.pause_event_weight) * l_pause_event
+    l_exec_pause = l_exec_pause_value + l_pause_event
     (
         l_budget,
         l_budget_raw,
@@ -1238,6 +1311,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     return {
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_pause': l_exec_pause,
+        'rhythm_exec_pause_value': l_exec_pause_value.detach(),
+        'rhythm_pause_event': l_pause_event.detach(),
         'rhythm_budget': l_budget,
         'rhythm_budget_raw_surface': l_budget_raw,
         'rhythm_budget_exec_surface': l_budget_exec,

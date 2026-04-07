@@ -63,6 +63,10 @@ class RhythmTaskRuntimeSupport:
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+            pause_event_weight=_nonnegative_float("rhythm_pause_event_weight", 0.0),
+            pause_event_threshold=_nonnegative_float("rhythm_pause_event_threshold", 0.5),
+            pause_event_temperature=max(1.0e-4, _nonnegative_float("rhythm_pause_event_temperature", 0.25)),
+            pause_event_pos_weight=max(1.0, _nonnegative_float("rhythm_pause_event_pos_weight", 2.0)),
             dedupe_primary_teacher_cache_distill=_resolve_duplicate_primary_distill_dedupe_flag(hparams),
             enable_distill_context_match=bool(
                 hparams.get("rhythm_enable_distill_context_match", False)

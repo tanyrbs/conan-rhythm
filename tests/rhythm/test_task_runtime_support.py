@@ -124,6 +124,32 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertTrue(config.dedupe_primary_teacher_cache_distill)
         self.assertEqual(config.distill_exec_weight, 0.0)
 
+    def test_target_build_config_exposes_pause_event_controls(self) -> None:
+        owner = SimpleNamespace(
+            mel_losses={"l1": 1.0},
+            _resolve_rhythm_plan_weights=lambda: (0.5, 1.0),
+            _resolve_rhythm_primary_target_surface=lambda: "teacher",
+            _resolve_rhythm_distill_surface=lambda: "cache",
+            _resolve_rhythm_pause_boundary_weight=lambda: 0.35,
+            _rhythm_policy=lambda: SimpleNamespace(strict_mainline=True),
+        )
+        support = RhythmTaskRuntimeSupport(owner)
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_pause_event_weight": 0.2,
+                "rhythm_pause_event_threshold": 0.6,
+                "rhythm_pause_event_temperature": 0.15,
+                "rhythm_pause_event_pos_weight": 2.5,
+            },
+            clear=True,
+        ):
+            config = support.build_rhythm_target_build_config()
+        self.assertAlmostEqual(config.pause_event_weight, 0.2)
+        self.assertAlmostEqual(config.pause_event_threshold, 0.6)
+        self.assertAlmostEqual(config.pause_event_temperature, 0.15)
+        self.assertAlmostEqual(config.pause_event_pos_weight, 2.5)
+
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:
             mel_losses = {"l1": 1.0}

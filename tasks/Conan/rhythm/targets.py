@@ -26,6 +26,10 @@ class RhythmTargetBuildConfig:
     budget_raw_weight: float
     budget_exec_weight: float
     feasible_debt_weight: float
+    pause_event_weight: float = 0.0
+    pause_event_threshold: float = 0.5
+    pause_event_temperature: float = 0.25
+    pause_event_pos_weight: float = 2.0
     dedupe_primary_teacher_cache_distill: bool = True
     enable_distill_context_match: bool = False
     distill_context_floor: float = 0.35
@@ -964,6 +968,10 @@ def build_rhythm_loss_targets_from_sample(
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
+        pause_event_weight=float(config.pause_event_weight),
+        pause_event_threshold=float(config.pause_event_threshold),
+        pause_event_temperature=float(config.pause_event_temperature),
+        pause_event_pos_weight=float(config.pause_event_pos_weight),
         ref_global_rate=ref_global_rate,
         ref_pause_ratio=ref_pause_ratio,
         ref_local_rate_trace=ref_local_rate_trace,
@@ -1032,6 +1040,10 @@ def build_identity_rhythm_loss_targets(
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
+        pause_event_weight=float(config.pause_event_weight),
+        pause_event_threshold=float(config.pause_event_threshold),
+        pause_event_temperature=float(config.pause_event_temperature),
+        pause_event_pos_weight=float(config.pause_event_pos_weight),
         descriptor_consistency_weight=float(config.lambda_descriptor_consistency),
         descriptor_global_weight=float(config.descriptor_global_weight),
         descriptor_pause_weight=float(config.descriptor_pause_weight),
@@ -1060,19 +1072,29 @@ def scale_rhythm_loss_terms(
             return cumplan
         return rhythm_losses["rhythm_carry"]
 
+    prefix_state = _resolve_prefix_state_loss()
+    loss_zero = prefix_state.new_zeros(())
+
     def _scaled_detached(
         key: str,
         scale: float,
         *,
         fallback_key: str | None = None,
+        allow_missing: bool = False,
     ) -> torch.Tensor:
         value = rhythm_losses.get(key)
         if not isinstance(value, torch.Tensor):
             if fallback_key is None:
+                if allow_missing:
+                    return loss_zero.detach()
                 raise KeyError(key)
             fallback = rhythm_losses.get(fallback_key)
             if not isinstance(fallback, torch.Tensor) and fallback_key == "rhythm_prefix_state":
                 fallback = _resolve_prefix_state_loss()
+            if not isinstance(fallback, torch.Tensor):
+                if allow_missing:
+                    return loss_zero.detach()
+                raise KeyError(fallback_key)
             value = fallback
         return (value * float(scale)).detach()
 
@@ -1088,12 +1110,22 @@ def scale_rhythm_loss_terms(
     descriptor_pause_weight = float(hparams.get("rhythm_descriptor_pause_weight", 1.0))
     descriptor_local_trace_weight = float(hparams.get("rhythm_descriptor_local_trace_weight", 0.5))
     descriptor_boundary_trace_weight = float(hparams.get("rhythm_descriptor_boundary_trace_weight", 0.5))
-    prefix_state = _resolve_prefix_state_loss()
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
+    lambda_exec_pause = float(hparams.get("lambda_rhythm_exec_pause", 1.0))
     scaled = {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
-        "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+        "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * lambda_exec_pause,
+        "rhythm_exec_pause_value": _scaled_detached(
+            "rhythm_exec_pause_value",
+            lambda_exec_pause,
+            fallback_key="rhythm_exec_pause",
+        ),
+        "rhythm_pause_event": _scaled_detached(
+            "rhythm_pause_event",
+            lambda_exec_pause,
+            allow_missing=True,
+        ),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * lambda_budget,
         "rhythm_budget_raw_surface": _scaled_detached(
             "rhythm_budget_raw_surface",
@@ -1137,25 +1169,29 @@ def scale_rhythm_loss_terms(
         "rhythm_plan_local": (rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight).detach(),
         "rhythm_plan_cum": (rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight).detach(),
         "rhythm_guidance": rhythm_losses["rhythm_guidance"] * lambda_guidance,
-        "rhythm_descriptor_consistency": rhythm_losses["rhythm_descriptor_consistency"],
+        "rhythm_descriptor_consistency": rhythm_losses.get("rhythm_descriptor_consistency", loss_zero),
         "rhythm_descriptor_global": _scaled_detached(
             "rhythm_descriptor_global",
             lambda_descriptor_consistency * descriptor_global_weight,
+            allow_missing=True,
         ),
         "rhythm_descriptor_pause": _scaled_detached(
             "rhythm_descriptor_pause",
             lambda_descriptor_consistency * descriptor_pause_weight,
+            allow_missing=True,
         ),
         "rhythm_descriptor_local_trace": _scaled_detached(
             "rhythm_descriptor_local_trace",
             lambda_descriptor_consistency * descriptor_local_trace_weight,
+            allow_missing=True,
         ),
         "rhythm_descriptor_boundary_trace": _scaled_detached(
             "rhythm_descriptor_boundary_trace",
             lambda_descriptor_consistency * descriptor_boundary_trace_weight,
+            allow_missing=True,
         ),
-        "rhythm_pairwise_contrastive": rhythm_losses["rhythm_pairwise_contrastive"],
-        "rhythm_pairwise_diversity": rhythm_losses["rhythm_pairwise_diversity"],
+        "rhythm_pairwise_contrastive": rhythm_losses.get("rhythm_pairwise_contrastive", loss_zero),
+        "rhythm_pairwise_diversity": rhythm_losses.get("rhythm_pairwise_diversity", loss_zero),
         "rhythm_distill": scaled_distill,
         "rhythm_distill_student": scaled_distill.detach(),
         "rhythm_distill_exec": _scaled_detached("rhythm_distill_exec", lambda_distill),

@@ -5,7 +5,7 @@ base_config: egs/conan_emformer_rhythm_v2_teacher_offline.yaml
 # - valid split: dev-clean
 # - test split: test-clean
 processed_data_dir: data/processed/libritts_train100_formal
-binary_data_dir: data/binary/libritts_train100_formal_rhythm_v5
+binary_data_dir: data/binary/libritts_train100_formal_rhythm_v6
 
 # Metadata built by scripts/build_libritts_local_processed_metadata.py now carries
 # canonical explicit split labels (`train` / `valid` / `test`), so prefix rules

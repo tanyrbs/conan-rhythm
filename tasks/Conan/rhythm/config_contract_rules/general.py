@@ -18,11 +18,27 @@ _REQUIRED_PUBLIC_LOSSES = {
 _MAINLINE_STAGES = {"teacher_offline", "student_kd", "student_retimed"}
 
 
-def _validate_cache_version(ctx: RhythmStageValidationContext, errors: list[str]) -> None:
+def _validate_cache_version(
+    ctx: RhythmStageValidationContext,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
     configured_cache_version = ctx.knobs.configured_cache_version
-    if configured_cache_version != int(RHYTHM_CACHE_VERSION):
+    maintained_cache_version = int(RHYTHM_CACHE_VERSION)
+    if configured_cache_version == maintained_cache_version:
+        return
+    allow_legacy_resume = bool(ctx.hparams.get("rhythm_allow_legacy_cache_resume", False))
+    if allow_legacy_resume and configured_cache_version < maintained_cache_version:
+        warnings.append(
+            "rhythm_allow_legacy_cache_resume=true: allowing configured "
+            f"rhythm_cache_version={configured_cache_version} below maintained={maintained_cache_version}. "
+            "This keeps the run on the old cache lineage and does not activate newer cache semantics "
+            "(for example soft-boundary trace updates) until the dataset is re-binarized."
+        )
+        return
+    if configured_cache_version != maintained_cache_version:
         errors.append(
-            f"rhythm_cache_version mismatch: configured={configured_cache_version}, maintained={int(RHYTHM_CACHE_VERSION)}."
+            f"rhythm_cache_version mismatch: configured={configured_cache_version}, maintained={maintained_cache_version}."
         )
 
 
@@ -352,7 +368,7 @@ def validate_general_stage_rules(
     errors: list[str],
     warnings: list[str],
 ) -> None:
-    _validate_cache_version(ctx, errors)
+    _validate_cache_version(ctx, errors, warnings)
     _validate_nonnegative_weights(ctx, errors)
     _validate_objective_activation(ctx, errors)
     _validate_inactive_distill_config_clutter(ctx, warnings)

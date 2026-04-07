@@ -26,7 +26,7 @@ rhythm_stats_dim: 6
 rhythm_trace_dim: 5
 rhythm_trace_bins: 24
 rhythm_trace_horizon: 0.35
-rhythm_cache_version: 5
+rhythm_cache_version: 6
 rhythm_slow_topk: 6
 rhythm_selector_cell_size: 3
 rhythm_source_phrase_threshold: 0.55

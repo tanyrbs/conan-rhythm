@@ -36,9 +36,9 @@ def build_report(raw_root: Path) -> dict:
     }
     outputs = {
         'train100_processed': REPO_ROOT / 'data/processed/libritts_train100_formal',
-        'train100_binary': REPO_ROOT / 'data/binary/libritts_train100_formal_rhythm_v5',
+        'train100_binary': REPO_ROOT / 'data/binary/libritts_train100_formal_rhythm_v6',
         'train100_360_processed': REPO_ROOT / 'data/processed/libritts_train100_360_formal',
-        'train100_360_binary': REPO_ROOT / 'data/binary/libritts_train100_360_formal_rhythm_v5',
+        'train100_360_binary': REPO_ROOT / 'data/binary/libritts_train100_360_formal_rhythm_v6',
     }
 
     report = {

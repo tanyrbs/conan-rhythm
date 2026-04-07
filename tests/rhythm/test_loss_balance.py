@@ -57,6 +57,30 @@ class RhythmLossBalanceTests(unittest.TestCase):
         self.assertTrue(torch.allclose(balanced["rhythm_exec_speech"], losses["rhythm_exec_speech"] * exec_scale))
         self.assertTrue(torch.allclose(balanced["rhythm_budget"], losses["rhythm_budget"] * state_scale))
 
+    def test_balancer_scales_pause_exec_observability_terms_with_exec_group(self) -> None:
+        balancer = AdaptiveRhythmLossBalancer(
+            AdaptiveRhythmLossBalancerConfig(
+                mode="ema_group",
+                beta=0.0,
+                alpha=1.0,
+                warmup_steps=0,
+                min_scale=0.25,
+                max_scale=4.0,
+            )
+        )
+        losses = {
+            "rhythm_exec_speech": torch.tensor(4.0, requires_grad=True),
+            "rhythm_exec_pause": torch.tensor(2.0, requires_grad=True),
+            "rhythm_exec_pause_value": torch.tensor(1.5),
+            "rhythm_pause_event": torch.tensor(0.5),
+            "rhythm_budget": torch.tensor(1.0, requires_grad=True),
+            "rhythm_prefix_state": torch.tensor(0.0, requires_grad=True),
+        }
+        balanced = balancer.apply(losses, global_step=100, training=True)
+        exec_scale = float(balanced["rhythm_loss_balance_exec_scale"].item())
+        self.assertTrue(torch.allclose(balanced["rhythm_exec_pause_value"], losses["rhythm_exec_pause_value"] * exec_scale))
+        self.assertTrue(torch.allclose(balanced["rhythm_pause_event"], losses["rhythm_pause_event"] * exec_scale))
+
 
 if __name__ == "__main__":
     unittest.main()

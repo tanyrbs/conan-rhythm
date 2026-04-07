@@ -24,7 +24,7 @@ WITH_F0="${WITH_F0:-0}"
 NUM_SHARDS="${NUM_SHARDS:-1}"
 CONFIG="egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml"
 PROCESSED_DIR="data/processed/libritts_train100_formal"
-BINARY_DIR="data/binary/libritts_train100_formal_rhythm_v5"
+BINARY_DIR="data/binary/libritts_train100_formal_rhythm_v6"
 
 for split in train-clean-100 dev-clean test-clean; do
   if [[ ! -d "$RAW_ROOT/$split" ]]; then

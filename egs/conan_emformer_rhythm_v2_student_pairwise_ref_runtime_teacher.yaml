@@ -45,6 +45,11 @@ rhythm_apply_train_override: false
 rhythm_apply_valid_override: false
 rhythm_export_debug_sidecars: false
 rhythm_export_cache_audit_to_sample: false
+rhythm_emit_reference_sidecar: true
+rhythm_enable_trace_exhaustion_fallback: true
+rhythm_trace_exhaustion_gap_start: 0.08
+rhythm_trace_exhaustion_gap_end: 0.22
+rhythm_trace_exhaustion_local_floor: 0.20
 
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0

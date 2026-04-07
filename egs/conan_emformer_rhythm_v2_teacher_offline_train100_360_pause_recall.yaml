@@ -1,0 +1,26 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360.yaml
+
+# Conservative Stage-1 continuation focused on pause event recall.
+# This config is meant for mid-run resume from the existing formal teacher
+# checkpoint lineage, not for a fresh from-scratch launch.
+
+# Support-first pause objective:
+# keep the original pause regression path, but add a light event-level auxiliary
+# term so missed pause sites are penalized more directly.
+rhythm_pause_event_weight: 0.15
+rhythm_pause_event_threshold: 0.50
+rhythm_pause_event_temperature: 0.20
+rhythm_pause_event_pos_weight: 2.0
+
+# Slightly relax pause support sparsity so projector top-k does not cap recall
+# too aggressively. The current run is already past 60k, so the effective value
+# after resume will immediately sit at the end ratio.
+rhythm_projector_pause_topk_ratio: 0.40
+rhythm_projector_pause_topk_ratio_train_start: 1.0
+rhythm_projector_pause_topk_ratio_train_end: 0.40
+rhythm_projector_pause_topk_ratio_anneal_steps: 60000
+
+# Mild extra boundary bias; keep this conservative on the first 5k resume block
+# so precision does not collapse while recall is being repaired.
+rhythm_projector_pause_boundary_bias_weight: 0.18
+rhythm_pause_boundary_weight: 0.45
