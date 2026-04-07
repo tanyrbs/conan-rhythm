@@ -1,4 +1,4 @@
-﻿# AutoDL Training Handoff (2026-04-05)
+# AutoDL Training Handoff (2026-04-07)
 
 Validated local baseline before writing this handoff: `67bd85b` (`Add retimed pitch handoff regression coverage`).
 
@@ -97,6 +97,9 @@ Use Linux paths, but keep the same logical contract.
 - Formal training should use rhythm cache **v5**.
 - The checked-in `libritts_single_smoke_rhythm_v4` is compatibility smoke only.
 - The checked-in `artifacts/rhythm_teacher_export_student_kd/...` chain is smoke only because the teacher checkpoint is `bootstrap_random_init`.
+- If you have older descriptor review exports or planner-facing cached sidecars
+  from before the boundary-trace softening change, rebuild them; `boundary_trace`
+  is now a soft strength trace while `boundary_ratio` remains the binary event-rate stat.
 - Do not start `student_kd` until teacher export covers `train`, `valid`, and `test`.
 - Do not start default `student_retimed` unless the rebuilt stage-3 binary really contains usable F0/UV for the retimed path.
 - Even though `train_sets` is now checked more strictly, the first formal AutoDL baseline should still prefer one unified binary over concatenating multiple separately-binarized train roots.
@@ -120,9 +123,13 @@ Recommended first launch posture:
 
 - start with **single-GPU** training first
 - keep maintained configs unchanged on the first long run
-- avoid turning on experimental knobs (`context_match`, `balanced`) before the default chain is clean
+- avoid turning on extra research knobs (`context_match`, stage-2 algorithmic-distill ablations, etc.) before the default chain is clean
 - use a **fresh `exp_name`** or `--reset` for fresh runs, so stale saved config does not silently override the current YAML
 - the maintained stage configs intentionally pin `load_ckpt_strict: false` for cross-stage warm-start; still inspect startup logs so only expected Rhythm V2 / offline-teacher / pitch keys are missing
+- maintained note:
+  - the stage-3 acoustic warmup is now anchored to the actual start of
+    `student_retimed`, so warm-starting from a high-step `student_kd`
+    checkpoint no longer skips the intended stage-3 curriculum
 
 ## 5. Pre-launch checklist on AutoDL
 
@@ -316,7 +323,7 @@ CUDA_VISIBLE_DEVICES=0 python tasks/run.py \
 First formal stage-3 launch rules:
 
 - keep the maintained config unchanged
-- do **not** start from `student_retimed_balanced`
+- no need to start from `student_retimed_balanced`; the maintained stage-3 yaml now already carries the conservative ramp / EMA-balance defaults
 - do **not** disable pitch embed just to get a run started
 - if strict preflight fails on F0 or matched retimed pitch, fix assets first
 
@@ -354,6 +361,7 @@ These are the most important stage-3 observability signals:
 
 - `rhythm_metric_pitch_supervision_disabled`
 - `rhythm_metric_missing_retimed_pitch_target`
+- `rhythm_metric_online_retimed_trace_gate_mean`
 - `acoustic_target_length_mismatch_abs_before_align`
 - `acoustic_target_resampled_to_output`
 - `acoustic_target_trimmed_to_output`
@@ -363,6 +371,7 @@ Interpretation:
 
 - formal stage-3 should **not** live in a state where `rhythm_metric_pitch_supervision_disabled=1`
 - if `rhythm_metric_missing_retimed_pitch_target=1`, your retimed pitch assets are not ready
+- if `rhythm_metric_online_retimed_trace_gate_mean` stays very low, the model is repeatedly telling you the local reference window is exhausted / unreliable; online retimed acoustic targets are being downweighted on purpose
 - repeated large length mismatch / resample / trim activity means your retimed target contract needs inspection
 
 ### 7.4 Known stage-3 risk pattern
@@ -380,6 +389,7 @@ So for the first real stage-3 run, actively watch whether:
 - `L_base` overwhelms control losses for too long
 - gradients stay clip-heavy for many thousands of steps
 - pitch supervision is silently disabled
+- the online trace gate collapses for a large fraction of training, which usually means the short-ref / longer-source regime is under-modeled or overrepresented
 
 If those persist, stop and inspect before wasting a long AutoDL run.
 

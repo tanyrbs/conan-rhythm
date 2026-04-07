@@ -140,6 +140,49 @@ class WeightedAcousticLossTests(unittest.TestCase):
             1.0,
         )
 
+    def test_resolve_acoustic_loss_scale_anchors_to_stage3_start_even_after_warm_start(self) -> None:
+        hparams.clear()
+        hparams.update(
+            {
+                "rhythm_stage3_acoustic_weight_end": 1.0,
+                "rhythm_stage3_acoustic_weight_start": 0.25,
+                "rhythm_stage3_acoustic_ramp_steps": 10000,
+            }
+        )
+        self.task.global_step = 40000
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            0.25,
+        )
+        self.task.global_step = 45000
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            0.625,
+        )
+        self.task.global_step = 52000
+        self.assertAlmostEqual(
+            self.task._resolve_stage3_acoustic_loss_scale(
+                stage="student_retimed",
+                retimed_stage_active=True,
+                acoustic_target_is_retimed=True,
+                infer=False,
+                test=False,
+            ),
+            1.0,
+        )
+
     def test_add_acoustic_loss_applies_true_scalar_after_weighted_reduction(self) -> None:
         mel_out = torch.ones((1, 2, 2), dtype=torch.float32)
         target = torch.zeros_like(mel_out)

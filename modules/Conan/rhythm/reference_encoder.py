@@ -229,18 +229,25 @@ class ReferenceRhythmEncoder(nn.Module):
         uniform = torch.linspace(0.0, 1.0, energy.size(1), device=energy.device)[None, :]
         segment_duration_bias = progress - uniform
 
-        boundary_events = boundary_strength >= torch.quantile(
+        boundary_threshold = torch.quantile(
             boundary_strength,
             self.boundary_quantile,
             dim=1,
             keepdim=True,
         )
+        boundary_events = boundary_strength >= boundary_threshold
+        # Keep a continuous boundary trace for planning while preserving the
+        # binary event rate in the global stats. This gives downstream planning
+        # a graded boundary salience signal instead of a hard 0/1 trace.
+        boundary_mean = boundary_strength.mean(dim=1, keepdim=True)
+        boundary_std = boundary_strength.std(dim=1, keepdim=True).clamp_min(1e-6)
+        boundary_strength_soft = torch.sigmoid((boundary_strength - boundary_mean) / boundary_std)
 
         feature_track = torch.stack(
             [
                 pause_mask.float(),
                 local_rate,
-                boundary_events.float(),
+                boundary_strength_soft,
                 segment_duration_bias,
                 voiced,
             ],

@@ -4,7 +4,6 @@ from .module import StreamingRhythmModule
 from .offline_teacher import OfflineTeacherConfig
 from .policy import (
     resolve_runtime_offline_teacher_enable as resolve_runtime_offline_teacher_enable_from_policy,
-    use_strict_mainline,
 )
 from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
@@ -19,13 +18,15 @@ def resolve_content_vocab_size(hparams) -> int:
 
 
 def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
-    strict_mainline = use_strict_mainline(hparams)
     pause_selection_mode = str(
         hparams.get(
             'rhythm_projector_pause_selection_mode',
-            'simple' if strict_mainline else 'sparse',
+            # Maintained mainline stages also rely on pause-topk annealing.
+            # If strict_mainline silently falls back to "simple", the resolved
+            # top-k schedule is logged but never actually affects the projector.
+            'sparse',
         )
-        or ('simple' if strict_mainline else 'sparse')
+        or 'sparse'
     ).strip().lower()
     if pause_selection_mode not in {'simple', 'sparse'}:
         raise ValueError(f'Unsupported rhythm_projector_pause_selection_mode: {pause_selection_mode}')
@@ -41,10 +42,13 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
         pause_selection_mode=pause_selection_mode,
         use_boundary_commit_guard=bool(
-            hparams.get('rhythm_projector_use_boundary_commit_guard', not strict_mainline)
+            # Streaming prefix release is safer with the guard on by default.
+            hparams.get('rhythm_projector_use_boundary_commit_guard', True)
         ),
         build_render_plan=bool(
-            hparams.get('rhythm_projector_build_render_plan', not strict_mainline)
+            # Keep render-plan construction on by default so retimed-target and
+            # observability paths stay aligned with the execution authority.
+            hparams.get('rhythm_projector_build_render_plan', True)
         ),
     )
 

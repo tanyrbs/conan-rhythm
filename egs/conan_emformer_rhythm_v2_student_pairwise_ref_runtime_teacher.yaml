@@ -44,6 +44,19 @@ rhythm_apply_valid_override: false
 rhythm_export_debug_sidecars: false
 rhythm_export_cache_audit_to_sample: false
 
+# External same-speaker bootstrap is one of the regimes most likely to hit
+# short-ref / longer-source mismatch. Turn on the existing reliability fallback
+# path here by default instead of requiring a separate override file.
+rhythm_emit_reference_sidecar: true
+rhythm_trace_reliability_enable: true
+rhythm_trace_exhaustion_gap_start: 0.08
+rhythm_trace_exhaustion_gap_end: 0.22
+rhythm_trace_exhaustion_local_floor: 0.20
+rhythm_trace_exhaustion_boundary_floor: 0.05
+rhythm_trace_exhaustion_reuse_full_count: 3
+rhythm_trace_exhaustion_final_cell_suppress: 0.65
+rhythm_trace_anchor_aware_sampling: true
+
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
 lambda_rhythm_teacher_aux: 0.0

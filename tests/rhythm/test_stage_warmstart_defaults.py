@@ -43,9 +43,13 @@ class StageWarmStartDefaultTests(unittest.TestCase):
             global_hparams=False,
             reset=True,
         )
-        self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_start"), 0.25)
+        self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_start"), 0.10)
         self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_end"), 1.0)
-        self.assertEqual(hp.get("rhythm_stage3_acoustic_ramp_steps"), 10000)
+        self.assertEqual(hp.get("rhythm_stage3_acoustic_ramp_steps"), 20000)
+        self.assertEqual(hp.get("rhythm_projector_pause_selection_mode"), "sparse")
+        self.assertTrue(hp.get("rhythm_projector_use_boundary_commit_guard"))
+        self.assertTrue(hp.get("rhythm_projector_build_render_plan"))
+        self.assertEqual(hp.get("rhythm_loss_balance_mode"), "ema_group")
 
     def test_ref_bootstrap_config_externalizes_rhythm_supervision_without_cached_teacher(self) -> None:
         hp = set_hparams(
@@ -66,6 +70,9 @@ class StageWarmStartDefaultTests(unittest.TestCase):
         self.assertEqual(hp.get("lambda_rhythm_ref_descriptor_stats"), 0.10)
         self.assertEqual(hp.get("lambda_rhythm_ref_descriptor_trace"), 0.05)
         self.assertEqual(hp.get("lambda_rhythm_ref_group_contrastive"), 0.05)
+        self.assertTrue(hp.get("rhythm_emit_reference_sidecar"))
+        self.assertTrue(hp.get("rhythm_trace_reliability_enable"))
+        self.assertTrue(hp.get("rhythm_trace_anchor_aware_sampling"))
 
 
 if __name__ == "__main__":

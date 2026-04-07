@@ -27,9 +27,24 @@ rhythm_joint_cumplan_macro_weight: 0.65
 # Conservative stage-3 curriculum:
 # early student_retimed updates should not be fully acoustic-dominated before
 # the explicit rhythm controller stabilizes on the retimed canvas.
-rhythm_stage3_acoustic_weight_start: 0.25
+rhythm_stage3_acoustic_weight_start: 0.10
 rhythm_stage3_acoustic_weight_end: 1.0
-rhythm_stage3_acoustic_ramp_steps: 10000
+rhythm_stage3_acoustic_ramp_steps: 20000
+
+# Make stage-3 projector behavior explicit instead of inheriting strict-mainline
+# fallbacks that are too weak for the real retimed canvas.
+rhythm_projector_pause_selection_mode: sparse
+rhythm_projector_use_boundary_commit_guard: true
+rhythm_projector_build_render_plan: true
+
+# Stage-3 smoke remains heavily acoustic-dominated. Bounded EMA balancing is the
+# least invasive way to keep control losses audible during warm-start.
+rhythm_loss_balance_mode: ema_group
+rhythm_loss_balance_beta: 0.98
+rhythm_loss_balance_alpha: 0.50
+rhythm_loss_balance_warmup_steps: 200
+rhythm_loss_balance_min_scale: 0.50
+rhythm_loss_balance_max_scale: 2.00
 
 rhythm_primary_target_surface: teacher
 rhythm_distill_surface: none

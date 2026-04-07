@@ -1,4 +1,4 @@
-# Rhythm Migration Plan (2026-04-06)
+# Rhythm Migration Plan (2026-04-07)
 
 This remains the maintained migration/audit note under `docs/`. Together with `README.md` and `docs/autodl_training_handoff.md`, it defines the current training path, the April 4-5 audit outcome, and the cloud-launch handoff.
 
@@ -50,6 +50,9 @@ cache contract instead of a simplified external view:
   - `pause_ratio`
   - `local_rate_trace`
   - `boundary_trace`
+- planner-facing boundary semantics:
+  - `boundary_trace` is now the **soft boundary-strength trace**
+  - `boundary_ratio` remains the **binary event-rate stat**
 - supports direct audio, feature bundles, and `descriptors.json::sample_id=...`
   style bundle selectors
 - for audio or mel-backed inputs, also renders raw repo-aligned proxy signals:
@@ -92,6 +95,7 @@ The maintained branch now includes these corrective changes:
 - factor intervention syncs compact edits back into `ref_rhythm_stats` / `ref_rhythm_trace` and drops stale sidecars
 - budget supervision and feasibility-debt accounting are cleaner under repair-heavy cases
 - online retimed acoustic targets now inherit sample confidence and projector-repair gating instead of being implicitly trusted at weight `1.0`
+- online retimed acoustic targets now also inherit local trace-reliability gating, so exhausted / replayed prompt tails are downweighted instead of being trusted like clean local evidence
 - module-only stages now keep train/valid objectives aligned instead of reintroducing acoustic/pitch losses only during validation
 - `teacher_offline` validation now uses the real offline-teacher branch instead of silently falling back to the student/runtime path
 - `teacher_offline` preflight dry-run now distinguishes:
@@ -119,6 +123,10 @@ The maintained branch now includes these corrective changes:
   - `_project_pause_impl`
   - `_compute_commit_frontier`
   - `_advance_state`
+- strict-mainline projector defaults now match the real maintained intent:
+  - pause selection defaults to `sparse`, so `pause_topk_ratio` annealing really reaches the sparse projector path
+  - `use_boundary_commit_guard` stays enabled by default
+  - `build_render_plan` stays enabled by default
 - stage-specific optimizer scope no longer silently falls back to full-model training:
   - empty collectors now fail fast
   - post-freeze zero-trainable states now fail fast
@@ -134,6 +142,11 @@ The maintained branch now includes these corrective changes:
 - a conservative group-level EMA rhythm-loss balancer now exists behind an explicit opt-in flag:
   - `rhythm_loss_balance_mode: ema_group`
   - maintained default stays `none`
+- the maintained stage-3 config now ships a more conservative acoustic curriculum:
+  - `rhythm_stage3_acoustic_weight_start: 0.10`
+  - `rhythm_stage3_acoustic_ramp_steps: 20000`
+  - stage-3 warmup is anchored to the **actual start of stage-3**, not the restored absolute `global_step`
+  - bounded EMA group balancing is enabled in the maintained stage-3 yaml
 - context-matched KD gating now exists as an opt-in stage-2 research path:
   - `rhythm_enable_distill_context_match`
   - `rhythm_distill_context_floor`
@@ -141,6 +154,7 @@ The maintained branch now includes these corrective changes:
   - `rhythm_distill_context_open_run_penalty`
 - new experimental configs were added without changing the maintained default chain:
   - `egs/conan_emformer_rhythm_v2_student_kd_context_match.yaml`
+  - `egs/conan_emformer_rhythm_v2_student_kd_algorithmic_distill_ablation.yaml`
   - `egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
 - a new experimental external-reference bootstrap stage is now available:
   - `egs/conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml`
@@ -171,6 +185,10 @@ The maintained branch now includes these corrective changes:
   - `pause_ratio`
   - `local_rate_trace`
   - `boundary_trace`
+- planner-facing boundary traces are now soft rather than binary:
+  - `ref_rhythm_trace[..., boundary_trace]` stores soft boundary strength
+  - `ref_rhythm_stats[..., boundary_ratio]` still stores the binary event rate
+  - if you exported descriptor bundles / sidecars before this change and rely on planner-facing traces, rebuild them
 - short-reference / long-stream robustness is now implemented as an **opt-in runtime profile**, not a silent rewrite of the maintained utterance-bounded mainline:
   - keep the full/global teacher unchanged
   - runtime/student side adds explicit `trace_reliability` gating instead of value-level blending of local trace with slow summary
@@ -186,6 +204,12 @@ The maintained branch now includes these corrective changes:
     - `rhythm_trace_exhaustion_final_cell_suppress`
     - `rhythm_trace_anchor_aware_sampling`
   - helper override yaml: `egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml`
+  - exception for the external-reference bootstrap path:
+    - `student_pairwise_ref_runtime_teacher` / `student_ref_bootstrap` now enable
+      `rhythm_emit_reference_sidecar`, `rhythm_trace_reliability_enable`, and
+      `rhythm_trace_anchor_aware_sampling` by default because that regime is
+      much more exposed to short-ref / longer-source mismatch than the
+      utterance-bounded maintained chain
 
 ## 4. Validation actually run on this checkout
 
@@ -213,6 +237,18 @@ The following were run locally in the `conda` `conan` environment:
   - `tests/rhythm/test_reference_sidecar.py`
   - `tests/rhythm/test_pair_manifest_sampler.py`
   - `tests/rhythm/test_reference_regularization.py`
+- focused April 7, 2026 regression rerun for the new stage-3 / projector /
+  descriptor-contract fixes:
+  - `tests/rhythm/test_factory_defaults.py`
+  - `tests/rhythm/test_reference_encoder.py`
+  - `tests/rhythm/test_stage_warmstart_defaults.py`
+  - `tests/rhythm/test_task_runtime_support.py`
+  - `tests/rhythm/test_trace_reliability_contract.py`
+  - `tests/rhythm/test_weighted_acoustic_losses.py`
+  - `tests/rhythm/test_reference_sidecar.py`
+  - `tests/rhythm/test_reference_regularization.py`
+  - `tests/rhythm/test_target_builder.py`
+  - `tests/rhythm/test_projector_invariants.py`
 
 Observed result summary:
 
@@ -233,6 +269,9 @@ Observed result summary:
 - focused external-reference bootstrap regression rerun on April 6, 2026:
   - **57 tests passed**
   - validated stage-2.5 config defaults, contract hard-errors, pair-manifest expansion, identity-anchor allowance, descriptor regularization helpers, runtime fail-fast against accidental self fallback, reference self/external observability metrics, and trace-exhaustion fallback wiring
+- focused stage-3 / projector / descriptor-contract regression rerun on April 7, 2026:
+  - **63 tests passed**
+  - validated strict-mainline projector defaults, stage-3 acoustic-ramp defaults, online retimed trace-gating, soft boundary-trace encoding, and the `_sample_trace_pair(...) -> forward()/forward_teacher()` contract
 
 The newest rerun extended regression coverage specifically around:
 
@@ -296,6 +335,9 @@ Additional training-prep caution:
 - teacher-export integration chain: **ready as smoke**
 - formal run from this checkout: **blocked by missing real learned teacher export / rebuilt cache**
 - experimental branch available: `conan_emformer_rhythm_v2_student_kd_context_match.yaml`
+- extra ceiling-only ablation branch available:
+  - `conan_emformer_rhythm_v2_student_kd_algorithmic_distill_ablation.yaml`
+  - keeps the primary teacher unchanged but re-enables very small algorithmic budget/prefix KD weights from a different distill surface
 - maintained KD reminder: the real maintained signal is `teacher-main + shape-only KD`; exec/budget/prefix/allocation KD stay disabled in the default stage-2 config
 
 ### `student_ref_bootstrap`
@@ -315,6 +357,12 @@ Additional training-prep caution:
 - important monitoring rule:
   - track `rhythm_metric_reference_self_rate`
   - healthy formal stage-2.5 runs should keep self-rate near `0`
+- short-ref / longer-source safety rule:
+  - the checked-in bootstrap config now already enables:
+    - `rhythm_emit_reference_sidecar`
+    - `rhythm_trace_reliability_enable`
+    - `rhythm_trace_anchor_aware_sampling`
+  - so the default stage-2.5 path does not keep replaying a tiny prompt tail as if it were fresh local evidence
 - anti-collapse rule:
   - stage-2.5 no longer has to rely only on `L_algo`
   - descriptor-consistency and same-`A` group contrastive loss are now available so the model is explicitly pushed to preserve `A` while still responding to `B`
@@ -324,13 +372,28 @@ Additional training-prep caution:
 - code path: **closer to ready**
 - smoke path: **runs**
 - formal run from this checkout: **not ready to bless**
-- experimental branch available: `conan_emformer_rhythm_v2_student_retimed_balanced.yaml`
+- maintained stage-3 base now already absorbs the conservative acoustic-ramp /
+  EMA-balance defaults that were previously only carried as an experimental
+  branch:
+  - `rhythm_stage3_acoustic_weight_start: 0.10`
+  - `rhythm_stage3_acoustic_ramp_steps: 20000`
+  - `rhythm_loss_balance_mode: ema_group`
+  - explicit sparse / guarded / render-plan projector defaults
+- `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` remains as a
+  compatibility alias / research handle, but it is no longer the only place
+  carrying the conservative stage-3 balancer defaults
 
 Why stage-3 is still guarded:
 
 - smoke requires `use_pitch_embed=False`
 - the smoke binary already has retimed targets, but default stage-3 still fails because it lacks F0
 - retimed mel no longer silently falls back to source-axis pitch; missing matched retimed pitch now disables pitch supervision first, and aligned retimed pitch tracks are kept on the same time axis as `mel_out`
+- maintained stage-3 now explicitly counters the worst early acoustic-domination pattern with:
+  - a lower acoustic-loss start
+  - a longer acoustic ramp
+  - anchored warm-start ramp semantics
+  - bounded EMA group balancing
+  - sparse / guarded / render-plan projector defaults
 - `L_base` dominates the current smoke objective
 - `grad_norm_before_clip` stays very high for long stretches
 - the real F0 / retimed asset contract is not present in this shared checkout

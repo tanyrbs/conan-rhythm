@@ -518,6 +518,9 @@ def _update_acoustic_target_metrics(
     acoustic_target_weight = output.get("acoustic_target_weight")
     if acoustic_target_weight is not None:
         metrics["rhythm_metric_retimed_weight_mean"] = _safe_mean(acoustic_target_weight.float())
+    online_trace_gate = output.get("rhythm_online_retimed_trace_gate")
+    if online_trace_gate is not None:
+        metrics["rhythm_metric_online_retimed_trace_gate_mean"] = _safe_mean(online_trace_gate.float())
     pause_topk_ratio = output.get("rhythm_projector_pause_topk_ratio")
     if pause_topk_ratio is not None:
         metrics["rhythm_metric_pause_topk_ratio_mean"] = _safe_mean(pause_topk_ratio.float())

@@ -368,6 +368,47 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(source, "online")
         self.assertTrue(torch.allclose(frame_weight, torch.full((1, 3), 0.375, dtype=torch.float32)))
 
+    def test_online_retimed_weight_also_uses_trace_reliability_gate(self) -> None:
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            effective_speech_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
+            effective_pause_budget_win=torch.tensor([[0.0]], dtype=torch.float32),
+            feasible_total_budget_delta=torch.tensor([[1.0]], dtype=torch.float32),
+            local_trace_path_weight=torch.tensor([0.20], dtype=torch.float32),
+        )
+        execution = SimpleNamespace(planner=planner)
+        sample = {
+            "mels": torch.zeros((1, 3, 80), dtype=torch.float32),
+            "rhythm_teacher_confidence": torch.tensor([[0.5]], dtype=torch.float32),
+        }
+        model_out = {
+            "rhythm_execution": execution,
+            "rhythm_online_retimed_mel_tgt": torch.ones((1, 3, 80), dtype=torch.float32),
+            "rhythm_online_retimed_frame_weight": torch.ones((1, 3), dtype=torch.float32),
+        }
+        _, is_retimed, frame_weight, source = resolve_acoustic_target_post_model(
+            sample,
+            model_out,
+            hparams={
+                "rhythm_use_retimed_target_if_available": True,
+                "rhythm_retimed_target_start_steps": 0,
+                "rhythm_online_retimed_target_start_steps": 0,
+                "rhythm_retimed_target_mode": "hybrid",
+                "rhythm_retimed_confidence_floor": 0.05,
+            },
+            global_step=0,
+            apply_rhythm_render=True,
+            infer=False,
+            test=False,
+        )
+        self.assertTrue(is_retimed)
+        self.assertEqual(source, "online")
+        self.assertTrue(torch.allclose(frame_weight, torch.full((1, 3), 0.075, dtype=torch.float32)))
+        self.assertTrue(torch.allclose(model_out["rhythm_online_retimed_trace_gate"], torch.tensor([[0.2]])))
+
     def test_attach_acoustic_target_bundle_disables_pitch_when_retimed_pitch_missing(self) -> None:
         support = RhythmTaskRuntimeSupport(self._runtime_owner())
         output = {

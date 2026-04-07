@@ -534,7 +534,19 @@ class RhythmConanTaskMixin:
         )
         if warmup_steps <= 0:
             return max(0.0, end_scale)
-        progress = min(max(int(self.global_step) / float(warmup_steps), 0.0), 1.0)
+        # Anchor the ramp to the moment stage-3 retimed training becomes active,
+        # rather than to the absolute global step. This preserves the intended
+        # curriculum when student_retimed warm-starts from a large stage-2
+        # checkpoint step.
+        anchor_step = getattr(self, "_rhythm_stage3_acoustic_ramp_anchor_step", None)
+        anchor_stage = getattr(self, "_rhythm_stage3_acoustic_ramp_anchor_stage", None)
+        current_step = int(self.global_step)
+        if anchor_step is None or anchor_stage != stage or current_step < int(anchor_step):
+            anchor_step = current_step
+            self._rhythm_stage3_acoustic_ramp_anchor_step = anchor_step
+            self._rhythm_stage3_acoustic_ramp_anchor_stage = stage
+        progress_steps = max(0, current_step - int(anchor_step))
+        progress = min(max(progress_steps / float(warmup_steps), 0.0), 1.0)
         scale = start_scale + (end_scale - start_scale) * progress
         return max(0.0, float(scale))
 
