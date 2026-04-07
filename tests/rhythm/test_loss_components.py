@@ -22,14 +22,22 @@ from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
 
 class RhythmLossComponentTests(unittest.TestCase):
     @staticmethod
-    def _execution(speech: torch.Tensor, pause: torch.Tensor):
+    def _execution(
+        speech: torch.Tensor,
+        pause: torch.Tensor,
+        *,
+        pause_shape_unit: torch.Tensor | None = None,
+    ):
         speech_budget = speech.sum(dim=1, keepdim=True)
         pause_budget = pause.sum(dim=1, keepdim=True)
+        if pause_shape_unit is None:
+            pause_shape_unit = torch.softmax(pause.float() + 1.0e-6, dim=1)
         planner = SimpleNamespace(
             raw_speech_budget_win=speech_budget,
             raw_pause_budget_win=pause_budget,
             speech_budget_win=speech_budget,
             pause_budget_win=pause_budget,
+            pause_shape_unit=pause_shape_unit,
             source_boundary_cue=torch.zeros_like(speech),
             feasible_total_budget_delta=torch.zeros_like(speech_budget),
         )
@@ -170,6 +178,48 @@ class RhythmLossComponentTests(unittest.TestCase):
             )
         )
 
+    def test_pause_support_aux_penalizes_misaligned_planner_distribution(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause_pred = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+        pause_tgt = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32)
+        pause_shape_unit = torch.zeros_like(pause_tgt, requires_grad=True)
+        execution = self._execution(
+            speech,
+            pause_pred,
+            pause_shape_unit=pause_shape_unit,
+        )
+        base_targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+        )
+        base_losses = build_rhythm_loss_dict(execution, base_targets)
+        support_targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            pause_support_weight=0.10,
+        )
+        support_losses = build_rhythm_loss_dict(execution, support_targets)
+        self.assertGreater(float(support_losses["rhythm_pause_support"].item()), 0.0)
+        self.assertGreater(
+            float(support_losses["rhythm_exec_pause"].item()),
+            float(base_losses["rhythm_exec_pause"].item()),
+        )
+        support_losses["rhythm_exec_pause"].backward()
+        self.assertIsNotNone(pause_shape_unit.grad)
+        self.assertGreater(float(pause_shape_unit.grad.abs().sum().item()), 0.0)
+
     def test_feasible_debt_penalizes_budget_redistribution_repairs(self) -> None:
         speech = torch.tensor([[4.0, 4.0]], dtype=torch.float32)
         pause = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
@@ -228,16 +278,18 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertAlmostEqual(float(losses["L_kd"].item()), 1.25, places=6)
         self.assertAlmostEqual(float(losses["L_teacher_aux"].item()), 2.05, places=6)
 
-    def test_public_aliases_expose_pause_event_terms(self) -> None:
+    def test_public_aliases_expose_pause_support_terms(self) -> None:
         losses = {
             "rhythm_exec_pause": torch.tensor(1.2),
-            "rhythm_exec_pause_value": torch.tensor(0.9),
-            "rhythm_pause_event": torch.tensor(0.3),
+            "rhythm_exec_pause_value": torch.tensor(0.85),
+            "rhythm_pause_event": torch.tensor(0.25),
+            "rhythm_pause_support": torch.tensor(0.10),
         }
         update_public_loss_aliases(losses, mel_loss_names=())
         self.assertTrue(torch.allclose(losses["L_exec_pause"], torch.tensor(1.2)))
-        self.assertTrue(torch.allclose(losses["L_exec_pause_value"], torch.tensor(0.9)))
-        self.assertTrue(torch.allclose(losses["L_pause_event"], torch.tensor(0.3)))
+        self.assertTrue(torch.allclose(losses["L_exec_pause_value"], torch.tensor(0.85)))
+        self.assertTrue(torch.allclose(losses["L_pause_event"], torch.tensor(0.25)))
+        self.assertTrue(torch.allclose(losses["L_pause_support"], torch.tensor(0.10)))
 
     def test_descriptor_bundle_falls_back_when_planner_boundary_fields_are_missing(self) -> None:
         speech = torch.tensor([[2.0, 1.0, 0.5]], dtype=torch.float32)

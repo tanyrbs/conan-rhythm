@@ -27,6 +27,7 @@ A_KEYS = [
     "L_exec_speech",
     "L_exec_pause_value",
     "L_pause_event",
+    "L_pause_support",
     "L_budget",
     "L_stream_state",
     "L_rhythm_exec",

@@ -1,0 +1,19 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# More aggressive pause-recall continuation config.
+# Use this as an A/B branch when validation shows precision >> recall and
+# sparse pause projection capacity is the likely bottleneck.
+
+# Slightly strengthen event-level missed-pause pressure while keeping the
+# planner-level support auxiliary from the base config.
+rhythm_pause_event_weight: 0.20
+
+# Give sparse pause projection more capacity so recall is not capped by a
+# support bottleneck after planner scores have already improved.
+rhythm_projector_pause_topk_ratio: 0.45
+rhythm_projector_pause_topk_ratio_train_end: 0.45
+
+# Mildly stronger boundary encouragement. This is intentionally not extreme so
+# we do not collapse precision while opening more pause support.
+rhythm_projector_pause_boundary_bias_weight: 0.22
+rhythm_pause_boundary_weight: 0.50

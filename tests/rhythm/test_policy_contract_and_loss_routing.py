@@ -622,6 +622,41 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(any("inactive KD config clutter" in w for w in warnings))
 
+    def test_route_compaction_materializes_weighted_stream_macro_under_no_grad(self) -> None:
+        losses = {
+            "rhythm_exec_speech": torch.tensor(1.0),
+            "rhythm_exec_pause": torch.tensor(2.0),
+            "rhythm_budget": torch.tensor(4.0),
+            "rhythm_prefix_state": torch.tensor(5.0),
+        }
+        hparams = {
+            "rhythm_compact_joint_loss": True,
+            "rhythm_joint_budget_macro_weight": 0.35,
+            "rhythm_joint_cumplan_macro_weight": 0.65,
+            "rhythm_enable_aux_optimizer_losses": False,
+            "lambda_rhythm_plan": 0.0,
+            "lambda_rhythm_guidance": 0.0,
+            "lambda_rhythm_distill": 0.0,
+            "lambda_rhythm_teacher_aux": 0.0,
+        }
+        route_conan_optimizer_losses(
+            losses,
+            mel_loss_names=(),
+            hparams=hparams,
+            schedule_only_stage=False,
+        )
+        update_public_loss_aliases(losses, mel_loss_names=())
+        self.assertTrue(torch.allclose(losses["rhythm_exec"], torch.tensor(3.0)))
+        self.assertTrue(torch.allclose(losses["rhythm_stream_state"], torch.tensor(4.65)))
+        self.assertTrue(torch.allclose(losses["L_stream_state"], torch.tensor(4.65)))
+        total = compute_reporting_total_loss(
+            losses,
+            mel_loss_names=(),
+            hparams=hparams,
+            schedule_only_stage=False,
+        )
+        self.assertTrue(torch.allclose(total, torch.tensor(7.65)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ class RhythmTargetBuildConfig:
     budget_exec_weight: float
     feasible_debt_weight: float
     pause_event_weight: float = 0.0
+    pause_support_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
@@ -969,6 +970,7 @@ def build_rhythm_loss_targets_from_sample(
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
+        pause_support_weight=float(config.pause_support_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -1041,6 +1043,7 @@ def build_identity_rhythm_loss_targets(
         pause_boundary_weight=float(config.pause_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
+        pause_support_weight=float(config.pause_support_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -1123,6 +1126,11 @@ def scale_rhythm_loss_terms(
         ),
         "rhythm_pause_event": _scaled_detached(
             "rhythm_pause_event",
+            lambda_exec_pause,
+            allow_missing=True,
+        ),
+        "rhythm_pause_support": _scaled_detached(
+            "rhythm_pause_support",
             lambda_exec_pause,
             allow_missing=True,
         ),

@@ -58,6 +58,7 @@ class RhythmLossTargets:
     pause_boundary_weight: float = 0.35
     feasible_debt_weight: float = 0.05
     pause_event_weight: float = 0.0
+    pause_support_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
@@ -643,6 +644,29 @@ def _masked_probability_distribution(
     return torch.where(mask_mass > 0.0, masked_probs, dense_uniform)
 
 
+def _masked_smoothed_distribution(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = 1e-4,
+) -> torch.Tensor:
+    """Normalize nonnegative scores without losing gradients when mass collapses.
+
+    `_masked_probability_distribution()` falls back to a constant uniform
+    distribution when the visible mass is ~0, which is desirable for generic
+    reporting but can zero out gradients for planner-side support supervision.
+    Here we keep a tiny masked prior in the denominator so collapsed pause
+    support still receives a corrective signal.
+    """
+
+    mask = mask.float()
+    mask_mass = mask.sum(dim=1, keepdim=True)
+    values = values.float().clamp_min(0.0) * mask
+    smoothed = values + float(eps) * mask
+    probs = smoothed / smoothed.sum(dim=1, keepdim=True).clamp_min(float(eps))
+    dense_uniform = torch.full_like(probs, 1.0 / max(probs.size(1), 1))
+    return torch.where(mask_mass > 0.0, probs, dense_uniform)
+
+
 def _positive_mass_gate(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return ((values.float() * mask.float()).sum(dim=1) > 1e-6).float()
 
@@ -923,6 +947,32 @@ def _compute_pause_event_loss(
     masked_loss = (loss * pause_mask).sum(dim=reduce_dims)
     masked_denom = pause_mask.sum(dim=reduce_dims).clamp_min(1.0)
     return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
+
+
+def _compute_pause_support_loss(
+    execution,
+    pause_exec_tgt: torch.Tensor,
+    support_mask: torch.Tensor,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    if planner is None:
+        return pause_exec_tgt.new_zeros(())
+    pause_weight_unit = getattr(planner, "pause_shape_unit", None)
+    if pause_weight_unit is None:
+        pause_weight_unit = getattr(planner, "pause_weight_unit", None)
+    if pause_weight_unit is None:
+        return pause_exec_tgt.new_zeros(())
+    support_mask = support_mask.float().clamp_min(0.0)
+    target_pause = pause_exec_tgt.float().clamp_min(0.0)
+    support_gate = _positive_mass_gate(target_pause, support_mask)
+    support_batch_weight = _merge_batch_weight(batch_weight, support_gate, target_pause)
+    pred = _masked_smoothed_distribution(pause_weight_unit.float(), support_mask)
+    tgt = _masked_probability_distribution(target_pause, support_mask)
+    reduce_dims = tuple(range(1, pred.dim()))
+    loss = (tgt * (torch.log(tgt.clamp_min(1e-6)) - torch.log(pred.clamp_min(1e-6)))).sum(dim=reduce_dims)
+    return _reduce_batch_loss(loss, support_batch_weight)
 
 
 def _scalar_flag(ref: torch.Tensor, enabled: bool) -> torch.Tensor:
@@ -1232,7 +1282,16 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             batch_weight=targets.sample_confidence,
         )
     l_pause_event = float(targets.pause_event_weight) * l_pause_event
-    l_exec_pause = l_exec_pause_value + l_pause_event
+    l_pause_support = blank_exec.new_tensor(0.0)
+    if float(targets.pause_support_weight) > 0.0:
+        l_pause_support = _compute_pause_support_loss(
+            execution,
+            targets.pause_exec_tgt.float(),
+            unit_mask,
+            batch_weight=targets.sample_confidence,
+        )
+    l_pause_support = float(targets.pause_support_weight) * l_pause_support
+    l_exec_pause = l_exec_pause_value + l_pause_event + l_pause_support
     (
         l_budget,
         l_budget_raw,
@@ -1313,6 +1372,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_exec_pause_value': l_exec_pause_value.detach(),
         'rhythm_pause_event': l_pause_event.detach(),
+        'rhythm_pause_support': l_pause_support.detach(),
         'rhythm_budget': l_budget,
         'rhythm_budget_raw_surface': l_budget_raw,
         'rhythm_budget_exec_surface': l_budget_exec,

@@ -5,9 +5,11 @@ base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360.yaml
 # checkpoint lineage, not for a fresh from-scratch launch.
 
 # Support-first pause objective:
-# keep the original pause regression path, but add a light event-level auxiliary
-# term so missed pause sites are penalized more directly.
+# keep the original pause regression path, add a light event-level auxiliary
+# term, and lightly supervise the planner pause distribution before projector
+# sparsification so recall is not capped too early by pause support collapse.
 rhythm_pause_event_weight: 0.15
+rhythm_pause_support_weight: 0.05
 rhythm_pause_event_threshold: 0.50
 rhythm_pause_event_temperature: 0.20
 rhythm_pause_event_pos_weight: 2.0
