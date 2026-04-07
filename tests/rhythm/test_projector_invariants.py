@@ -17,7 +17,13 @@ from modules.Conan.rhythm.prefix_state import (
     build_prefix_state_from_exec_numpy,
     build_prefix_state_from_exec_torch,
 )
-from modules.Conan.rhythm.projector import ProjectorConfig, StreamingRhythmProjector, _project_pause_impl
+from modules.Conan.rhythm.projector import (
+    ProjectorConfig,
+    StreamingRhythmProjector,
+    _project_pause_impl,
+    apply_pause_boundary_prior,
+    compose_pause_candidate_scores,
+)
 from modules.Conan.rhythm.scheduler import MonotonicRhythmScheduler
 
 
@@ -227,6 +233,8 @@ class ProjectorInvariantTests(unittest.TestCase):
     def test_pause_projection_preserves_reused_prefix_mass(self) -> None:
         pause = _project_pause_impl(
             pause_weight_unit=torch.tensor([[0.1, 0.3, 0.6]], dtype=torch.float32),
+            pause_support_prob_unit=None,
+            pause_amount_weight_unit=None,
             boundary_score_unit=torch.zeros((1, 3), dtype=torch.float32),
             unit_mask=torch.ones((1, 3), dtype=torch.float32),
             pause_budget_win=torch.tensor([[3.0]], dtype=torch.float32),
@@ -237,10 +245,35 @@ class ProjectorInvariantTests(unittest.TestCase):
             topk_ratio=1.0,
             pause_min_boundary_weight=0.10,
             pause_boundary_bias_weight=0.15,
+            pause_boundary_mode="additive",
             temperature=0.12,
         )
         self.assertTrue(torch.allclose(pause[:, :1], torch.tensor([[2.0]], dtype=torch.float32)))
         self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([3.0], dtype=torch.float32)))
+
+    def test_compose_pause_candidate_scores_can_factor_support_and_allocation(self) -> None:
+        scores = compose_pause_candidate_scores(
+            pause_weight_unit=torch.tensor([[0.3, 0.3, 0.4]], dtype=torch.float32),
+            pause_support_prob_unit=torch.tensor([[0.1, 0.9, 0.2]], dtype=torch.float32),
+            pause_amount_weight_unit=torch.tensor([[0.6, 0.2, 0.2]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        )
+        self.assertTrue(torch.allclose(scores, torch.tensor([[0.06, 0.18, 0.04]], dtype=torch.float32)))
+
+    def test_boundary_gain_preserves_relative_support_without_absolute_floor(self) -> None:
+        scores = compose_pause_candidate_scores(
+            pause_weight_unit=torch.tensor([[0.02, 0.02, 0.02]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        )
+        gained = apply_pause_boundary_prior(
+            scores=scores,
+            boundary_score_unit=torch.tensor([[0.0, 0.5, 1.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            pause_min_boundary_weight=0.0,
+            pause_boundary_bias_weight=0.5,
+            pause_boundary_mode="gain",
+        )
+        self.assertTrue(torch.allclose(gained, torch.tensor([[0.02, 0.025, 0.03]], dtype=torch.float32)))
 
     def test_prefix_state_torch_numpy_parity(self) -> None:
         speech_exec = torch.tensor([[2.0, 1.0, 0.0, 0.0]], dtype=torch.float32)

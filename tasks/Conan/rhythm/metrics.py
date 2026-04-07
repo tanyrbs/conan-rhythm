@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from modules.Conan.rhythm.projector import apply_pause_boundary_prior, compose_pause_candidate_scores
 from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
 from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
 from tasks.Conan.rhythm.losses import (
@@ -951,16 +952,26 @@ def _update_sample_supervision_metrics(
             boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
             pause_boundary_bias_weight = getattr(ctx.execution, "pause_boundary_bias_weight", None)
             pause_min_boundary_weight = getattr(ctx.execution, "pause_min_boundary_weight", None)
+            pause_boundary_mode = getattr(ctx.execution, "pause_boundary_mode", "additive")
             if planner_pause_weight is not None and boundary_score is not None:
                 if pause_boundary_bias_weight is None:
                     pause_boundary_bias_weight = planner_pause_weight.new_zeros((planner_pause_weight.size(0), 1))
                 if pause_min_boundary_weight is None:
                     pause_min_boundary_weight = planner_pause_weight.new_zeros((planner_pause_weight.size(0), 1))
-                score = planner_pause_weight.float().clamp_min(0.0)
-                score = score + pause_boundary_bias_weight.float() * (
-                    pause_min_boundary_weight.float() + boundary_score.float().clamp_min(0.0)
+                score = compose_pause_candidate_scores(
+                    pause_weight_unit=planner_pause_weight,
+                    unit_mask=ctx.unit_mask,
+                    pause_support_prob_unit=getattr(ctx.planner, "pause_support_prob_unit", None),
+                    pause_amount_weight_unit=getattr(ctx.planner, "pause_amount_weight_unit", None),
                 )
-                score = score * ctx.unit_mask.float()
+                score = apply_pause_boundary_prior(
+                    scores=score,
+                    boundary_score_unit=boundary_score,
+                    unit_mask=ctx.unit_mask,
+                    pause_min_boundary_weight=float(pause_min_boundary_weight.float().mean().item()),
+                    pause_boundary_bias_weight=float(pause_boundary_bias_weight.float().mean().item()),
+                    pause_boundary_mode=str(pause_boundary_mode),
+                )
                 valid_mask = ctx.unit_mask.float() > 0.5
                 sparse_selector = torch.zeros_like(score)
                 if bool(torch.any(pause_topk_slots > 0).item()):

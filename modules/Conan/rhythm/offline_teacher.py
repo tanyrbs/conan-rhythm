@@ -35,6 +35,7 @@ class OfflineTeacherConfig:
     boundary_feature_scale: float = 0.35
     boundary_source_cue_weight: float = 0.65
     pause_source_boundary_weight: float = 0.20
+    split_pause_heads: bool = False
     min_speech_frames: float = 1.0
 
     def resolve_dilations(self) -> tuple[int, ...]:
@@ -130,6 +131,7 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         self.boundary_feature_scale = float(self.config.boundary_feature_scale)
         self.boundary_source_cue_weight = float(self.config.boundary_source_cue_weight)
         self.pause_source_boundary_weight = float(self.config.pause_source_boundary_weight)
+        self.split_pause_heads = bool(self.config.split_pause_heads)
         self.min_speech_frames = float(self.config.min_speech_frames)
         self.confidence_agreement_weight = float(self.config.confidence_agreement_weight)
         self.confidence_floor = float(self.config.confidence_floor)
@@ -188,6 +190,7 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             param.requires_grad = False
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
+        self.pause_support_head = nn.Linear(hidden_size, 1) if self.split_pause_heads else None
         self.confidence_trunk = nn.Sequential(
             nn.Linear(hidden_size + stats_dim + trace_dim + 5, hidden_size),
             nn.SiLU(),
@@ -363,8 +366,28 @@ class OfflineRhythmTeacherPlanner(nn.Module):
         dur_logratio = (raw_logratio - mean_logratio) * unit_mask
 
         pause_logits = self.pause_head(x).squeeze(-1)
-        pause_logits = pause_logits + self.pause_source_boundary_weight * boundary_score_unit.float()
-        pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
+        pause_support_logits = None
+        pause_support_prob = None
+        pause_amount_weight = None
+        pause_candidate_score = None
+        if self.pause_support_head is None:
+            pause_logits = pause_logits + self.pause_source_boundary_weight * boundary_score_unit.float()
+            pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
+        else:
+            pause_support_logits = self.pause_support_head(x).squeeze(-1)
+            pause_support_logits = (
+                pause_support_logits + self.pause_source_boundary_weight * boundary_score_unit.float()
+            ) * unit_mask
+            pause_support_prob = torch.sigmoid(pause_support_logits) * unit_mask
+            pause_amount_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
+            pause_candidate_score = pause_support_prob * pause_amount_weight * unit_mask
+            candidate_total = pause_candidate_score.sum(dim=1, keepdim=True)
+            fallback = unit_mask / unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            pause_weight = torch.where(
+                candidate_total > 1e-6,
+                pause_candidate_score / candidate_total.clamp_min(1e-6),
+                fallback,
+            ) * unit_mask
 
         planner = RhythmPlannerOutputs(
             speech_budget_win=budget_outputs["speech_budget_win"],
@@ -374,6 +397,10 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             boundary_score_unit=boundary_score_unit,
             trace_context=full_trace_context,
             source_boundary_cue=source_boundary_cue,
+            pause_support_logit_unit=pause_support_logits,
+            pause_support_prob_unit=pause_support_prob,
+            pause_amount_weight_unit=pause_amount_weight,
+            pause_candidate_score_unit=pause_candidate_score,
         )
         planner.raw_speech_budget_win = budget_outputs["raw_speech_budget_win"]
         planner.raw_pause_budget_win = budget_outputs["raw_pause_budget_win"]

@@ -29,9 +29,16 @@ class RhythmTargetBuildConfig:
     pause_event_boundary_weight: float = 0.0
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
+    pause_support_event_weight: float = 0.0
+    pause_support_count_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
+    pause_support_threshold: float = 0.2
+    pause_support_pos_weight: float = 2.0
+    pause_support_loss_type: str = "focal"
+    pause_support_focal_gamma: float = 2.0
+    pause_support_focal_alpha: float = 0.75
     dedupe_primary_teacher_cache_distill: bool = True
     enable_distill_context_match: bool = False
     distill_context_floor: float = 0.35
@@ -973,9 +980,16 @@ def build_rhythm_loss_targets_from_sample(
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),
+        pause_support_event_weight=float(config.pause_support_event_weight),
+        pause_support_count_weight=float(config.pause_support_count_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
+        pause_support_threshold=float(config.pause_support_threshold),
+        pause_support_pos_weight=float(config.pause_support_pos_weight),
+        pause_support_loss_type=str(config.pause_support_loss_type),
+        pause_support_focal_gamma=float(config.pause_support_focal_gamma),
+        pause_support_focal_alpha=float(config.pause_support_focal_alpha),
         ref_global_rate=ref_global_rate,
         ref_pause_ratio=ref_pause_ratio,
         ref_local_rate_trace=ref_local_rate_trace,
@@ -1047,9 +1061,16 @@ def build_identity_rhythm_loss_targets(
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),
+        pause_support_event_weight=float(config.pause_support_event_weight),
+        pause_support_count_weight=float(config.pause_support_count_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
+        pause_support_threshold=float(config.pause_support_threshold),
+        pause_support_pos_weight=float(config.pause_support_pos_weight),
+        pause_support_loss_type=str(config.pause_support_loss_type),
+        pause_support_focal_gamma=float(config.pause_support_focal_gamma),
+        pause_support_focal_alpha=float(config.pause_support_focal_alpha),
         descriptor_consistency_weight=float(config.lambda_descriptor_consistency),
         descriptor_global_weight=float(config.descriptor_global_weight),
         descriptor_pause_weight=float(config.descriptor_pause_weight),
@@ -1134,6 +1155,16 @@ def scale_rhythm_loss_terms(
         ),
         "rhythm_pause_support": _scaled_detached(
             "rhythm_pause_support",
+            lambda_exec_pause,
+            allow_missing=True,
+        ),
+        "rhythm_pause_support_event": _scaled_detached(
+            "rhythm_pause_support_event",
+            lambda_exec_pause,
+            allow_missing=True,
+        ),
+        "rhythm_pause_support_count": _scaled_detached(
+            "rhythm_pause_support_count",
             lambda_exec_pause,
             allow_missing=True,
         ),

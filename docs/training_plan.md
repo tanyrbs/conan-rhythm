@@ -28,24 +28,41 @@
 
 ## 2. 当前 active 训练路线
 
-### T1-current：train360-only teacher_offline pause-recall consistent line
+### T1-current：train360-only teacher_offline pause split-head line
 
-当前主线已经不是 mixed train100+360 formal stage1；当前真正活跃的 pause 专项线是：
+当前主线已经切到 split-head：
 
-- `teacher_offline_train360only_pause_recall_consistent_stage1`
-- 从 `teacher_offline_train360only_pause_recall_stage1@105000` 精确续训
+- `teacher_offline_train360only_pause_split_heads_stage1`
+- 从 `teacher_offline_train360only_pause_recall_consistent_stage1@115000` 做 weight-only warm-start
 - 使用现成 `train360 v5 binary`
 - `val_check_interval = 2500`
 
 配置：
 
-- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_consistent_resume.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
 
 目标：
 
-1. 先验证当前结构修复能否真实抬升 recall
-2. 先证明问题主要卡在 pause placement / support，而不是 budget
-3. 先用 legacy v5 lineage 把可在线修的结构问题修掉
+1. 直接验证 support / allocation 分头能否提升 recall
+2. 验证 projector 的 `boundary gain` 是否比 additive floor 更稳
+3. 在 legacy v5 lineage 下先把**在线可修**的问题修掉
+
+### 为什么不再继续把 old consistent line 当主线
+
+旧 `teacher_offline_train360only_pause_recall_consistent_stage1` 已保留为对照，但不再是主线。
+
+已完成验证的关键点：
+
+- `@107500`: recall `0.4231`, f1 `0.5221`, prefix drift `31.4913`, exec corr `0.8863`
+- `@112500`: recall `0.5067`, f1 `0.5950`, prefix drift `30.3021`, exec corr `0.8866`
+- `@115000`: recall `0.4447`, f1 `0.5264`, prefix drift `40.1634`, exec corr `0.8664`
+- `@117500`: recall `0.3628`, f1 `0.4276`, prefix drift `35.2436`, exec corr `0.8785`
+
+结论：
+
+- 这条线在 `112500` 出现过短暂最好点
+- 但 `115000` 相比 `105000` 起训阶段附近的最近可比验证点（`107500`）**没有稳定进步**
+- 因此选 `115000` 作为 split-head 的 warm-start，只是出于“主干已收敛、可直接加新头试结构修复”，不是因为 `115000` 本身是 pause 最优点
 
 ### 为什么不是继续跑 boundary-relaxed
 
@@ -61,6 +78,23 @@
 ---
 
 ## 3. 当前已经落地的训练相关修复
+
+### 3.0 新增：split-head support / allocation
+
+当前最重要的新修复是：
+
+- `support head` 负责“哪里该停”
+- `allocation head` 负责“停顿质量怎么分”
+
+并新增：
+
+- `L_pause_support_event`
+- `L_pause_support_count`
+
+这样不再让单个 softmax 同时承担：
+
+- support 激活
+- pause budget 分配
 
 ### 3.1 teacher 阶段启用可训练的 soft pause selection
 

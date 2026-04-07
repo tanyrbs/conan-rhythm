@@ -60,9 +60,16 @@ class RhythmLossTargets:
     feasible_debt_weight: float = 0.05
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
+    pause_support_event_weight: float = 0.0
+    pause_support_count_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
+    pause_support_threshold: float = 0.2
+    pause_support_pos_weight: float = 2.0
+    pause_support_loss_type: str = "focal"
+    pause_support_focal_gamma: float = 2.0
+    pause_support_focal_alpha: float = 0.75
     ref_global_rate: Optional[torch.Tensor] = None
     ref_pause_ratio: Optional[torch.Tensor] = None
     ref_local_rate_trace: Optional[torch.Tensor] = None
@@ -976,6 +983,74 @@ def _compute_pause_support_loss(
     return _reduce_batch_loss(loss, support_batch_weight)
 
 
+def _compute_pause_support_event_loss(
+    execution,
+    pause_exec_tgt: torch.Tensor,
+    support_mask: torch.Tensor,
+    *,
+    threshold: float,
+    pos_weight: float,
+    loss_type: str,
+    focal_gamma: float,
+    focal_alpha: float,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    if planner is None:
+        return pause_exec_tgt.new_zeros(())
+    support_logits = getattr(planner, "pause_support_logit_unit", None)
+    if support_logits is None:
+        return pause_exec_tgt.new_zeros(())
+    support_mask = support_mask.float().clamp_min(0.0)
+    target_event = (pause_exec_tgt.float() > float(threshold)).float()
+    logits = support_logits.float()
+    loss = F.binary_cross_entropy_with_logits(logits, target_event, reduction="none")
+    if float(pos_weight) > 1.0:
+        loss = loss * torch.where(
+            target_event > 0.5,
+            loss.new_full(target_event.shape, float(pos_weight)),
+            loss.new_ones(target_event.shape),
+        )
+    if str(loss_type or "focal").strip().lower() == "focal":
+        prob = torch.sigmoid(logits)
+        pt = prob * target_event + (1.0 - prob) * (1.0 - target_event)
+        alpha = torch.where(
+            target_event > 0.5,
+            loss.new_full(target_event.shape, float(focal_alpha)),
+            loss.new_full(target_event.shape, 1.0 - float(focal_alpha)),
+        )
+        loss = alpha * (1.0 - pt).clamp_min(0.0).pow(float(max(0.0, focal_gamma))) * loss
+    reduce_dims = tuple(range(1, loss.dim()))
+    masked_loss = (loss * support_mask).sum(dim=reduce_dims)
+    masked_denom = support_mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
+
+
+def _compute_pause_support_count_loss(
+    execution,
+    pause_exec_tgt: torch.Tensor,
+    support_mask: torch.Tensor,
+    *,
+    threshold: float,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    if planner is None:
+        return pause_exec_tgt.new_zeros(())
+    support_prob = getattr(planner, "pause_support_prob_unit", None)
+    if support_prob is None:
+        support_logits = getattr(planner, "pause_support_logit_unit", None)
+        if support_logits is None:
+            return pause_exec_tgt.new_zeros(())
+        support_prob = torch.sigmoid(support_logits.float())
+    support_mask = support_mask.float().clamp_min(0.0)
+    visible = support_mask.sum(dim=1).clamp_min(1.0)
+    pred_rate = (support_prob.float().clamp(0.0, 1.0) * support_mask).sum(dim=1) / visible
+    target_rate = ((pause_exec_tgt.float() > float(threshold)).float() * support_mask).sum(dim=1) / visible
+    loss = F.smooth_l1_loss(pred_rate, target_rate, reduction="none")
+    return _reduce_batch_loss(loss, batch_weight)
+
+
 def _scalar_flag(ref: torch.Tensor, enabled: bool) -> torch.Tensor:
     return ref.new_tensor(1.0 if enabled else 0.0)
 
@@ -1299,7 +1374,31 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             batch_weight=targets.sample_confidence,
         )
     l_pause_support = float(targets.pause_support_weight) * l_pause_support
-    l_exec_pause = l_exec_pause_value + l_pause_event + l_pause_support
+    l_pause_support_event = blank_exec.new_tensor(0.0)
+    if float(targets.pause_support_event_weight) > 0.0:
+        l_pause_support_event = _compute_pause_support_event_loss(
+            execution,
+            targets.pause_exec_tgt.float(),
+            unit_mask,
+            threshold=float(targets.pause_support_threshold),
+            pos_weight=float(targets.pause_support_pos_weight),
+            loss_type=str(targets.pause_support_loss_type),
+            focal_gamma=float(targets.pause_support_focal_gamma),
+            focal_alpha=float(targets.pause_support_focal_alpha),
+            batch_weight=targets.sample_confidence,
+        )
+    l_pause_support_event = float(targets.pause_support_event_weight) * l_pause_support_event
+    l_pause_support_count = blank_exec.new_tensor(0.0)
+    if float(targets.pause_support_count_weight) > 0.0:
+        l_pause_support_count = _compute_pause_support_count_loss(
+            execution,
+            targets.pause_exec_tgt.float(),
+            unit_mask,
+            threshold=float(targets.pause_support_threshold),
+            batch_weight=targets.sample_confidence,
+        )
+    l_pause_support_count = float(targets.pause_support_count_weight) * l_pause_support_count
+    l_exec_pause = l_exec_pause_value + l_pause_event + l_pause_support + l_pause_support_event + l_pause_support_count
     (
         l_budget,
         l_budget_raw,
@@ -1381,6 +1480,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_exec_pause_value': l_exec_pause_value.detach(),
         'rhythm_pause_event': l_pause_event.detach(),
         'rhythm_pause_support': l_pause_support.detach(),
+        'rhythm_pause_support_event': l_pause_support_event.detach(),
+        'rhythm_pause_support_count': l_pause_support_count.detach(),
         'rhythm_budget': l_budget,
         'rhythm_budget_raw_surface': l_budget_raw,
         'rhythm_budget_exec_surface': l_budget_exec,

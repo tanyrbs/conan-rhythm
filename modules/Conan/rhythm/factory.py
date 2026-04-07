@@ -28,6 +28,9 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
     ).strip().lower()
     if pause_selection_mode not in {'simple', 'sparse'}:
         raise ValueError(f'Unsupported rhythm_projector_pause_selection_mode: {pause_selection_mode}')
+    pause_boundary_mode = str(hparams.get('rhythm_projector_pause_boundary_mode', 'additive') or 'additive').strip().lower()
+    if pause_boundary_mode not in {'additive', 'gain'}:
+        raise ValueError(f'Unsupported rhythm_projector_pause_boundary_mode: {pause_boundary_mode}')
     return ProjectorConfig(
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
         max_speech_expand=float(hparams.get('rhythm_projector_max_speech_expand', 3.0)),
@@ -36,6 +39,7 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_topk_ratio=float(hparams.get('rhythm_projector_pause_topk_ratio', 0.35)),
         pause_min_boundary_weight=float(hparams.get('rhythm_projector_pause_min_boundary_weight', 0.10)),
         pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
+        pause_boundary_mode=pause_boundary_mode,
         pause_train_soft=bool(hparams.get('rhythm_projector_pause_train_soft', True)),
         pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
         pause_selection_mode=pause_selection_mode,
@@ -84,6 +88,7 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
+        split_pause_heads=bool(hparams.get('rhythm_offline_teacher_split_pause_heads', False)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
     )
 

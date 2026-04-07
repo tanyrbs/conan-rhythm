@@ -72,6 +72,10 @@ class RhythmPlannerOutputs:
     boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
     source_boundary_cue: Optional[torch.Tensor] = None
+    pause_support_logit_unit: Optional[torch.Tensor] = None
+    pause_support_prob_unit: Optional[torch.Tensor] = None
+    pause_amount_weight_unit: Optional[torch.Tensor] = None
+    pause_candidate_score_unit: Optional[torch.Tensor] = None
 
     @property
     def blank_budget_win(self) -> torch.Tensor:
@@ -87,6 +91,14 @@ class RhythmPlannerOutputs:
     def pause_shape_unit(self) -> torch.Tensor:
         """Planner-facing alias used by the weak-factorization mainline."""
 
+        if self.pause_amount_weight_unit is not None:
+            return self.pause_amount_weight_unit
+        return self.pause_weight_unit
+
+    @property
+    def pause_support_unit(self) -> torch.Tensor:
+        if self.pause_support_prob_unit is not None:
+            return self.pause_support_prob_unit
         return self.pause_weight_unit
 
     @property

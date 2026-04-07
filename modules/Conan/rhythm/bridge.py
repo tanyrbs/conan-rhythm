@@ -306,6 +306,14 @@ def attach_rhythm_outputs(
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
     ret["dur_shape_unit"] = execution.planner.dur_shape_unit
     ret["pause_shape_unit"] = execution.planner.pause_shape_unit
+    if getattr(execution.planner, "pause_support_logit_unit", None) is not None:
+        ret["pause_support_logit_unit"] = execution.planner.pause_support_logit_unit
+    if getattr(execution.planner, "pause_support_prob_unit", None) is not None:
+        ret["pause_support_prob_unit"] = execution.planner.pause_support_prob_unit
+    if getattr(execution.planner, "pause_amount_weight_unit", None) is not None:
+        ret["pause_amount_weight_unit"] = execution.planner.pause_amount_weight_unit
+    if getattr(execution.planner, "pause_candidate_score_unit", None) is not None:
+        ret["pause_candidate_score_unit"] = execution.planner.pause_candidate_score_unit
     boundary_score_unit = resolve_boundary_score_unit(execution.planner)
     ret["boundary_score_unit"] = boundary_score_unit
     ret["boundary_latent"] = boundary_score_unit

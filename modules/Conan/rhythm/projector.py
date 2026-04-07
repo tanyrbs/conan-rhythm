@@ -20,6 +20,7 @@ class ProjectorConfig:
     pause_topk_ratio: float = 0.35
     pause_min_boundary_weight: float = 0.10
     pause_boundary_bias_weight: float = 0.15
+    pause_boundary_mode: str = "additive"
     pause_train_soft: bool = True
     pause_soft_temperature: float = 0.12
     pause_selection_mode: str = "sparse"
@@ -105,9 +106,52 @@ def _allocate_pause_budget(
     return (prefix_row + tail_values) * active
 
 
+def compose_pause_candidate_scores(
+    *,
+    pause_weight_unit: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_support_prob_unit: torch.Tensor | None = None,
+    pause_amount_weight_unit: torch.Tensor | None = None,
+) -> torch.Tensor:
+    unit_mask = unit_mask.float()
+    scores = pause_weight_unit.float().clamp_min(0.0)
+    if pause_support_prob_unit is not None:
+        support = pause_support_prob_unit.float().clamp(0.0, 1.0) * unit_mask
+        if pause_amount_weight_unit is not None:
+            amount = pause_amount_weight_unit.float().clamp_min(0.0) * unit_mask
+            scores = support * amount
+        else:
+            scores = support
+    elif pause_amount_weight_unit is not None:
+        scores = pause_amount_weight_unit.float().clamp_min(0.0) * unit_mask
+    return scores * unit_mask
+
+
+def apply_pause_boundary_prior(
+    *,
+    scores: torch.Tensor,
+    boundary_score_unit: torch.Tensor,
+    unit_mask: torch.Tensor,
+    pause_min_boundary_weight: float,
+    pause_boundary_bias_weight: float,
+    pause_boundary_mode: str,
+) -> torch.Tensor:
+    unit_mask = unit_mask.float()
+    scores = scores.float().clamp_min(0.0) * unit_mask
+    boundary_term = (float(pause_min_boundary_weight) + boundary_score_unit.float().clamp_min(0.0)) * unit_mask
+    if float(pause_boundary_bias_weight) <= 0.0:
+        return scores
+    mode = str(pause_boundary_mode or "additive").strip().lower()
+    if mode == "gain":
+        return scores * (1.0 + float(pause_boundary_bias_weight) * boundary_term)
+    return (scores + float(pause_boundary_bias_weight) * boundary_term) * unit_mask
+
+
 def _project_pause_impl(
     *,
     pause_weight_unit: torch.Tensor,
+    pause_support_prob_unit: torch.Tensor | None,
+    pause_amount_weight_unit: torch.Tensor | None,
     boundary_score_unit: torch.Tensor,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
@@ -118,13 +162,23 @@ def _project_pause_impl(
     topk_ratio: float,
     pause_min_boundary_weight: float,
     pause_boundary_bias_weight: float,
+    pause_boundary_mode: str,
     temperature: float,
 ) -> torch.Tensor:
-    scores = pause_weight_unit.float().clamp_min(0.0)
-    boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+    scores = compose_pause_candidate_scores(
+        pause_weight_unit=pause_weight_unit,
+        unit_mask=unit_mask,
+        pause_support_prob_unit=pause_support_prob_unit,
+        pause_amount_weight_unit=pause_amount_weight_unit,
     )
-    scores = (scores + boundary_bias) * unit_mask.float()
+    scores = apply_pause_boundary_prior(
+        scores=scores,
+        boundary_score_unit=boundary_score_unit,
+        unit_mask=unit_mask,
+        pause_min_boundary_weight=pause_min_boundary_weight,
+        pause_boundary_bias_weight=pause_boundary_bias_weight,
+        pause_boundary_mode=pause_boundary_mode,
+    )
     visible = unit_mask.float().sum(dim=1).long()
     topk = torch.round(visible.float() * float(topk_ratio)).long()
     topk = torch.where(visible > 0, topk.clamp(min=1), topk).clamp(max=visible)
@@ -160,6 +214,8 @@ def _project_pause_impl(
 def _project_pause_simple_impl(
     *,
     pause_weight_unit: torch.Tensor,
+    pause_support_prob_unit: torch.Tensor | None,
+    pause_amount_weight_unit: torch.Tensor | None,
     boundary_score_unit: torch.Tensor,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
@@ -168,12 +224,22 @@ def _project_pause_simple_impl(
     reuse_prefix: bool,
     pause_min_boundary_weight: float,
     pause_boundary_bias_weight: float,
+    pause_boundary_mode: str,
 ) -> torch.Tensor:
-    scores = pause_weight_unit.float().clamp_min(0.0)
-    boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+    scores = compose_pause_candidate_scores(
+        pause_weight_unit=pause_weight_unit,
+        unit_mask=unit_mask,
+        pause_support_prob_unit=pause_support_prob_unit,
+        pause_amount_weight_unit=pause_amount_weight_unit,
     )
-    scores = (scores + boundary_bias) * unit_mask.float()
+    scores = apply_pause_boundary_prior(
+        scores=scores,
+        boundary_score_unit=boundary_score_unit,
+        unit_mask=unit_mask,
+        pause_min_boundary_weight=pause_min_boundary_weight,
+        pause_boundary_bias_weight=pause_boundary_bias_weight,
+        pause_boundary_mode=pause_boundary_mode,
+    )
     return _allocate_pause_budget(
         candidate_scores=scores,
         unit_mask=unit_mask,
@@ -359,6 +425,8 @@ class StreamingRhythmProjector(nn.Module):
         self,
         *,
         pause_weight_unit: torch.Tensor,
+        pause_support_prob_unit: torch.Tensor | None,
+        pause_amount_weight_unit: torch.Tensor | None,
         boundary_score_unit: torch.Tensor,
         unit_mask: torch.Tensor,
         pause_budget_win: torch.Tensor,
@@ -371,6 +439,8 @@ class StreamingRhythmProjector(nn.Module):
         if selection_mode == "simple":
             return _project_pause_simple_impl(
                 pause_weight_unit=pause_weight_unit,
+                pause_support_prob_unit=pause_support_prob_unit,
+                pause_amount_weight_unit=pause_amount_weight_unit,
                 boundary_score_unit=boundary_score_unit,
                 unit_mask=unit_mask,
                 pause_budget_win=pause_budget_win,
@@ -379,12 +449,15 @@ class StreamingRhythmProjector(nn.Module):
                 reuse_prefix=reuse_prefix,
                 pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
                 pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
+                pause_boundary_mode=str(self.config.pause_boundary_mode or "additive"),
             )
         topk_ratio = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
         topk_ratio = float(max(0.0, min(1.0, topk_ratio)))
         temperature = float(max(1e-4, self.config.pause_soft_temperature))
         return _project_pause_impl(
             pause_weight_unit=pause_weight_unit,
+            pause_support_prob_unit=pause_support_prob_unit,
+            pause_amount_weight_unit=pause_amount_weight_unit,
             boundary_score_unit=boundary_score_unit,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
@@ -395,6 +468,7 @@ class StreamingRhythmProjector(nn.Module):
             topk_ratio=topk_ratio,
             pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
             pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
+            pause_boundary_mode=str(self.config.pause_boundary_mode or "additive"),
             temperature=temperature,
         )
 
@@ -529,6 +603,10 @@ class StreamingRhythmProjector(nn.Module):
             boundary_score_unit=planner_boundary_score,
             trace_context=planner.trace_context,
             source_boundary_cue=planner.source_boundary_cue,
+            pause_support_logit_unit=getattr(planner, "pause_support_logit_unit", None),
+            pause_support_prob_unit=getattr(planner, "pause_support_prob_unit", None),
+            pause_amount_weight_unit=getattr(planner, "pause_amount_weight_unit", None),
+            pause_candidate_score_unit=getattr(planner, "pause_candidate_score_unit", None),
         )
         execution_planner.raw_speech_budget_win = getattr(
             planner,
@@ -563,6 +641,8 @@ class StreamingRhythmProjector(nn.Module):
         )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
+            pause_support_prob_unit=getattr(planner, "pause_support_prob_unit", None),
+            pause_amount_weight_unit=getattr(planner, "pause_amount_weight_unit", None),
             boundary_score_unit=planner_boundary_score,
             unit_mask=unit_mask,
             pause_budget_win=pause_budget_win,
@@ -638,6 +718,7 @@ class StreamingRhythmProjector(nn.Module):
             (speech_duration_exec.size(0), 1),
             float(self.config.pause_boundary_bias_weight),
         )
+        execution.pause_boundary_mode = str(self.config.pause_boundary_mode or "additive")
         execution.pause_min_boundary_weight = speech_duration_exec.new_full(
             (speech_duration_exec.size(0), 1),
             float(self.config.pause_min_boundary_weight),

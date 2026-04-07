@@ -31,24 +31,29 @@
 
 ### 2.1 当前 active run
 
-当前主线已经切换为：
+当前主线已进一步切换为：
 
 - **train360-only**
 - **teacher_offline + teacher_as_main**
-- **pause-recall consistent resume**
-- 从 old source line 的 **105000 ckpt** 精确续训
+- **pause split-head support/allocation**
+- 从旧 `consistent` 线的 **115000 ckpt** 做 **weight-only warm-start**
 
 具体信息：
 
-- 配置：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_consistent_resume.yaml`
-- 目标实验：`teacher_offline_train360only_pause_recall_consistent_stage1`
-- source ckpt：`checkpoints/teacher_offline_train360only_pause_recall_stage1/model_ckpt_steps_105000.ckpt`
-- 新 work dir：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1`
-- 日志：`logs/stage1_train360only_pause_recall_consistent_from105000.log`
-- resume note：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1/resume_notes/train360only_pause_recall_resume_step105000_20260407T134055Z.md`
+- 配置：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
+- 目标实验：`teacher_offline_train360only_pause_split_heads_stage1`
+- warm-start ckpt：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1/model_ckpt_steps_115000.ckpt`
+- 新 work dir：`checkpoints/teacher_offline_train360only_pause_split_heads_stage1`
+- 日志：`logs/stage1_train360only_pause_split_heads_from115000.log`
 - 训练数据：`data/binary/libritts_train360_formal_trainset_rhythm_v5`
 - `val_check_interval = 2500`
 - `max_updates = 135000`
+
+说明：
+
+- 这条新线**不是** exact resume，因为新增了 `pause_support_head`
+- 因此保留旧 `consistent` 线作为对照，新 split-head 线从 step `0` 重新记步
+- warm-start 时允许新 head 缺失权重，其他主干权重从 `115000.ckpt` 载入
 
 ### 2.2 为什么停掉 boundary-relaxed 线
 
@@ -71,6 +76,42 @@
 ---
 
 ## 3. 当前已经落地的代码修复
+
+### 3.0 新增：pause support / allocation 分头
+
+本轮已新增一条真正对准“support / allocation 解耦”的结构修复：
+
+- planner 新增 `pause_support_head`
+- `pause_support_logit_unit -> sigmoid -> pause_support_prob_unit`
+- 原 `pause_head` 继续承担 amount / allocation
+- `pause_amount_weight_unit -> softmax`
+- `pause_candidate_score_unit = support_prob * amount_weight`
+- 兼容输出 `pause_weight_unit = normalized(candidate_score)`
+
+同时新增两类 support 监督：
+
+- `rhythm_pause_support_event_weight`
+- `rhythm_pause_support_count_weight`
+
+其中：
+
+- `pause_support_weight` 继续作为 planner allocation / shape KL
+- `pause_support_event` 用稀疏正例 supervision 修 support
+- `pause_support_count` 约束 support 激活率不要塌
+
+对应新配置：
+
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
+
+对应关键文件：
+
+- `modules/Conan/rhythm/offline_teacher.py`
+- `modules/Conan/rhythm/projector.py`
+- `modules/Conan/rhythm/contracts.py`
+- `tasks/Conan/rhythm/losses.py`
+- `tasks/Conan/rhythm/targets.py`
+- `tasks/Conan/rhythm/task_runtime_support.py`
+- `tasks/Conan/rhythm/metrics.py`
 
 ### 3.1 已修：pause_event 默认不再 boundary-weighted
 
@@ -142,6 +183,21 @@ OMP_NUM_THREADS=1 /root/miniconda3/envs/conan/bin/python -m unittest \
 结果：
 
 - `50 passed`
+
+补充：
+
+- split-head 实现本轮新增后，已再次通过核心节奏单测回归
+- 本地通过：
+
+```bash
+OMP_NUM_THREADS=1 python -m unittest \
+  tests.rhythm.test_loss_components \
+  tests.rhythm.test_projector_invariants \
+  tests.rhythm.test_metrics_masking \
+  tests.rhythm.test_factorization_contract
+```
+
+- 结果：`40 passed`
 
 ---
 

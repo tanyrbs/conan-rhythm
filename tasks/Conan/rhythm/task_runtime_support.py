@@ -45,6 +45,9 @@ class RhythmTaskRuntimeSupport:
         def _nonnegative_float(name: str, default: float) -> float:
             return max(0.0, float(hparams.get(name, default) or default))
 
+        def _string_value(name: str, default: str) -> str:
+            return str(hparams.get(name, default) or default).strip().lower()
+
         plan_local_weight, plan_cum_weight = self.owner._resolve_rhythm_plan_weights()
         return RhythmTargetBuildConfig(
             primary_target_surface=self.owner._resolve_rhythm_primary_target_surface(),
@@ -69,9 +72,16 @@ class RhythmTaskRuntimeSupport:
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
             pause_event_weight=_nonnegative_float("rhythm_pause_event_weight", 0.0),
             pause_support_weight=_nonnegative_float("rhythm_pause_support_weight", 0.0),
+            pause_support_event_weight=_nonnegative_float("rhythm_pause_support_event_weight", 0.0),
+            pause_support_count_weight=_nonnegative_float("rhythm_pause_support_count_weight", 0.0),
             pause_event_threshold=_nonnegative_float("rhythm_pause_event_threshold", 0.5),
             pause_event_temperature=max(1.0e-4, _nonnegative_float("rhythm_pause_event_temperature", 0.25)),
             pause_event_pos_weight=max(1.0, _nonnegative_float("rhythm_pause_event_pos_weight", 2.0)),
+            pause_support_threshold=_nonnegative_float("rhythm_pause_support_threshold", 0.2),
+            pause_support_pos_weight=max(1.0, _nonnegative_float("rhythm_pause_support_pos_weight", 2.0)),
+            pause_support_loss_type=_string_value("rhythm_pause_support_loss_type", "focal"),
+            pause_support_focal_gamma=_nonnegative_float("rhythm_pause_support_focal_gamma", 2.0),
+            pause_support_focal_alpha=min(1.0, _nonnegative_float("rhythm_pause_support_focal_alpha", 0.75)),
             dedupe_primary_teacher_cache_distill=_resolve_duplicate_primary_distill_dedupe_flag(hparams),
             enable_distill_context_match=bool(
                 hparams.get("rhythm_enable_distill_context_match", False)
