@@ -60,6 +60,10 @@ class RhythmTaskRuntimeSupport:
             plan_local_weight=plan_local_weight,
             plan_cum_weight=plan_cum_weight,
             pause_boundary_weight=self.owner._resolve_rhythm_pause_boundary_weight(),
+            pause_event_boundary_weight=_nonnegative_float(
+                "rhythm_pause_event_boundary_weight",
+                0.0,
+            ),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),

@@ -56,6 +56,7 @@ class RhythmLossTargets:
     budget_raw_weight: float = 1.0
     budget_exec_weight: float = 0.25
     pause_boundary_weight: float = 0.35
+    pause_event_boundary_weight: float = 0.0
     feasible_debt_weight: float = 0.05
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
@@ -1272,10 +1273,17 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     )
     l_pause_event = blank_exec.new_tensor(0.0)
     if float(targets.pause_event_weight) > 0.0:
+        pause_event_mask = unit_mask
+        if float(targets.pause_event_boundary_weight) > 0.0:
+            pause_event_mask = _resolve_pause_exec_mask(
+                execution,
+                unit_mask,
+                boundary_weight=float(targets.pause_event_boundary_weight),
+            )
         l_pause_event = _compute_pause_event_loss(
             blank_exec,
             targets.pause_exec_tgt.float(),
-            pause_mask,
+            pause_event_mask,
             threshold=float(targets.pause_event_threshold),
             temperature=float(targets.pause_event_temperature),
             pos_weight=float(targets.pause_event_pos_weight),

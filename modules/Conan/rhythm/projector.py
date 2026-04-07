@@ -504,6 +504,7 @@ class StreamingRhythmProjector(nn.Module):
         planner: RhythmPlannerOutputs,
         reuse_prefix: bool = True,
         force_full_commit: bool = False,
+        allow_soft_pause_selection_with_force_full_commit: bool = False,
         pause_topk_ratio_override: float | None = None,
     ) -> RhythmExecution:
         unit_mask = unit_mask.float()
@@ -550,6 +551,16 @@ class StreamingRhythmProjector(nn.Module):
             state=state,
             reuse_prefix=reuse_prefix,
         )
+        selection_mode = str(self.config.pause_selection_mode or "sparse").strip().lower()
+        pause_topk_ratio_used = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
+        pause_topk_ratio_used = float(max(0.0, min(1.0, pause_topk_ratio_used)))
+        pause_soft_temperature = float(max(1e-4, self.config.pause_soft_temperature))
+        pause_soft_selection_active = bool(
+            self.training
+            and torch.is_grad_enabled()
+            and self.config.pause_train_soft
+            and (allow_soft_pause_selection_with_force_full_commit or not force_full_commit)
+        )
         pause_after_exec = self._project_pause(
             pause_weight_unit=pause_weight_unit,
             boundary_score_unit=planner_boundary_score,
@@ -557,9 +568,7 @@ class StreamingRhythmProjector(nn.Module):
             pause_budget_win=pause_budget_win,
             state=state,
             reuse_prefix=reuse_prefix,
-            soft_pause_selection=bool(
-                self.training and torch.is_grad_enabled() and self.config.pause_train_soft and not force_full_commit
-            ),
+            soft_pause_selection=pause_soft_selection_active,
             pause_topk_ratio_override=pause_topk_ratio_override,
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
@@ -600,7 +609,7 @@ class StreamingRhythmProjector(nn.Module):
             speech_duration_exec=speech_duration_exec,
             pause_after_exec=pause_after_exec,
         )
-        return RhythmExecution(
+        execution = RhythmExecution(
             speech_duration_exec=speech_duration_exec,
             blank_duration_exec=pause_after_exec,
             pause_after_exec=pause_after_exec,
@@ -614,3 +623,25 @@ class StreamingRhythmProjector(nn.Module):
             planner=execution_planner,
             next_state=next_state,
         )
+        execution.pause_soft_selection_active = speech_duration_exec.new_tensor(
+            1.0 if pause_soft_selection_active else 0.0
+        )
+        execution.pause_topk_ratio_used = speech_duration_exec.new_full(
+            (speech_duration_exec.size(0), 1),
+            pause_topk_ratio_used,
+        )
+        execution.pause_soft_temperature = speech_duration_exec.new_full(
+            (speech_duration_exec.size(0), 1),
+            pause_soft_temperature,
+        )
+        execution.pause_boundary_bias_weight = speech_duration_exec.new_full(
+            (speech_duration_exec.size(0), 1),
+            float(self.config.pause_boundary_bias_weight),
+        )
+        execution.pause_min_boundary_weight = speech_duration_exec.new_full(
+            (speech_duration_exec.size(0), 1),
+            float(self.config.pause_min_boundary_weight),
+        )
+        execution.pause_selection_mode = selection_mode
+        execution.force_full_commit = speech_duration_exec.new_tensor(1.0 if force_full_commit else 0.0)
+        return execution

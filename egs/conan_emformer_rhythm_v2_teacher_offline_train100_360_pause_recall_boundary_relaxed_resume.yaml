@@ -1,0 +1,29 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_gentle_resume.yaml
+
+# Boundary-relaxed resume variant.
+# Goal: reduce repeated boundary amplification across planner, projector and
+# event-level pause supervision while keeping the resume-safe top-k anchor.
+
+# Keep the conservative pause objectives that were already stable.
+rhythm_pause_event_weight: 0.15
+rhythm_pause_support_weight: 0.05
+rhythm_pause_event_threshold: 0.50
+rhythm_pause_event_temperature: 0.20
+rhythm_pause_event_pos_weight: 2.0
+
+# Event recall should not be over-focused on boundary-like units.
+rhythm_pause_event_boundary_weight: 0.0
+
+# Reduce boundary preference earlier in the planner.
+rhythm_pause_source_boundary_weight: 0.08
+
+# Keep only mild boundary encouragement downstream.
+rhythm_projector_pause_boundary_bias_weight: 0.10
+rhythm_pause_boundary_weight: 0.35
+
+# Open support a little more than the gentle branch now that boundary
+# over-emphasis is reduced.
+rhythm_projector_pause_topk_ratio: 0.44
+rhythm_projector_pause_topk_ratio_train_start: 0.40
+rhythm_projector_pause_topk_ratio_train_end: 0.44
+rhythm_projector_pause_topk_ratio_anneal_steps: 10000

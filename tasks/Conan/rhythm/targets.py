@@ -26,6 +26,7 @@ class RhythmTargetBuildConfig:
     budget_raw_weight: float
     budget_exec_weight: float
     feasible_debt_weight: float
+    pause_event_boundary_weight: float = 0.0
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
     pause_event_threshold: float = 0.5
@@ -968,6 +969,7 @@ def build_rhythm_loss_targets_from_sample(
         budget_raw_weight=float(config.budget_raw_weight),
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
+        pause_event_boundary_weight=float(config.pause_event_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),
@@ -1041,6 +1043,7 @@ def build_identity_rhythm_loss_targets(
         budget_raw_weight=float(config.budget_raw_weight),
         budget_exec_weight=float(config.budget_exec_weight),
         pause_boundary_weight=float(config.pause_boundary_weight),
+        pause_event_boundary_weight=float(config.pause_event_boundary_weight),
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),

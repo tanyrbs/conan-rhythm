@@ -1,0 +1,35 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_boundary_relaxed_resume.yaml
+
+# Consistent teacher_offline pause-recall resume variant.
+# Goal:
+# 1) keep pause-event recall supervision global by default;
+# 2) reduce repeated boundary amplification on the active teacher_offline path;
+# 3) open projector support capacity enough to test whether recall is being
+#    capped by sparse support rather than total pause budget.
+
+# Keep recall repair active, but avoid over-trusting the pre-projector support
+# term on its own.
+rhythm_pause_event_weight: 0.20
+rhythm_pause_support_weight: 0.06
+rhythm_pause_event_threshold: 0.30
+rhythm_pause_event_temperature: 0.22
+rhythm_pause_event_pos_weight: 2.0
+rhythm_pause_event_boundary_weight: 0.0
+
+# Reduce boundary pressure earlier in the active teacher_offline branch.
+rhythm_pause_source_boundary_weight: 0.06
+rhythm_boundary_feature_scale: 0.22
+rhythm_boundary_source_cue_weight: 0.55
+
+# Keep downstream boundary encouragement mild so support does not collapse onto
+# a few strong boundary peaks.
+rhythm_projector_pause_boundary_bias_weight: 0.10
+rhythm_pause_boundary_weight: 0.22
+
+# Open support capacity more directly and make the sparse gate less sharp.
+rhythm_projector_pause_selection_mode: sparse
+rhythm_projector_pause_topk_ratio: 0.50
+rhythm_projector_pause_topk_ratio_train_start: 0.44
+rhythm_projector_pause_topk_ratio_train_end: 0.50
+rhythm_projector_pause_topk_ratio_anneal_steps: 15000
+rhythm_projector_pause_soft_temperature: 0.18

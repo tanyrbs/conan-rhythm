@@ -335,6 +335,41 @@ class ProjectorInvariantTests(unittest.TestCase):
         self.assertTrue(torch.allclose(execution.planner.raw_speech_budget_win, planner.raw_speech_budget_win))
         self.assertTrue(torch.allclose(execution.planner.raw_pause_budget_win, planner.raw_pause_budget_win))
 
+    def test_force_full_commit_can_still_use_soft_pause_selection_for_teacher_training(self) -> None:
+        projector = StreamingRhythmProjector(
+            ProjectorConfig(
+                pause_train_soft=True,
+                pause_selection_mode="sparse",
+                build_render_plan=False,
+            )
+        )
+        projector.train()
+        planner = RhythmPlannerOutputs(
+            speech_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            dur_logratio_unit=torch.zeros((1, 3), dtype=torch.float32, requires_grad=True),
+            pause_weight_unit=torch.tensor([[0.2, 0.3, 0.5]], dtype=torch.float32, requires_grad=True),
+            boundary_score_unit=torch.tensor([[0.1, 0.2, 0.9]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 3, 2), dtype=torch.float32),
+            source_boundary_cue=torch.zeros((1, 3), dtype=torch.float32),
+        )
+        execution = projector(
+            dur_anchor_src=torch.ones((1, 3), dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            speech_budget_win=planner.speech_budget_win,
+            pause_budget_win=planner.pause_budget_win,
+            dur_logratio_unit=planner.dur_logratio_unit,
+            pause_weight_unit=planner.pause_weight_unit,
+            boundary_score_unit=planner.boundary_score_unit,
+            state=projector.init_state(batch_size=1, device=torch.device("cpu")),
+            planner=planner,
+            reuse_prefix=False,
+            force_full_commit=True,
+            allow_soft_pause_selection_with_force_full_commit=True,
+        )
+        self.assertTrue(torch.allclose(execution.pause_soft_selection_active, torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(execution.pause_topk_ratio_used, torch.tensor([[0.35]], dtype=torch.float32)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -753,6 +753,7 @@ class StreamingRhythmModule(nn.Module):
             planner=planner,
             reuse_prefix=False,
             force_full_commit=True,
+            allow_soft_pause_selection_with_force_full_commit=True,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
         )
         execution.trace_reliability = trace_reliability

@@ -27,18 +27,21 @@ class RhythmLossComponentTests(unittest.TestCase):
         pause: torch.Tensor,
         *,
         pause_shape_unit: torch.Tensor | None = None,
+        source_boundary_cue: torch.Tensor | None = None,
     ):
         speech_budget = speech.sum(dim=1, keepdim=True)
         pause_budget = pause.sum(dim=1, keepdim=True)
         if pause_shape_unit is None:
             pause_shape_unit = torch.softmax(pause.float() + 1.0e-6, dim=1)
+        if source_boundary_cue is None:
+            source_boundary_cue = torch.zeros_like(speech)
         planner = SimpleNamespace(
             raw_speech_budget_win=speech_budget,
             raw_pause_budget_win=pause_budget,
             speech_budget_win=speech_budget,
             pause_budget_win=pause_budget,
             pause_shape_unit=pause_shape_unit,
-            source_boundary_cue=torch.zeros_like(speech),
+            source_boundary_cue=source_boundary_cue,
             feasible_total_budget_delta=torch.zeros_like(speech_budget),
         )
         return SimpleNamespace(
@@ -176,6 +179,55 @@ class RhythmLossComponentTests(unittest.TestCase):
                 event_losses["rhythm_exec_pause"],
                 event_losses["rhythm_exec_pause_value"] + event_losses["rhythm_pause_event"],
             )
+        )
+
+    def test_pause_event_boundary_weight_zero_removes_extra_boundary_focus(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause_pred = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+        pause_tgt = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+        boundary = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+        execution = self._execution(
+            speech,
+            pause_pred,
+            source_boundary_cue=boundary,
+        )
+        weighted_targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            pause_boundary_weight=0.35,
+            pause_event_boundary_weight=0.35,
+            pause_event_weight=0.20,
+            pause_event_threshold=0.5,
+            pause_event_temperature=0.20,
+            pause_event_pos_weight=2.0,
+        )
+        decoupled_targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            pause_boundary_weight=0.35,
+            pause_event_boundary_weight=0.0,
+            pause_event_weight=0.20,
+            pause_event_threshold=0.5,
+            pause_event_temperature=0.20,
+            pause_event_pos_weight=2.0,
+        )
+        weighted_losses = build_rhythm_loss_dict(execution, weighted_targets)
+        decoupled_losses = build_rhythm_loss_dict(execution, decoupled_targets)
+        self.assertGreater(
+            float(decoupled_losses["rhythm_pause_event"].item()),
+            float(weighted_losses["rhythm_pause_event"].item()),
         )
 
     def test_pause_support_aux_penalizes_misaligned_planner_distribution(self) -> None:

@@ -73,16 +73,79 @@ def _masked_corr(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> t
 
 
 def _masked_event_f1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, *, threshold: float = 0.5):
+    precision, recall, f1, _, _ = _masked_event_stats(
+        pred,
+        tgt,
+        mask,
+        pred_threshold=threshold,
+        target_threshold=threshold,
+    )
+    return precision, recall, f1
+
+
+def _masked_event_stats(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pred_threshold: float = 0.5,
+    target_threshold: float = 0.5,
+):
     mask_bool = mask > 0
-    pred_evt = (pred.float() > threshold) & mask_bool
-    tgt_evt = (tgt.float() > threshold) & mask_bool
+    pred_evt = (pred.float() > pred_threshold) & mask_bool
+    tgt_evt = (tgt.float() > target_threshold) & mask_bool
     tp = (pred_evt & tgt_evt).float().sum(dim=1)
     fp = (pred_evt & (~tgt_evt)).float().sum(dim=1)
     fn = ((~pred_evt) & tgt_evt).float().sum(dim=1)
     precision = tp / (tp + fp).clamp_min(1.0)
     recall = tp / (tp + fn).clamp_min(1.0)
     f1 = 2 * precision * recall / (precision + recall).clamp_min(1e-6)
-    return precision.mean(), recall.mean(), f1.mean()
+    return precision.mean(), recall.mean(), f1.mean(), pred_evt.float().sum(dim=1).mean(), tgt_evt.float().sum(dim=1).mean()
+
+
+def _masked_best_event_f1(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pred_thresholds: tuple[float, ...] = (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.75, 1.00),
+    target_threshold: float = 0.5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    best_precision = pred.new_tensor(0.0)
+    best_recall = pred.new_tensor(0.0)
+    best_f1 = pred.new_tensor(-1.0)
+    best_threshold = pred.new_tensor(float(target_threshold))
+    for threshold in pred_thresholds:
+        precision, recall, f1, _, _ = _masked_event_stats(
+            pred,
+            tgt,
+            mask,
+            pred_threshold=float(threshold),
+            target_threshold=float(target_threshold),
+        )
+        if float(f1.item()) > float(best_f1.item()):
+            best_precision = precision
+            best_recall = recall
+            best_f1 = f1
+            best_threshold = pred.new_tensor(float(threshold))
+    return best_precision, best_recall, best_f1.clamp_min(0.0), best_threshold
+
+
+def _masked_select_mean(values: torch.Tensor, selector: torch.Tensor) -> torch.Tensor:
+    selected = values.float().masked_select(selector)
+    if selected.numel() <= 0:
+        return values.float().new_tensor(0.0)
+    return selected.mean()
+
+
+def _masked_selected_recall(pred_evt: torch.Tensor, tgt_evt: torch.Tensor, selector: torch.Tensor) -> torch.Tensor:
+    selector = selector.bool()
+    tp = (pred_evt & tgt_evt & selector).float().sum(dim=1)
+    tgt = (tgt_evt & selector).float().sum(dim=1)
+    recall = tp / tgt.clamp_min(1.0)
+    valid = tgt > 0
+    recall = torch.where(valid, recall, torch.zeros_like(recall))
+    return recall.mean()
 
 
 def _masked_kl(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -628,6 +691,27 @@ def _update_acoustic_target_metrics(
         metrics["rhythm_metric_pause_topk_sparsity_mean"] = ctx.execution.speech_duration_exec.new_tensor(1.0) - _safe_mean(
             pause_topk_ratio.float()
         )
+    pause_topk_ratio_used = getattr(ctx.execution, "pause_topk_ratio_used", None)
+    if pause_topk_ratio_used is not None:
+        metrics["rhythm_metric_pause_topk_ratio_used_mean"] = _safe_mean(pause_topk_ratio_used.float())
+    pause_soft_selection_active = getattr(ctx.execution, "pause_soft_selection_active", None)
+    if pause_soft_selection_active is not None:
+        metrics["rhythm_metric_pause_soft_selection_active"] = _safe_mean(pause_soft_selection_active.float())
+    pause_soft_temperature = getattr(ctx.execution, "pause_soft_temperature", None)
+    if pause_soft_temperature is not None:
+        metrics["rhythm_metric_pause_soft_temperature_mean"] = _safe_mean(pause_soft_temperature.float())
+    force_full_commit = getattr(ctx.execution, "force_full_commit", None)
+    if force_full_commit is not None:
+        metrics["rhythm_metric_force_full_commit_mean"] = _safe_mean(force_full_commit.float())
+    pause_selection_mode = getattr(ctx.execution, "pause_selection_mode", None)
+    if pause_selection_mode is not None:
+        mode = str(pause_selection_mode).strip().lower()
+        metrics["rhythm_metric_pause_selection_mode_sparse"] = ctx.execution.speech_duration_exec.new_tensor(
+            1.0 if mode == "sparse" else 0.0
+        )
+        metrics["rhythm_metric_pause_selection_mode_simple"] = ctx.execution.speech_duration_exec.new_tensor(
+            1.0 if mode == "simple" else 0.0
+        )
     source_boundary_scale = output.get("rhythm_source_boundary_scale")
     if source_boundary_scale is not None:
         metrics["rhythm_metric_source_boundary_scale_mean"] = _safe_mean(source_boundary_scale.float())
@@ -760,6 +844,7 @@ def _resolve_sample_pause_keys(sample: dict[str, Any]) -> tuple[str, str, str]:
 def _update_sample_supervision_metrics(
     metrics: dict[str, torch.Tensor],
     sample: dict[str, Any],
+    output: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> None:
     pause_target_key, pause_budget_key, teacher_pause_key = _resolve_sample_pause_keys(sample)
@@ -786,19 +871,139 @@ def _update_sample_supervision_metrics(
             ctx.unit_mask,
         )
     if pause_target_key in sample:
+        pause_target = sample[pause_target_key].float()
         metrics["rhythm_metric_exec_pause_l1"] = _masked_l1(
             ctx.blank_exec,
-            sample[pause_target_key],
+            pause_target,
             ctx.unit_mask,
         )
-        pause_p, pause_r, pause_f1 = _masked_event_f1(
+        pause_p, pause_r, pause_f1, pause_pred_count, pause_tgt_count = _masked_event_stats(
             ctx.blank_exec,
-            sample[pause_target_key],
+            pause_target,
             ctx.unit_mask,
         )
         metrics["rhythm_metric_pause_event_precision"] = pause_p
         metrics["rhythm_metric_pause_event_recall"] = pause_r
         metrics["rhythm_metric_pause_event_f1"] = pause_f1
+        metrics["rhythm_metric_pause_event_count_pred_mean"] = pause_pred_count
+        metrics["rhythm_metric_pause_event_count_target_mean"] = pause_tgt_count
+        metrics["rhythm_metric_pause_event_count_delta_mean"] = pause_pred_count - pause_tgt_count
+        best_pause_p, best_pause_r, best_pause_f1, best_pause_threshold = _masked_best_event_f1(
+            ctx.blank_exec,
+            pause_target,
+            ctx.unit_mask,
+            target_threshold=0.5,
+        )
+        metrics["rhythm_metric_pause_event_best_precision"] = best_pause_p
+        metrics["rhythm_metric_pause_event_best_recall"] = best_pause_r
+        metrics["rhythm_metric_pause_event_best_f1"] = best_pause_f1
+        metrics["rhythm_metric_pause_event_best_threshold"] = best_pause_threshold
+        for threshold, suffix in ((0.20, "t02"), (0.30, "t03"), (0.50, "t05")):
+            sweep_p, sweep_r, sweep_f1, _, _ = _masked_event_stats(
+                ctx.blank_exec,
+                pause_target,
+                ctx.unit_mask,
+                pred_threshold=float(threshold),
+                target_threshold=float(threshold),
+            )
+            metrics[f"rhythm_metric_pause_event_precision_{suffix}"] = sweep_p
+            metrics[f"rhythm_metric_pause_event_recall_{suffix}"] = sweep_r
+            metrics[f"rhythm_metric_pause_event_f1_{suffix}"] = sweep_f1
+
+        planner_pause_shape = getattr(ctx.planner, "pause_shape_unit", None)
+        if planner_pause_shape is None:
+            planner_pause_shape = getattr(ctx.planner, "pause_weight_unit", None)
+        planner_pause_budget = getattr(ctx.planner, "pause_budget_win", None)
+        if planner_pause_shape is not None and planner_pause_budget is not None:
+            planner_pause_surface = planner_pause_shape.float() * planner_pause_budget.float()
+            planner_p, planner_r, planner_f1, planner_pred_count, _ = _masked_event_stats(
+                planner_pause_surface,
+                pause_target,
+                ctx.unit_mask,
+            )
+            metrics["rhythm_metric_planner_pause_event_precision"] = planner_p
+            metrics["rhythm_metric_planner_pause_event_recall"] = planner_r
+            metrics["rhythm_metric_planner_pause_event_f1"] = planner_f1
+            metrics["rhythm_metric_planner_pause_event_count_pred_mean"] = planner_pred_count
+            metrics["rhythm_metric_pause_recall_drop_post_from_planner"] = planner_r - pause_r
+            metrics["rhythm_metric_pause_f1_drop_post_from_planner"] = planner_f1 - pause_f1
+
+        pause_topk_ratio = getattr(ctx.execution, "pause_topk_ratio_used", None)
+        if pause_topk_ratio is None:
+            pause_topk_ratio = output.get("rhythm_projector_pause_topk_ratio")
+        if pause_topk_ratio is not None:
+            pause_topk_ratio = pause_topk_ratio.float().reshape(-1)
+            if pause_topk_ratio.numel() == 1:
+                pause_topk_ratio = pause_topk_ratio.expand(ctx.visible_units.shape[0])
+            elif pause_topk_ratio.numel() != ctx.visible_units.shape[0]:
+                pause_topk_ratio = pause_topk_ratio.mean().expand(ctx.visible_units.shape[0])
+            pause_topk_slots = torch.round(ctx.visible_units.float() * pause_topk_ratio).clamp_min(1.0)
+            pause_target_events = ((pause_target > 0.5) & (ctx.unit_mask > 0)).float().sum(dim=1)
+            pause_topk_excess = (pause_target_events - pause_topk_slots).clamp_min(0.0)
+            metrics["rhythm_metric_pause_topk_slots_mean"] = _safe_mean(pause_topk_slots.float())
+            metrics["rhythm_metric_pause_target_over_topk_excess_mean"] = _safe_mean(pause_topk_excess.float())
+            metrics["rhythm_metric_pause_target_over_topk_rate"] = _safe_mean(
+                (pause_target_events > pause_topk_slots).float()
+            )
+            planner_pause_weight = getattr(ctx.planner, "pause_weight_unit", None)
+            if planner_pause_weight is None:
+                planner_pause_weight = getattr(ctx.planner, "pause_shape_unit", None)
+            boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
+            pause_boundary_bias_weight = getattr(ctx.execution, "pause_boundary_bias_weight", None)
+            pause_min_boundary_weight = getattr(ctx.execution, "pause_min_boundary_weight", None)
+            if planner_pause_weight is not None and boundary_score is not None:
+                if pause_boundary_bias_weight is None:
+                    pause_boundary_bias_weight = planner_pause_weight.new_zeros((planner_pause_weight.size(0), 1))
+                if pause_min_boundary_weight is None:
+                    pause_min_boundary_weight = planner_pause_weight.new_zeros((planner_pause_weight.size(0), 1))
+                score = planner_pause_weight.float().clamp_min(0.0)
+                score = score + pause_boundary_bias_weight.float() * (
+                    pause_min_boundary_weight.float() + boundary_score.float().clamp_min(0.0)
+                )
+                score = score * ctx.unit_mask.float()
+                valid_mask = ctx.unit_mask.float() > 0.5
+                sparse_selector = torch.zeros_like(score)
+                if bool(torch.any(pause_topk_slots > 0).item()):
+                    k_max = max(1, int(pause_topk_slots.max().item()))
+                    masked_scores = score.masked_fill(~valid_mask, float("-inf"))
+                    _, top_indices = torch.topk(masked_scores, k=k_max, dim=1)
+                    rank_mask = (
+                        torch.arange(k_max, device=score.device)[None, :] < pause_topk_slots[:, None]
+                    )
+                    sparse_selector.scatter_(1, top_indices, rank_mask.to(dtype=score.dtype))
+                target_evt = (pause_target > 0.5) & valid_mask
+                selected_evt = sparse_selector > 0.5
+                selected_target = (selected_evt & target_evt).float().sum(dim=1)
+                target_count = target_evt.float().sum(dim=1).clamp_min(1.0)
+                metrics["rhythm_metric_pause_support_cover_at_topk"] = _safe_mean(selected_target / target_count)
+
+        boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
+        if boundary_score is not None:
+            mask_bool = ctx.unit_mask > 0
+            pred_evt = (ctx.blank_exec.float() > 0.5) & mask_bool
+            tgt_evt = (pause_target > 0.5) & mask_bool
+            fn_evt = (~pred_evt) & tgt_evt
+            tp_evt = pred_evt & tgt_evt
+            boundary_high = (boundary_score.float() > 0.5) & mask_bool
+            boundary_low = (~boundary_high) & mask_bool
+            metrics["rhythm_metric_pause_event_recall_boundary"] = _masked_selected_recall(
+                pred_evt,
+                tgt_evt,
+                boundary_high,
+            )
+            metrics["rhythm_metric_pause_event_recall_nonboundary"] = _masked_selected_recall(
+                pred_evt,
+                tgt_evt,
+                boundary_low,
+            )
+            metrics["rhythm_metric_pause_fn_boundary_mean"] = _masked_select_mean(
+                boundary_score.float(),
+                fn_evt,
+            )
+            metrics["rhythm_metric_pause_tp_boundary_mean"] = _masked_select_mean(
+                boundary_score.float(),
+                tp_evt,
+            )
     if "rhythm_speech_exec_tgt" in sample and pause_target_key in sample:
         metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
             ctx.execution.speech_duration_exec + ctx.blank_exec,
@@ -936,10 +1141,11 @@ def _collect_observability_metrics(
 
 def _collect_sample_supervision_metric_dict(
     sample: dict[str, Any],
+    output: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> dict[str, torch.Tensor]:
     metrics: dict[str, torch.Tensor] = {}
-    _update_sample_supervision_metrics(metrics, sample, ctx)
+    _update_sample_supervision_metrics(metrics, sample, output, ctx)
     return metrics
 
 
@@ -958,7 +1164,7 @@ def build_rhythm_metric_sections(
         "observability": _collect_observability_metrics(output, ctx),
     }
     if sample is not None:
-        sample_metrics = _collect_sample_supervision_metric_dict(sample, ctx)
+        sample_metrics = _collect_sample_supervision_metric_dict(sample, output, ctx)
         _update_reference_alignment_metrics(sample_metrics, output, sample, ctx)
         sections["sample_supervision"] = sample_metrics
     return sections

@@ -1,14 +1,16 @@
 # AutoDL Training Handoff（2026-04-07 UTC）
 
-## 1. 当前项目处于什么状态
+## 1. 当前项目状态
 
-### 1.1 已完成的数据资产
+### 1.1 已完成、可直接复用的数据资产
 
 - `data/processed/libritts_train100_formal`
 - `data/binary/libritts_train100_formal_rhythm_v5`
 - `data/processed/libritts_train360_formal_trainset`
 - `data/binary/libritts_train360_formal_trainset_rhythm_v5`
-- `checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
+- teacher warmup ckpt：`checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
+
+这些资产足够继续做 **legacy v5 lineage** 的 teacher Stage-1 / pause-recall 实验。
 
 ### 1.2 raw 音频状态
 
@@ -17,215 +19,283 @@
 - `/root/autodl-tmp/data/LibriTTS/train-clean-100`
 - `/root/autodl-tmp/data/LibriTTS/train-clean-360`
 
-这意味着：
+因此：
 
-- **继续训练当前 Stage 1 没问题**，因为直接复用现成 binary
-- **如果要重做 binarize / cache**，必须先重新挂载 raw 音频
-
-### 1.3 当前正在跑的训练
-
-当前主线是：
-
-- mixed `train100 + train360`
-- `teacher_offline` formal Stage 1
-- 启动脚本：`scripts/autodl_recovery_mixed100360_v3_trainonly.sh`
-
-注意：
-
-- status 文件只会显示 `FORMAL_STAGE1_RUN_START`
-- 真正的训练进度请看：
-  - `logs/stage1_recovery_mixed100360_v3_trainonly.log`
-  - `checkpoints/teacher_offline_train100_360_stage1/`
-
-### 1.4 当前最新可引用的验证窗口
-
-截至 **2026-04-07 UTC**，日志里最新完整 validation 为：
-
-- step `75000`
-- `total_loss = 0.2155`
-- `L_exec_pause = 0.1133`
-- `L_prefix_state = 0.0314`
-- `rhythm_metric_pause_event_precision = 0.7111`
-- `rhythm_metric_pause_event_recall = 0.5666`
-- `rhythm_metric_pause_event_f1 = 0.5778`
-- `rhythm_metric_prefix_drift_l1 = 22.8119`
-- `rhythm_metric_exec_total_corr = 0.8943`
-- `rhythm_metric_budget_projection_repair_ratio_mean = 0.0`
-- `L_base = 0.0`
-- `L_pitch = 0.0`
-
-解释：
-
-- teacher Stage 1 仍在健康推进
-- 契约没有跑歪
-- 当前最关键短板已不再是 budget，而是 pause placement 的 recall/precision 平衡
-- prefix consistency 仍未完全收住，所以现在还不是 teacher 定稿点
+- **继续训练当前 v5 binary 没问题**
+- **任何需要重建 cache/binary 的实验都暂时不能直接做**
+- 包括：`soft-boundary v6`、修改 guidance target 构造、修改 teacher cached target 的导出语义
 
 ---
 
+## 2. 当前主训练线
 
-## 1.5 cache lineage 说明
+### 2.1 当前 active run
 
-- 当前仓库头已经把 soft-boundary `ref_rhythm_trace` 语义提升到 **`rhythm_cache_version: 6`**
-- 当前正在跑的 Stage 1 是旧 cache lineage 上启动的进程，**会继续跑完**
-- 但未来任何新开的 `cached_only` 实验，如果想声明 soft-boundary 生效，必须：
-  1. 恢复 raw
-  2. 重建 binary/cache
-  3. 在 version 6 下重新 preflight
+当前主线已经切换为：
 
-### 2026-04-07 运行补充
+- **train360-only**
+- **teacher_offline + teacher_as_main**
+- **pause-recall consistent resume**
+- 从 old source line 的 **105000 ckpt** 精确续训
 
-- 当前 mixed lineage 的实际 binary 仍是：
-  - `data/binary/libritts_train100_formal_rhythm_v5`
-  - `data/binary/libritts_train360_formal_trainset_rhythm_v5`
-- 当前机器上 `/root/autodl-tmp/data/LibriTTS/...` raw wav 已不存在，因此**现在不能直接重建 v6 binary**
-- 为了让 `teacher_offline_train100_360_stage1` 从 `80000 -> 82500` 精确续训，同时不“默默假装 soft-boundary 已生效”，恢复脚本现在显式加入：
-  - `rhythm_cache_version=5`
-  - `rhythm_allow_legacy_cache_resume=True`
-- 这条恢复链的含义是：
-  - **允许旧 v5 cache 明确续训**
-  - **pause-recall loss 改动生效**
-  - **soft-boundary cache 语义暂不生效**
-  - 后续如果要正式宣称 soft-boundary，有且只有一条路：恢复 raw 后重建 train100 + train360 两套 binary/cache 到 v6
+具体信息：
 
-## 2. 当前唯一正确的总计划
+- 配置：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_consistent_resume.yaml`
+- 目标实验：`teacher_offline_train360only_pause_recall_consistent_stage1`
+- source ckpt：`checkpoints/teacher_offline_train360only_pause_recall_stage1/model_ckpt_steps_105000.ckpt`
+- 新 work dir：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1`
+- 日志：`logs/stage1_train360only_pause_recall_consistent_from105000.log`
+- resume note：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1/resume_notes/train360only_pause_recall_resume_step105000_20260407T134055Z.md`
+- 训练数据：`data/binary/libritts_train360_formal_trainset_rhythm_v5`
+- `val_check_interval = 2500`
+- `max_updates = 135000`
 
-不是：
+### 2.2 为什么停掉 boundary-relaxed 线
 
-- teacher -> 立刻 `student_ref_bootstrap`
-- teacher -> 立刻 `student_kd`
+旧的 `teacher_offline_train360only_pause_recall_boundary_relaxed_stage1` 已停止。
 
-而是：
+原因不是 budget，也不是单一 bug，而是当前 stage 的 pause 训练存在**结构性错配**：
 
-1. **先把 teacher Stage 1 跑稳**
-2. **继续 teacher Stage 2 / v2.5 / v3，把 teacher 上限做高**
-3. **保留每个 teacher 阶段的最佳 checkpoint**
-4. **固定 teacher audit 集，持续做人耳 + descriptor 审计**
-5. **等 teacher 家族成熟后，再做学生蒸馏**
+1. **target 面**：主监督是 `guidance`，而 guidance pause surface 本身偏 boundary-heavy
+2. **planner 面**：teacher_offline 的 `pause_weight_unit` 是 softmax simplex，天然更偏“少数赢家”
+3. **projector 面**：pause 在 `sparse top-k + boundary bias + 低温 soft gate` 下形成稀疏瓶颈
+4. **loss 面**：event/support/value 目标之前不完全同向，容易把系统推成“边界点少而准”
 
----
+所以会稳定出现：
 
-## 3. 当前不该做什么
-
-- 不要因为 student 配置已经存在，就提前切到学生
-- 不要现在把 `student_ref_bootstrap` 当默认下一步
-- 不要为了 soft boundary 立刻打断当前 Stage 1 去重做 binary
-- 不要只看 `val_loss` 就宣布 teacher 已经够好
+- `pause_event_precision` 高
+- `pause_event_recall` 低
+- `L_budget` 与 repair 看起来正常
+- 但 `prefix_drift_l1` 仍难降
 
 ---
 
-## 4. 当前最该怎么盯 Stage 1
+## 3. 当前已经落地的代码修复
 
-### S 级指标
+### 3.1 已修：pause_event 默认不再 boundary-weighted
 
-- `L_base`
-- `L_pitch`
-- `rhythm_metric_module_only_objective`
-- `rhythm_metric_skip_acoustic_objective`
-- `rhythm_metric_disable_acoustic_train_path`
-- `L_exec_pause`
-- `L_exec_pause_value`
-- `L_pause_event`
-- `L_prefix_state`
-- `rhythm_metric_prefix_drift_l1`
-- `rhythm_metric_pause_event_f1`
-- `rhythm_metric_pause_event_precision`
-- `rhythm_metric_pause_event_recall`
-- `rhythm_metric_budget_projection_repair_ratio_mean`
+文件：
 
-### A 级指标
+- `tasks/Conan/rhythm/losses.py`
+- `tasks/Conan/rhythm/targets.py`
+- `tasks/Conan/rhythm/task_runtime_support.py`
 
-- `L_exec_speech`
-- `L_budget`
-- `L_stream_state`
-- `rhythm_metric_exec_total_corr`
-- `rhythm_metric_exec_pause_l1`
-- `rhythm_metric_exec_speech_l1`
+当前默认语义：
 
-### 当前判断
+- `l_exec_pause_value` 仍可按 boundary-weighted mask 训练
+- `l_pause_event` 默认走 `unit_mask`
+- `pause_event_boundary_weight` 默认 `0.0`
 
-- 60k 还属于 teacher Stage 1 主收敛期
-- 第一批认真挑 teacher ckpt 的窗口仍建议放在：
-  - **80k ~ 120k**
+这让 event loss 真正承担“全局补 recall”的职责，而不是继续偏向少数强边界点。
 
----
+### 3.2 已修：teacher 阶段不再因 `force_full_commit=True` 被动退化成 hard top-k
 
-## 5. 关于 5k 验证节奏与断点续训
+文件：
 
-### 5.1 `val_check_interval = 5000` 会不会影响 pause 收敛
+- `modules/Conan/rhythm/projector.py`
+- `modules/Conan/rhythm/module.py`
 
-不会直接影响 pause objective 本身。
+当前修复：
 
-当前 trainer 里，`5000` 主要决定：
-
-- 什么时候跑 validation
-- 什么时候刷新 best checkpoint
-- 我们每 5k 复盘一次指标的节奏
-
-它**不会直接改 pause loss / projector / optimizer 路径**。  
-所以我们现在保留 `5000`，是为了：
-
-- 让恢复训练后的每一档调参都正好对应一个完整评估窗口
-- 便于人工比较 `75k -> 80k -> 85k -> 90k`
-
-### 5.2 当前支持“同 exp + 新配置 + 精确续训”
-
-当前代码支持下面这种恢复方式：
-
-- 同一个 `exp_name`
-- `RESET=1`
-- 不删除旧 checkpoint
+- projector 新增 `allow_soft_pause_selection_with_force_full_commit`
+- `forward_teacher()` 显式传 `True`
 
 效果：
 
-1. 新 YAML 会覆盖 `checkpoints/<exp_name>/config.yaml`
-2. trainer 会自动恢复该 `exp_name` 下最新 `model_ckpt_steps_*.ckpt`
-3. `global_step` 和 optimizer state 都会继续
+- teacher 阶段仍可 full commit
+- 但 pause support 训练时不再默认被 hard top-k 卡死
+- 这是当前最重要的结构性修复之一
 
-也就是说：
+### 3.3 已补：pause 诊断指标
 
-- 这是**真正的断点续训**
-- 不是重新从 0 开始 warm-start
+文件：
 
-### 5.3 当前 pause recall 续训入口
+- `tasks/Conan/rhythm/metrics.py`
 
-新增：
+已新增：
 
-- 配置：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml`
-- 脚本：`scripts/autodl_resume_stage1_pause_recall.sh`
+- planner vs post-projector recall/f1
+- `pause_support_cover_at_topk`
+- `pause_target_over_topk_rate`
+- threshold sweep (`t02/t03/t05`)
+- `best_f1 / best_threshold`
+- boundary / non-boundary recall split
+- `pause_soft_selection_active`
+- `pause_topk_ratio_used_mean`
+- `pause_soft_temperature_mean`
+- `force_full_commit_mean`
 
-默认逻辑：
+这些指标是当前判断主因最重要的证据链。
 
-- 自动找到当前 `teacher_offline_train100_360_stage1` 的最新 checkpoint
-- 自动把 `max_updates` 设成 `latest + 5000`
-- 用新的 pause-recall 配置继续下一档
+### 3.4 当前测试状态
 
-如果当前老训练还在跑，脚本默认会拒绝启动第二个 writer。  
-要切换时，可显式：
+已通过：
 
 ```bash
-STOP_EXISTING=1 bash scripts/autodl_resume_stage1_pause_recall.sh
+OMP_NUM_THREADS=1 /root/miniconda3/envs/conan/bin/python -m unittest \
+  tests.rhythm.test_projector_invariants \
+  tests.rhythm.test_loss_components \
+  tests.rhythm.test_task_runtime_support \
+  tests.rhythm.test_metrics_masking
+```
+
+结果：
+
+- `50 passed`
+
+---
+
+## 4. 当前 consistent resume 配置的真实意图
+
+`conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_consistent_resume.yaml` 的目标不是“彻底解决 pause”，而是做一条**方向一致**的续训线：
+
+- 降低 active path 的 boundary 过度强化
+- 开大 support capacity
+- 提高 soft gate 温度
+- 把 event threshold 从 `0.50` 降到 `0.30`
+- 保持 legacy v5 数据不变，先验证当前结构修复能否带来真正的 recall 收益
+
+当前关键参数：
+
+```yaml
+rhythm_pause_event_weight: 0.20
+rhythm_pause_support_weight: 0.06
+rhythm_pause_event_threshold: 0.30
+rhythm_pause_event_temperature: 0.22
+rhythm_pause_event_boundary_weight: 0.0
+
+rhythm_pause_source_boundary_weight: 0.06
+rhythm_boundary_feature_scale: 0.22
+rhythm_boundary_source_cue_weight: 0.55
+
+rhythm_projector_pause_boundary_bias_weight: 0.10
+rhythm_pause_boundary_weight: 0.22
+
+rhythm_projector_pause_topk_ratio: 0.50
+rhythm_projector_pause_topk_ratio_train_start: 0.44
+rhythm_projector_pause_topk_ratio_train_end: 0.50
+rhythm_projector_pause_topk_ratio_anneal_steps: 15000
+rhythm_projector_pause_soft_temperature: 0.18
 ```
 
 ---
 
-## 6. 交接时最少要记住的命令
+## 5. 现在还没改、且必须区分“在线旋钮”和“需要重建 cache 的旋钮”
+
+### 5.1 现在可直接通过 resume 生效的
+
+- `rhythm_pause_event_*`
+- `rhythm_pause_support_weight`
+- `rhythm_pause_source_boundary_weight`
+- `rhythm_boundary_feature_scale`
+- `rhythm_boundary_source_cue_weight`
+- `rhythm_projector_pause_boundary_bias_weight`
+- `rhythm_projector_pause_topk_ratio*`
+- `rhythm_projector_pause_soft_temperature`
+
+### 5.2 现在**不能**靠 resume 直接宣称已验证的
+
+- `rhythm_guidance_pause_strength`
+- `rhythm_guidance_boundary_strength`
+- soft-boundary `ref_rhythm_trace` / `rhythm_cache_version: 6`
+- 任何 teacher/export cache 语义变化
+
+原因：
+
+这些都属于 **cache/binary lineage** 的一部分；没有 raw 就无法重建，当前只能继续把这轮实验表述为：
+
+- **legacy v5 train360-only pause-recall structural fix line**
+
+而不是：
+
+- **v6 / rebuilt guidance target line**
+
+---
+
+## 6. 当前最重要的监控指标
+
+### S 级
+
+- `rhythm_metric_pause_event_recall`
+- `rhythm_metric_pause_event_f1`
+- `rhythm_metric_pause_event_precision`
+- `rhythm_metric_prefix_drift_l1`
+- `rhythm_metric_planner_pause_event_recall`
+- `rhythm_metric_pause_recall_drop_post_from_planner`
+- `rhythm_metric_pause_support_cover_at_topk`
+- `rhythm_metric_pause_target_over_topk_rate`
+- `rhythm_metric_pause_event_recall_t02 / t03 / t05`
+- `rhythm_metric_pause_event_best_f1`
+- `rhythm_metric_pause_event_best_threshold`
+- `rhythm_metric_pause_event_recall_boundary`
+- `rhythm_metric_pause_event_recall_nonboundary`
+- `rhythm_metric_pause_soft_selection_active`
+
+### 阶段契约
+
+- `L_base = 0`
+- `L_pitch = 0`
+- `rhythm_metric_module_only_objective = 1`
+- `rhythm_metric_skip_acoustic_objective = 1`
+- `rhythm_metric_disable_acoustic_train_path = 1`
+
+### A 级
+
+- `L_exec_pause`
+- `L_pause_event`
+- `L_pause_support`
+- `L_prefix_state`
+- `rhythm_metric_exec_total_corr`
+- `rhythm_metric_budget_projection_repair_ratio_mean`
+
+---
+
+## 7. 当前最合理的后续 A/B 顺序
+
+### A/B-1（当前已在跑）
+
+- consistent sparse line
+- 目标：先验证 teacher soft pause selection + 一致化 boundary 下降 是否足以修 recall
+
+### A/B-2（若当前线仍卡住）
+
+最优先短诊断：
+
+- `rhythm_projector_pause_selection_mode: simple`
+- 只跑 2k~5k
+
+目的：
+
+- 快速确认根因是不是 sparse projector bottleneck 本身
+
+### A/B-3（需要 raw 后再做）
+
+- guidance target 去 boundary 化
+- 例如：`guidance_boundary_strength 1.25 -> 0.75~1.00`
+- 并重建 cache/binary
+
+---
+
+## 8. 当前最少要记住的命令
+
+查看日志：
 
 ```bash
 cd /root/autodl-tmp/project-1/conan-rhythm
-bash scripts/autodl_recovery_mixed100360_v3_trainonly.sh
+
+tail -f logs/stage1_train360only_pause_recall_consistent_from105000.log
 ```
 
-```bash
-tail -f logs/stage1_recovery_mixed100360_v3_trainonly.log
-```
+查看最新 validation：
 
 ```bash
 python scripts/monitor_stage1_metrics.py \
-  --log logs/stage1_recovery_mixed100360_v3_trainonly.log \
+  --log logs/stage1_train360only_pause_recall_consistent_from105000.log \
   --tail 5
 ```
 
+如果要确认当前 source ckpt：
+
 ```bash
-STOP_EXISTING=1 bash scripts/autodl_resume_stage1_pause_recall.sh
+ls checkpoints/teacher_offline_train360only_pause_recall_stage1/model_ckpt_steps_105000.ckpt
 ```
