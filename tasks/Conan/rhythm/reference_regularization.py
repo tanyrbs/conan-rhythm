@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from modules.Conan.rhythm.reference_encoder import _resample_by_progress
+from modules.Conan.rhythm.reference_descriptor import mean_speech_frames_to_global_rate
 from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
 
 
@@ -45,9 +46,17 @@ def build_target_compact_reference_descriptor(sample: dict) -> CompactReferenceD
     ref_trace = sample.get("ref_rhythm_trace")
     if not isinstance(ref_stats, torch.Tensor) or not isinstance(ref_trace, torch.Tensor):
         return None
+    mean_speech_frames = ref_stats.float()[:, 2:3]
     global_rate = sample.get("global_rate")
     if not isinstance(global_rate, torch.Tensor):
-        global_rate = torch.reciprocal(ref_stats.float()[:, 2:3].clamp_min(1.0))
+        global_rate = mean_speech_frames_to_global_rate(mean_speech_frames)
+    else:
+        global_rate = _reshape_batch_scalar(global_rate)
+        global_rate = torch.where(
+            mean_speech_frames > 0.0,
+            global_rate,
+            torch.zeros_like(mean_speech_frames),
+        )
     pause_ratio = sample.get("pause_ratio")
     if not isinstance(pause_ratio, torch.Tensor):
         pause_ratio = ref_stats.float()[:, 0:1].clamp(0.0, 1.0)
@@ -81,7 +90,11 @@ def build_predicted_compact_reference_descriptor(
     pause_exec = pause_exec.float().reshape(unit_mask.shape).clamp_min(0.0) * unit_mask
     active_units = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
     speech_total = speech_exec.sum(dim=1, keepdim=True)
-    global_rate = active_units / speech_total.clamp_min(1.0e-6)
+    global_rate = torch.where(
+        speech_total > 1.0e-6,
+        active_units / speech_total.clamp_min(1.0e-6),
+        torch.zeros_like(speech_total),
+    )
     pause_ratio = pause_exec.sum(dim=1, keepdim=True) / (speech_total + pause_exec.sum(dim=1, keepdim=True)).clamp_min(1.0e-6)
 
     relative_speech = speech_exec / dur_anchor_src.clamp_min(1.0)

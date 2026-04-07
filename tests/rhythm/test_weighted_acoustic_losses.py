@@ -215,15 +215,40 @@ class WeightedAcousticLossTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["l1"], torch.tensor(1.0)))
         self.assertTrue(torch.allclose(losses["mse"], torch.tensor(1.5)))
 
+    def test_add_pitch_loss_applies_stage3_scalar_to_pitch_terms(self) -> None:
+        hparams.clear()
+        hparams.update({"f0_gen": "diff", "lambda_uv": 1.0})
+        output = {
+            "content": torch.ones((1, 4), dtype=torch.long),
+            "tgt_nonpadding": torch.ones((1, 4), dtype=torch.float32),
+            "fdiff": torch.tensor(4.0),
+            "uv_pred": torch.zeros((1, 4, 1), dtype=torch.float32),
+        }
+        sample = {
+            "content": torch.ones((1, 4), dtype=torch.long),
+            "f0": torch.zeros((1, 4), dtype=torch.float32),
+            "uv": torch.zeros((1, 4), dtype=torch.float32),
+        }
+        full_losses = {}
+        scaled_losses = {}
+        self.task.add_pitch_loss(output, sample, full_losses, loss_scale=1.0)
+        self.task.add_pitch_loss(output, sample, scaled_losses, loss_scale=0.25)
+        self.assertTrue(torch.allclose(scaled_losses["fdiff"], full_losses["fdiff"] * 0.25))
+        self.assertTrue(torch.allclose(scaled_losses["uv"], full_losses["uv"] * 0.25))
+
     def test_observability_passthrough_includes_retimed_acoustic_scale(self) -> None:
         observability = self.task._collect_runtime_observability_outputs(
             {
                 "rhythm_stage3_acoustic_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
                 "rhythm_retimed_acoustic_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
+                "rhythm_stage3_pitch_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
+                "rhythm_retimed_pitch_loss_scale": torch.tensor([0.25, 0.75], dtype=torch.float32),
             }
         )
         self.assertAlmostEqual(observability["rhythm_metric_stage3_acoustic_loss_scale"], 0.5)
         self.assertAlmostEqual(observability["rhythm_metric_retimed_acoustic_loss_scale"], 0.5)
+        self.assertAlmostEqual(observability["rhythm_metric_stage3_pitch_loss_scale"], 0.5)
+        self.assertAlmostEqual(observability["rhythm_metric_retimed_pitch_loss_scale"], 0.5)
 
 
 if __name__ == "__main__":

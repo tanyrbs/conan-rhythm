@@ -290,6 +290,10 @@ class RhythmMetricMaskingTests(unittest.TestCase):
                 "rhythm_skip_acoustic_objective": 1.0,
                 "rhythm_pitch_supervision_disabled": 1.0,
                 "rhythm_missing_retimed_pitch_target": 1.0,
+                "rhythm_stage3_acoustic_loss_scale": 0.5,
+                "rhythm_retimed_acoustic_loss_scale": 0.5,
+                "rhythm_stage3_pitch_loss_scale": 0.25,
+                "rhythm_retimed_pitch_loss_scale": 0.25,
             }
         )
         self.assertTrue(torch.allclose(metrics["rhythm_metric_disable_acoustic_train_path"], torch.tensor(1.0)))
@@ -297,6 +301,10 @@ class RhythmMetricMaskingTests(unittest.TestCase):
         self.assertTrue(torch.allclose(metrics["rhythm_metric_skip_acoustic_objective"], torch.tensor(1.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_pitch_supervision_disabled"], torch.tensor(1.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_missing_retimed_pitch_target"], torch.tensor(1.0)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_stage3_acoustic_loss_scale"], torch.tensor(0.5)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_retimed_acoustic_loss_scale"], torch.tensor(0.5)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_stage3_pitch_loss_scale"], torch.tensor(0.25)))
+        self.assertTrue(torch.allclose(metrics["rhythm_metric_retimed_pitch_loss_scale"], torch.tensor(0.25)))
 
     def test_metric_sections_flatten_without_loss(self) -> None:
         unit_mask = torch.tensor([[1.0]], dtype=torch.float32)

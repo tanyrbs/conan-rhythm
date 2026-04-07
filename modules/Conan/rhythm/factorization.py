@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from .reference_descriptor import global_rate_to_mean_speech_frames
 from .source_boundary import resolve_boundary_score_unit
 
 
@@ -133,7 +134,7 @@ def _sync_raw_reference_contract(ref_conditioning: dict[str, Any]) -> None:
             )[:, :1].to(device=synced_stats.device, dtype=synced_stats.dtype)
         global_rate = ref_conditioning.get("global_rate")
         if isinstance(global_rate, torch.Tensor):
-            mean_speech = torch.reciprocal(global_rate.float().clamp_min(1e-6)).reshape(batch_size, -1)[:, :1]
+            mean_speech = global_rate_to_mean_speech_frames(global_rate).reshape(batch_size, -1)[:, :1]
             synced_stats[:, _REF_STATS_MEAN_SPEECH_IDX:_REF_STATS_MEAN_SPEECH_IDX + 1] = mean_speech.to(
                 device=synced_stats.device,
                 dtype=synced_stats.dtype,

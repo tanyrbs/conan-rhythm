@@ -164,6 +164,22 @@ class FactorizationContractTests(unittest.TestCase):
             )
         )
 
+    def test_zero_global_rate_keeps_raw_mean_speech_at_zero(self) -> None:
+        ref_conditioning = self._build_ref_conditioning()
+        ref_conditioning["global_rate"] = torch.zeros((1, 1), dtype=torch.float32)
+        ref_conditioning["planner_ref_stats"] = torch.cat(
+            [ref_conditioning["global_rate"], ref_conditioning["pause_ratio"]],
+            dim=-1,
+        )
+
+        updated = apply_compact_reference_intervention(
+            ref_conditioning,
+            CompactPlannerIntervention(name="zero_rate_identity"),
+        )
+
+        self.assertEqual(float(updated["global_rate"].item()), 0.0)
+        self.assertEqual(float(updated["ref_rhythm_stats"][0, 2].item()), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,6 +123,8 @@ class RhythmConanTaskMixin:
             ("rhythm_metric_retimed_pitch_target_trimmed_to_output", "retimed_pitch_target_trimmed_to_output"),
             ("rhythm_metric_stage3_acoustic_loss_scale", "rhythm_stage3_acoustic_loss_scale"),
             ("rhythm_metric_retimed_acoustic_loss_scale", "rhythm_retimed_acoustic_loss_scale"),
+            ("rhythm_metric_stage3_pitch_loss_scale", "rhythm_stage3_pitch_loss_scale"),
+            ("rhythm_metric_retimed_pitch_loss_scale", "rhythm_retimed_pitch_loss_scale"),
         ):
             value = model_out.get(field_name)
             if isinstance(value, torch.Tensor):
@@ -785,6 +787,13 @@ class RhythmConanTaskMixin:
             )
             output["rhythm_stage3_acoustic_loss_scale"] = float(acoustic_loss_scale)
             output["rhythm_retimed_acoustic_loss_scale"] = float(acoustic_loss_scale)
+            pitch_loss_scale = (
+                acoustic_loss_scale
+                if bool(hparams.get("rhythm_stage3_scale_pitch_loss", True))
+                else 1.0
+            )
+            output["rhythm_stage3_pitch_loss_scale"] = float(pitch_loss_scale)
+            output["rhythm_retimed_pitch_loss_scale"] = float(pitch_loss_scale)
             if not skip_acoustic_objective:
                 self._add_acoustic_loss(
                     output['mel_out'],
@@ -794,7 +803,7 @@ class RhythmConanTaskMixin:
                     loss_scale=acoustic_loss_scale,
                 )
                 # self.add_dur_loss(output['dur'], mel2ph, txt_tokens, losses=losses)
-                self.add_pitch_loss(output, sample, losses)
+                self.add_pitch_loss(output, sample, losses, loss_scale=pitch_loss_scale)
             self.add_rhythm_loss(output, sample, losses)
             runtime_helper.add_style_losses(output, losses, schedule_only_stage=schedule_only_stage)
             runtime_helper.route_conan_losses(losses, schedule_only_stage=schedule_only_stage)
@@ -910,10 +919,11 @@ class RhythmConanTaskMixin:
             "rhythm_fail_fast_missing_pitch_supervision=false only for debugging."
         )
 
-    def add_pitch_loss(self, output, sample, losses):
+    def add_pitch_loss(self, output, sample, losses, *, loss_scale: float = 1.0):
         # mel2ph = sample['mel2ph']  # [B, T_s]
         if bool(output.get("rhythm_pitch_supervision_disabled", False)):
             return
+        loss_scale = float(max(0.0, loss_scale))
         content = output.get("content", sample['content'])
         f0 = output.get("retimed_f0_tgt", sample.get('f0'))
         uv = output.get("retimed_uv_tgt", sample.get('uv'))
@@ -934,20 +944,20 @@ class RhythmConanTaskMixin:
         nonpadding = nonpadding.to(device=uv.device)
         nonpadding_sum = nonpadding.sum().clamp_min(1.0)
         if hparams["f0_gen"] == "diff":
-            losses["fdiff"] = output["fdiff"]
+            losses["fdiff"] = output["fdiff"] * loss_scale
             losses['uv'] = (F.binary_cross_entropy_with_logits(
-                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv']
+                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv'] * loss_scale
         elif hparams["f0_gen"] == "flow":
-            losses["pflow"] = output["pflow"]
+            losses["pflow"] = output["pflow"] * loss_scale
             losses['uv'] = (F.binary_cross_entropy_with_logits(
-                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv']
+                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv'] * loss_scale
         elif hparams["f0_gen"] == "gmdiff":
-            losses["gdiff"] = output["gdiff"]
-            losses["mdiff"] = output["mdiff"]
+            losses["gdiff"] = output["gdiff"] * loss_scale
+            losses["mdiff"] = output["mdiff"] * loss_scale
         elif hparams["f0_gen"] == "orig":
-            losses["fdiff"] = output["fdiff"]
+            losses["fdiff"] = output["fdiff"] * loss_scale
             losses['uv'] = (F.binary_cross_entropy_with_logits(
-                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv']
+                output["uv_pred"][:, :, 0], uv, reduction='none') * nonpadding).sum() / nonpadding_sum * hparams['lambda_uv'] * loss_scale
 
     def _build_runtime_teacher_supervision_targets(self, output, sample):
         plan_local_weight, plan_cum_weight = self._resolve_rhythm_plan_weights()

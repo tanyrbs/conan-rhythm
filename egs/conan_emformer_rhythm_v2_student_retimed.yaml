@@ -14,8 +14,11 @@ rhythm_apply_valid_override: true
 rhythm_train_render_start_steps: 0
 rhythm_valid_render_start_steps: 0
 rhythm_retimed_target_start_steps: 0
-rhythm_retimed_target_mode: hybrid
-rhythm_online_retimed_target_start_steps: 0
+# Safer maintained stage-3 baseline:
+# start from cached retimed targets and only introduce online/hybrid targets
+# after the controller has already stabilized for a while.
+rhythm_retimed_target_mode: cached
+rhythm_online_retimed_target_start_steps: 40000
 rhythm_use_retimed_pitch_target: true
 rhythm_disable_pitch_loss_when_retimed: false
 rhythm_disable_mel_adv_when_retimed: true
@@ -30,6 +33,7 @@ rhythm_joint_cumplan_macro_weight: 0.65
 rhythm_stage3_acoustic_weight_start: 0.10
 rhythm_stage3_acoustic_weight_end: 1.0
 rhythm_stage3_acoustic_ramp_steps: 20000
+rhythm_stage3_scale_pitch_loss: true
 
 # Make stage-3 projector behavior explicit instead of inheriting strict-mainline
 # fallbacks that are too weak for the real retimed canvas.

@@ -22,6 +22,28 @@ PLANNER_REF_TRACE_KEYS = (
 )
 
 
+def mean_speech_frames_to_global_rate(mean_speech_frames: torch.Tensor) -> torch.Tensor:
+    mean_speech_frames = mean_speech_frames.float()
+    safe_mean_speech = mean_speech_frames.clamp_min(1.0)
+    has_speech_evidence = mean_speech_frames > 0.0
+    return torch.where(
+        has_speech_evidence,
+        torch.reciprocal(safe_mean_speech),
+        torch.zeros_like(mean_speech_frames),
+    )
+
+
+def global_rate_to_mean_speech_frames(global_rate: torch.Tensor) -> torch.Tensor:
+    global_rate = global_rate.float()
+    safe_global_rate = global_rate.clamp_min(1.0e-6)
+    has_speech_evidence = global_rate > 0.0
+    return torch.where(
+        has_speech_evidence,
+        torch.reciprocal(safe_global_rate),
+        torch.zeros_like(global_rate),
+    )
+
+
 class RefRhythmDescriptor(nn.Module):
     """Reference descriptor with a compact planner-facing contract.
 
@@ -126,7 +148,7 @@ class RefRhythmDescriptor(nn.Module):
         include_sidecar: bool = False,
     ) -> dict[str, torch.Tensor]:
         RefRhythmDescriptor._validate_cached_contract(ref_rhythm_stats, ref_rhythm_trace)
-        global_rate = torch.reciprocal(ref_rhythm_stats[:, 2:3].clamp_min(1.0))
+        global_rate = mean_speech_frames_to_global_rate(ref_rhythm_stats[:, 2:3])
         pause_ratio = ref_rhythm_stats[:, 0:1].clamp(0.0, 1.0)
         local_rate_trace = ref_rhythm_trace[:, :, 1:2]
         boundary_trace = ref_rhythm_trace[:, :, 2:3]

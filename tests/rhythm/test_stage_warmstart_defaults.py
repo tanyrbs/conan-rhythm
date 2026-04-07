@@ -46,10 +46,50 @@ class StageWarmStartDefaultTests(unittest.TestCase):
         self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_start"), 0.10)
         self.assertEqual(hp.get("rhythm_stage3_acoustic_weight_end"), 1.0)
         self.assertEqual(hp.get("rhythm_stage3_acoustic_ramp_steps"), 20000)
+        self.assertEqual(hp.get("rhythm_retimed_target_mode"), "cached")
+        self.assertEqual(hp.get("rhythm_online_retimed_target_start_steps"), 40000)
+        self.assertTrue(hp.get("rhythm_stage3_scale_pitch_loss"))
         self.assertEqual(hp.get("rhythm_projector_pause_selection_mode"), "sparse")
         self.assertTrue(hp.get("rhythm_projector_use_boundary_commit_guard"))
         self.assertTrue(hp.get("rhythm_projector_build_render_plan"))
         self.assertEqual(hp.get("rhythm_loss_balance_mode"), "ema_group")
+
+    def test_balanced_stage3_config_pushes_harder_against_acoustic_dominance(self) -> None:
+        maintained_hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_retimed.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        balanced_hp = set_hparams(
+            config="egs/conan_emformer_rhythm_v2_student_retimed_balanced.yaml",
+            print_hparams=False,
+            global_hparams=False,
+            reset=True,
+        )
+        self.assertLess(
+            balanced_hp.get("rhythm_stage3_acoustic_weight_start"),
+            maintained_hp.get("rhythm_stage3_acoustic_weight_start"),
+        )
+        self.assertLess(
+            balanced_hp.get("rhythm_stage3_acoustic_weight_end"),
+            maintained_hp.get("rhythm_stage3_acoustic_weight_end"),
+        )
+        self.assertGreater(
+            balanced_hp.get("rhythm_stage3_acoustic_ramp_steps"),
+            maintained_hp.get("rhythm_stage3_acoustic_ramp_steps"),
+        )
+        self.assertEqual(balanced_hp.get("rhythm_loss_balance_mode"), "ema_group")
+        self.assertEqual(balanced_hp.get("rhythm_retimed_target_mode"), "cached")
+        self.assertEqual(balanced_hp.get("rhythm_online_retimed_target_start_steps"), 40000)
+        self.assertLess(
+            balanced_hp.get("rhythm_loss_balance_min_scale"),
+            maintained_hp.get("rhythm_loss_balance_min_scale"),
+        )
+        self.assertGreater(
+            balanced_hp.get("rhythm_loss_balance_max_scale"),
+            maintained_hp.get("rhythm_loss_balance_max_scale"),
+        )
 
     def test_ref_bootstrap_config_externalizes_rhythm_supervision_without_cached_teacher(self) -> None:
         hp = set_hparams(

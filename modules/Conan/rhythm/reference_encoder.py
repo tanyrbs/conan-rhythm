@@ -83,6 +83,27 @@ def _resample_by_progress(feature_track: torch.Tensor, progress: torch.Tensor, t
     return trace
 
 
+def _uniform_progress_like(value: torch.Tensor) -> torch.Tensor:
+    if value.dim() != 2:
+        raise ValueError(f"value must be [B,T], got {tuple(value.shape)}")
+    return torch.linspace(
+        0.0,
+        1.0,
+        value.size(1),
+        device=value.device,
+        dtype=value.dtype,
+    )[None, :].expand(value.size(0), -1)
+
+
+def _resolve_progress_from_speech_mask(speech_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    speech_progress = speech_mask.float().cumsum(dim=1)
+    speech_total = speech_progress[:, -1:]
+    progress_from_speech = speech_progress / speech_total.clamp_min(1.0)
+    uniform_progress = _uniform_progress_like(speech_progress)
+    progress = torch.where(speech_total > 0.0, progress_from_speech, uniform_progress)
+    return progress, uniform_progress
+
+
 def sample_progress_trace(
     trace: torch.Tensor,
     phase_ptr: torch.Tensor,
@@ -223,11 +244,8 @@ class ReferenceRhythmEncoder(nn.Module):
         if boundary_strength.size(1) > energy.size(1):
             boundary_strength = boundary_strength[:, : energy.size(1)]
 
-        speech_progress = speech_mask.float().cumsum(dim=1)
-        speech_total = speech_progress[:, -1:].clamp_min(1.0)
-        progress = speech_progress / speech_total
-        uniform = torch.linspace(0.0, 1.0, energy.size(1), device=energy.device)[None, :]
-        segment_duration_bias = progress - uniform
+        progress, uniform_progress = _resolve_progress_from_speech_mask(speech_mask)
+        segment_duration_bias = progress - uniform_progress
 
         boundary_threshold = torch.quantile(
             boundary_strength,
