@@ -49,6 +49,7 @@ class RhythmTaskRuntimeSupport:
             return str(hparams.get(name, default) or default).strip().lower()
 
         plan_local_weight, plan_cum_weight = self.owner._resolve_rhythm_plan_weights()
+        pause_event_threshold = _nonnegative_float("rhythm_pause_event_threshold", 0.5)
         return RhythmTargetBuildConfig(
             primary_target_surface=self.owner._resolve_rhythm_primary_target_surface(),
             distill_surface=self.owner._resolve_rhythm_distill_surface(),
@@ -74,10 +75,10 @@ class RhythmTaskRuntimeSupport:
             pause_support_weight=_nonnegative_float("rhythm_pause_support_weight", 0.0),
             pause_support_event_weight=_nonnegative_float("rhythm_pause_support_event_weight", 0.0),
             pause_support_count_weight=_nonnegative_float("rhythm_pause_support_count_weight", 0.0),
-            pause_event_threshold=_nonnegative_float("rhythm_pause_event_threshold", 0.5),
+            pause_event_threshold=pause_event_threshold,
             pause_event_temperature=max(1.0e-4, _nonnegative_float("rhythm_pause_event_temperature", 0.25)),
             pause_event_pos_weight=max(1.0, _nonnegative_float("rhythm_pause_event_pos_weight", 2.0)),
-            pause_support_threshold=_nonnegative_float("rhythm_pause_support_threshold", 0.2),
+            pause_support_threshold=_nonnegative_float("rhythm_pause_support_threshold", pause_event_threshold),
             pause_support_pos_weight=max(1.0, _nonnegative_float("rhythm_pause_support_pos_weight", 2.0)),
             pause_support_loss_type=_string_value("rhythm_pause_support_loss_type", "focal"),
             pause_support_focal_gamma=_nonnegative_float("rhythm_pause_support_focal_gamma", 2.0),

@@ -16,7 +16,7 @@ rhythm_offline_teacher_split_pause_heads: true
 rhythm_pause_support_weight: 0.05
 rhythm_pause_support_event_weight: 0.12
 rhythm_pause_support_count_weight: 0.03
-rhythm_pause_support_threshold: 0.20
+rhythm_pause_support_threshold: 0.30
 rhythm_pause_support_pos_weight: 2.0
 rhythm_pause_support_loss_type: focal
 rhythm_pause_support_focal_gamma: 2.0

@@ -34,7 +34,7 @@ class RhythmTargetBuildConfig:
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
-    pause_support_threshold: float = 0.2
+    pause_support_threshold: float = 0.5
     pause_support_pos_weight: float = 2.0
     pause_support_loss_type: str = "focal"
     pause_support_focal_gamma: float = 2.0

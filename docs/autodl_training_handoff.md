@@ -1,193 +1,256 @@
 # AutoDL Training Handoff（2026-04-07 UTC）
 
-## 1. 当前项目状态
+## 1. 当前数据与代码状态
 
-### 1.1 已完成、可直接复用的数据资产
+### 1.1 当前磁盘上已确认的数据资产
 
 - `data/processed/libritts_train100_formal`
-- `data/binary/libritts_train100_formal_rhythm_v5`
 - `data/processed/libritts_train360_formal_trainset`
-- `data/binary/libritts_train360_formal_trainset_rhythm_v5`
-- teacher warmup ckpt：`checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
+- `data/binary/libritts_train360_formal_trainset_rhythm_v5`：**完整可训练**（train/valid/test）
+- `data/binary/libritts_train100_formal_rhythm_v6`：**当前仅看到 valid/test**，还不能当作完整 mixed train100 训练根目录使用
+- `data/binary/libritts_train360_formal_trainset_rhythm_v6`：**当前未落盘**
 
-这些资产足够继续做 **legacy v5 lineage** 的 teacher Stage-1 / pause-recall 实验。
+补充：
 
-### 1.2 raw 音频状态
+- 当前仓库维护缓存版本是 **v6**
+- 当前 active run 之所以还能跑 v5，是因为显式使用：
+  - `rhythm_cache_version=5`
+  - `rhythm_allow_legacy_cache_resume=True`
 
-为了控制磁盘，以下 raw 已删除：
+### 1.2 当前代码实现与新 binary 的兼容性
 
-- `/root/autodl-tmp/data/LibriTTS/train-clean-100`
-- `/root/autodl-tmp/data/LibriTTS/train-clean-360`
+结论：**兼容，但前提是 v6 binary 真的完整落盘。**
 
-因此：
+原因：
 
-- **继续训练当前 v5 binary 没问题**
-- **任何需要重建 cache/binary 的实验都暂时不能直接做**
-- 包括：`soft-boundary v6`、修改 guidance target 构造、修改 teacher cached target 的导出语义
+- split-head 改动是**模型侧 / loss 侧**改动，不要求重新定义新的 binary schema
+- 新增的字段主要是运行时 planner 输出：
+  - `pause_support_logit_unit`
+  - `pause_support_prob_unit`
+  - `pause_amount_weight_unit`
+  - `pause_candidate_score_unit`
+- 当前 loss 仍主要使用已有 cached target，例如 `pause_exec_tgt`
+
+所以：
+
+- **完整的 v6 binary 与当前实现兼容**
+- **split-head 不是“必须重做 binary schema 才能用”的实现**
+- 但**不能混用** `train100 v6 + train360 v5` 作为一条正式主线
 
 ---
 
-## 2. 当前主训练线
+## 2. 当前最新训练主线
 
-### 2.1 当前 active run
+### 2.1 当前 active run 的精确定义
 
-当前主线已进一步切换为：
+当前真正的主训练线是：
 
+- **teacher_offline**
+- **teacher_as_main**
 - **train360-only**
-- **teacher_offline + teacher_as_main**
+- **legacy v5 binary**
 - **pause split-head support/allocation**
-- 从旧 `consistent` 线的 **115000 ckpt** 做 **weight-only warm-start**
+- **projector boundary gain**
+- 从旧 consistent 线 `115000` 做 **weight-only warm-start**
 
 具体信息：
 
 - 配置：`egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
-- 目标实验：`teacher_offline_train360only_pause_split_heads_stage1`
+- 实验：`teacher_offline_train360only_pause_split_heads_stage1`
 - warm-start ckpt：`checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1/model_ckpt_steps_115000.ckpt`
-- 新 work dir：`checkpoints/teacher_offline_train360only_pause_split_heads_stage1`
+- 当前 work dir：`checkpoints/teacher_offline_train360only_pause_split_heads_stage1`
 - 日志：`logs/stage1_train360only_pause_split_heads_from115000.log`
 - 训练数据：`data/binary/libritts_train360_formal_trainset_rhythm_v5`
-- `val_check_interval = 2500`
-- `max_updates = 135000`
+- `val_check_interval=2500`
+- `max_updates=135000`
 
-说明：
+这条线的语义必须写清楚：
 
-- 这条新线**不是** exact resume，因为新增了 `pause_support_head`
-- 因此保留旧 `consistent` 线作为对照，新 split-head 线从 step `0` 重新记步
-- warm-start 时允许新 head 缺失权重，其他主干权重从 `115000.ckpt` 载入
+- **不是 exact resume**
+- **不是 mixed 100+360**
+- **不是 v6 cache 线**
+- 是一条 **legacy v5 / train360-only / split-head 结构验证线**
 
-### 2.2 为什么停掉 boundary-relaxed 线
+### 2.2 当前启动语义
 
-旧的 `teacher_offline_train360only_pause_recall_boundary_relaxed_stage1` 已停止。
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+RESET=1 \
+MAX_UPDATES=135000 \
+VAL_CHECK_INTERVAL=2500 \
+HP_EXTRA="binary_data_dir='data/binary/libritts_train360_formal_trainset_rhythm_v5',\
+processed_data_dir='data/processed/libritts_train360_formal_trainset',\
+train_sets='data/binary/libritts_train360_formal_trainset_rhythm_v5',\
+load_ckpt='checkpoints/teacher_offline_train360only_pause_recall_consistent_stage1/model_ckpt_steps_115000.ckpt',\
+load_ckpt_strict=False,\
+rhythm_cache_version=5,\
+rhythm_allow_legacy_cache_resume=True" \
+bash scripts/autodl_train_stage1.sh \
+  egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml \
+  teacher_offline_train360only_pause_split_heads_stage1
+```
 
-原因不是 budget，也不是单一 bug，而是当前 stage 的 pause 训练存在**结构性错配**：
+### 2.3 当前主线配置里最关键的参数
 
-1. **target 面**：主监督是 `guidance`，而 guidance pause surface 本身偏 boundary-heavy
-2. **planner 面**：teacher_offline 的 `pause_weight_unit` 是 softmax simplex，天然更偏“少数赢家”
-3. **projector 面**：pause 在 `sparse top-k + boundary bias + 低温 soft gate` 下形成稀疏瓶颈
-4. **loss 面**：event/support/value 目标之前不完全同向，容易把系统推成“边界点少而准”
+```yaml
+rhythm_offline_teacher_split_pause_heads: true
 
-所以会稳定出现：
+rhythm_pause_support_weight: 0.05
+rhythm_pause_support_event_weight: 0.12
+rhythm_pause_support_count_weight: 0.03
+rhythm_pause_support_threshold: 0.20
+rhythm_pause_support_pos_weight: 2.0
+rhythm_pause_support_loss_type: focal
+rhythm_pause_support_focal_gamma: 2.0
+rhythm_pause_support_focal_alpha: 0.75
 
-- `pause_event_precision` 高
-- `pause_event_recall` 低
-- `L_budget` 与 repair 看起来正常
-- 但 `prefix_drift_l1` 仍难降
+rhythm_pause_event_weight: 0.20
+rhythm_pause_event_threshold: 0.30
+rhythm_pause_event_temperature: 0.22
+rhythm_pause_event_pos_weight: 2.0
+rhythm_pause_event_boundary_weight: 0.0
+
+rhythm_pause_source_boundary_weight: 0.06
+rhythm_boundary_feature_scale: 0.22
+rhythm_boundary_source_cue_weight: 0.55
+rhythm_pause_boundary_weight: 0.22
+
+rhythm_projector_pause_selection_mode: sparse
+rhythm_projector_pause_topk_ratio: 0.55
+rhythm_projector_pause_topk_ratio_train_start: 0.50
+rhythm_projector_pause_topk_ratio_train_end: 0.55
+rhythm_projector_pause_topk_ratio_anneal_steps: 15000
+rhythm_projector_pause_soft_temperature: 0.20
+rhythm_projector_pause_boundary_mode: gain
+rhythm_projector_pause_boundary_bias_weight: 0.08
+rhythm_projector_pause_min_boundary_weight: 0.0
+```
 
 ---
 
-## 3. 当前已经落地的代码修复
+## 3. 当前 split-head 线的最新训练观察
 
-### 3.0 新增：pause support / allocation 分头
+### 3.1 当前运行状态
 
-本轮已新增一条真正对准“support / allocation 解耦”的结构修复：
+截至当前检查：
 
-- planner 新增 `pause_support_head`
-- `pause_support_logit_unit -> sigmoid -> pause_support_prob_unit`
-- 原 `pause_head` 继续承担 amount / allocation
-- `pause_amount_weight_unit -> softmax`
-- `pause_candidate_score_unit = support_prob * amount_weight`
-- 兼容输出 `pause_weight_unit = normalized(candidate_score)`
+- 训练**仍在运行**
+- 日志最新 step 已超过 **15000**
+- 已保存：
+  - `model_ckpt_steps_2500.ckpt`
+  - `model_ckpt_steps_5000.ckpt`
+  - `model_ckpt_steps_7500.ckpt`
+  - `model_ckpt_steps_10000.ckpt`
+  - `model_ckpt_steps_12500.ckpt`
+  - `model_ckpt_steps_15000.ckpt`
+  - `model_ckpt_best.pt`（当前仍是早期 best）
 
-同时新增两类 support 监督：
+### 3.2 已完成的 validation
 
-- `rhythm_pause_support_event_weight`
-- `rhythm_pause_support_count_weight`
+#### `@2500`
 
-其中：
+- pause precision / recall / f1 = **0.8009 / 0.6426 / 0.6679**
+- `prefix_drift_l1 = 26.5305`
+- `exec_total_corr = 0.9122`
+- `budget_projection_repair_ratio_mean = 0.0`
+- `L_budget = 0.0022`
+- `L_pause_support_event = 0.0067`
+- `L_pause_support_count = 0.0013`
 
-- `pause_support_weight` 继续作为 planner allocation / shape KL
-- `pause_support_event` 用稀疏正例 supervision 修 support
-- `pause_support_count` 约束 support 激活率不要塌
+#### `@5000`
 
-对应新配置：
+- pause precision / recall / f1 = **0.8745 / 0.6198 / 0.6813**
+- `prefix_drift_l1 = 31.8658`
+- `exec_total_corr = 0.8794`
+- `budget_projection_repair_ratio_mean = 0.0`
+- `L_budget = 0.0035`
+- `L_pause_support_event = 0.0079`
+- `L_pause_support_count = 0.0004`
 
-- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
+#### `@7500`
 
-对应关键文件：
+- pause precision / recall / f1 = **0.8504 / 0.6952 / 0.6928**
+- `prefix_drift_l1 = 31.5229`
+- `exec_total_corr = 0.8820`
+- `budget_projection_repair_ratio_mean = 0.0`
+
+#### `@10000`
+
+- pause precision / recall / f1 = **0.8846 / 0.6176 / 0.6789**
+- `prefix_drift_l1 = 38.0078`
+- `exec_total_corr = 0.8833`
+- `budget_projection_repair_ratio_mean = 0.0`
+
+#### `@12500`
+
+- pause precision / recall / f1 = **0.8453 / 0.6051 / 0.6570**
+- `prefix_drift_l1 = 30.2024`
+- `exec_total_corr = 0.8967`
+- `budget_projection_repair_ratio_mean = 0.0`
+
+#### `@15000`
+
+- pause precision / recall / f1 = **0.7769 / 0.6412 / 0.6543**
+- `prefix_drift_l1 = 31.9455`
+- `exec_total_corr = 0.8831`
+- `budget_projection_repair_ratio_mean = 0.0`
+
+### 3.3 当前结论
+
+对这条 split-head 新线，当前最保守、最准确的判断是：
+
+- **相对旧 consistent@115000 起点，split-head 方向明显有效**
+  - recall 提高
+  - f1 提高
+  - prefix drift 改善
+- 但在 split-head 线内部：
+  - `5000` 相比 `2500` 只是 **f1 小升**
+  - `recall / prefix / exec corr` 反而回退
+
+所以当前应记为：
+
+- **按综合稳定性 / best checkpoint，当前仍是 `2500` 最稳**
+- **按 pause recall / f1 峰值，当前 `7500` 是这条线到目前为止最强的一次**
+- `10000`、`12500`、`15000` 之间仍在来回波动，说明这条线还没有真正稳定收敛
+
+---
+
+## 4. 已落地的关键代码修复
+
+### 4.1 split-head support / allocation
+
+当前已实现：
+
+- `pause_support_head` 负责 support
+- 原 `pause_head` 负责 amount / allocation
+- `pause_candidate_score = support_prob * amount_weight`
+- 再归一化得到 `pause_weight_unit`
+
+对应主要文件：
 
 - `modules/Conan/rhythm/offline_teacher.py`
 - `modules/Conan/rhythm/projector.py`
 - `modules/Conan/rhythm/contracts.py`
 - `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/task_runtime_support.py`
 - `tasks/Conan/rhythm/metrics.py`
 
-### 3.1 已修：pause_event 默认不再 boundary-weighted
-
-文件：
-
-- `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/task_runtime_support.py`
+### 4.2 pause_event 默认不再 boundary-weighted
 
 当前默认语义：
 
-- `l_exec_pause_value` 仍可按 boundary-weighted mask 训练
+- `l_exec_pause_value` 可继续偏重 boundary
 - `l_pause_event` 默认走 `unit_mask`
-- `pause_event_boundary_weight` 默认 `0.0`
+- `pause_event_boundary_weight = 0.0`
 
-这让 event loss 真正承担“全局补 recall”的职责，而不是继续偏向少数强边界点。
+这一步是为了让 event loss 真正承担 recall 补漏，而不是继续奖励少数强边界点。
 
-### 3.2 已修：teacher 阶段不再因 `force_full_commit=True` 被动退化成 hard top-k
+### 4.3 projector boundary prior 已改为 gain 语义
 
-文件：
+目标不是取消 boundary，而是避免 post-softmax absolute bias 直接盖过 planner 的细粒度 pause surface。
 
-- `modules/Conan/rhythm/projector.py`
-- `modules/Conan/rhythm/module.py`
+### 4.4 单测状态
 
-当前修复：
-
-- projector 新增 `allow_soft_pause_selection_with_force_full_commit`
-- `forward_teacher()` 显式传 `True`
-
-效果：
-
-- teacher 阶段仍可 full commit
-- 但 pause support 训练时不再默认被 hard top-k 卡死
-- 这是当前最重要的结构性修复之一
-
-### 3.3 已补：pause 诊断指标
-
-文件：
-
-- `tasks/Conan/rhythm/metrics.py`
-
-已新增：
-
-- planner vs post-projector recall/f1
-- `pause_support_cover_at_topk`
-- `pause_target_over_topk_rate`
-- threshold sweep (`t02/t03/t05`)
-- `best_f1 / best_threshold`
-- boundary / non-boundary recall split
-- `pause_soft_selection_active`
-- `pause_topk_ratio_used_mean`
-- `pause_soft_temperature_mean`
-- `force_full_commit_mean`
-
-这些指标是当前判断主因最重要的证据链。
-
-### 3.4 当前测试状态
-
-已通过：
-
-```bash
-OMP_NUM_THREADS=1 /root/miniconda3/envs/conan/bin/python -m unittest \
-  tests.rhythm.test_projector_invariants \
-  tests.rhythm.test_loss_components \
-  tests.rhythm.test_task_runtime_support \
-  tests.rhythm.test_metrics_masking
-```
-
-结果：
-
-- `50 passed`
-
-补充：
-
-- split-head 实现本轮新增后，已再次通过核心节奏单测回归
-- 本地通过：
+本轮核心节奏相关测试已通过：
 
 ```bash
 OMP_NUM_THREADS=1 python -m unittest \
@@ -197,161 +260,116 @@ OMP_NUM_THREADS=1 python -m unittest \
   tests.rhythm.test_factorization_contract
 ```
 
-- 结果：`40 passed`
+结果：`40 passed`
 
 ---
 
-## 4. 当前 consistent resume 配置的真实意图
+## 5. 新 binary 什么时候能切
 
-`conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_consistent_resume.yaml` 的目标不是“彻底解决 pause”，而是做一条**方向一致**的续训线：
+### 5.1 现在为什么还不能直接切到 mixed v6
 
-- 降低 active path 的 boundary 过度强化
-- 开大 support capacity
-- 提高 soft gate 温度
-- 把 event threshold 从 `0.50` 降到 `0.30`
-- 保持 legacy v5 数据不变，先验证当前结构修复能否带来真正的 recall 收益
+当前原因有两个：
 
-当前关键参数：
+1. `data/binary/libritts_train360_formal_trainset_rhythm_v6` **还不存在**
+2. `data/binary/libritts_train100_formal_rhythm_v6` **当前仅看到 valid/test**，还不能确认它已是完整 train/valid/test 训练目录
+
+因此当前不能把项目表述成：
+
+- “已经可以切新 binary mixed 训练”
+
+最多只能表述成：
+
+- **当前实现兼容 v6，新 binary 线接近可切，但数据侧尚未完整 ready**
+
+### 5.2 切到新 binary 的硬条件
+
+必须同时满足：
+
+1. `data/binary/libritts_train100_formal_rhythm_v6` 为**完整训练目录**
+2. `data/binary/libritts_train360_formal_trainset_rhythm_v6` 真正落盘
+3. preflight 确认两侧 `rhythm_cache_version=6`
+4. mixed lineage 显式指定，不能被 YAML 默认值偷换
+
+推荐写法：
 
 ```yaml
-rhythm_pause_event_weight: 0.20
-rhythm_pause_support_weight: 0.06
-rhythm_pause_event_threshold: 0.30
-rhythm_pause_event_temperature: 0.22
-rhythm_pause_event_boundary_weight: 0.0
-
-rhythm_pause_source_boundary_weight: 0.06
-rhythm_boundary_feature_scale: 0.22
-rhythm_boundary_source_cue_weight: 0.55
-
-rhythm_projector_pause_boundary_bias_weight: 0.10
-rhythm_pause_boundary_weight: 0.22
-
-rhythm_projector_pause_topk_ratio: 0.50
-rhythm_projector_pause_topk_ratio_train_start: 0.44
-rhythm_projector_pause_topk_ratio_train_end: 0.50
-rhythm_projector_pause_topk_ratio_anneal_steps: 15000
-rhythm_projector_pause_soft_temperature: 0.18
+binary_data_dir='data/binary/libritts_train100_formal_rhythm_v6'
+processed_data_dir='data/processed/libritts_train100_formal'
+train_sets='data/binary/libritts_train100_formal_rhythm_v6|data/binary/libritts_train360_formal_trainset_rhythm_v6'
+rhythm_cache_version=6
+# 不再开启 rhythm_allow_legacy_cache_resume
 ```
 
----
+### 5.3 为什么 `binary_data_dir` 仍应选 train100 base
 
-## 5. 现在还没改、且必须区分“在线旋钮”和“需要重建 cache 的旋钮”
+因为在这个项目里：
 
-### 5.1 现在可直接通过 resume 生效的
+- `train_sets` 决定训练集
+- `binary_data_dir` 同时承担：
+  - valid/test 默认根目录
+  - shared artifact / json / condition map 基准目录
+  - train_sets contract check 的基准目录
 
-- `rhythm_pause_event_*`
-- `rhythm_pause_support_weight`
-- `rhythm_pause_source_boundary_weight`
-- `rhythm_boundary_feature_scale`
-- `rhythm_boundary_source_cue_weight`
-- `rhythm_projector_pause_boundary_bias_weight`
-- `rhythm_projector_pause_topk_ratio*`
-- `rhythm_projector_pause_soft_temperature`
+而 train360 这边本来是 **train-only** 语义，所以 mixed 线的 base 仍应放在 **train100**。
 
-### 5.2 现在**不能**靠 resume 直接宣称已验证的
+### 5.4 切 v6 时的训练语义
 
-- `rhythm_guidance_pause_strength`
-- `rhythm_guidance_boundary_strength`
-- soft-boundary `ref_rhythm_trace` / `rhythm_cache_version: 6`
-- 任何 teacher/export cache 语义变化
+切到新 binary / 新 cache 线时，推荐：
+
+- **新开 exp**
+- **weight-only warm-start**
+- **不要 exact resume 当前 v5 split-head 线**
 
 原因：
 
-这些都属于 **cache/binary lineage** 的一部分；没有 raw 就无法重建，当前只能继续把这轮实验表述为：
+- 数据 lineage 已变化
+- cache 语义已变化
+- 继续复用旧 optimizer / scheduler / global_step 会让实验语义变脏
 
-- **legacy v5 train360-only pause-recall structural fix line**
+### 5.5 明确禁止的混搭
 
-而不是：
+不建议也不应把下面这种当正式主线：
 
-- **v6 / rebuilt guidance target line**
+- `train100 v6` + `train360 v5`
 
----
+原因：
 
-## 6. 当前最重要的监控指标
-
-### S 级
-
-- `rhythm_metric_pause_event_recall`
-- `rhythm_metric_pause_event_f1`
-- `rhythm_metric_pause_event_precision`
-- `rhythm_metric_prefix_drift_l1`
-- `rhythm_metric_planner_pause_event_recall`
-- `rhythm_metric_pause_recall_drop_post_from_planner`
-- `rhythm_metric_pause_support_cover_at_topk`
-- `rhythm_metric_pause_target_over_topk_rate`
-- `rhythm_metric_pause_event_recall_t02 / t03 / t05`
-- `rhythm_metric_pause_event_best_f1`
-- `rhythm_metric_pause_event_best_threshold`
-- `rhythm_metric_pause_event_recall_boundary`
-- `rhythm_metric_pause_event_recall_nonboundary`
-- `rhythm_metric_pause_soft_selection_active`
-
-### 阶段契约
-
-- `L_base = 0`
-- `L_pitch = 0`
-- `rhythm_metric_module_only_objective = 1`
-- `rhythm_metric_skip_acoustic_objective = 1`
-- `rhythm_metric_disable_acoustic_train_path = 1`
-
-### A 级
-
-- `L_exec_pause`
-- `L_pause_event`
-- `L_pause_support`
-- `L_prefix_state`
-- `rhythm_metric_exec_total_corr`
-- `rhythm_metric_budget_projection_repair_ratio_mean`
+- 语义不干净
+- cache contract 不一致
+- 当前代码的 v6 run 不会把 v5 当作同版本兼容线收进来
 
 ---
 
-## 7. 当前最合理的后续 A/B 顺序
+## 6. 当前建议的执行顺序
 
-### A/B-1（当前已在跑）
+### 6.1 现在先做什么
 
-- consistent sparse line
-- 目标：先验证 teacher soft pause selection + 一致化 boundary 下降 是否足以修 recall
+- 继续盯当前 `train360-only / v5 / split-head` 主线
+- 重点看后续 validation 是否能超过 `@2500`
+- 当前如果要选“最好 checkpoint”，优先记 `2500`
 
-### A/B-2（若当前线仍卡住）
+### 6.2 新 binary ready 后再做什么
 
-最优先短诊断：
+一旦 `train100 v6` 与 `train360 v6` 都 ready：
 
-- `rhythm_projector_pause_selection_mode: simple`
-- 只跑 2k~5k
-
-目的：
-
-- 快速确认根因是不是 sparse projector bottleneck 本身
-
-### A/B-3（需要 raw 后再做）
-
-- guidance target 去 boundary 化
-- 例如：`guidance_boundary_strength 1.25 -> 0.75~1.00`
-- 并重建 cache/binary
+- 新开一个 **mixed 100+360 v6 split-head** 实验
+- 从当前较好的 split-head checkpoint 做 **weight-only warm-start**
+- 先跑一个短 block（2.5k~5k）
+- 重点盯：
+  - `pause_event_recall / f1`
+  - `pause_support_cover_at_topk`
+  - `pause_recall_drop_post_from_planner`
+  - `prefix_drift_l1`
+  - `cache_version_mean`
 
 ---
 
-## 8. 当前最少要记住的命令
+## 7. 现在最重要的一句话
 
-查看日志：
+当前项目的最新主线不是 “mixed v6 exact resume”，而是：
 
-```bash
-cd /root/autodl-tmp/project-1/conan-rhythm
+> **legacy v5 / train360-only / split-head pause structural-fix run**
 
-tail -f logs/stage1_train360only_pause_recall_consistent_from105000.log
-```
+而新 binary 线目前的最准确认知是：
 
-查看最新 validation：
-
-```bash
-python scripts/monitor_stage1_metrics.py \
-  --log logs/stage1_train360only_pause_recall_consistent_from105000.log \
-  --tail 5
-```
-
-如果要确认当前 source ckpt：
-
-```bash
-ls checkpoints/teacher_offline_train360only_pause_recall_stage1/model_ckpt_steps_105000.ckpt
-```
+> **实现已兼容，但数据侧还没完整 ready；等完整 v6 binary 落盘后，再新开 mixed v6 实验。**

@@ -310,7 +310,7 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertIsNotNone(pause_support_logit_unit.grad)
         self.assertGreater(float(pause_support_logit_unit.grad.abs().sum().item()), 0.0)
 
-    def test_pause_support_count_aux_tracks_support_rate(self) -> None:
+    def test_pause_support_count_aux_matches_relative_support_count(self) -> None:
         speech = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
         pause_pred = torch.zeros_like(speech)
         pause_tgt = torch.tensor([[0.0, 1.0, 0.0, 1.0]], dtype=torch.float32)
@@ -334,6 +334,44 @@ class RhythmLossComponentTests(unittest.TestCase):
         )
         losses = build_rhythm_loss_dict(execution, targets)
         self.assertGreater(float(losses["rhythm_pause_support_count"].item()), 0.0)
+
+    def test_pause_support_count_aux_is_not_diluted_by_visible_length(self) -> None:
+        speech = torch.ones((2, 8), dtype=torch.float32)
+        pause_pred = torch.zeros_like(speech)
+        pause_tgt = torch.tensor(
+            [
+                [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        pause_support_prob_unit = torch.zeros_like(speech)
+        unit_mask = torch.tensor(
+            [
+                [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            ],
+            dtype=torch.float32,
+        )
+        execution = self._execution(
+            speech,
+            pause_pred,
+            pause_support_prob_unit=pause_support_prob_unit,
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause_tgt,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause_tgt.sum(dim=1, keepdim=True),
+            unit_mask=unit_mask,
+            dur_anchor_src=unit_mask,
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            pause_support_count_weight=0.05,
+            pause_support_threshold=0.2,
+        )
+        losses = build_rhythm_loss_dict(execution, targets)
+        self.assertGreater(float(losses["rhythm_pause_support_count"].item()), 0.02)
 
     def test_feasible_debt_penalizes_budget_redistribution_repairs(self) -> None:
         speech = torch.tensor([[4.0, 4.0]], dtype=torch.float32)

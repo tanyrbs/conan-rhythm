@@ -65,7 +65,7 @@ class RhythmLossTargets:
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0
-    pause_support_threshold: float = 0.2
+    pause_support_threshold: float = 0.5
     pause_support_pos_weight: float = 2.0
     pause_support_loss_type: str = "focal"
     pause_support_focal_gamma: float = 2.0
@@ -1044,10 +1044,10 @@ def _compute_pause_support_count_loss(
             return pause_exec_tgt.new_zeros(())
         support_prob = torch.sigmoid(support_logits.float())
     support_mask = support_mask.float().clamp_min(0.0)
-    visible = support_mask.sum(dim=1).clamp_min(1.0)
-    pred_rate = (support_prob.float().clamp(0.0, 1.0) * support_mask).sum(dim=1) / visible
-    target_rate = ((pause_exec_tgt.float() > float(threshold)).float() * support_mask).sum(dim=1) / visible
-    loss = F.smooth_l1_loss(pred_rate, target_rate, reduction="none")
+    pred_count = (support_prob.float().clamp(0.0, 1.0) * support_mask).sum(dim=1)
+    target_count = ((pause_exec_tgt.float() > float(threshold)).float() * support_mask).sum(dim=1)
+    count_scale = target_count.clamp_min(1.0)
+    loss = F.smooth_l1_loss(pred_count / count_scale, target_count / count_scale, reduction="none")
     return _reduce_batch_loss(loss, batch_weight)
 
 
