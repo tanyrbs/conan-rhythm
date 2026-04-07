@@ -579,6 +579,16 @@ Recent branch work improved the maintained path around:
   - keep the original pause-magnitude regression as the main term
   - add a BCE-style pause-event objective on `pause_exec_tgt > threshold`
   - expose `L_exec_pause_value` and `L_pause_event` so operators can separate "pause amount" from "pause support / recall"
+- teacher-offline recall repair now also has an **opt-in structural path** when event-only tuning is not enough:
+  - split planner pause support vs allocation with `rhythm_pause_support_split_enable`
+  - add lightweight run-length / breath-debt pause features with `rhythm_pause_breath_features_enable`
+  - expose `L_pause_allocation` plus planner-side observability such as `rhythm_metric_planner_pause_event_recall`, `rhythm_metric_pause_event_recall_drop_projector`, `rhythm_metric_pause_target_exceeds_topk_rate`, and `rhythm_metric_pause_fn_boundary_q*_share`
+  - staged overlay ladder now lives in:
+    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_a_soft_teacher_selection.yaml`
+    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_b_lower_boundary.yaml`
+    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_c_event_threshold.yaml`
+    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_next.yaml`
+    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_structural.yaml`
 - CPU probe summaries now surface runtime observability flags for:
   - module-only / acoustic-skip stages
   - retimed pitch supervision disablement
@@ -631,7 +641,26 @@ What to watch after enabling it:
 - `pause_event_recall`
 - `pause_event_f1`
 
-If recall improves offline but streaming behavior is still conservative, the next lever is usually not more budget weight; it is pause-support capacity in the projector, for example `rhythm_projector_pause_topk_ratio` and boundary-biased support placement.
+If recall improves offline but streaming behavior is still conservative, the next lever is usually not more budget weight. Prefer the staged pause-recall overlays above: first test teacher-side soft sparse selection, then lower late boundary bias, then soften the event definition, and only then opt into the structural support/allocation split. Avoid blindly increasing late boundary bias and top-k at the same time.
+
+### Pause-recall overlay ladder
+
+For the maintained `teacher_offline` recall-repair workflow, the repo now ships a small ablation ladder instead of one monolithic "more boundary" recipe:
+
+- **Run A**: `...pause_recall_run_a_soft_teacher_selection.yaml`
+  - isolates soft sparse pause selection on the active teacher path during training
+- **Run B**: `...pause_recall_run_b_lower_boundary.yaml`
+  - lowers late planner/projector/loss-side boundary pressure without rebuilding caches
+- **Run C**: `...pause_recall_run_c_event_threshold.yaml`
+  - softens the pause-event definition so smaller-but-real pause targets contribute recall gradients earlier
+- **Recommended next**: `...pause_recall_next.yaml`
+  - combines soft teacher sparse selection, warmer sparse gating, and lower late boundary bias
+- **Structural upgrade**: `...pause_recall_structural.yaml`
+  - keeps `load_ckpt_strict: false` on purpose because older checkpoints will not contain the new `pause_allocation_head` / `pause_feature_proj` parameters
+  - enables planner-side support/allocation split plus run-length / breath-debt features
+  - adds `rhythm_pause_allocation_weight` / `L_pause_allocation` so recall repair is not forced to ride only on one normalized planner distribution
+
+This structural path is an opt-in research/repair overlay, not a claim that the maintained default stage has "solved" pause recall.
 
 Current performance headroom is still mostly in:
 

@@ -118,6 +118,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
                 "rhythm_feasible_debt_weight": 0.05,
                 "rhythm_pause_event_weight": 0.20,
                 "rhythm_pause_support_weight": 0.08,
+                "rhythm_pause_allocation_weight": 0.04,
                 "rhythm_pause_event_threshold": 0.60,
                 "rhythm_pause_event_temperature": 0.15,
                 "rhythm_pause_event_pos_weight": 2.75,
@@ -130,6 +131,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.distill_exec_weight, 0.0)
         self.assertEqual(config.pause_event_weight, 0.20)
         self.assertEqual(config.pause_support_weight, 0.08)
+        self.assertEqual(config.pause_allocation_weight, 0.04)
         self.assertEqual(config.pause_event_threshold, 0.60)
         self.assertEqual(config.pause_event_temperature, 0.15)
         self.assertEqual(config.pause_event_pos_weight, 2.75)

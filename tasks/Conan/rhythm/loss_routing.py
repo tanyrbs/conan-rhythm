@@ -278,6 +278,11 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         if isinstance(losses.get("rhythm_pause_support"), torch.Tensor)
         else zero
     )
+    losses["L_pause_allocation"] = (
+        losses.get("rhythm_pause_allocation", zero).detach()
+        if isinstance(losses.get("rhythm_pause_allocation"), torch.Tensor)
+        else zero
+    )
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
     prefix_state = _resolve_prefix_state_value(losses)
     losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero

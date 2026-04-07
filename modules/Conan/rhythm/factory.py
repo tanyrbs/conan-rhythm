@@ -113,6 +113,9 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
+        pause_support_split_enable=bool(hparams.get('rhythm_pause_support_split_enable', False)),
+        pause_breath_features_enable=bool(hparams.get('rhythm_pause_breath_features_enable', False)),
+        pause_breath_reset_threshold=float(hparams.get('rhythm_pause_breath_reset_threshold', 0.55)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
     )
 
@@ -152,6 +155,9 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         boundary_feature_scale=float(hparams.get('rhythm_boundary_feature_scale', 0.35)),
         boundary_source_cue_weight=float(hparams.get('rhythm_boundary_source_cue_weight', 0.65)),
         pause_source_boundary_weight=float(hparams.get('rhythm_pause_source_boundary_weight', 0.20)),
+        pause_support_split_enable=bool(hparams.get('rhythm_pause_support_split_enable', False)),
+        pause_breath_features_enable=bool(hparams.get('rhythm_pause_breath_features_enable', False)),
+        pause_breath_reset_threshold=float(hparams.get('rhythm_pause_breath_reset_threshold', 0.55)),
         min_speech_frames=float(hparams.get('rhythm_projector_min_speech_frames', 1.0)),
         trace_reliability_enable=_trace_exhaustion_fallback_requested(hparams),
         trace_exhaustion_gap_start=float(hparams.get('rhythm_trace_exhaustion_gap_start', 0.08)),

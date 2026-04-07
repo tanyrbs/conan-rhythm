@@ -133,6 +133,17 @@ The maintained branch now includes these corrective changes:
   - empty collectors now fail fast
   - post-freeze zero-trainable states now fail fast
   - foreign / stale params from the wrong model instance now fail fast
+- stage-1 pause-recall repair now has a more explicit ablation ladder instead of only "increase boundary bias":
+  - `pause_recall_run_a_soft_teacher_selection`: isolate soft sparse selection on the active teacher path
+  - `pause_recall_run_b_lower_boundary`: de-emphasize late planner/projector/loss-side boundary ownership
+  - `pause_recall_run_c_event_threshold`: soften the pause-event definition
+  - `pause_recall_next`: combine the recommended teacher-soft + lower-boundary + warmer-gate settings
+  - `pause_recall_structural`: opt-in support/allocation split plus run-length / breath-debt pause features
+- the structural pause-recall overlay adds explicit planner observability and loss surfacing for the new path:
+  - planner heads: `pause_support_prob_unit`, `pause_allocation_weight_unit`
+  - planner features: `pause_run_length_unit`, `pause_breath_debt_unit`
+  - loss / reporting: `rhythm_pause_allocation`, `L_pause_allocation`
+  - diagnostics: pre-vs-post projector recall, top-k support coverage, and FN boundary-quartile shares
 - maintained stage configs now pin `load_ckpt_strict: false` so cross-stage warm-start behaves like partial restore instead of exact-architecture resume:
   - base Conan -> `teacher_offline`
   - `teacher_offline` -> `student_kd`
@@ -347,6 +358,12 @@ Additional training-prep caution:
 - research note:
   - a true runtime algorithmic-teacher-supervised offline-teacher stage remains
     a separate upper-bound / paper-facing ablation, not the maintained default
+- recall-repair note:
+  - if stage-1 recall remains low while `L_budget` / repair metrics stay healthy,
+    prefer the shipped recall ladder above over "increase boundary bias again"
+  - the structural overlay is intentionally opt-in and keeps non-strict
+    warm-start because older checkpoints will not contain the new pause-support
+    split heads / breath-feature projection parameters
 
 ### `student_kd`
 

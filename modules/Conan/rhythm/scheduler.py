@@ -25,6 +25,9 @@ class MonotonicRhythmScheduler(nn.Module):
         boundary_feature_scale: float = 0.35,
         boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
+        pause_support_split_enable: bool = False,
+        pause_breath_features_enable: bool = False,
+        pause_breath_reset_threshold: float = 0.55,
     ) -> None:
         super().__init__()
         self.boundary_source_cue_weight = float(boundary_source_cue_weight)
@@ -44,6 +47,9 @@ class MonotonicRhythmScheduler(nn.Module):
             max_unit_logratio=max_unit_logratio,
             boundary_feature_scale=boundary_feature_scale,
             pause_source_boundary_weight=pause_source_boundary_weight,
+            pause_support_split_enable=pause_support_split_enable,
+            pause_breath_features_enable=pause_breath_features_enable,
+            pause_breath_reset_threshold=pause_breath_reset_threshold,
         )
 
     @staticmethod
@@ -187,6 +193,11 @@ class MonotonicRhythmScheduler(nn.Module):
             pause_weight_unit=redistribution_outputs["pause_weight_unit"],
             boundary_score_unit=boundary_score_unit,
             trace_context=trace_context,
+            pause_support_prob_unit=redistribution_outputs.get("pause_support_prob_unit"),
+            pause_allocation_weight_unit=redistribution_outputs.get("pause_allocation_weight_unit"),
+            pause_support_logit_unit=redistribution_outputs.get("pause_support_logit_unit"),
+            pause_run_length_unit=redistribution_outputs.get("pause_run_length_unit"),
+            pause_breath_debt_unit=redistribution_outputs.get("pause_breath_debt_unit"),
             source_boundary_cue=source_boundary_cue,
             trace_reliability=(
                 trace_reliability.trace_reliability if trace_reliability is not None else None

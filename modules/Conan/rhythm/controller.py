@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from modules.Conan.diff.net import CausalConv1d
+from .pause_features import build_pause_support_feature_bundle
 
 
 def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: int = 1, keepdim: bool = False) -> torch.Tensor:
@@ -213,16 +214,23 @@ class UnitRedistributionHead(nn.Module):
         max_unit_logratio: float = 0.6,
         boundary_feature_scale: float = 0.35,
         pause_source_boundary_weight: float = 0.20,
+        pause_support_split_enable: bool = False,
+        pause_breath_features_enable: bool = False,
+        pause_breath_reset_threshold: float = 0.55,
         causal: bool = True,
     ) -> None:
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.pause_source_boundary_weight = float(pause_source_boundary_weight)
+        self.pause_support_split_enable = bool(pause_support_split_enable)
+        self.pause_breath_features_enable = bool(pause_breath_features_enable)
+        self.pause_breath_reset_threshold = float(max(0.0, min(1.0, pause_breath_reset_threshold)))
         self.anchor_proj = nn.Linear(1, hidden_size)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
         self.slow_proj = nn.Linear(trace_dim, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
+        self.pause_feature_proj = nn.Linear(2, hidden_size) if self.pause_breath_features_enable else None
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
             ResidualTemporalBlock(hidden_size, dilation=1, causal=causal),
@@ -230,6 +238,7 @@ class UnitRedistributionHead(nn.Module):
         ])
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
+        self.pause_allocation_head = nn.Linear(hidden_size, 1) if self.pause_support_split_enable else None
 
     def forward(
         self,
@@ -248,6 +257,13 @@ class UnitRedistributionHead(nn.Module):
             slow_rhythm_summary = masked_mean(planner_trace_context, unit_mask, dim=1)
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
         boundary_feat = (boundary_score_unit.float() * self.boundary_feature_scale).unsqueeze(-1)
+        pause_feature_bundle = build_pause_support_feature_bundle(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            boundary_score_unit=boundary_score_unit,
+            source_boundary_cue=None,
+            reset_threshold=self.pause_breath_reset_threshold,
+        )
         x = (
             unit_states
             + self.anchor_proj(src_log)
@@ -255,6 +271,8 @@ class UnitRedistributionHead(nn.Module):
             + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
             + self.boundary_proj(boundary_feat)
         )
+        if self.pause_feature_proj is not None:
+            x = x + self.pause_feature_proj(pause_feature_bundle.feature_tensor)
         x = self.in_proj(x)
         for block in self.blocks:
             x = block(x)
@@ -265,9 +283,30 @@ class UnitRedistributionHead(nn.Module):
 
         pause_logits = self.pause_head(x).squeeze(-1)
         pause_logits = pause_logits + self.pause_source_boundary_weight * boundary_score_unit.float()
-        pause_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
-
-        return {
+        ret = {
             'dur_logratio_unit': dur_logratio,
-            'pause_weight_unit': pause_weight,
+            'pause_run_length_unit': pause_feature_bundle.run_length_unit,
+            'pause_breath_debt_unit': pause_feature_bundle.breath_debt_unit,
         }
+        if self.pause_allocation_head is None:
+            ret['pause_weight_unit'] = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
+            return ret
+        pause_support_prob = torch.sigmoid(pause_logits) * unit_mask
+        allocation_logits = self.pause_allocation_head(x).squeeze(-1)
+        pause_allocation_weight = masked_softmax(allocation_logits, unit_mask, dim=1) * unit_mask
+        combined = pause_support_prob * pause_allocation_weight * unit_mask
+        combined_total = combined.sum(dim=1, keepdim=True)
+        pause_weight = torch.where(
+            combined_total > 1e-6,
+            combined / combined_total.clamp_min(1e-6),
+            pause_allocation_weight,
+        ) * unit_mask
+        ret.update(
+            {
+                'pause_weight_unit': pause_weight,
+                'pause_support_logit_unit': pause_logits * unit_mask,
+                'pause_support_prob_unit': pause_support_prob,
+                'pause_allocation_weight_unit': pause_allocation_weight,
+            }
+        )
+        return ret

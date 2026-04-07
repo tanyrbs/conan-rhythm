@@ -1,0 +1,8 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# Run C: isolate event-definition softness. Keep sparse capacity and boundary
+# priors fixed, but lower the pause-event positive threshold so smaller-but-real
+# pause targets can contribute recall gradients earlier.
+rhythm_pause_event_threshold: 0.30
+rhythm_pause_event_temperature: 0.25
+rhythm_pause_event_pos_weight: 2.5

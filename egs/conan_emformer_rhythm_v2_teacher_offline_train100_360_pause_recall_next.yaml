@@ -1,0 +1,16 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# Recommended next resumed Stage-1 recall repair after the boundary-overuse
+# review:
+#   - keep the existing pause-event auxiliary and wider sparse capacity
+#   - enable soft sparse selection on the teacher path so top-k losers still
+#     receive training signal
+#   - de-emphasize late boundary reweighting instead of pushing it even higher
+#   - slightly warm the sparse gate so near-threshold candidates are not starved
+rhythm_teacher_projector_force_full_commit: true
+rhythm_teacher_projector_soft_pause_selection: true
+
+rhythm_pause_source_boundary_weight: 0.08
+rhythm_projector_pause_boundary_bias_weight: 0.10
+rhythm_pause_boundary_weight: 0.22
+rhythm_projector_pause_soft_temperature: 0.18

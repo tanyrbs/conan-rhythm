@@ -256,6 +256,21 @@ What this stage is for:
   - keep the external story aligned with the YAML unless you introduce a
     separate ablation config and validate it explicitly
 
+If stage-1 pause precision stays high while recall remains low and `L_budget` /
+`budget_projection_repair_ratio_mean` still look healthy, do **not** jump
+straight to "more boundary bias". The repo now ships a small recall-ablation
+ladder for the active teacher path:
+
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_a_soft_teacher_selection.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_b_lower_boundary.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_c_event_threshold.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_next.yaml`
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_structural.yaml`
+
+The final structural overlay is intentionally still non-strict warm-start
+(`load_ckpt_strict: false`) because it introduces new planner parameters such
+as `pause_allocation_head` and `pause_feature_proj`.
+
 ### 6.2 Export teacher targets
 
 ```bash
@@ -378,10 +393,12 @@ Pause-specific interpretation:
   - `L_exec_pause` decreases slowly
   - `prefix_drift_l1` also decreases slowly because missed pauses keep the cumulative clock behind
 
-The maintained code now exposes two separate pause views:
+The maintained code now exposes separate pause views:
 
 - `L_exec_pause_value`: the original pause-magnitude regression term
 - `L_pause_event`: the auxiliary support-first event term
+- `L_pause_allocation`: the opt-in structural allocation term when
+  `rhythm_pause_support_split_enable: true`
 
 Recommended first response when recall is the clear bottleneck:
 
@@ -407,7 +424,24 @@ What to watch after enabling it:
 - `L_pause_event`
 - `prefix_drift_l1`
 
-If recall improves offline but streaming pause placement still looks conservative, the next lever is usually projector support capacity rather than more budget weight, e.g. `rhythm_projector_pause_topk_ratio` or stronger boundary-biased pause support.
+If recall improves offline but streaming pause placement still looks conservative, the next lever is usually projector support capacity plus **less aggressive late boundary ownership**, not more budget weight. Prefer the shipped recall ladder:
+
+- Run A: teacher-side soft sparse selection
+- Run B: lower projector/loss-side boundary weighting
+- Run C: softer event thresholding
+- then `pause_recall_next`
+- finally `pause_recall_structural` if you want planner support/allocation split + breath-debt features
+
+Useful new diagnostics for these ablations:
+
+- `rhythm_metric_planner_pause_event_precision`
+- `rhythm_metric_planner_pause_event_recall`
+- `rhythm_metric_pause_event_recall_drop_projector`
+- `rhythm_metric_pause_target_exceeds_topk_rate`
+- `rhythm_metric_pause_fn_boundary_q1_share` ... `q4_share`
+- `rhythm_metric_pause_support_prob_mean`
+- `rhythm_metric_pause_run_length_mean`
+- `rhythm_metric_pause_breath_debt_mean`
 
 ### 7.3 Stage-3 watch items
 

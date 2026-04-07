@@ -153,14 +153,29 @@ def _validate_pause_recall_support_controls(
             "pause-recall auxiliaries are enabled while rhythm_projector_pause_topk_ratio_train_end < 0.40; "
             "sparse projector capacity may still cap pause recall."
         )
+    if knobs.pause_soft_temperature <= 0.12:
+        warnings.append(
+            "pause-recall auxiliaries are enabled while rhythm_projector_pause_soft_temperature <= 0.12; "
+            "the sparse gate remains sharp, so near-threshold pause candidates may still get weak gradients."
+        )
     if (
-        knobs.pause_boundary_weight < 0.45
-        and knobs.pause_boundary_bias_weight < 0.20
+        ctx.stage == "teacher_offline"
+        and knobs.teacher_projector_force_full_commit
+        and not knobs.teacher_projector_soft_pause_selection
     ):
         warnings.append(
-            "pause-recall auxiliaries are enabled but both rhythm_pause_boundary_weight and "
-            "rhythm_projector_pause_boundary_bias_weight remain conservative; "
-            "boundary-aligned pause support may still be underpowered."
+            "pause-recall auxiliaries are enabled during teacher_offline, but the teacher projector still runs "
+            "with force_full_commit and no soft pause-selection override; sparse support losers may receive little "
+            "gradient. Consider setting rhythm_teacher_projector_soft_pause_selection: true for recall ablations."
+        )
+    if (
+        knobs.pause_boundary_weight >= 0.45
+        and knobs.pause_boundary_bias_weight >= 0.20
+    ):
+        warnings.append(
+            "pause-recall auxiliaries are enabled while both rhythm_pause_boundary_weight and "
+            "rhythm_projector_pause_boundary_bias_weight remain aggressive; if recall stays low, inspect "
+            "pre-vs-post-projector recall before increasing boundary weighting further."
         )
 
 
@@ -259,6 +274,11 @@ def _validate_reporting_and_export_hints(
         if missing_public:
             warnings.append(
                 f"rhythm_public_losses is missing maintained mainline aliases: {missing_public}."
+            )
+        if knobs.pause_allocation_weight > 0.0 and "L_pause_allocation" not in set(knobs.public_losses):
+            warnings.append(
+                "rhythm_pause_allocation_weight > 0 but rhythm_public_losses omits L_pause_allocation; "
+                "the structural pause-allocation diagnostic term will be harder to monitor in logs."
             )
 
 

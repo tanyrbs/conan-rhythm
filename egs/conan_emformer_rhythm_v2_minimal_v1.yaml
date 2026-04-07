@@ -47,6 +47,21 @@ rhythm_feasible_debt_weight: 0.05
 # clearly lagging.
 rhythm_pause_event_weight: 0.0
 rhythm_pause_support_weight: 0.0
+rhythm_pause_allocation_weight: 0.0
 rhythm_pause_event_threshold: 0.5
 rhythm_pause_event_temperature: 0.25
 rhythm_pause_event_pos_weight: 2.0
+
+# Structural pause-recall upgrade remains opt-in. These knobs are intentionally
+# off in the maintained baseline, but the stage-1 recall overlays can enable
+# them when dense guidance targets keep collapsing into sparse boundary-only
+# pause support.
+rhythm_pause_support_split_enable: false
+rhythm_pause_breath_features_enable: false
+rhythm_pause_breath_reset_threshold: 0.55
+
+# Teacher-offline recall ablations may optionally keep full-commit semantics
+# while still enabling soft sparse pause selection during training so near-top-k
+# pause candidates receive gradient.
+rhythm_teacher_projector_force_full_commit: true
+rhythm_teacher_projector_soft_pause_selection: false

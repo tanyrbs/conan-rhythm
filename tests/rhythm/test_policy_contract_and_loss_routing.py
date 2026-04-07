@@ -115,12 +115,56 @@ class PolicyContractAndLossRoutingTests(unittest.TestCase):
                 "rhythm_projector_pause_topk_ratio_train_end": 0.35,
                 "rhythm_projector_pause_boundary_bias_weight": 0.15,
                 "rhythm_pause_boundary_weight": 0.35,
+                "rhythm_projector_pause_soft_temperature": 0.12,
+                "rhythm_teacher_projector_force_full_commit": True,
+                "rhythm_teacher_projector_soft_pause_selection": False,
             }
         )
         self.assertEqual(errors, [])
         self.assertTrue(any("pause-recall auxiliaries are enabled but rhythm_projector_pause_selection_mode is not 'sparse'" in w for w in warnings))
         self.assertTrue(any("pause-recall auxiliaries are enabled while rhythm_projector_pause_topk_ratio_train_end < 0.40" in w for w in warnings))
-        self.assertTrue(any("boundary-aligned pause support may still be underpowered" in w for w in warnings))
+        self.assertTrue(any("rhythm_projector_pause_soft_temperature <= 0.12" in w for w in warnings))
+        self.assertTrue(any("sparse support losers may receive little gradient" in w for w in warnings))
+
+    def test_pause_recall_aux_warns_when_boundary_weighting_is_still_aggressive(self) -> None:
+        _, errors, warnings = validate_stage_contract(
+            {
+                "rhythm_enable_v2": True,
+                "rhythm_stage": "teacher_offline",
+                "rhythm_strict_mainline": False,
+                "rhythm_cache_version": 5,
+                "rhythm_dataset_target_mode": "cached_only",
+                "rhythm_primary_target_surface": "guidance",
+                "rhythm_teacher_target_source": "algorithmic",
+                "rhythm_distill_surface": "none",
+                "rhythm_require_cached_teacher": False,
+                "rhythm_binarize_teacher_targets": False,
+                "rhythm_enable_dual_mode_teacher": False,
+                "rhythm_enable_learned_offline_teacher": True,
+                "rhythm_runtime_enable_learned_offline_teacher": True,
+                "rhythm_teacher_as_main": True,
+                "rhythm_optimize_module_only": True,
+                "rhythm_apply_train_override": False,
+                "rhythm_apply_valid_override": False,
+                "rhythm_require_retimed_cache": False,
+                "rhythm_use_retimed_target_if_available": False,
+                "rhythm_compact_joint_loss": False,
+                "lambda_rhythm_guidance": 0.0,
+                "lambda_rhythm_plan": 0.0,
+                "lambda_rhythm_distill": 0.0,
+                "lambda_rhythm_teacher_aux": 0.0,
+                "rhythm_pause_event_weight": 0.20,
+                "rhythm_projector_pause_selection_mode": "sparse",
+                "rhythm_projector_pause_topk_ratio_train_end": 0.45,
+                "rhythm_projector_pause_soft_temperature": 0.18,
+                "rhythm_teacher_projector_force_full_commit": True,
+                "rhythm_teacher_projector_soft_pause_selection": True,
+                "rhythm_projector_pause_boundary_bias_weight": 0.22,
+                "rhythm_pause_boundary_weight": 0.50,
+            }
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(any("pre-vs-post-projector recall before increasing boundary weighting further" in w for w in warnings))
 
     def test_strict_mainline_rejects_cached_teacher_distill_without_dedupe(self) -> None:
         _, errors, _ = validate_stage_contract(

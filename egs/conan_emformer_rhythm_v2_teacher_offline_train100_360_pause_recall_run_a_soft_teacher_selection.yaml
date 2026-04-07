@@ -1,0 +1,8 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# Run A: isolate teacher-side soft sparse pause selection during training.
+# Keep full-commit semantics for the teacher path, but allow the sparse
+# projector to backprop through near-threshold pause candidates instead of
+# hard-zeroing every loser outside top-k.
+rhythm_teacher_projector_force_full_commit: true
+rhythm_teacher_projector_soft_pause_selection: true

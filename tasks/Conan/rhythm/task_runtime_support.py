@@ -65,6 +65,7 @@ class RhythmTaskRuntimeSupport:
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
             pause_event_weight=_nonnegative_hparam("rhythm_pause_event_weight", 0.0),
             pause_support_weight=_nonnegative_hparam("rhythm_pause_support_weight", 0.0),
+            pause_allocation_weight=_nonnegative_hparam("rhythm_pause_allocation_weight", 0.0),
             pause_event_threshold=_nonnegative_hparam("rhythm_pause_event_threshold", 0.5),
             pause_event_temperature=max(1e-4, _nonnegative_hparam("rhythm_pause_event_temperature", 0.25)),
             pause_event_pos_weight=max(1.0, _nonnegative_hparam("rhythm_pause_event_pos_weight", 2.0)),

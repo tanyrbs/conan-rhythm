@@ -125,6 +125,16 @@ class RhythmConanTaskMixin:
             ("rhythm_metric_retimed_acoustic_loss_scale", "rhythm_retimed_acoustic_loss_scale"),
             ("rhythm_metric_stage3_pitch_loss_scale", "rhythm_stage3_pitch_loss_scale"),
             ("rhythm_metric_retimed_pitch_loss_scale", "rhythm_retimed_pitch_loss_scale"),
+            ("rhythm_metric_projector_pause_soft_selection_active", "rhythm_projector_pause_soft_selection_active"),
+            ("rhythm_metric_projector_force_full_commit", "rhythm_projector_force_full_commit"),
+            (
+                "rhythm_metric_teacher_projector_force_full_commit",
+                "rhythm_teacher_projector_force_full_commit",
+            ),
+            (
+                "rhythm_metric_teacher_projector_soft_pause_selection",
+                "rhythm_teacher_projector_soft_pause_selection",
+            ),
         ):
             value = model_out.get(field_name)
             if isinstance(value, torch.Tensor):
@@ -628,6 +638,10 @@ class RhythmConanTaskMixin:
             infer=bool(infer),
             global_steps=int(self.global_step),
         )
+        teacher_force_full_commit = bool(hparams.get("rhythm_teacher_projector_force_full_commit", True))
+        teacher_soft_pause_selection = hparams.get("rhythm_teacher_projector_soft_pause_selection", None)
+        if teacher_soft_pause_selection is not None:
+            teacher_soft_pause_selection = bool(teacher_soft_pause_selection)
         execution, confidence = rhythm_module.forward_teacher(
             content_units=unit_batch.content_units,
             dur_anchor_src=unit_batch.dur_anchor_src,
@@ -639,6 +653,8 @@ class RhythmConanTaskMixin:
             boundary_confidence=unit_batch.boundary_confidence,
             projector_pause_topk_ratio_override=pause_ratio,
             source_boundary_scale_override=teacher_scale,
+            projector_force_full_commit=teacher_force_full_commit,
+            projector_soft_pause_selection_override=teacher_soft_pause_selection,
         )
         output = {
             "rhythm_execution": execution,
@@ -650,8 +666,19 @@ class RhythmConanTaskMixin:
             "rhythm_teacher_only_stage": 1.0,
             "rhythm_module_only_objective": 1.0,
             "rhythm_skip_acoustic_objective": 1.0,
+            "rhythm_teacher_projector_force_full_commit": float(teacher_force_full_commit),
             **self._task_runtime_support().build_offline_confidence_outputs(confidence),
         }
+        if teacher_scale is not None:
+            output["rhythm_teacher_source_boundary_scale"] = unit_batch.dur_anchor_src.new_full(
+                (unit_batch.dur_anchor_src.size(0), 1),
+                float(teacher_scale),
+            )
+        if teacher_soft_pause_selection is not None:
+            output["rhythm_teacher_projector_soft_pause_selection"] = unit_batch.dur_anchor_src.new_full(
+                (unit_batch.dur_anchor_src.size(0), 1),
+                1.0 if teacher_soft_pause_selection else 0.0,
+            )
         output.update(collect_planner_runtime_outputs(execution))
         losses = {}
         self.add_rhythm_loss(output, sample, losses)

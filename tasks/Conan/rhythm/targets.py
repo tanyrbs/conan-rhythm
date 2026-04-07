@@ -28,6 +28,7 @@ class RhythmTargetBuildConfig:
     feasible_debt_weight: float
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
+    pause_allocation_weight: float = 0.0
     pause_event_threshold: float = 0.5
     pause_event_temperature: float = 0.25
     pause_event_pos_weight: float = 2.0

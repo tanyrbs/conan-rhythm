@@ -19,7 +19,7 @@ rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_duration_exec, pause_after_exec, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [L_exec_speech, L_exec_pause, L_exec_pause_value, L_pause_event, L_pause_support, L_budget, L_prefix_state, L_base, L_rhythm_exec, L_stream_state, L_pitch]
+rhythm_public_losses: [L_exec_speech, L_exec_pause, L_exec_pause_value, L_pause_event, L_pause_support, L_pause_allocation, L_budget, L_prefix_state, L_base, L_rhythm_exec, L_stream_state, L_pitch]
 content_vocab_size: 102
 
 rhythm_stats_dim: 6

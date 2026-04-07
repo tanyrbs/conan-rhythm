@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 from modules.Conan.rhythm.contracts import RhythmPlannerOutputs, StreamingRhythmState
 from modules.Conan.rhythm.controller import resolve_budget_views_from_total_and_pause_share
 from modules.Conan.rhythm.feasibility import lift_projector_budgets_to_feasible_region
+from modules.Conan.rhythm.offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
+from modules.Conan.rhythm.pause_features import build_pause_support_feature_bundle
 from modules.Conan.rhythm.prefix_state import (
     build_prefix_state_from_exec_numpy,
     build_prefix_state_from_exec_torch,
@@ -334,6 +336,137 @@ class ProjectorInvariantTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(execution.planner.raw_speech_budget_win, planner.raw_speech_budget_win))
         self.assertTrue(torch.allclose(execution.planner.raw_pause_budget_win, planner.raw_pause_budget_win))
+
+    def test_forward_can_enable_soft_pause_selection_even_with_force_full_commit(self) -> None:
+        projector = StreamingRhythmProjector(
+            ProjectorConfig(
+                pause_selection_mode="sparse",
+                pause_train_soft=True,
+                build_render_plan=False,
+            )
+        )
+        projector.train()
+        planner = RhythmPlannerOutputs(
+            speech_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            dur_logratio_unit=torch.zeros((1, 4), dtype=torch.float32),
+            pause_weight_unit=torch.tensor([[0.45, 0.30, 0.15, 0.10]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.1, 0.2, 0.3, 0.4]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 4, 2), dtype=torch.float32),
+            source_boundary_cue=torch.zeros((1, 4), dtype=torch.float32),
+        )
+        execution = projector(
+            dur_anchor_src=torch.ones((1, 4), dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            speech_budget_win=planner.speech_budget_win,
+            pause_budget_win=planner.pause_budget_win,
+            dur_logratio_unit=planner.dur_logratio_unit,
+            pause_weight_unit=planner.pause_weight_unit,
+            boundary_score_unit=planner.boundary_score_unit,
+            state=projector.init_state(batch_size=1, device=torch.device("cpu")),
+            planner=planner,
+            reuse_prefix=False,
+            force_full_commit=True,
+            soft_pause_selection_override=True,
+            pause_topk_ratio_override=0.5,
+        )
+        self.assertTrue(torch.allclose(execution.planner.projector_force_full_commit, torch.tensor([[1.0]])))
+        self.assertTrue(torch.allclose(execution.planner.pause_soft_selection_active, torch.tensor([[1.0]])))
+        self.assertTrue(torch.allclose(execution.planner.pause_topk_ratio, torch.tensor([[0.5]])))
+
+    def test_soft_pause_selection_restores_gradient_to_below_topk_candidates(self) -> None:
+        kwargs = dict(
+            boundary_score_unit=torch.zeros((1, 4), dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            previous_pause_exec=None,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            reuse_prefix=False,
+            topk_ratio=0.5,
+            pause_min_boundary_weight=0.10,
+            pause_boundary_bias_weight=0.0,
+            temperature=0.20,
+        )
+        hard_scores = torch.tensor([[0.60, 0.25, 0.10, 0.05]], dtype=torch.float32, requires_grad=True)
+        hard_pause = _project_pause_impl(
+            pause_weight_unit=hard_scores,
+            soft_pause_selection=False,
+            **kwargs,
+        )
+        hard_pause[:, 2].sum().backward()
+        hard_grad = hard_scores.grad.detach().clone()
+
+        soft_scores = torch.tensor([[0.60, 0.25, 0.10, 0.05]], dtype=torch.float32, requires_grad=True)
+        soft_pause = _project_pause_impl(
+            pause_weight_unit=soft_scores,
+            soft_pause_selection=True,
+            **kwargs,
+        )
+        soft_pause[:, 2].sum().backward()
+        soft_grad = soft_scores.grad.detach().clone()
+
+        self.assertTrue(torch.allclose(hard_pause[:, 2], torch.tensor([0.0], dtype=torch.float32), atol=1e-7))
+        self.assertAlmostEqual(float(hard_grad[0, 2].item()), 0.0, places=7)
+        self.assertGreater(float(soft_pause[:, 2].item()), 0.0)
+        self.assertGreater(abs(float(soft_grad[0, 2].item())), 1.0e-7)
+
+    def test_pause_projection_can_decouple_support_selection_from_allocation(self) -> None:
+        pause = _project_pause_impl(
+            pause_weight_unit=torch.tensor([[0.25, 0.25, 0.25, 0.25]], dtype=torch.float32),
+            pause_support_prob_unit=torch.tensor([[0.90, 0.80, 0.10, 0.05]], dtype=torch.float32),
+            pause_allocation_weight_unit=torch.tensor([[0.10, 0.20, 0.60, 0.10]], dtype=torch.float32),
+            boundary_score_unit=torch.zeros((1, 4), dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            previous_pause_exec=None,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            reuse_prefix=False,
+            soft_pause_selection=False,
+            topk_ratio=0.50,
+            pause_min_boundary_weight=0.10,
+            pause_boundary_bias_weight=0.0,
+            temperature=0.20,
+        )
+        self.assertAlmostEqual(float(pause[:, 2].item()), 0.0, places=7)
+        self.assertGreater(float(pause[:, 1].item()), float(pause[:, 0].item()))
+
+    def test_pause_support_feature_bundle_tracks_run_length_and_breath_debt(self) -> None:
+        bundle = build_pause_support_feature_bundle(
+            dur_anchor_src=torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+            reset_threshold=0.5,
+        )
+        self.assertTrue(torch.allclose(bundle.run_length_unit, torch.tensor([[0.25, 0.50, 0.25, 0.50]])))
+        self.assertTrue(torch.allclose(bundle.reset_mask, torch.tensor([[0.0, 1.0, 0.0, 0.0]])))
+        self.assertGreater(float(bundle.breath_debt_unit[0, 1].item()), float(bundle.breath_debt_unit[0, 0].item()))
+        self.assertGreater(float(bundle.breath_debt_unit[0, 3].item()), float(bundle.breath_debt_unit[0, 2].item()))
+
+    def test_offline_teacher_can_emit_support_allocation_and_breath_features(self) -> None:
+        teacher = OfflineRhythmTeacherPlanner(
+            hidden_size=8,
+            stats_dim=2,
+            trace_dim=2,
+            config=OfflineTeacherConfig(
+                pause_support_split_enable=True,
+                pause_breath_features_enable=True,
+            ),
+        )
+        planner, _ = teacher(
+            unit_states=torch.zeros((1, 4, 8), dtype=torch.float32),
+            dur_anchor_src=torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            ref_conditioning={"planner_ref_stats": torch.tensor([[1.0, 0.25]], dtype=torch.float32)},
+            planner_trace_context=torch.zeros((1, 4, 2), dtype=torch.float32),
+            full_trace_context=torch.zeros((1, 4, 2), dtype=torch.float32),
+            source_boundary_cue=torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+        )
+        self.assertIsNotNone(planner.pause_support_prob_unit)
+        self.assertIsNotNone(planner.pause_allocation_weight_unit)
+        self.assertIsNotNone(planner.pause_run_length_unit)
+        self.assertIsNotNone(planner.pause_breath_debt_unit)
+        self.assertTrue(torch.allclose(planner.pause_shape_unit, planner.pause_allocation_weight_unit))
+        self.assertEqual(tuple(planner.pause_support_prob_unit.shape), (1, 4))
 
 
 if __name__ == "__main__":

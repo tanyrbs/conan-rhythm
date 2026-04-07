@@ -85,6 +85,11 @@ class RhythmPlannerOutputs:
     pause_weight_unit: torch.Tensor
     boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
+    pause_support_prob_unit: Optional[torch.Tensor] = None
+    pause_allocation_weight_unit: Optional[torch.Tensor] = None
+    pause_support_logit_unit: Optional[torch.Tensor] = None
+    pause_run_length_unit: Optional[torch.Tensor] = None
+    pause_breath_debt_unit: Optional[torch.Tensor] = None
     source_boundary_cue: Optional[torch.Tensor] = None
     trace_reliability: Optional[torch.Tensor] = None
     local_trace_path_weight: Optional[torch.Tensor] = None
@@ -109,6 +114,16 @@ class RhythmPlannerOutputs:
     def pause_shape_unit(self) -> torch.Tensor:
         """Planner-facing alias used by the weak-factorization mainline."""
 
+        allocation = self.pause_allocation_weight_unit
+        if allocation is not None:
+            return allocation
+        return self.pause_weight_unit
+
+    @property
+    def pause_support_unit(self) -> torch.Tensor:
+        support = self.pause_support_prob_unit
+        if support is not None:
+            return support
         return self.pause_weight_unit
 
     @property

@@ -84,9 +84,13 @@ class RhythmStageKnobs:
     teacher_source_boundary_scale: float
     pause_boundary_weight: float
     pause_boundary_bias_weight: float
+    pause_soft_temperature: float
     pause_selection_mode: str
     pause_event_weight: float
     pause_support_weight: float
+    pause_allocation_weight: float
+    teacher_projector_force_full_commit: bool
+    teacher_projector_soft_pause_selection: bool
     export_cache_audit_to_sample: bool
     public_losses: tuple[str, ...]
     configured_cache_version: int
@@ -251,11 +255,21 @@ def build_stage_validation_context(
             pause_boundary_bias_weight=float(
                 hparams.get("rhythm_projector_pause_boundary_bias_weight", 0.15)
             ),
+            pause_soft_temperature=float(
+                hparams.get("rhythm_projector_pause_soft_temperature", 0.12)
+            ),
             pause_selection_mode=str(
                 hparams.get("rhythm_projector_pause_selection_mode", "sparse") or "sparse"
             ).strip().lower(),
             pause_event_weight=float(hparams.get("rhythm_pause_event_weight", 0.0) or 0.0),
             pause_support_weight=float(hparams.get("rhythm_pause_support_weight", 0.0) or 0.0),
+            pause_allocation_weight=float(hparams.get("rhythm_pause_allocation_weight", 0.0) or 0.0),
+            teacher_projector_force_full_commit=bool(
+                hparams.get("rhythm_teacher_projector_force_full_commit", True)
+            ),
+            teacher_projector_soft_pause_selection=bool(
+                hparams.get("rhythm_teacher_projector_soft_pause_selection", False)
+            ),
             export_cache_audit_to_sample=bool(
                 hparams.get("rhythm_export_cache_audit_to_sample", False)
             ),

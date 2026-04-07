@@ -119,34 +119,56 @@ def _project_pause_impl(
     pause_min_boundary_weight: float,
     pause_boundary_bias_weight: float,
     temperature: float,
+    pause_support_prob_unit: torch.Tensor | None = None,
+    pause_allocation_weight_unit: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    scores = pause_weight_unit.float().clamp_min(0.0)
-    boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
-    )
-    scores = (scores + boundary_bias) * unit_mask.float()
+    unit_mask_f = unit_mask.float()
+    use_split = pause_support_prob_unit is not None or pause_allocation_weight_unit is not None
+    if use_split:
+        support_scores = (
+            pause_support_prob_unit.float().clamp(0.0, 1.0)
+            if pause_support_prob_unit is not None
+            else pause_weight_unit.float().clamp_min(0.0)
+        )
+        allocation_scores = (
+            pause_allocation_weight_unit.float().clamp_min(0.0)
+            if pause_allocation_weight_unit is not None
+            else pause_weight_unit.float().clamp_min(0.0)
+        )
+        boundary_gain = 1.0 + pause_boundary_bias_weight * (
+            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        )
+        ranking_scores = support_scores * boundary_gain * unit_mask_f
+        candidate_scores = allocation_scores * support_scores * boundary_gain * unit_mask_f
+    else:
+        ranking_scores = pause_weight_unit.float().clamp_min(0.0)
+        boundary_bias = pause_boundary_bias_weight * (
+            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        )
+        ranking_scores = (ranking_scores + boundary_bias) * unit_mask_f
+        candidate_scores = ranking_scores
     visible = unit_mask.float().sum(dim=1).long()
     topk = torch.round(visible.float() * float(topk_ratio)).long()
     topk = torch.where(visible > 0, topk.clamp(min=1), topk).clamp(max=visible)
     valid_mask = unit_mask.float() > 0.5
-    sparse_scores = scores.new_zeros(scores.shape)
+    sparse_scores = candidate_scores.new_zeros(candidate_scores.shape)
     if bool(torch.any(topk > 0).item()):
         k_max = max(1, int(topk.max().item()))
-        masked_scores = scores.masked_fill(~valid_mask, float("-inf"))
+        masked_scores = ranking_scores.masked_fill(~valid_mask, float("-inf"))
         top_values, top_indices = torch.topk(masked_scores, k=k_max, dim=1)
         rank_mask = (
-            torch.arange(k_max, device=scores.device)[None, :] < topk[:, None]
+            torch.arange(k_max, device=ranking_scores.device)[None, :] < topk[:, None]
         ) & (top_values > float("-inf"))
         if soft_pause_selection:
             full_keep = topk >= visible
             threshold_index = (topk.clamp_min(1) - 1).unsqueeze(1)
             threshold = top_values.gather(1, threshold_index)
-            gated = scores * torch.sigmoid((scores - threshold) / float(temperature))
-            sparse_scores = torch.where(full_keep[:, None], scores, gated) * unit_mask.float()
+            gated = candidate_scores * torch.sigmoid((ranking_scores - threshold) / float(temperature))
+            sparse_scores = torch.where(full_keep[:, None], candidate_scores, gated) * unit_mask_f
         else:
-            selector = torch.zeros_like(scores)
-            selector.scatter_(1, top_indices, rank_mask.to(dtype=scores.dtype))
-            sparse_scores = scores * selector
+            selector = torch.zeros_like(candidate_scores)
+            selector.scatter_(1, top_indices, rank_mask.to(dtype=candidate_scores.dtype))
+            sparse_scores = candidate_scores * selector
     return _allocate_pause_budget(
         candidate_scores=sparse_scores,
         unit_mask=unit_mask,
@@ -168,12 +190,32 @@ def _project_pause_simple_impl(
     reuse_prefix: bool,
     pause_min_boundary_weight: float,
     pause_boundary_bias_weight: float,
+    pause_support_prob_unit: torch.Tensor | None = None,
+    pause_allocation_weight_unit: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    scores = pause_weight_unit.float().clamp_min(0.0)
-    boundary_bias = pause_boundary_bias_weight * (
-        pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
-    )
-    scores = (scores + boundary_bias) * unit_mask.float()
+    unit_mask_f = unit_mask.float()
+    use_split = pause_support_prob_unit is not None or pause_allocation_weight_unit is not None
+    if use_split:
+        support_scores = (
+            pause_support_prob_unit.float().clamp(0.0, 1.0)
+            if pause_support_prob_unit is not None
+            else pause_weight_unit.float().clamp_min(0.0)
+        )
+        allocation_scores = (
+            pause_allocation_weight_unit.float().clamp_min(0.0)
+            if pause_allocation_weight_unit is not None
+            else pause_weight_unit.float().clamp_min(0.0)
+        )
+        boundary_gain = 1.0 + pause_boundary_bias_weight * (
+            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        )
+        scores = allocation_scores * support_scores * boundary_gain * unit_mask_f
+    else:
+        scores = pause_weight_unit.float().clamp_min(0.0)
+        boundary_bias = pause_boundary_bias_weight * (
+            pause_min_boundary_weight + boundary_score_unit.float().clamp_min(0.0)
+        )
+        scores = (scores + boundary_bias) * unit_mask_f
     return _allocate_pause_budget(
         candidate_scores=scores,
         unit_mask=unit_mask,
@@ -367,6 +409,8 @@ class StreamingRhythmProjector(nn.Module):
         reuse_prefix: bool,
         soft_pause_selection: bool,
         pause_topk_ratio_override: float | None = None,
+        pause_support_prob_unit: torch.Tensor | None = None,
+        pause_allocation_weight_unit: torch.Tensor | None = None,
     ) -> torch.Tensor:
         selection_mode = str(self.config.pause_selection_mode or "sparse").strip().lower()
         if selection_mode == "simple":
@@ -380,6 +424,8 @@ class StreamingRhythmProjector(nn.Module):
                 reuse_prefix=reuse_prefix,
                 pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
                 pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
+                pause_support_prob_unit=pause_support_prob_unit,
+                pause_allocation_weight_unit=pause_allocation_weight_unit,
             )
         topk_ratio = self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
         topk_ratio = float(max(0.0, min(1.0, topk_ratio)))
@@ -397,6 +443,8 @@ class StreamingRhythmProjector(nn.Module):
             pause_min_boundary_weight=float(self.config.pause_min_boundary_weight),
             pause_boundary_bias_weight=float(self.config.pause_boundary_bias_weight),
             temperature=temperature,
+            pause_support_prob_unit=pause_support_prob_unit,
+            pause_allocation_weight_unit=pause_allocation_weight_unit,
         )
 
     def _compute_commit_frontier(
@@ -511,6 +559,7 @@ class StreamingRhythmProjector(nn.Module):
         reuse_prefix: bool = True,
         force_full_commit: bool = False,
         pause_topk_ratio_override: float | None = None,
+        soft_pause_selection_override: bool | None = None,
     ) -> RhythmExecution:
         unit_mask = unit_mask.float()
         feasibility = self._lift_budgets_to_feasible_region(
@@ -533,6 +582,11 @@ class StreamingRhythmProjector(nn.Module):
             pause_weight_unit=planner.pause_weight_unit,
             boundary_score_unit=planner_boundary_score,
             trace_context=planner.trace_context,
+            pause_support_prob_unit=getattr(planner, "pause_support_prob_unit", None),
+            pause_allocation_weight_unit=getattr(planner, "pause_allocation_weight_unit", None),
+            pause_support_logit_unit=getattr(planner, "pause_support_logit_unit", None),
+            pause_run_length_unit=getattr(planner, "pause_run_length_unit", None),
+            pause_breath_debt_unit=getattr(planner, "pause_breath_debt_unit", None),
             source_boundary_cue=planner.source_boundary_cue,
             trace_reliability=getattr(planner, "trace_reliability", None),
             local_trace_path_weight=getattr(planner, "local_trace_path_weight", None),
@@ -556,6 +610,21 @@ class StreamingRhythmProjector(nn.Module):
         execution_planner.feasible_speech_budget_delta = feasible_speech_budget_delta
         execution_planner.feasible_pause_budget_delta = feasible_pause_budget_delta
         execution_planner.feasible_total_budget_delta = feasibility.total_budget_delta
+        selection_mode = str(self.config.pause_selection_mode or "sparse").strip().lower()
+        resolved_pause_topk_ratio = (
+            self.config.pause_topk_ratio if pause_topk_ratio_override is None else pause_topk_ratio_override
+        )
+        resolved_pause_topk_ratio = float(max(0.0, min(1.0, resolved_pause_topk_ratio)))
+        soft_pause_selection_active = (
+            bool(soft_pause_selection_override)
+            if soft_pause_selection_override is not None
+            else bool(
+                self.training
+                and torch.is_grad_enabled()
+                and self.config.pause_train_soft
+                and not force_full_commit
+            )
+        )
         speech_duration_exec = self._project_speech(
             dur_anchor_src=dur_anchor_src,
             dur_logratio_unit=dur_logratio_unit,
@@ -571,10 +640,37 @@ class StreamingRhythmProjector(nn.Module):
             pause_budget_win=pause_budget_win,
             state=state,
             reuse_prefix=reuse_prefix,
-            soft_pause_selection=bool(
-                self.training and torch.is_grad_enabled() and self.config.pause_train_soft and not force_full_commit
-            ),
+            soft_pause_selection=soft_pause_selection_active,
             pause_topk_ratio_override=pause_topk_ratio_override,
+            pause_support_prob_unit=getattr(planner, "pause_support_prob_unit", None),
+            pause_allocation_weight_unit=getattr(planner, "pause_allocation_weight_unit", None),
+        )
+        planner_batch = pause_budget_win.size(0)
+        planner_device = pause_budget_win.device
+        planner_dtype = pause_budget_win.dtype
+        execution_planner.pause_topk_ratio = torch.full(
+            (planner_batch, 1),
+            resolved_pause_topk_ratio,
+            dtype=planner_dtype,
+            device=planner_device,
+        )
+        execution_planner.pause_soft_selection_active = torch.full(
+            (planner_batch, 1),
+            1.0 if soft_pause_selection_active else 0.0,
+            dtype=planner_dtype,
+            device=planner_device,
+        )
+        execution_planner.projector_force_full_commit = torch.full(
+            (planner_batch, 1),
+            1.0 if force_full_commit else 0.0,
+            dtype=planner_dtype,
+            device=planner_device,
+        )
+        execution_planner.pause_selection_mode_id = torch.full(
+            (planner_batch, 1),
+            1.0 if selection_mode == "sparse" else 0.0,
+            dtype=planner_dtype,
+            device=planner_device,
         )
         effective_duration_exec = (speech_duration_exec + pause_after_exec) * unit_mask
         slot_schedule = None

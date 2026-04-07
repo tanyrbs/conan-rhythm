@@ -68,6 +68,10 @@ def _masked_event_f1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, 
     mask_bool = mask > 0
     pred_evt = (pred.float() > threshold) & mask_bool
     tgt_evt = (tgt.float() > threshold) & mask_bool
+    return _binary_event_f1(pred_evt, tgt_evt)
+
+
+def _binary_event_f1(pred_evt: torch.Tensor, tgt_evt: torch.Tensor):
     tp = (pred_evt & tgt_evt).float().sum(dim=1)
     fp = (pred_evt & (~tgt_evt)).float().sum(dim=1)
     fn = ((~pred_evt) & tgt_evt).float().sum(dim=1)
@@ -103,6 +107,96 @@ def _optional_scalar(x: Any, device: torch.device) -> torch.Tensor | None:
     if isinstance(x, (int, float)):
         return torch.tensor(float(x), device=device)
     return None
+
+
+def _resolve_pause_topk_ratio_tensor(
+    output: dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    value = output.get("rhythm_projector_pause_topk_ratio")
+    if isinstance(value, torch.Tensor):
+        ratio = value.float().reshape(-1)
+        if ratio.numel() == 1:
+            ratio = ratio.expand(batch_size)
+        return ratio.to(device=device)
+    if isinstance(value, (int, float)):
+        return torch.full((batch_size,), float(value), device=device)
+    return None
+
+
+def _build_topk_support_mask(
+    scores: torch.Tensor,
+    mask: torch.Tensor,
+    topk_ratio: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scores = scores.float()
+    mask_bool = mask > 0
+    visible = mask_bool.sum(dim=1)
+    ratio = topk_ratio.float().reshape(-1)
+    if ratio.numel() == 1:
+        ratio = ratio.expand(scores.size(0))
+    ratio = ratio.clamp(0.0, 1.0)
+    topk = torch.round(visible.float() * ratio).long()
+    topk = torch.where(visible > 0, topk.clamp(min=1), topk)
+    topk = torch.minimum(topk, visible)
+    selector = torch.zeros_like(scores, dtype=torch.bool)
+    if bool(torch.any(topk > 0).item()):
+        k_max = max(1, int(topk.max().item()))
+        masked_scores = scores.masked_fill(~mask_bool, float("-inf"))
+        top_values, top_indices = torch.topk(masked_scores, k=k_max, dim=1)
+        rank_mask = (
+            torch.arange(k_max, device=scores.device)[None, :] < topk[:, None]
+        ) & torch.isfinite(top_values)
+        selector.scatter_(1, top_indices, rank_mask)
+    return selector & mask_bool, topk
+
+
+def _compute_pause_fn_boundary_quartile_shares(
+    boundary_score: torch.Tensor,
+    *,
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: torch.Tensor,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    mask_bool = mask > 0
+    pred_evt = (pred.float() > threshold) & mask_bool
+    tgt_evt = (tgt.float() > threshold) & mask_bool
+    fn_evt = (~pred_evt) & tgt_evt
+    sample_shares: list[torch.Tensor] = []
+    quartiles = torch.tensor([0.25, 0.50, 0.75], device=boundary_score.device)
+    for batch_idx in range(boundary_score.size(0)):
+        visible = mask_bool[batch_idx]
+        if int(visible.sum().item()) <= 0:
+            continue
+        fn_visible = fn_evt[batch_idx][visible]
+        fn_total = int(fn_visible.sum().item())
+        if fn_total <= 0:
+            continue
+        visible_scores = boundary_score[batch_idx][visible].float()
+        q25, q50, q75 = torch.quantile(visible_scores, quartiles)
+        visible_boundary = boundary_score[batch_idx][visible].float()
+        bins = [
+            visible_boundary <= q25,
+            (visible_boundary > q25) & (visible_boundary <= q50),
+            (visible_boundary > q50) & (visible_boundary <= q75),
+            visible_boundary > q75,
+        ]
+        denom = fn_visible.float().sum().clamp_min(1.0)
+        sample_shares.append(
+            torch.stack(
+                [
+                    (fn_visible & bin_mask).float().sum() / denom
+                    for bin_mask in bins
+                ],
+                dim=0,
+            )
+        )
+    if not sample_shares:
+        return boundary_score.new_zeros((4,))
+    return torch.stack(sample_shares, dim=0).mean(dim=0)
 
 
 @dataclass(frozen=True)
@@ -535,6 +629,26 @@ def _update_acoustic_target_metrics(
         metrics["rhythm_metric_teacher_source_boundary_scale_mean"] = _safe_mean(
             teacher_source_boundary_scale.float()
         )
+    projector_soft_selection = output.get("rhythm_projector_pause_soft_selection_active")
+    if projector_soft_selection is not None:
+        metrics["rhythm_metric_projector_pause_soft_selection_active"] = _safe_mean(
+            projector_soft_selection.float()
+        )
+    projector_force_full_commit = output.get("rhythm_projector_force_full_commit")
+    if projector_force_full_commit is not None:
+        metrics["rhythm_metric_projector_force_full_commit"] = _safe_mean(
+            projector_force_full_commit.float()
+        )
+    teacher_projector_force_full_commit = output.get("rhythm_teacher_projector_force_full_commit")
+    if teacher_projector_force_full_commit is not None:
+        metrics["rhythm_metric_teacher_projector_force_full_commit"] = _safe_mean(
+            teacher_projector_force_full_commit.float()
+        )
+    teacher_projector_soft_selection = output.get("rhythm_teacher_projector_soft_pause_selection")
+    if teacher_projector_soft_selection is not None:
+        metrics["rhythm_metric_teacher_projector_soft_pause_selection"] = _safe_mean(
+            teacher_projector_soft_selection.float()
+        )
     for metric_key, field_name in (
         ("rhythm_metric_pitch_supervision_disabled", "rhythm_pitch_supervision_disabled"),
         ("rhythm_metric_missing_retimed_pitch_target", "rhythm_missing_retimed_pitch_target"),
@@ -619,6 +733,7 @@ def _update_alias_metrics(
         "L_exec_pause_value": "rhythm_metric_alias_L_exec_pause_value",
         "L_pause_event": "rhythm_metric_alias_L_pause_event",
         "L_pause_support": "rhythm_metric_alias_L_pause_support",
+        "L_pause_allocation": "rhythm_metric_alias_L_pause_allocation",
         "L_budget": "rhythm_metric_alias_L_budget",
         "L_cumplan": "rhythm_metric_alias_L_cumplan",
         "L_prefix_state": "rhythm_metric_alias_L_prefix_state",
@@ -663,6 +778,7 @@ def _resolve_sample_pause_keys(sample: dict[str, Any]) -> tuple[str, str, str]:
 
 def _update_sample_supervision_metrics(
     metrics: dict[str, torch.Tensor],
+    output: dict[str, Any],
     sample: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> None:
@@ -690,29 +806,62 @@ def _update_sample_supervision_metrics(
             ctx.unit_mask,
         )
     if pause_target_key in sample:
+        pause_target = sample[pause_target_key].float()
         metrics["rhythm_metric_exec_pause_l1"] = _masked_l1(
             ctx.blank_exec,
-            sample[pause_target_key],
+            pause_target,
             ctx.unit_mask,
         )
         pause_p, pause_r, pause_f1 = _masked_event_f1(
             ctx.blank_exec,
-            sample[pause_target_key],
+            pause_target,
             ctx.unit_mask,
         )
         metrics["rhythm_metric_pause_event_precision"] = pause_p
         metrics["rhythm_metric_pause_event_recall"] = pause_r
         metrics["rhythm_metric_pause_event_f1"] = pause_f1
+        pause_topk_ratio = _resolve_pause_topk_ratio_tensor(
+            output,
+            batch_size=ctx.unit_mask.size(0),
+            device=ctx.unit_mask.device,
+        )
         planner_pause_shape = getattr(ctx.planner, "pause_shape_unit", None)
+        planner_pause_support = getattr(ctx.planner, "pause_support_prob_unit", None)
+        if planner_pause_support is None:
+            planner_pause_support = planner_pause_shape
         if isinstance(planner_pause_shape, torch.Tensor):
+            if pause_topk_ratio is not None:
+                planner_support_evt, topk_slots = _build_topk_support_mask(
+                    planner_pause_support,
+                    ctx.unit_mask,
+                    pause_topk_ratio,
+                )
+                target_evt = (pause_target > 0.5) & (ctx.unit_mask > 0)
+                planner_p, planner_r, planner_f1 = _binary_event_f1(
+                    planner_support_evt,
+                    target_evt,
+                )
+                metrics["rhythm_metric_planner_pause_event_precision"] = planner_p
+                metrics["rhythm_metric_planner_pause_event_recall"] = planner_r
+                metrics["rhythm_metric_planner_pause_event_f1"] = planner_f1
+                metrics["rhythm_metric_pause_event_recall_drop_projector"] = planner_r - pause_r
+                target_count = target_evt.float().sum(dim=1)
+                topk_slots_f = topk_slots.float()
+                excess = (target_count - topk_slots_f).clamp_min(0.0)
+                metrics["rhythm_metric_target_pause_event_count_mean"] = _safe_mean(target_count)
+                metrics["rhythm_metric_planner_pause_topk_slots_mean"] = _safe_mean(topk_slots_f)
+                metrics["rhythm_metric_pause_target_excess_over_topk_mean"] = _safe_mean(excess)
+                metrics["rhythm_metric_pause_target_exceeds_topk_rate"] = _safe_mean(
+                    (target_count > topk_slots_f).float()
+                )
             metrics["rhythm_metric_planner_pause_support_kl"] = _masked_kl(
                 planner_pause_shape,
-                sample[pause_target_key],
+                pause_target,
                 ctx.unit_mask,
             )
             planner_pause_dist = _masked_distribution(planner_pause_shape, ctx.unit_mask)
             target_pause_event = (
-                sample[pause_target_key].float() > 0.5
+                pause_target > 0.5
             ).float() * ctx.unit_mask.float()
             target_has_pause = target_pause_event.sum(dim=1) > 0
             if bool(target_has_pause.any()):
@@ -722,15 +871,29 @@ def _update_sample_supervision_metrics(
                 )
             else:
                 metrics["rhythm_metric_planner_pause_support_mass_on_target"] = planner_pause_dist.new_tensor(0.0)
+        boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
+        if boundary_score is None:
+            boundary_score = getattr(ctx.planner, "source_boundary_cue", None)
+        if isinstance(boundary_score, torch.Tensor):
+            fn_quartile_shares = _compute_pause_fn_boundary_quartile_shares(
+                boundary_score.float(),
+                pred=ctx.blank_exec,
+                tgt=pause_target,
+                mask=ctx.unit_mask,
+            )
+            metrics["rhythm_metric_pause_fn_boundary_q1_share"] = fn_quartile_shares[0]
+            metrics["rhythm_metric_pause_fn_boundary_q2_share"] = fn_quartile_shares[1]
+            metrics["rhythm_metric_pause_fn_boundary_q3_share"] = fn_quartile_shares[2]
+            metrics["rhythm_metric_pause_fn_boundary_q4_share"] = fn_quartile_shares[3]
     if "rhythm_speech_exec_tgt" in sample and pause_target_key in sample:
         metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
             ctx.execution.speech_duration_exec + ctx.blank_exec,
-            sample["rhythm_speech_exec_tgt"] + sample[pause_target_key],
+            sample["rhythm_speech_exec_tgt"] + pause_target,
             ctx.unit_mask,
         )
         pred_prefix = torch.cumsum((ctx.execution.speech_duration_exec + ctx.blank_exec) * ctx.unit_mask, dim=1)
         tgt_prefix = torch.cumsum(
-            (sample["rhythm_speech_exec_tgt"] + sample[pause_target_key]).float() * ctx.unit_mask,
+            (sample["rhythm_speech_exec_tgt"] + pause_target).float() * ctx.unit_mask,
             dim=1,
         )
         metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, ctx.unit_mask)
@@ -862,15 +1025,24 @@ def _collect_observability_metrics(
     metrics: dict[str, torch.Tensor] = {}
     _update_confidence_metrics(metrics, output, ctx)
     _update_alias_metrics(metrics, output, ctx)
+    for attr_name, metric_key in (
+        ("pause_support_prob_unit", "rhythm_metric_pause_support_prob_mean"),
+        ("pause_run_length_unit", "rhythm_metric_pause_run_length_mean"),
+        ("pause_breath_debt_unit", "rhythm_metric_pause_breath_debt_mean"),
+    ):
+        value = getattr(ctx.planner, attr_name, None)
+        if isinstance(value, torch.Tensor):
+            metrics[metric_key] = _masked_mean(value.float(), ctx.unit_mask)
     return metrics
 
 
 def _collect_sample_supervision_metric_dict(
+    output: dict[str, Any],
     sample: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> dict[str, torch.Tensor]:
     metrics: dict[str, torch.Tensor] = {}
-    _update_sample_supervision_metrics(metrics, sample, ctx)
+    _update_sample_supervision_metrics(metrics, output, sample, ctx)
     return metrics
 
 
@@ -889,7 +1061,7 @@ def build_rhythm_metric_sections(
         "observability": _collect_observability_metrics(output, ctx),
     }
     if sample is not None:
-        sections["sample_supervision"] = _collect_sample_supervision_metric_dict(sample, ctx)
+        sections["sample_supervision"] = _collect_sample_supervision_metric_dict(output, sample, ctx)
     return sections
 
 

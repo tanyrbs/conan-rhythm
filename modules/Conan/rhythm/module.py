@@ -50,6 +50,9 @@ class StreamingRhythmModule(nn.Module):
         boundary_feature_scale: float = 0.35,
         boundary_source_cue_weight: float = 0.65,
         pause_source_boundary_weight: float = 0.20,
+        pause_support_split_enable: bool = False,
+        pause_breath_features_enable: bool = False,
+        pause_breath_reset_threshold: float = 0.55,
         min_speech_frames: float = 1.0,
         trace_reliability_enable: bool = False,
         trace_exhaustion_gap_start: float = 0.08,
@@ -102,6 +105,9 @@ class StreamingRhythmModule(nn.Module):
             boundary_feature_scale=boundary_feature_scale,
             boundary_source_cue_weight=boundary_source_cue_weight,
             pause_source_boundary_weight=pause_source_boundary_weight,
+            pause_support_split_enable=pause_support_split_enable,
+            pause_breath_features_enable=pause_breath_features_enable,
+            pause_breath_reset_threshold=pause_breath_reset_threshold,
             min_speech_frames=min_speech_frames,
         )
         self.enable_learned_offline_teacher = bool(enable_learned_offline_teacher)
@@ -114,6 +120,9 @@ class StreamingRhythmModule(nn.Module):
                 boundary_feature_scale=boundary_feature_scale,
                 boundary_source_cue_weight=boundary_source_cue_weight,
                 pause_source_boundary_weight=pause_source_boundary_weight,
+                pause_support_split_enable=pause_support_split_enable,
+                pause_breath_features_enable=pause_breath_features_enable,
+                pause_breath_reset_threshold=pause_breath_reset_threshold,
                 min_speech_frames=min_speech_frames,
             )
         self.offline_teacher = (
@@ -626,6 +635,8 @@ class StreamingRhythmModule(nn.Module):
         projector_pause_topk_ratio_override: float | None = None,
         source_boundary_scale_override: float | None = None,
         teacher_source_boundary_scale_override: float | None = None,
+        teacher_projector_force_full_commit: bool = True,
+        teacher_projector_soft_pause_selection_override: bool | None = None,
     ) -> dict[str, object]:
         if self.offline_teacher is None:
             raise RuntimeError(
@@ -676,6 +687,8 @@ class StreamingRhythmModule(nn.Module):
             boundary_confidence=offline_boundary_confidence,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=teacher_source_boundary_scale_override,
+            projector_force_full_commit=teacher_projector_force_full_commit,
+            projector_soft_pause_selection_override=teacher_projector_soft_pause_selection_override,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=offline_content_units,
@@ -714,6 +727,8 @@ class StreamingRhythmModule(nn.Module):
         boundary_confidence: torch.Tensor | None = None,
         projector_pause_topk_ratio_override: float | None = None,
         source_boundary_scale_override: float | None = None,
+        projector_force_full_commit: bool = True,
+        projector_soft_pause_selection_override: bool | None = None,
     ) -> tuple[object, dict[str, torch.Tensor]]:
         if self.offline_teacher is None:
             raise RuntimeError(
@@ -764,7 +779,8 @@ class StreamingRhythmModule(nn.Module):
             open_run_mask=torch.zeros_like(content_units) if open_run_mask is None else open_run_mask,
             planner=planner,
             reuse_prefix=False,
-            force_full_commit=True,
+            force_full_commit=projector_force_full_commit,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            soft_pause_selection_override=projector_soft_pause_selection_override,
         )
         return execution, confidence

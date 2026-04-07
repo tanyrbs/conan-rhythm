@@ -117,6 +117,8 @@ def run_rhythm_frontend(
     trace_horizon: float | None = None,
     projector_reuse_prefix: bool = True,
     projector_force_full_commit: bool = False,
+    teacher_projector_force_full_commit: bool = True,
+    teacher_projector_soft_pause_selection: bool | None = None,
 ):
     if not rhythm_enable_v2:
         return None
@@ -157,6 +159,8 @@ def run_rhythm_frontend(
             boundary_confidence=unit_batch.boundary_confidence,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=teacher_source_boundary_scale_override,
+            projector_force_full_commit=teacher_projector_force_full_commit,
+            projector_soft_pause_selection_override=teacher_projector_soft_pause_selection,
         )
         return {
             "unit_batch": unit_batch,
@@ -198,6 +202,8 @@ def run_rhythm_frontend(
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
+            teacher_projector_force_full_commit=teacher_projector_force_full_commit,
+            teacher_projector_soft_pause_selection_override=teacher_projector_soft_pause_selection,
             trace_horizon=trace_horizon,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
@@ -302,6 +308,16 @@ def attach_rhythm_outputs(
     ret["pause_weight_unit"] = execution.planner.pause_weight_unit
     ret["dur_shape_unit"] = execution.planner.dur_shape_unit
     ret["pause_shape_unit"] = execution.planner.pause_shape_unit
+    for planner_key in (
+        "pause_support_prob_unit",
+        "pause_allocation_weight_unit",
+        "pause_support_logit_unit",
+        "pause_run_length_unit",
+        "pause_breath_debt_unit",
+    ):
+        planner_value = getattr(execution.planner, planner_key, None)
+        if planner_value is not None:
+            ret[planner_key] = planner_value
     boundary_score_unit = resolve_boundary_score_unit(execution.planner)
     ret["boundary_score_unit"] = boundary_score_unit
     ret["boundary_latent"] = boundary_score_unit

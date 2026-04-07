@@ -211,6 +211,18 @@ class ConanRhythmAdapter(nn.Module):
             "teacher_source_boundary_scale_override",
             teacher_source_boundary_scale_override,
         )
+        teacher_projector_force_full_commit = bool(
+            runtime_overrides.pop(
+                "teacher_projector_force_full_commit",
+                self.hparams.get("rhythm_teacher_projector_force_full_commit", True),
+            )
+        )
+        teacher_projector_soft_pause_selection = runtime_overrides.pop(
+            "teacher_projector_soft_pause_selection",
+            self.hparams.get("rhythm_teacher_projector_soft_pause_selection", None),
+        )
+        if teacher_projector_soft_pause_selection is not None:
+            teacher_projector_soft_pause_selection = bool(teacher_projector_soft_pause_selection)
         ret["rhythm_stage"] = stage
         ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
         ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
@@ -232,6 +244,19 @@ class ConanRhythmAdapter(nn.Module):
             ret["rhythm_teacher_source_boundary_scale"] = torch.full(
                 (content.size(0), 1),
                 float(teacher_source_boundary_scale_override),
+                dtype=content_embed.dtype,
+                device=content.device,
+            )
+        ret["rhythm_teacher_projector_force_full_commit"] = torch.full(
+            (content.size(0), 1),
+            1.0 if teacher_projector_force_full_commit else 0.0,
+            dtype=content_embed.dtype,
+            device=content.device,
+        )
+        if teacher_projector_soft_pause_selection is not None:
+            ret["rhythm_teacher_projector_soft_pause_selection"] = torch.full(
+                (content.size(0), 1),
+                1.0 if teacher_projector_soft_pause_selection else 0.0,
                 dtype=content_embed.dtype,
                 device=content.device,
             )
@@ -257,6 +282,8 @@ class ConanRhythmAdapter(nn.Module):
             trace_horizon=runtime_overrides.pop("trace_horizon", None),
             projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
             projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
+            teacher_projector_force_full_commit=teacher_projector_force_full_commit,
+            teacher_projector_soft_pause_selection=teacher_projector_soft_pause_selection,
         )
         content_embed, tgt_nonpadding = attach_rhythm_outputs(
             ret=ret,

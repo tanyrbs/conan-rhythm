@@ -1,0 +1,8 @@
+base_config: egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml
+
+# Run B: isolate model-side boundary de-emphasis without requiring a cache
+# rebuild. Guidance targets remain unchanged; this only lowers the active
+# planner/projector/loss-side boundary pressure on the current run.
+rhythm_pause_source_boundary_weight: 0.08
+rhythm_projector_pause_boundary_bias_weight: 0.10
+rhythm_pause_boundary_weight: 0.22
