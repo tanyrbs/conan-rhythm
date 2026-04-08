@@ -107,7 +107,9 @@ Deprecated compatibility aliases still exist for older configs:
 - `rhythm_phase_free_phrase_boundary_threshold`
 - `rhythm_phase_decoupled_phrase_boundary_threshold`
 
-New work should use the canonical `rhythm_phase_decoupled_*` names only.
+New work should use the canonical `rhythm_phase_decoupled_*` names only. The
+repo still materializes a few `phase_free_*` compatibility attributes so older
+tests/callers do not break, but they are no longer the canonical surface.
 
 ### Sidecar terminology
 
@@ -135,9 +137,11 @@ Phrase-bank conditioning is related but not identical:
 - it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
 - it may also be consumed directly when `ref_conditioning` already carries
   `ref_phrase_*` fields
-- if external sidecars drift from the rebuilt compact/raw reference contract,
+- if those external sidecars drift from the rebuilt compact/raw reference
+  contract,
   `build_reference_conditioning()` now drops those stale sidecars and rebuilds
-  from the raw cached contract instead of silently trusting them
+  from the raw cached contract instead of silently trusting them; matching
+  sidecars are still preserved
 
 ### Runtime entrypoints
 
