@@ -621,17 +621,27 @@ class ReferenceSidecarTests(unittest.TestCase):
     def test_dataset_cached_reference_keeps_planner_sidecars(self) -> None:
         dataset = self._DummyDataset()
         stats, trace = self._dummy_inputs(trace_bins=8)
+        ref_phrase_trace = torch.randn(2, 8, 5, dtype=torch.float32)
+        planner_ref_phrase_trace = ref_phrase_trace[:, :, 1:3]
         ref_item = {
             "ref_rhythm_stats": stats.numpy()[0],
             "ref_rhythm_trace": trace.numpy()[0],
             "slow_rhythm_memory": torch.randn(6, 5, dtype=torch.float32).numpy(),
             "slow_rhythm_summary": torch.randn(5, dtype=torch.float32).numpy(),
-            "planner_slow_rhythm_memory": torch.randn(6, 5, dtype=torch.float32).numpy(),
-            "planner_slow_rhythm_summary": torch.randn(5, dtype=torch.float32).numpy(),
+            "planner_slow_rhythm_memory": torch.randn(6, 2, dtype=torch.float32).numpy(),
+            "planner_slow_rhythm_summary": torch.randn(2, dtype=torch.float32).numpy(),
             "selector_meta_indices": torch.arange(6, dtype=torch.long).numpy(),
             "selector_meta_scores": torch.ones(6, dtype=torch.float32).numpy(),
             "selector_meta_starts": torch.arange(6, dtype=torch.long).numpy(),
             "selector_meta_ends": torch.arange(6, dtype=torch.long).numpy(),
+            "ref_phrase_trace": ref_phrase_trace.numpy(),
+            "planner_ref_phrase_trace": planner_ref_phrase_trace.numpy(),
+            "ref_phrase_valid": torch.tensor([1.0, 1.0], dtype=torch.float32).numpy(),
+            "ref_phrase_lengths": torch.tensor([3, 5], dtype=torch.int64).numpy(),
+            "ref_phrase_starts": torch.tensor([0, 3], dtype=torch.int64).numpy(),
+            "ref_phrase_ends": torch.tensor([2, 7], dtype=torch.int64).numpy(),
+            "ref_phrase_boundary_strength": torch.tensor([0.2, 0.9], dtype=torch.float32).numpy(),
+            "ref_phrase_stats": torch.randn(2, 5, dtype=torch.float32).numpy(),
         }
         conditioning = dataset._get_reference_rhythm_conditioning(
             ref_item,
@@ -640,13 +650,23 @@ class ReferenceSidecarTests(unittest.TestCase):
         )
         self.assertIn("planner_slow_rhythm_memory", conditioning)
         self.assertIn("planner_slow_rhythm_summary", conditioning)
+        self.assertIn("ref_phrase_trace", conditioning)
+        self.assertIn("planner_ref_phrase_trace", conditioning)
+        self.assertIn("ref_phrase_valid", conditioning)
         self.assertIn("planner_slow_rhythm_memory", dataset._resolve_optional_sample_keys())
         self.assertIn("planner_slow_rhythm_summary", dataset._build_optional_collate_spec())
+        self.assertIn("ref_phrase_trace", dataset._resolve_optional_sample_keys())
+        self.assertIn("planner_ref_phrase_trace", dataset._build_optional_collate_spec())
         planner_memory = dataset._rhythm_sample_assembler()._tensorize_optional_value(
             "planner_slow_rhythm_memory",
             ref_item["planner_slow_rhythm_memory"],
         )
         self.assertEqual(planner_memory.dtype, torch.float32)
+        phrase_trace = dataset._rhythm_sample_assembler()._tensorize_optional_value(
+            "ref_phrase_trace",
+            ref_item["ref_phrase_trace"],
+        )
+        self.assertEqual(tuple(phrase_trace.shape), (2, 8, 5))
 
 
 if __name__ == "__main__":

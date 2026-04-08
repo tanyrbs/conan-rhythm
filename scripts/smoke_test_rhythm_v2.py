@@ -284,8 +284,6 @@ if __name__ == '__main__':
         offline_content_units=batch.content_units,
         offline_dur_anchor_src=batch.dur_anchor_src,
         offline_unit_mask=batch.unit_mask,
-        offline_open_run_mask=batch.open_run_mask,
-        offline_sealed_mask=batch.sealed_mask,
         offline_sep_hint=batch.sep_hint,
         offline_boundary_confidence=batch.boundary_confidence,
     )

@@ -22,8 +22,8 @@ This is the current engineering mainline of the repo.
 The maintained control story is:
 
 > **source-side boundary / commit evidence -> explicit speech/pause budget planning -> projector execution authority -> renderer**  
-> **reference acts as global / phrase prior**  
-> **phase / trace remain diagnostics and compatibility paths**
+> **reference acts as global / phrase prior plus bounded local boundary-style residual**  
+> **phase_ptr is retained as observer / telemetry, not as the runtime control authority**
 
 In concrete terms:
 
@@ -31,7 +31,178 @@ In concrete terms:
 - **planner side**: explicit speech / pause budgeting and unit-level redistribution
 - **execution side**: the projector remains the binding execution authority
 - **reference side**: reference conditioning is treated as global / phrase prior, not as the main continuous control script
-- **diagnostics only**: `phase_ptr`, local trace sampling, trace reliability, cold-start gating, and active-tail sampling remain available for observability and compatibility
+- **phase semantics**: phase-decoupled timing is the canonical runtime direction and naming surface, but compatibility-default configs may still require explicit `rhythm_phase_decoupled_timing: true`; `phase_ptr` remains available for observability, compatibility, and render-side telemetry
+
+## Current runtime semantics that the docs now commit to
+
+The maintained runtime is best understood as a **timing controller**, not a
+full prosody imitation controller.
+
+- planner mainline controls:
+  - speech duration budget
+  - pause budget
+  - unit-level duration redistribution
+  - boundary-related local lengthening hints / side signals
+- projector mainline enforces:
+  - feasibility
+  - sparse pause allocation
+  - discrete commit frontier
+  - timing-debt update
+- downstream style / acoustic layers remain responsible for:
+  - full F0 contour
+  - accent realization
+  - expressive pitch reset / intonation shape
+
+### Boundary typing
+
+The maintained code now distinguishes three boundary types:
+
+- `JOIN`: continuous connection; projector-side execution keeps JOIN slots pause-free
+- `WEAK`: weak local junction; local timing variation is allowed, but projector pause is capped by `rhythm_projector_weak_boundary_pause_cap`
+- `PHRASE`: stronger phrase-like boundary class; phrase slots are the main carrier for redistributed editable-tail pause mass
+
+This means **boundary is not the same thing as pause**, and not every word
+boundary or token transition advances reference-side phrase retrieval.
+
+### Reference usage
+
+Reference conditioning is layered:
+
+- **global prior**: overall rate / pause tendency
+- **phrase prior**: ordered phrase-bank prototype selected through the persisted runtime pointer `ref_phrase_ptr`
+- **local residual style cue**: bounded boundary-style modulation only
+
+In the current checkout, phrase-bank retrieval is driven by the persisted
+runtime pointer `ref_phrase_ptr`. When the committed frontier moves forward,
+the pointer advances and is clamped against the valid phrase-bank size.
+`JOIN / WEAK / PHRASE` currently constrain local realization and projector
+pause behavior; a stricter PHRASE-only pointer update remains a future contract
+change rather than current code truth. The reference is not treated as a
+wall-clock script.
+
+### Phase-decoupled naming
+
+Canonical runtime naming is now:
+
+- `rhythm_phase_decoupled_timing`
+- `rhythm_phase_decoupled_phrase_gate_boundary_threshold`
+- `rhythm_phase_decoupled_boundary_style_residual_scale`
+- `rhythm_debt_control_scale`
+- `rhythm_debt_pause_priority`
+- `rhythm_debt_speech_priority`
+- `rhythm_projector_debt_leak`
+- `rhythm_projector_debt_max_abs`
+- `rhythm_projector_debt_correction_horizon`
+- `rhythm_runtime_phrase_bank_enable`
+- `rhythm_runtime_phrase_select_window`
+- `rhythm_runtime_phrase_neighbor_mix_alpha`
+- `rhythm_weak_boundary_threshold`
+- `rhythm_phrase_boundary_threshold`
+- `rhythm_boundary_lengthening_max`
+- `rhythm_projector_weak_boundary_pause_cap`
+
+Deprecated compatibility aliases still exist for older configs:
+
+- `rhythm_phase_free_timing`
+- `rhythm_phase_free_phrase_boundary_threshold`
+- `rhythm_phase_decoupled_phrase_boundary_threshold`
+
+New work should use the canonical `rhythm_phase_decoupled_*` names only.
+
+### Sidecar terminology
+
+Two different concepts are intentionally separated:
+
+1. **reference sidecar**
+   - enabled by `rhythm_emit_reference_sidecar`
+   - means generic reference-conditioning auxiliaries such as slow-memory / planner sidecars
+2. **debug export sidecars**
+   - enabled by `rhythm_export_debug_sidecars`
+   - means dataset/sample/cache audit fields exported for debugging
+
+Do not treat these as the same switch.
+
+`rhythm_emit_reference_sidecar` may also auto-enable when the repo needs:
+
+- external reference bootstrap
+- `rhythm_cached_reference_policy=sample_ref`
+- reference-descriptor bootstrap losses
+- trace reliability / fallback support
+
+Phrase-bank conditioning is related but not identical:
+
+- it may be emitted together with reference sidecars
+- it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
+- it may also be consumed directly when `ref_conditioning` already carries
+  `ref_phrase_*` fields
+
+### Runtime entrypoints
+
+- **public runtime entry**: `modules/Conan/rhythm/runtime_adapter.py::ConanRhythmAdapter`
+- **lower-level helper**: `modules/Conan/rhythm/bridge.py::run_rhythm_frontend`
+
+`run_rhythm_frontend()` is still used in tests and integration glue, but the
+adapter is the maintained public runtime surface.
+
+### Teacher runtime semantics
+
+- `rhythm_teacher_as_main=true` means **run the learned offline teacher as the main
+  execution branch for teacher-only audit/export style stages**
+- it is an **offline/full-commit teacher runtime**, not a deployment streaming replacement
+- `forward_teacher()` internally materializes a closed teacher view
+  (`open_run_mask=0`, `sealed_mask=1`) and a fresh teacher state per call
+- `rhythm_enable_dual_mode_teacher=true` means **run both streaming and offline teacher branches during training**
+- teacher branches are suppressed during `infer=true`
+- canonical teacher pause sparsity knob:
+  `rhythm_teacher_projector_soft_pause_selection`
+- scheduler-only streaming knobs such as
+  `rhythm_phase_decoupled_boundary_style_residual_scale`,
+  `rhythm_debt_control_scale`,
+  `rhythm_debt_pause_priority`,
+  `rhythm_debt_speech_priority`
+  do **not** change offline teacher planning
+- shared projector anti-windup knobs
+  (`rhythm_projector_debt_leak`,
+  `rhythm_projector_debt_max_abs`,
+  `rhythm_projector_debt_correction_horizon`)
+  affect both streaming and teacher projector execution
+
+### Runtime override surface
+
+The maintained runtime override surface is intentionally smaller than the full
+training hparam surface. Supported operator-facing overrides include:
+
+- trace controls
+  - `trace_horizon`
+  - `trace_active_tail_only`
+  - `trace_offset_lookahead_units`
+  - `trace_cold_start_min_visible_units`
+  - `trace_cold_start_full_visible_units`
+- phase-decoupled controls
+  - `phase_decoupled_timing`
+  - `phase_decoupled_phrase_gate_boundary_threshold`
+- streaming-only scheduler / debt shaping
+  - `phase_decoupled_boundary_style_residual_scale`
+  - `debt_control_scale`
+  - `debt_pause_priority`
+  - `debt_speech_priority`
+- source-boundary scaling
+  - `source_boundary_scale_override`
+  - `teacher_source_boundary_scale_override`
+- projector controls
+  - `projector_pause_topk_ratio_override`
+  - `projector_force_full_commit`
+  - `teacher_projector_force_full_commit`
+  - `teacher_projector_soft_pause_selection`
+- projector debt anti-windup
+  - `projector_debt_leak`
+  - `projector_debt_max_abs`
+  - `projector_debt_correction_horizon`
+
+Teacher-only runtime does **not** expose every streaming scheduler knob; the
+offline teacher path intentionally stays narrower. If teacher-only override
+keys are passed while no teacher runtime branch is active, the adapter now
+treats them as unused runtime overrides rather than silently consuming them.
 
 ## Maintained stage map
 

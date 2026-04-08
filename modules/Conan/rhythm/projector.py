@@ -8,7 +8,7 @@ import torch.nn as nn
 from .contracts import RhythmExecution, RhythmPlannerOutputs, StreamingRhythmState
 from .feasibility import FeasibleBudgetProjection, lift_projector_budgets_to_feasible_region
 from .frame_plan import build_frame_plan_from_execution, build_interleaved_blank_slot_schedule
-from .source_boundary import resolve_boundary_score_unit
+from .source_boundary import build_boundary_type_masks, resolve_boundary_score_unit
 
 
 @dataclass
@@ -28,6 +28,7 @@ class ProjectorConfig:
     debt_leak: float = 0.05
     debt_max_abs: float = 12.0
     debt_correction_horizon: float = 4.0
+    weak_boundary_pause_cap: float = 1.0
 
 
 def _apply_pause_boundary_gain(
@@ -137,6 +138,51 @@ def _build_pause_selection_mask(
         allocation_mask=allocation_mask,
     )
     return tail_mask
+
+
+def _apply_boundary_pause_constraints(
+    *,
+    pause_after_exec: torch.Tensor,
+    boundary_type_unit: torch.Tensor | None,
+    unit_mask: torch.Tensor,
+    commit_frontier: torch.Tensor,
+    reuse_prefix: bool,
+    weak_boundary_pause_cap: float,
+) -> torch.Tensor:
+    if boundary_type_unit is None:
+        return pause_after_exec * unit_mask.float()
+    join_mask, weak_mask, phrase_mask = build_boundary_type_masks(
+        boundary_type_unit,
+        unit_mask=unit_mask,
+    )
+    active = unit_mask.float()
+    steps = torch.arange(active.size(1), device=active.device)[None, :]
+    frontier = commit_frontier.long().to(device=active.device)
+    if frontier.dim() == 0:
+        frontier = frontier.unsqueeze(0)
+    if reuse_prefix:
+        tail_mask = (steps >= frontier[:, None]).float() * active
+    else:
+        tail_mask = active
+    join_mask = join_mask * tail_mask
+    weak_mask = weak_mask * tail_mask
+    phrase_mask = phrase_mask * tail_mask
+    constrained = pause_after_exec.float() * (1.0 - join_mask)
+    weak_cap = float(max(0.0, weak_boundary_pause_cap))
+    if weak_cap > 0.0:
+        weak_cap_tensor = constrained.new_full(constrained.shape, weak_cap)
+        constrained = torch.where(weak_mask > 0.5, torch.minimum(constrained, weak_cap_tensor), constrained)
+    else:
+        constrained = constrained * (1.0 - weak_mask)
+    leftover = ((pause_after_exec.float() - constrained).clamp_min(0.0) * tail_mask).sum(dim=1, keepdim=True)
+    phrase_total = phrase_mask.sum(dim=1, keepdim=True)
+    phrase_distribution = torch.where(
+        phrase_total > 1.0e-6,
+        phrase_mask / phrase_total.clamp_min(1.0e-6),
+        torch.zeros_like(phrase_mask),
+    )
+    constrained = constrained + phrase_distribution * leftover
+    return constrained * active
 
 
 def _prefix_sum_from_cumsum(cumsum: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
@@ -783,6 +829,9 @@ class StreamingRhythmProjector(nn.Module):
         speech_duration_exec: torch.Tensor,
         pause_after_exec: torch.Tensor,
         intra_phrase_alpha: torch.Tensor | None = None,
+        debt_leak_override: float | None = None,
+        debt_max_abs_override: float | None = None,
+        debt_correction_horizon_override: float | None = None,
     ) -> StreamingRhythmState:
         next_phase = state.phase_ptr.float().clone()
         next_clock = state.clock_delta.float().clone()
@@ -820,14 +869,34 @@ class StreamingRhythmProjector(nn.Module):
         exec_delta = _prefix_sum_from_cumsum(exec_cumsum, curr) - _prefix_sum_from_cumsum(exec_cumsum, prev)
         src_delta = _prefix_sum_from_cumsum(anchor_cumsum, curr) - _prefix_sum_from_cumsum(anchor_cumsum, prev)
         raw_clock_delta = torch.where(advance_mask, exec_delta - src_delta, torch.zeros_like(next_clock))
-        correction_horizon = float(max(0.0, self.config.debt_correction_horizon))
+        correction_horizon = float(
+            max(
+                0.0,
+                self.config.debt_correction_horizon
+                if debt_correction_horizon_override is None
+                else float(debt_correction_horizon_override),
+            )
+        )
         if correction_horizon > 0.0:
             raw_clock_delta = raw_clock_delta.clamp(-correction_horizon, correction_horizon)
-        debt_leak = float(min(max(self.config.debt_leak, 0.0), 1.0))
+        debt_leak = float(
+            min(
+                max(
+                    self.config.debt_leak if debt_leak_override is None else float(debt_leak_override),
+                    0.0,
+                ),
+                1.0,
+            )
+        )
         if debt_leak > 0.0:
             next_clock = next_clock * (1.0 - debt_leak)
         next_clock = next_clock + raw_clock_delta
-        debt_max_abs = float(max(0.0, self.config.debt_max_abs))
+        debt_max_abs = float(
+            max(
+                0.0,
+                self.config.debt_max_abs if debt_max_abs_override is None else float(debt_max_abs_override),
+            )
+        )
         if debt_max_abs > 0.0:
             next_clock = next_clock.clamp(-debt_max_abs, debt_max_abs)
         return StreamingRhythmState(
@@ -863,6 +932,9 @@ class StreamingRhythmProjector(nn.Module):
         force_full_commit: bool = False,
         pause_topk_ratio_override: float | None = None,
         soft_pause_selection_override: bool | None = None,
+        debt_leak_override: float | None = None,
+        debt_max_abs_override: float | None = None,
+        debt_correction_horizon_override: float | None = None,
     ) -> RhythmExecution:
         unit_mask = unit_mask.float()
         self._validate_prefix_reuse_consistency(
@@ -935,8 +1007,11 @@ class StreamingRhythmProjector(nn.Module):
         execution_planner.prompt_reliability = getattr(planner, "prompt_reliability", None)
         execution_planner.boundary_style_residual_unit = getattr(planner, "boundary_style_residual_unit", None)
         execution_planner.intra_phrase_alpha = getattr(planner, "intra_phrase_alpha", None)
+        execution_planner.boundary_type_unit = getattr(planner, "boundary_type_unit", None)
+        execution_planner.boundary_lengthening_unit = getattr(planner, "boundary_lengthening_unit", None)
         execution_planner.commit_boundary_logit_unit = getattr(planner, "commit_boundary_logit_unit", None)
         execution_planner.commit_mask_unit = getattr(planner, "commit_mask_unit", None)
+        execution_planner.commit_eligible_mask_unit = getattr(planner, "commit_eligible_mask_unit", None)
         execution_planner.planned_commit_frontier = getattr(planner, "planned_commit_frontier", None)
         execution_planner.commit_confidence = getattr(planner, "commit_confidence", None)
         execution_planner.segment_mask_unit = getattr(planner, "segment_mask_unit", None)
@@ -1016,6 +1091,14 @@ class StreamingRhythmProjector(nn.Module):
             pause_support_prob_unit=getattr(planner, "pause_support_prob_unit", None),
             pause_allocation_weight_unit=getattr(planner, "pause_allocation_weight_unit", None),
             allocation_mask=sanitized_pause_segment_mask,
+        )
+        pause_after_exec = _apply_boundary_pause_constraints(
+            pause_after_exec=pause_after_exec,
+            boundary_type_unit=getattr(execution_planner, "boundary_type_unit", None),
+            unit_mask=unit_mask,
+            commit_frontier=state.commit_frontier,
+            reuse_prefix=reuse_prefix,
+            weak_boundary_pause_cap=float(self.config.weak_boundary_pause_cap),
         )
         computed_local_rho = self._compute_local_rho(
             speech_exec=speech_duration_exec,
@@ -1113,6 +1196,9 @@ class StreamingRhythmProjector(nn.Module):
             speech_duration_exec=speech_duration_exec,
             pause_after_exec=pause_after_exec,
             intra_phrase_alpha=execution_planner.intra_phrase_alpha,
+            debt_leak_override=debt_leak_override,
+            debt_max_abs_override=debt_max_abs_override,
+            debt_correction_horizon_override=debt_correction_horizon_override,
         )
         return RhythmExecution(
             speech_duration_exec=speech_duration_exec,

@@ -7,16 +7,21 @@ base_config: egs/conan_emformer_rhythm_v2_minimal_v1.yaml
 load_ckpt_strict: false
 
 # Formal stage-1 maintained path:
-# keep the learned offline planner teacher as the primary execution branch, but
-# bootstrap it on the cached guidance/self floor first. In other words, the
-# maintained stage-1 is *not* yet the research variant where the offline teacher
-# directly learns from runtime algorithmic-teacher targets.
+# keep the learned offline planner teacher as the primary execution branch for
+# offline/full-commit audit/export semantics, but bootstrap it on the cached
+# guidance/self floor first. In other words, the maintained stage-1 is *not*
+# yet the research variant where the offline teacher directly learns from
+# runtime algorithmic-teacher targets.
 # After this stage stabilizes, export learned_offline teacher surfaces for
 # student_kd / student_retimed.
 rhythm_stage: teacher_offline
 rhythm_minimal_v1_profile: false
 rhythm_strict_mainline: false
 rhythm_teacher_only_stage: true
+# `teacher_as_main` here means: run the learned offline teacher as the main
+# execution branch for teacher-only audit/export style training. It is an
+# offline/full-commit teacher runtime, not the deployment streaming runtime;
+# the module rebuilds a closed teacher view and fresh teacher state per call.
 rhythm_teacher_as_main: true
 rhythm_schedule_only_stage: false
 rhythm_optimize_module_only: true
@@ -31,8 +36,13 @@ rhythm_require_cached_teacher: false
 rhythm_enable_dual_mode_teacher: false
 rhythm_enable_learned_offline_teacher: true
 rhythm_runtime_enable_learned_offline_teacher: true
+# Teacher runtime in this stage still uses the offline branch semantics above.
+# Streaming scheduler-only knobs such as boundary-style residual scale and
+# debt-priority are not the control surface to judge here; teacher projector
+# sparsity/full-commit, phrase gating, source-boundary scale, and projector
+# debt anti-windup are the meaningful runtime controls.
 rhythm_enable_algorithmic_teacher: false
-# Maintained stage-1 keeps runtime teacher synthesis off and reuses the cached
+# Maintained stage-1 keeps teacher supervision/cache truth on the cached
 # guidance floor for stability / asset compatibility. A future research config
 # can flip these knobs if you want a true "teacher learns from runtime teacher"
 # ablation, but that is intentionally not the maintained default here.

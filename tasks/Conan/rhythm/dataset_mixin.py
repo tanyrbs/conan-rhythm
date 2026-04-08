@@ -39,6 +39,16 @@ class RhythmConanDatasetMixin:
         "ref_rhythm_stats",
         "ref_rhythm_trace",
     )
+    _RHYTHM_REF_PHRASE_CACHE_KEYS = (
+        "ref_phrase_trace",
+        "planner_ref_phrase_trace",
+        "ref_phrase_valid",
+        "ref_phrase_lengths",
+        "ref_phrase_starts",
+        "ref_phrase_ends",
+        "ref_phrase_boundary_strength",
+        "ref_phrase_stats",
+    )
     _RHYTHM_REF_DEBUG_CACHE_KEYS = (
         "slow_rhythm_memory",
         "slow_rhythm_summary",
@@ -158,6 +168,14 @@ class RhythmConanDatasetMixin:
         "selector_meta_scores",
         "selector_meta_starts",
         "selector_meta_ends",
+        "ref_phrase_trace",
+        "planner_ref_phrase_trace",
+        "ref_phrase_valid",
+        "ref_phrase_lengths",
+        "ref_phrase_starts",
+        "ref_phrase_ends",
+        "ref_phrase_boundary_strength",
+        "ref_phrase_stats",
     )
     # Public/runtime batch contract prefers pause-* naming. Keep blank-* only as
     # cache/backward-compat aliases inside cached target validation / adaptation.
@@ -260,6 +278,12 @@ class RhythmConanDatasetMixin:
     def _should_export_rhythm_debug_sidecars(self) -> bool:
         return bool(self.hparams.get("rhythm_export_debug_sidecars", False))
 
+    def _should_export_runtime_phrase_bank_sidecars(self) -> bool:
+        return bool(
+            self.hparams.get("rhythm_runtime_phrase_bank_enable", False)
+            or self._should_export_rhythm_debug_sidecars()
+        )
+
     def _should_export_rhythm_cache_audit(self) -> bool:
         return bool(self.hparams.get("rhythm_export_cache_audit_to_sample", False))
 
@@ -358,6 +382,14 @@ class RhythmConanDatasetMixin:
             "rhythm_offline_phrase_final_mask": ("float", 0.0),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
+            "ref_phrase_trace": ("float", 0.0),
+            "planner_ref_phrase_trace": ("float", 0.0),
+            "ref_phrase_valid": ("float", 0.0),
+            "ref_phrase_lengths": ("long", 0),
+            "ref_phrase_starts": ("long", 0),
+            "ref_phrase_ends": ("long", 0),
+            "ref_phrase_boundary_strength": ("float", 0.0),
+            "ref_phrase_stats": ("float", 0.0),
             "slow_rhythm_memory": ("float", 0.0),
             "slow_rhythm_summary": ("float", 0.0),
             "planner_slow_rhythm_memory": ("float", 0.0),
@@ -428,6 +460,8 @@ class RhythmConanDatasetMixin:
             keys.extend(self._RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS)
             if self._should_export_offline_teacher_aux():
                 keys.extend(self._RHYTHM_STREAMING_OFFLINE_TEACHER_AUX_KEYS)
+        if self._should_export_runtime_phrase_bank_sidecars():
+            keys.extend(self._RHYTHM_REF_PHRASE_CACHE_KEYS)
         if self._should_export_rhythm_debug_sidecars():
             keys.extend(self._RHYTHM_DEBUG_SIDECAR_KEYS)
         if self._should_export_rhythm_cache_audit():
@@ -666,7 +700,11 @@ class RhythmConanDatasetMixin:
         cache_keys = self._RHYTHM_REF_CACHE_KEYS
         if ref_item is not None and all(key in ref_item for key in cache_keys):
             conditioning = {key: ref_item[key] for key in cache_keys}
-            for debug_key in self._RHYTHM_REF_DEBUG_CACHE_KEYS + self._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS:
+            for debug_key in (
+                self._RHYTHM_REF_DEBUG_CACHE_KEYS
+                + self._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS
+                + self._RHYTHM_REF_PHRASE_CACHE_KEYS
+            ):
                 if debug_key in ref_item:
                     conditioning[debug_key] = ref_item[debug_key]
             if target_mode == "cached_only":

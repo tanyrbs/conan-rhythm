@@ -71,6 +71,7 @@ class RefRhythmDescriptor(nn.Module):
         runtime_phrase_bank_max_phrases: int | None = None,
         runtime_phrase_bank_bins: int | None = None,
         runtime_phrase_select_window: int = 3,
+        runtime_phrase_neighbor_mix_alpha: float = 0.15,
         phrase_selection_boundary_weight: float = 0.28,
         phrase_selection_local_rate_weight: float = 0.28,
         phrase_selection_pause_weight: float = 0.18,
@@ -98,6 +99,9 @@ class RefRhythmDescriptor(nn.Module):
             int(max(4, selector_cell_size * 2 + 2) if runtime_phrase_bank_bins is None else runtime_phrase_bank_bins),
         )
         self.runtime_phrase_select_window = max(1, int(runtime_phrase_select_window))
+        self.runtime_phrase_neighbor_mix_alpha = float(
+            max(0.0, min(0.49, runtime_phrase_neighbor_mix_alpha))
+        )
         self.encoder = ReferenceRhythmEncoder(
             trace_bins=trace_bins,
             trace_horizon=trace_horizon,
@@ -270,6 +274,25 @@ class RefRhythmDescriptor(nn.Module):
                     phrase_trace_bins=self.runtime_phrase_bank_bins,
                 ),
             }
+        selector = self.selector
+        if selector is not None:
+            return selector.select_monotonic_phrase_bank(
+                ref_phrase_trace=ref_conditioning["ref_phrase_trace"],
+                planner_ref_phrase_trace=ref_conditioning["planner_ref_phrase_trace"],
+                ref_phrase_valid=ref_conditioning["ref_phrase_valid"],
+                ref_phrase_lengths=ref_conditioning["ref_phrase_lengths"],
+                ref_phrase_starts=ref_conditioning["ref_phrase_starts"],
+                ref_phrase_ends=ref_conditioning["ref_phrase_ends"],
+                ref_phrase_boundary_strength=ref_conditioning["ref_phrase_boundary_strength"],
+                ref_phrase_stats=ref_conditioning.get("ref_phrase_stats"),
+                ref_phrase_ptr=ref_phrase_ptr,
+                query_chunk_summary=query_chunk_summary,
+                query_commit_confidence=query_commit_confidence,
+                query_phrase_close_prob=query_phrase_close_prob,
+                monotonic_window=self.runtime_phrase_select_window,
+                strict_pointer_only=strict_pointer_only,
+                neighbor_mix_alpha=self.runtime_phrase_neighbor_mix_alpha,
+            )
         return ReferenceSelector.select_monotonic_phrase(
             ref_phrase_trace=ref_conditioning["ref_phrase_trace"],
             planner_ref_phrase_trace=ref_conditioning["planner_ref_phrase_trace"],
@@ -285,6 +308,7 @@ class RefRhythmDescriptor(nn.Module):
             query_phrase_close_prob=query_phrase_close_prob,
             monotonic_window=self.runtime_phrase_select_window,
             strict_pointer_only=strict_pointer_only,
+            neighbor_mix_alpha=self.runtime_phrase_neighbor_mix_alpha,
         )
 
     def sample_trace_window(

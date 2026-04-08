@@ -189,7 +189,7 @@ def materialize_rhythm_cache_compat_fields(item: dict | None) -> dict | None:
             ],
             dtype=np.str_,
         )
-    return adapted
+    return with_blank_aliases(adapted)
 
 
 def with_blank_aliases(bundle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

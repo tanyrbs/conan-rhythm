@@ -4,31 +4,10 @@ from typing import Callable
 
 import torch
 
+from .compat import resolve_phase_decoupled_flag
 from .frame_plan import build_frame_plan, build_interleaved_blank_slot_schedule
 from .renderer import render_rhythm_sequence
 from .source_boundary import resolve_boundary_score_unit
-
-
-def _resolve_phase_decoupled_flag(
-    *,
-    default: bool,
-    phase_decoupled_timing: bool | None,
-    phase_free_timing: bool | None,
-    where: str,
-) -> bool:
-    if (
-        phase_decoupled_timing is not None
-        and phase_free_timing is not None
-        and bool(phase_decoupled_timing) != bool(phase_free_timing)
-    ):
-        raise ValueError(
-            f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
-        )
-    if phase_decoupled_timing is not None:
-        return bool(phase_decoupled_timing)
-    if phase_free_timing is not None:
-        return bool(phase_free_timing)
-    return bool(default)
 
 
 def resolve_content_lengths(content: torch.Tensor, content_lengths: torch.Tensor | None = None) -> torch.Tensor:
@@ -116,6 +95,60 @@ def _attach_slot_outputs(ret: dict, execution) -> None:
         ret["rhythm_frame_plan"] = execution.frame_plan
 
 
+def _run_teacher_as_main_frontend(
+    *,
+    rhythm_module,
+    unit_batch,
+    rhythm_ref_conditioning,
+    projector_pause_topk_ratio_override: float | None,
+    teacher_source_boundary_scale_override: float | None,
+    teacher_projector_force_full_commit: bool,
+    teacher_projector_soft_pause_selection: bool | None,
+    trace_horizon: float | None,
+    trace_active_tail_only: bool | None,
+    trace_offset_lookahead_units: int | None,
+    trace_cold_start_min_visible_units: int | None,
+    trace_cold_start_full_visible_units: int | None,
+    phase_decoupled_timing: bool,
+    phase_decoupled_phrase_gate_boundary_threshold: float | None,
+    projector_debt_leak: float | None,
+    projector_debt_max_abs: float | None,
+    projector_debt_correction_horizon: float | None,
+):
+    execution, offline_confidence = rhythm_module.forward_teacher(
+        content_units=unit_batch.content_units,
+        dur_anchor_src=unit_batch.dur_anchor_src,
+        ref_conditioning=rhythm_ref_conditioning,
+        unit_mask=unit_batch.unit_mask,
+        sep_hint=unit_batch.sep_hint,
+        boundary_confidence=unit_batch.boundary_confidence,
+        projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
+        source_boundary_scale_override=teacher_source_boundary_scale_override,
+        projector_force_full_commit=teacher_projector_force_full_commit,
+        projector_soft_pause_selection=teacher_projector_soft_pause_selection,
+        trace_horizon=trace_horizon,
+        trace_active_tail_only=trace_active_tail_only,
+        trace_offset_lookahead_units=trace_offset_lookahead_units,
+        trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
+        trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+        phase_decoupled_timing=phase_decoupled_timing,
+        phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+        projector_debt_leak=projector_debt_leak,
+        projector_debt_max_abs=projector_debt_max_abs,
+        projector_debt_correction_horizon=projector_debt_correction_horizon,
+    )
+    return {
+        "unit_batch": unit_batch,
+        "execution": execution,
+        "ref_conditioning": rhythm_ref_conditioning,
+        "offline_execution": None,
+        "offline_confidence": offline_confidence,
+        "offline_unit_batch": None,
+        "algorithmic_teacher": None,
+        "teacher_as_main": True,
+    }
+
+
 def run_rhythm_frontend(
     *,
     rhythm_enable_v2: bool,
@@ -130,7 +163,7 @@ def run_rhythm_frontend(
     rhythm_source_cache: dict | None = None,
     rhythm_offline_source_cache: dict | None = None,
     enable_dual_mode_teacher: bool = False,
-    enable_learned_offline_teacher: bool = True,
+    enable_learned_offline_teacher: bool | None = None,
     enable_algorithmic_teacher: bool = False,
     teacher_as_main: bool = False,
     projector_pause_topk_ratio_override: float | None = None,
@@ -143,24 +176,68 @@ def run_rhythm_frontend(
     trace_cold_start_full_visible_units: int | None = None,
     phase_decoupled_timing: bool | None = None,
     phase_free_timing: bool | None = None,
+    phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
+    phase_decoupled_boundary_style_residual_scale: float | None = None,
+    debt_control_scale: float | None = None,
+    debt_pause_priority: float | None = None,
+    debt_speech_priority: float | None = None,
+    projector_debt_leak: float | None = None,
+    projector_debt_max_abs: float | None = None,
+    projector_debt_correction_horizon: float | None = None,
     streaming_prefix_train: bool = False,
     projector_reuse_prefix: bool = True,
     projector_force_full_commit: bool = False,
     teacher_projector_force_full_commit: bool = True,
     teacher_projector_soft_pause_selection: bool | None = None,
 ):
+    """Low-level rhythm runtime helper used by `ConanRhythmAdapter`.
+
+    Public Conan runtime code should usually go through `ConanRhythmAdapter`.
+    This helper stays available for tests and integration glue.
+
+    Teacher semantics:
+    - `teacher_as_main=True` runs the learned offline teacher as a single
+      offline/full-commit execution path for audit/export style stages
+    - `enable_dual_mode_teacher=True` runs both streaming and offline teacher
+      branches during training
+    - neither teacher branch is activated during `infer=True`
+    - scheduler-only overrides such as boundary-style residual and
+      debt-controller priorities apply to the streaming branch only; the
+      teacher branch only consumes trace/phrase-gate controls plus projector
+      debt controls
+    """
     if not rhythm_enable_v2:
         return None
     if ref is None and rhythm_ref_conditioning is None:
         return None
-    effective_phase_decoupled_timing = _resolve_phase_decoupled_flag(
-        default=False,
+    effective_phase_decoupled_timing = resolve_phase_decoupled_flag(
+        default=getattr(rhythm_module, "phase_decoupled_timing", False),
         phase_decoupled_timing=phase_decoupled_timing,
         phase_free_timing=phase_free_timing,
         where="run_rhythm_frontend",
     )
-    runtime_dual_mode_teacher = bool(enable_dual_mode_teacher) and bool(enable_learned_offline_teacher) and not bool(infer)
-    runtime_teacher_as_main = bool(teacher_as_main) and bool(enable_learned_offline_teacher) and not bool(infer)
+    if effective_phase_decoupled_timing is None:
+        effective_phase_decoupled_timing = bool(getattr(rhythm_module, "phase_decoupled_timing", False))
+    effective_enable_learned_offline_teacher = (
+        bool(getattr(rhythm_module, "enable_learned_offline_teacher", False))
+        if enable_learned_offline_teacher is None
+        else bool(enable_learned_offline_teacher)
+    )
+    if bool(teacher_as_main) and not effective_enable_learned_offline_teacher and not bool(infer):
+        raise ValueError(
+            "rhythm_teacher_as_main requires rhythm_enable_learned_offline_teacher: true "
+            "in the maintained rhythm path."
+        )
+    runtime_dual_mode_teacher = (
+        bool(enable_dual_mode_teacher)
+        and effective_enable_learned_offline_teacher
+        and not bool(infer)
+    )
+    runtime_teacher_as_main = (
+        bool(teacher_as_main)
+        and effective_enable_learned_offline_teacher
+        and not bool(infer)
+    )
     if rhythm_source_cache is not None:
         unit_batch = rhythm_unit_frontend.from_precomputed(
             content_units=rhythm_source_cache["content_units"],
@@ -183,36 +260,25 @@ def run_rhythm_frontend(
         ref_mel=ref,
     )
     if runtime_teacher_as_main:
-        execution, offline_confidence = rhythm_module.forward_teacher(
-            content_units=unit_batch.content_units,
-            dur_anchor_src=unit_batch.dur_anchor_src,
-            ref_conditioning=rhythm_ref_conditioning,
-            unit_mask=unit_batch.unit_mask,
-            open_run_mask=torch.zeros_like(unit_batch.content_units),
-            sealed_mask=torch.ones_like(unit_batch.unit_mask).float(),
-            sep_hint=unit_batch.sep_hint,
-            boundary_confidence=unit_batch.boundary_confidence,
+        return _run_teacher_as_main_frontend(
+            rhythm_module=rhythm_module,
+            unit_batch=unit_batch,
+            rhythm_ref_conditioning=rhythm_ref_conditioning,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
-            source_boundary_scale_override=teacher_source_boundary_scale_override,
-            projector_force_full_commit=teacher_projector_force_full_commit,
-            projector_soft_pause_selection_override=teacher_projector_soft_pause_selection,
+            teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
+            teacher_projector_force_full_commit=teacher_projector_force_full_commit,
+            teacher_projector_soft_pause_selection=teacher_projector_soft_pause_selection,
             trace_horizon=trace_horizon,
             trace_active_tail_only=trace_active_tail_only,
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
         )
-        return {
-            "unit_batch": unit_batch,
-            "execution": execution,
-            "ref_conditioning": rhythm_ref_conditioning,
-            "offline_execution": None,
-            "offline_confidence": offline_confidence,
-            "offline_unit_batch": None,
-            "algorithmic_teacher": None,
-            "teacher_as_main": True,
-        }
     offline_unit_batch = None
     if rhythm_offline_source_cache is not None and runtime_dual_mode_teacher:
         offline_unit_batch = rhythm_unit_frontend.from_precomputed(
@@ -224,7 +290,7 @@ def run_rhythm_frontend(
             sep_hint=rhythm_offline_source_cache.get("sep_hint"),
             boundary_confidence=rhythm_offline_source_cache.get("boundary_confidence"),
         )
-    if enable_dual_mode_teacher and not enable_learned_offline_teacher and not infer:
+    if enable_dual_mode_teacher and not effective_enable_learned_offline_teacher and not infer:
         raise ValueError(
             "rhythm_enable_dual_mode_teacher requires rhythm_enable_learned_offline_teacher: true "
             "in the maintained rhythm path."
@@ -244,20 +310,26 @@ def run_rhythm_frontend(
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
             teacher_projector_force_full_commit=teacher_projector_force_full_commit,
-            teacher_projector_soft_pause_selection_override=teacher_projector_soft_pause_selection,
+            teacher_projector_soft_pause_selection=teacher_projector_soft_pause_selection,
             trace_horizon=trace_horizon,
             trace_active_tail_only=trace_active_tail_only,
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
+            debt_control_scale=debt_control_scale,
+            debt_pause_priority=debt_pause_priority,
+            debt_speech_priority=debt_speech_priority,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             offline_content_units=offline_unit_batch.content_units if offline_unit_batch is not None else None,
             offline_dur_anchor_src=offline_unit_batch.dur_anchor_src if offline_unit_batch is not None else None,
             offline_unit_mask=offline_unit_batch.unit_mask if offline_unit_batch is not None else None,
-            offline_open_run_mask=offline_unit_batch.open_run_mask if offline_unit_batch is not None else None,
-            offline_sealed_mask=offline_unit_batch.sealed_mask if offline_unit_batch is not None else None,
             offline_sep_hint=offline_unit_batch.sep_hint if offline_unit_batch is not None else None,
             offline_boundary_confidence=offline_unit_batch.boundary_confidence if offline_unit_batch is not None else None,
         )
@@ -282,6 +354,14 @@ def run_rhythm_frontend(
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
+            debt_control_scale=debt_control_scale,
+            debt_pause_priority=debt_pause_priority,
+            debt_speech_priority=debt_speech_priority,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,

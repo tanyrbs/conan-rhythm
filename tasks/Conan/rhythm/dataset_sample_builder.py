@@ -13,7 +13,13 @@ class RhythmDatasetSampleAssembler:
         return self.owner.hparams
 
     def _tensorize_optional_value(self, key, value):
-        if key in {"ref_rhythm_trace", "slow_rhythm_memory", "planner_slow_rhythm_memory"}:
+        if key in {
+            "ref_rhythm_trace",
+            "ref_phrase_trace",
+            "planner_ref_phrase_trace",
+            "slow_rhythm_memory",
+            "planner_slow_rhythm_memory",
+        }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {
             "source_boundary_cue",
@@ -33,6 +39,8 @@ class RhythmDatasetSampleAssembler:
             "rhythm_stream_full_units",
             "rhythm_reference_is_self",
             "rhythm_pair_is_identity",
+            "ref_phrase_valid",
+            "ref_phrase_boundary_strength",
         } or "stats" in key or "budget" in key:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"sealed_mask", "boundary_confidence", "rhythm_offline_sealed_mask", "rhythm_offline_boundary_confidence"}:
@@ -53,6 +61,9 @@ class RhythmDatasetSampleAssembler:
             return torch.tensor(value, dtype=torch.float32)
         if key in {
             "phrase_group_index",
+            "ref_phrase_lengths",
+            "ref_phrase_starts",
+            "ref_phrase_ends",
             "rhythm_offline_content_units",
             "rhythm_offline_dur_anchor_src",
             "rhythm_offline_open_run_mask",

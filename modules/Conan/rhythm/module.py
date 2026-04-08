@@ -5,6 +5,7 @@ from dataclasses import replace
 import torch
 import torch.nn as nn
 
+from .compat import resolve_bool_alias, resolve_phase_decoupled_flag, resolve_phase_decoupled_threshold
 from .contracts import BoundaryCommitDecision, RhythmTeacherTargets, StreamingRhythmState, TraceReliabilityBundle
 from .controller import BoundaryCommitController, ChunkStateBundle, CommitConfig
 from .offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
@@ -12,7 +13,13 @@ from .projector import ProjectorConfig, StreamingRhythmProjector
 from .reference_descriptor import RefRhythmDescriptor
 from .reference_encoder import REF_RHYTHM_STATS_KEYS, REF_RHYTHM_TRACE_KEYS
 from .scheduler import MonotonicRhythmScheduler
-from .source_boundary import build_source_boundary_cue
+from .source_boundary import (
+    BOUNDARY_TYPE_PHRASE,
+    BOUNDARY_TYPE_WEAK,
+    build_boundary_type_masks,
+    build_source_boundary_cue,
+    classify_boundary_type_unit,
+)
 from .teacher import AlgorithmicRhythmTeacher, AlgorithmicTeacherConfig
 
 
@@ -53,6 +60,7 @@ class StreamingRhythmModule(nn.Module):
         runtime_phrase_bank_max_phrases: int = 6,
         runtime_phrase_bank_bins: int = 8,
         runtime_phrase_select_window: int = 3,
+        runtime_phrase_neighbor_mix_alpha: float = 0.15,
         phrase_selection_boundary_weight: float = 0.28,
         phrase_selection_local_rate_weight: float = 0.28,
         phrase_selection_pause_weight: float = 0.18,
@@ -85,6 +93,9 @@ class StreamingRhythmModule(nn.Module):
         trace_offset_lookahead_units: int = 0,
         chunk_state_enable: bool = True,
         budget_phase_feature_scale: float = 0.0,
+        weak_boundary_threshold: float = 0.40,
+        phrase_boundary_threshold: float = 0.55,
+        boundary_lengthening_max: float = 0.18,
         phase_decoupled_timing: bool | None = None,
         phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
         phase_decoupled_boundary_style_residual_scale: float = 0.18,
@@ -141,6 +152,7 @@ class StreamingRhythmModule(nn.Module):
             runtime_phrase_bank_max_phrases=runtime_phrase_bank_max_phrases,
             runtime_phrase_bank_bins=runtime_phrase_bank_bins,
             runtime_phrase_select_window=runtime_phrase_select_window,
+            runtime_phrase_neighbor_mix_alpha=runtime_phrase_neighbor_mix_alpha,
             phrase_selection_boundary_weight=phrase_selection_boundary_weight,
             phrase_selection_local_rate_weight=phrase_selection_local_rate_weight,
             phrase_selection_pause_weight=phrase_selection_pause_weight,
@@ -224,6 +236,11 @@ class StreamingRhythmModule(nn.Module):
         self.trace_offset_lookahead_units = max(0, int(trace_offset_lookahead_units))
         self.chunk_state_enable = bool(chunk_state_enable)
         self.budget_phase_feature_scale = float(min(max(budget_phase_feature_scale, 0.0), 1.0))
+        self.weak_boundary_threshold = float(min(max(weak_boundary_threshold, 0.0), 1.0))
+        self.phrase_boundary_threshold = float(
+            min(max(max(phrase_boundary_threshold, weak_boundary_threshold), 0.0), 1.0)
+        )
+        self.boundary_lengthening_max = float(max(0.0, boundary_lengthening_max))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
         # Deprecated compatibility aliases; internal logic should use phase_decoupled_* only.
         self.phase_free_timing = self.phase_decoupled_timing
@@ -248,19 +265,13 @@ class StreamingRhythmModule(nn.Module):
         phase_free_timing: bool | None,
         where: str,
     ) -> bool:
-        if (
-            phase_decoupled_timing is not None
-            and phase_free_timing is not None
-            and bool(phase_decoupled_timing) != bool(phase_free_timing)
-        ):
-            raise ValueError(
-                f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
-            )
-        if phase_decoupled_timing is not None:
-            return bool(phase_decoupled_timing)
-        if phase_free_timing is not None:
-            return bool(phase_free_timing)
-        return bool(default)
+        resolved = resolve_phase_decoupled_flag(
+            default=default,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where=where,
+        )
+        return bool(resolved)
 
     @staticmethod
     def _resolve_phase_decoupled_threshold(
@@ -270,22 +281,30 @@ class StreamingRhythmModule(nn.Module):
         phase_free_phrase_boundary_threshold: float | None,
         where: str,
     ) -> float:
-        if (
-            phase_decoupled_phrase_gate_boundary_threshold is not None
-            and phase_free_phrase_boundary_threshold is not None
-            and float(phase_decoupled_phrase_gate_boundary_threshold)
-            != float(phase_free_phrase_boundary_threshold)
-        ):
-            raise ValueError(
-                f"{where}: conflicting values for "
-                "phase_decoupled_phrase_gate_boundary_threshold and "
-                "deprecated phase_free_phrase_boundary_threshold."
-            )
-        if phase_decoupled_phrase_gate_boundary_threshold is not None:
-            return float(phase_decoupled_phrase_gate_boundary_threshold)
-        if phase_free_phrase_boundary_threshold is not None:
-            return float(phase_free_phrase_boundary_threshold)
-        return float(default)
+        resolved = resolve_phase_decoupled_threshold(
+            default=default,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_free_phrase_boundary_threshold=phase_free_phrase_boundary_threshold,
+            where=where,
+        )
+        return float(resolved)
+
+    @staticmethod
+    def _resolve_teacher_soft_pause_selection(
+        *,
+        default: bool | None,
+        canonical_value,
+        legacy_value,
+        where: str,
+    ) -> bool | None:
+        return resolve_bool_alias(
+            default=default,
+            canonical_value=canonical_value,
+            legacy_value=legacy_value,
+            canonical_name="teacher_projector_soft_pause_selection",
+            legacy_name="teacher_projector_soft_pause_selection_override",
+            where=where,
+        )
 
     @staticmethod
     def _scale_source_boundary_cue(source_boundary_cue: torch.Tensor, scale: float | None) -> torch.Tensor:
@@ -334,6 +353,17 @@ class StreamingRhythmModule(nn.Module):
             source_boundary_scale_override,
         )
         return ref_conditioning, unit_mask, source_boundary_cue
+
+    @staticmethod
+    def _build_teacher_closed_masks(
+        *,
+        content_units: torch.Tensor,
+        unit_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            torch.zeros_like(content_units),
+            torch.ones_like(unit_mask).float(),
+        )
 
     @staticmethod
     def _visible_sizes(unit_mask: torch.Tensor) -> torch.Tensor:
@@ -758,6 +788,7 @@ class StreamingRhythmModule(nn.Module):
         dur_anchor_src: torch.Tensor | None = None,
         trace_cold_start_min_visible_units: int | None = None,
         trace_cold_start_full_visible_units: int | None = None,
+        phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, TraceReliabilityBundle]:
         batch_size = int(unit_mask.size(0))
         device = unit_mask.device
@@ -808,7 +839,11 @@ class StreamingRhythmModule(nn.Module):
             full_committed_units=effective_trace_cold_start_full_visible_units,
             phrase_valid=selected_valid,
             phrase_boundary_strength=selected_boundary_strength,
-            boundary_threshold=self.phase_decoupled_phrase_gate_boundary_threshold,
+            boundary_threshold=(
+                self.phase_decoupled_phrase_gate_boundary_threshold
+                if phase_decoupled_phrase_gate_boundary_threshold is None
+                else float(phase_decoupled_phrase_gate_boundary_threshold)
+            ),
         )
         global_gate = (1.0 - phrase_gate).clamp(0.0, 1.0)
         if phrase_trace_summary is None:
@@ -1199,18 +1234,23 @@ class StreamingRhythmModule(nn.Module):
         active_phrase_end: torch.Tensor,
         segment_mask: torch.Tensor,
         pause_segment_mask: torch.Tensor,
+        boundary_type_unit: torch.Tensor,
+        boundary_lengthening_unit: torch.Tensor,
         phrase_speech_budget: torch.Tensor,
         phrase_pause_budget: torch.Tensor,
         phrase_selection: dict[str, torch.Tensor] | None,
     ):
         planner.commit_boundary_logit_unit = commit_decision.commit_score_unit
         planner.commit_mask_unit = commit_decision.eligible_mask_unit
+        planner.commit_eligible_mask_unit = commit_decision.eligible_mask_unit
         planner.planned_commit_frontier = commit_decision.commit_end
         planner.commit_confidence = commit_decision.commit_confidence
         planner.active_phrase_start = active_phrase_start
         planner.active_phrase_end = active_phrase_end
         planner.segment_mask_unit = segment_mask
         planner.pause_segment_mask_unit = pause_segment_mask
+        planner.boundary_type_unit = boundary_type_unit
+        planner.boundary_lengthening_unit = boundary_lengthening_unit
         planner.phrase_speech_budget_win = phrase_speech_budget
         planner.phrase_pause_budget_win = phrase_pause_budget
         if phrase_selection is not None:
@@ -1262,6 +1302,32 @@ class StreamingRhythmModule(nn.Module):
             open_run_mask=open_run_mask,
             sealed_mask=sealed_mask,
         )
+        boundary_type_unit = classify_boundary_type_unit(
+            unit_mask=unit_mask,
+            source_boundary_cue=source_boundary_cue,
+            boundary_score_unit=planner.boundary_score_unit,
+            sep_hint=sep_hint,
+            open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            boundary_confidence=boundary_confidence,
+            weak_boundary_threshold=self.weak_boundary_threshold,
+            phrase_boundary_threshold=self.phrase_boundary_threshold,
+        )
+        join_mask, weak_mask, phrase_mask = build_boundary_type_masks(
+            boundary_type_unit,
+            unit_mask=unit_mask,
+        )
+        pause_segment_mask = pause_segment_mask * (1.0 - join_mask)
+        boundary_strength = (
+            planner.boundary_score_unit.float().clamp(0.0, 1.0)
+            if getattr(planner, "boundary_score_unit", None) is not None
+            else unit_mask.new_zeros(unit_mask.shape)
+        )
+        boundary_lengthening_unit = (
+            (0.35 * weak_mask + phrase_mask)
+            * boundary_strength
+            * float(self.boundary_lengthening_max)
+        ) * unit_mask.float()
         phrase_speech_budget, phrase_pause_budget = self._build_phrase_budget_views(
             planner=planner,
             state=state,
@@ -1290,6 +1356,8 @@ class StreamingRhythmModule(nn.Module):
             active_phrase_end=active_phrase_end,
             segment_mask=segment_mask,
             pause_segment_mask=pause_segment_mask,
+            boundary_type_unit=boundary_type_unit,
+            boundary_lengthening_unit=boundary_lengthening_unit,
             phrase_speech_budget=phrase_speech_budget,
             phrase_pause_budget=phrase_pause_budget,
             phrase_selection=selection,
@@ -1434,6 +1502,14 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
+        phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
+        phase_decoupled_boundary_style_residual_scale: float | None = None,
+        debt_control_scale: float | None = None,
+        debt_pause_priority: float | None = None,
+        debt_speech_priority: float | None = None,
+        projector_debt_leak: float | None = None,
+        projector_debt_max_abs: float | None = None,
+        projector_debt_correction_horizon: float | None = None,
         projector_reuse_prefix: bool = True,
         projector_force_full_commit: bool = False,
         projector_pause_topk_ratio_override: float | None = None,
@@ -1463,6 +1539,11 @@ class StreamingRhythmModule(nn.Module):
             phase_decoupled_timing=phase_decoupled_timing,
             phase_free_timing=phase_free_timing,
             where="StreamingRhythmModule.forward",
+        )
+        effective_phase_decoupled_phrase_gate_boundary_threshold = (
+            self.phase_decoupled_phrase_gate_boundary_threshold
+            if phase_decoupled_phrase_gate_boundary_threshold is None
+            else float(phase_decoupled_phrase_gate_boundary_threshold)
         )
         unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
         chunk_state = None
@@ -1495,6 +1576,9 @@ class StreamingRhythmModule(nn.Module):
                 dur_anchor_src=dur_anchor_src,
                 trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
                 trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+                phase_decoupled_phrase_gate_boundary_threshold=(
+                    effective_phase_decoupled_phrase_gate_boundary_threshold
+                ),
             )
         else:
             trace_context, planner_trace_context, trace_reliability = self._sample_trace_pair(
@@ -1529,6 +1613,10 @@ class StreamingRhythmModule(nn.Module):
             trace_exhaustion_final_cell_suppress=self.trace_exhaustion_final_cell_suppress,
             chunk_state=chunk_state,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
+            debt_control_scale=debt_control_scale,
+            debt_pause_priority=debt_pause_priority,
+            debt_speech_priority=debt_speech_priority,
         )
         if phrase_selection is not None:
             planner.ref_phrase_index = phrase_selection.get("selected_ref_phrase_index")
@@ -1562,6 +1650,9 @@ class StreamingRhythmModule(nn.Module):
             reuse_prefix=projector_reuse_prefix,
             force_full_commit=projector_force_full_commit,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
+            debt_leak_override=projector_debt_leak,
+            debt_max_abs_override=projector_debt_max_abs,
+            debt_correction_horizon_override=projector_debt_correction_horizon,
         )
         execution.next_state = replace(
             execution.next_state,
@@ -1657,8 +1748,6 @@ class StreamingRhythmModule(nn.Module):
         offline_content_units: torch.Tensor | None = None,
         offline_dur_anchor_src: torch.Tensor | None = None,
         offline_unit_mask: torch.Tensor | None = None,
-        offline_open_run_mask: torch.Tensor | None = None,
-        offline_sealed_mask: torch.Tensor | None = None,
         offline_sep_hint: torch.Tensor | None = None,
         offline_boundary_confidence: torch.Tensor | None = None,
         trace_horizon: float | None = None,
@@ -1668,14 +1757,29 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
+        phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
+        phase_decoupled_boundary_style_residual_scale: float | None = None,
+        debt_control_scale: float | None = None,
+        debt_pause_priority: float | None = None,
+        debt_speech_priority: float | None = None,
+        projector_debt_leak: float | None = None,
+        projector_debt_max_abs: float | None = None,
+        projector_debt_correction_horizon: float | None = None,
         projector_reuse_prefix: bool = True,
         projector_force_full_commit: bool = False,
         projector_pause_topk_ratio_override: float | None = None,
         source_boundary_scale_override: float | None = None,
         teacher_source_boundary_scale_override: float | None = None,
         teacher_projector_force_full_commit: bool = True,
-        teacher_projector_soft_pause_selection_override: bool | None = None,
+        teacher_projector_soft_pause_selection: bool | None = None,
     ) -> dict[str, object]:
+        """Run streaming execution plus the learned offline teacher branch.
+
+        The streaming branch consumes the full phase-decoupled scheduler /
+        debt-controller override surface. The offline teacher branch only
+        consumes overrides that actually affect teacher trace sampling or the
+        teacher projector.
+        """
         if self.offline_teacher is None:
             raise RuntimeError(
                 "forward_dual requires learned offline teacher runtime branch, but it is disabled. "
@@ -1706,6 +1810,14 @@ class StreamingRhythmModule(nn.Module):
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
+            debt_control_scale=debt_control_scale,
+            debt_pause_priority=debt_pause_priority,
+            debt_speech_priority=debt_speech_priority,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
@@ -1716,12 +1828,12 @@ class StreamingRhythmModule(nn.Module):
         offline_unit_mask = unit_mask if offline_unit_mask is None else offline_unit_mask
         offline_sep_hint = sep_hint if offline_sep_hint is None else offline_sep_hint
         offline_boundary_confidence = boundary_confidence if offline_boundary_confidence is None else offline_boundary_confidence
-        if offline_open_run_mask is None:
-            offline_open_run_mask = torch.zeros_like(offline_content_units)
-        if offline_sealed_mask is None:
-            if offline_unit_mask is None:
-                offline_unit_mask = offline_dur_anchor_src.gt(0).float()
-            offline_sealed_mask = torch.ones_like(offline_unit_mask).float()
+        if offline_unit_mask is None:
+            offline_unit_mask = self._resolve_unit_mask(offline_dur_anchor_src, offline_unit_mask)
+        teacher_open_run_mask, teacher_sealed_mask = self._build_teacher_closed_masks(
+            content_units=offline_content_units,
+            unit_mask=offline_unit_mask,
+        )
         offline_execution, offline_confidence = self.forward_teacher(
             content_units=offline_content_units,
             dur_anchor_src=offline_dur_anchor_src,
@@ -1730,20 +1842,22 @@ class StreamingRhythmModule(nn.Module):
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
             unit_mask=offline_unit_mask,
-            open_run_mask=torch.zeros_like(offline_open_run_mask),
-            sealed_mask=torch.ones_like(offline_sealed_mask).float(),
             sep_hint=offline_sep_hint,
             boundary_confidence=offline_boundary_confidence,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=teacher_source_boundary_scale_override,
             projector_force_full_commit=teacher_projector_force_full_commit,
-            projector_soft_pause_selection_override=teacher_projector_soft_pause_selection_override,
+            projector_soft_pause_selection=teacher_projector_soft_pause_selection,
             trace_horizon=trace_horizon,
             trace_active_tail_only=trace_active_tail_only,
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=effective_phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=offline_content_units,
@@ -1753,8 +1867,8 @@ class StreamingRhythmModule(nn.Module):
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
             unit_mask=offline_unit_mask,
-            open_run_mask=torch.zeros_like(offline_open_run_mask),
-            sealed_mask=torch.ones_like(offline_sealed_mask).float(),
+            open_run_mask=teacher_open_run_mask,
+            sealed_mask=teacher_sealed_mask,
             sep_hint=offline_sep_hint,
             boundary_confidence=offline_boundary_confidence,
             source_boundary_scale_override=teacher_source_boundary_scale_override,
@@ -1776,14 +1890,12 @@ class StreamingRhythmModule(nn.Module):
         ref_rhythm_trace: torch.Tensor | None = None,
         ref_mel: torch.Tensor | None = None,
         unit_mask: torch.Tensor | None = None,
-        open_run_mask: torch.Tensor | None = None,
-        sealed_mask: torch.Tensor | None = None,
         sep_hint: torch.Tensor | None = None,
         boundary_confidence: torch.Tensor | None = None,
         projector_pause_topk_ratio_override: float | None = None,
         source_boundary_scale_override: float | None = None,
         projector_force_full_commit: bool = True,
-        projector_soft_pause_selection_override: bool | None = None,
+        projector_soft_pause_selection: bool | None = None,
         trace_horizon: float | None = None,
         trace_active_tail_only: bool | None = None,
         trace_offset_lookahead_units: int | None = None,
@@ -1791,55 +1903,95 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
+        phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
+        projector_debt_leak: float | None = None,
+        projector_debt_max_abs: float | None = None,
+        projector_debt_correction_horizon: float | None = None,
     ) -> tuple[object, dict[str, torch.Tensor]]:
+        """Run the learned offline teacher branch as a standalone execution path.
+
+        This is an offline/full-commit teacher runtime used for teacher-only
+        audit/export semantics. It is not a streaming dual-runtime replacement.
+        Only teacher-relevant controls are exposed here:
+        trace sampling / phrase gating, source-boundary scaling, pause sparsity,
+        and projector debt anti-windup.
+        """
         effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
             default=self.phase_decoupled_timing,
             phase_decoupled_timing=phase_decoupled_timing,
             phase_free_timing=phase_free_timing,
             where="StreamingRhythmModule.forward_teacher",
         )
-        del effective_phase_decoupled_timing
         if self.offline_teacher is None:
             raise RuntimeError(
                 "forward_teacher requires learned offline teacher runtime branch, but it is disabled. "
                 "Enable `rhythm_runtime_enable_learned_offline_teacher` (or dual-mode teacher)."
             )
+        teacher_unit_mask = self._resolve_unit_mask(dur_anchor_src, unit_mask)
+        teacher_open_run_mask, teacher_sealed_mask = self._build_teacher_closed_masks(
+            content_units=content_units,
+            unit_mask=teacher_unit_mask,
+        )
         ref_conditioning, unit_mask, source_boundary_cue = self._prepare_runtime_inputs(
             dur_anchor_src=dur_anchor_src,
             ref_conditioning=ref_conditioning,
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             ref_mel=ref_mel,
-            unit_mask=unit_mask,
+            unit_mask=teacher_unit_mask,
             sep_hint=sep_hint,
-            open_run_mask=open_run_mask,
-            sealed_mask=sealed_mask,
+            open_run_mask=teacher_open_run_mask,
+            sealed_mask=teacher_sealed_mask,
             boundary_confidence=boundary_confidence,
             source_boundary_scale_override=source_boundary_scale_override,
         )
         unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
         teacher_phase_ptr = unit_mask.new_zeros((unit_mask.size(0),))
         teacher_state = self.init_state(batch_size=content_units.size(0), device=content_units.device)
+        effective_trace_horizon = (
+            self.reference_descriptor.encoder.trace_horizon if trace_horizon is None else float(trace_horizon)
+        )
+        effective_phase_decoupled_phrase_gate_boundary_threshold = (
+            self.phase_decoupled_phrase_gate_boundary_threshold
+            if phase_decoupled_phrase_gate_boundary_threshold is None
+            else float(phase_decoupled_phrase_gate_boundary_threshold)
+        )
         teacher_phrase_selection = self._select_scheduler_phrase_bank(
             ref_conditioning=ref_conditioning,
             state=teacher_state,
             batch_size=content_units.size(0),
             device=content_units.device,
+            strict_pointer_only=effective_phase_decoupled_timing,
         )
-        trace_context, planner_trace_context, trace_reliability = self._sample_trace_pair(
-            ref_conditioning=ref_conditioning,
-            phase_ptr=teacher_phase_ptr,
-            window_size=content_units.size(1),
-            unit_mask=unit_mask,
-            dur_anchor_src=dur_anchor_src,
-            horizon=(1.0 if trace_horizon is None else float(trace_horizon)),
-            state=teacher_state,
-            phrase_selection=teacher_phrase_selection,
-            trace_active_tail_only=trace_active_tail_only,
-            trace_offset_lookahead_units=trace_offset_lookahead_units,
-            trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
-            trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-        )
+        if effective_phase_decoupled_timing:
+            trace_context, planner_trace_context, trace_reliability = self._sample_phase_decoupled_trace_pair(
+                ref_conditioning=ref_conditioning,
+                window_size=content_units.size(1),
+                unit_mask=unit_mask,
+                state=teacher_state,
+                phrase_selection=teacher_phrase_selection,
+                dur_anchor_src=dur_anchor_src,
+                trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
+                trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+                phase_decoupled_phrase_gate_boundary_threshold=(
+                    effective_phase_decoupled_phrase_gate_boundary_threshold
+                ),
+            )
+        else:
+            trace_context, planner_trace_context, trace_reliability = self._sample_trace_pair(
+                ref_conditioning=ref_conditioning,
+                phase_ptr=teacher_phase_ptr,
+                window_size=content_units.size(1),
+                unit_mask=unit_mask,
+                dur_anchor_src=dur_anchor_src,
+                horizon=effective_trace_horizon,
+                state=teacher_state,
+                phrase_selection=teacher_phrase_selection,
+                trace_active_tail_only=trace_active_tail_only,
+                trace_offset_lookahead_units=trace_offset_lookahead_units,
+                trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
+                trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+            )
         planner, confidence = self.offline_teacher(
             unit_states=unit_embed,
             dur_anchor_src=dur_anchor_src,
@@ -1858,8 +2010,8 @@ class StreamingRhythmModule(nn.Module):
             source_boundary_cue=source_boundary_cue,
             boundary_confidence=boundary_confidence,
             sep_hint=sep_hint,
-            open_run_mask=open_run_mask,
-            sealed_mask=sealed_mask,
+            open_run_mask=teacher_open_run_mask,
+            sealed_mask=teacher_sealed_mask,
             force_full_commit=projector_force_full_commit,
             phrase_selection=teacher_phrase_selection,
         )
@@ -1872,12 +2024,15 @@ class StreamingRhythmModule(nn.Module):
             pause_weight_unit=planner.pause_weight_unit,
             boundary_score_unit=planner.boundary_score_unit,
             state=teacher_state,
-            open_run_mask=torch.zeros_like(content_units) if open_run_mask is None else open_run_mask,
+            open_run_mask=teacher_open_run_mask,
             planner=planner,
             reuse_prefix=False,
             force_full_commit=projector_force_full_commit,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
-            soft_pause_selection_override=projector_soft_pause_selection_override,
+            soft_pause_selection_override=projector_soft_pause_selection,
+            debt_leak_override=projector_debt_leak,
+            debt_max_abs_override=projector_debt_max_abs,
+            debt_correction_horizon_override=projector_debt_correction_horizon,
         )
         execution.trace_reliability = trace_reliability
         return execution, confidence

@@ -57,6 +57,14 @@ class FactorizationContractTests(unittest.TestCase):
             "selector_meta_scores": torch.tensor([[0.4, 0.9]], dtype=torch.float32),
             "selector_meta_starts": torch.tensor([[0, 2]], dtype=torch.long),
             "selector_meta_ends": torch.tensor([[1, 2]], dtype=torch.long),
+            "ref_phrase_trace": torch.ones((1, 2, 6, 5), dtype=torch.float32),
+            "planner_ref_phrase_trace": torch.ones((1, 2, 6, 2), dtype=torch.float32),
+            "ref_phrase_valid": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "ref_phrase_lengths": torch.tensor([[3, 3]], dtype=torch.long),
+            "ref_phrase_starts": torch.tensor([[0, 3]], dtype=torch.long),
+            "ref_phrase_ends": torch.tensor([[2, 5]], dtype=torch.long),
+            "ref_phrase_boundary_strength": torch.tensor([[0.4, 0.8]], dtype=torch.float32),
+            "ref_phrase_stats": torch.ones((1, 2, 5), dtype=torch.float32),
         }
 
     def test_apply_compact_reference_intervention_keeps_raw_contract_in_sync(self) -> None:
@@ -121,6 +129,14 @@ class FactorizationContractTests(unittest.TestCase):
             "selector_meta_scores",
             "selector_meta_starts",
             "selector_meta_ends",
+            "ref_phrase_trace",
+            "planner_ref_phrase_trace",
+            "ref_phrase_valid",
+            "ref_phrase_lengths",
+            "ref_phrase_starts",
+            "ref_phrase_ends",
+            "ref_phrase_boundary_strength",
+            "ref_phrase_stats",
         ):
             self.assertNotIn(stale_key, updated)
 

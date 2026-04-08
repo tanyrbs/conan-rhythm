@@ -1,3 +1,10 @@
+> **Archive snapshot only.**
+> This file records a historical training/status snapshot and may reflect runs
+> started before the current repository HEAD. It is not the live
+> runtime-contract or architecture document. For current semantics, use
+> `README.md`, `docs/rhythm_migration_plan.md`, and
+> `docs/autodl_training_handoff.md`.
+
 # Project Status
 
 更新时间：2026-04-08 UTC

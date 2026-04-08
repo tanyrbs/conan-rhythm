@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .bridge import attach_rhythm_outputs, run_rhythm_frontend
+from .compat import resolve_bool_alias, resolve_float_alias, resolve_phase_decoupled_flag
 from .factory import build_streaming_rhythm_module_from_hparams
 from .stages import (
     detect_rhythm_stage,
@@ -18,20 +19,12 @@ from .unit_frontend import RhythmUnitFrontend
 
 
 def _resolve_phase_decoupled_override(runtime_overrides: dict) -> bool | None:
-    phase_decoupled_timing = runtime_overrides.pop("phase_decoupled_timing", None)
-    phase_free_timing = runtime_overrides.pop("phase_free_timing", None)
-    if (
-        phase_decoupled_timing is not None
-        and phase_free_timing is not None
-        and bool(phase_decoupled_timing) != bool(phase_free_timing)
-    ):
-        raise ValueError(
-            "Conflicting rhythm runtime overrides: phase_decoupled_timing and deprecated phase_free_timing."
-        )
-    resolved = phase_decoupled_timing if phase_decoupled_timing is not None else phase_free_timing
-    if resolved is None:
-        return None
-    return bool(resolved)
+    return resolve_phase_decoupled_flag(
+        default=None,
+        phase_decoupled_timing=runtime_overrides.pop("phase_decoupled_timing", None),
+        phase_free_timing=runtime_overrides.pop("phase_free_timing", None),
+        where="ConanRhythmAdapter.runtime_overrides",
+    )
 
 
 class ConanRhythmAdapter(nn.Module):
@@ -40,6 +33,9 @@ class ConanRhythmAdapter(nn.Module):
     This pulls the strong-rhythm stack out of modules/Conan/Conan.py so the
     acoustic model no longer has to directly manage all scheduler/projector/
     teacher runtime details.
+
+    This adapter is the public runtime entrypoint. `bridge.run_rhythm_frontend`
+    is the lower-level helper used underneath for tests and integration glue.
     """
 
     def __init__(self, hparams, hidden_size: int) -> None:
@@ -197,19 +193,26 @@ class ConanRhythmAdapter(nn.Module):
             "source_boundary_scale_override",
             source_boundary_scale_override,
         )
-        runtime_teacher_enabled = bool(
+        configured_teacher_runtime_enabled = resolve_runtime_offline_teacher_enable(
+            self.hparams,
+            stage=stage,
+        )
+        module_supports_teacher_runtime = bool(
             getattr(
                 self.module,
                 "enable_learned_offline_teacher",
-                resolve_runtime_offline_teacher_enable(self.hparams, stage=stage),
+                configured_teacher_runtime_enabled,
             )
         )
-        teacher_as_main = resolve_teacher_as_main(
+        teacher_runtime_available = bool(
+            configured_teacher_runtime_enabled and module_supports_teacher_runtime
+        )
+        teacher_as_main_requested = resolve_teacher_as_main(
             self.hparams,
             stage=stage,
             infer=bool(infer),
         )
-        dual_mode_teacher_enabled = resolve_runtime_dual_mode_teacher_enable(
+        dual_mode_teacher_requested = resolve_runtime_dual_mode_teacher_enable(
             self.hparams,
             stage=stage,
             infer=bool(infer),
@@ -219,29 +222,38 @@ class ConanRhythmAdapter(nn.Module):
             and not bool(infer)
             and stage in {"legacy_dual_mode_kd", "transitional"}
         )
+        teacher_runtime_branch_requested = (
+            bool(teacher_as_main_requested) or bool(dual_mode_teacher_requested)
+        )
         teacher_source_boundary_scale_override = None
-        if teacher_as_main or dual_mode_teacher_enabled or algorithmic_teacher_enabled:
+        if teacher_runtime_branch_requested or algorithmic_teacher_enabled:
             teacher_source_boundary_scale_override = self.resolve_source_boundary_scale(
                 infer=bool(infer),
                 global_steps=int(global_steps),
                 teacher=True,
             )
-        teacher_source_boundary_scale_override = runtime_overrides.pop(
-            "teacher_source_boundary_scale_override",
-            teacher_source_boundary_scale_override,
-        )
-        teacher_projector_force_full_commit = bool(
-            runtime_overrides.pop(
-                "teacher_projector_force_full_commit",
-                self.hparams.get("rhythm_teacher_projector_force_full_commit", True),
+        if teacher_runtime_branch_requested or algorithmic_teacher_enabled:
+            teacher_source_boundary_scale_override = runtime_overrides.pop(
+                "teacher_source_boundary_scale_override",
+                teacher_source_boundary_scale_override,
             )
-        )
-        teacher_projector_soft_pause_selection = runtime_overrides.pop(
-            "teacher_projector_soft_pause_selection",
-            self.hparams.get("rhythm_teacher_projector_soft_pause_selection", None),
-        )
-        if teacher_projector_soft_pause_selection is not None:
-            teacher_projector_soft_pause_selection = bool(teacher_projector_soft_pause_selection)
+        teacher_projector_force_full_commit = None
+        teacher_projector_soft_pause_selection = None
+        if teacher_runtime_branch_requested:
+            teacher_projector_force_full_commit = bool(
+                runtime_overrides.pop(
+                    "teacher_projector_force_full_commit",
+                    self.hparams.get("rhythm_teacher_projector_force_full_commit", True),
+                )
+            )
+            teacher_projector_soft_pause_selection = resolve_bool_alias(
+                default=self.hparams.get("rhythm_teacher_projector_soft_pause_selection", None),
+                canonical_value=runtime_overrides.pop("teacher_projector_soft_pause_selection", None),
+                legacy_value=runtime_overrides.pop("teacher_projector_soft_pause_selection_override", None),
+                canonical_name="teacher_projector_soft_pause_selection",
+                legacy_name="teacher_projector_soft_pause_selection_override",
+                where="ConanRhythmAdapter.runtime_overrides",
+            )
         trace_active_tail_only = runtime_overrides.pop("trace_active_tail_only", None)
         if trace_active_tail_only is not None:
             trace_active_tail_only = bool(trace_active_tail_only)
@@ -261,9 +273,54 @@ class ConanRhythmAdapter(nn.Module):
         if trace_cold_start_full_visible_units is not None:
             trace_cold_start_full_visible_units = int(trace_cold_start_full_visible_units)
         phase_decoupled_timing = _resolve_phase_decoupled_override(runtime_overrides)
+        phase_decoupled_phrase_gate_boundary_threshold = resolve_float_alias(
+            default=None,
+            canonical_value=runtime_overrides.pop("phase_decoupled_phrase_gate_boundary_threshold", None),
+            legacy_value=runtime_overrides.pop("phase_decoupled_phrase_boundary_threshold", None),
+            canonical_name="phase_decoupled_phrase_gate_boundary_threshold",
+            legacy_name="phase_decoupled_phrase_boundary_threshold",
+            where="ConanRhythmAdapter.runtime_overrides",
+        )
+        phase_decoupled_phrase_gate_boundary_threshold = resolve_float_alias(
+            default=phase_decoupled_phrase_gate_boundary_threshold,
+            canonical_value=phase_decoupled_phrase_gate_boundary_threshold,
+            legacy_value=runtime_overrides.pop("phase_free_phrase_boundary_threshold", None),
+            canonical_name="phase_decoupled_phrase_gate_boundary_threshold",
+            legacy_name="phase_free_phrase_boundary_threshold",
+            where="ConanRhythmAdapter.runtime_overrides",
+        )
+        phase_decoupled_boundary_style_residual_scale = runtime_overrides.pop(
+            "phase_decoupled_boundary_style_residual_scale",
+            None,
+        )
+        if phase_decoupled_boundary_style_residual_scale is not None:
+            phase_decoupled_boundary_style_residual_scale = float(
+                phase_decoupled_boundary_style_residual_scale
+            )
+        debt_control_scale = runtime_overrides.pop("debt_control_scale", None)
+        if debt_control_scale is not None:
+            debt_control_scale = float(debt_control_scale)
+        debt_pause_priority = runtime_overrides.pop("debt_pause_priority", None)
+        if debt_pause_priority is not None:
+            debt_pause_priority = float(debt_pause_priority)
+        debt_speech_priority = runtime_overrides.pop("debt_speech_priority", None)
+        if debt_speech_priority is not None:
+            debt_speech_priority = float(debt_speech_priority)
+        projector_debt_leak = runtime_overrides.pop("projector_debt_leak", None)
+        if projector_debt_leak is not None:
+            projector_debt_leak = float(projector_debt_leak)
+        projector_debt_max_abs = runtime_overrides.pop("projector_debt_max_abs", None)
+        if projector_debt_max_abs is not None:
+            projector_debt_max_abs = float(projector_debt_max_abs)
+        projector_debt_correction_horizon = runtime_overrides.pop(
+            "projector_debt_correction_horizon",
+            None,
+        )
+        if projector_debt_correction_horizon is not None:
+            projector_debt_correction_horizon = float(projector_debt_correction_horizon)
         ret["rhythm_stage"] = stage
-        ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
-        ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
+        ret["rhythm_teacher_runtime_enabled"] = float(teacher_runtime_available)
+        ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main_requested))
         if projector_pause_topk_ratio_override is not None:
             ret["rhythm_projector_pause_topk_ratio"] = torch.full(
                 (content.size(0), 1),
@@ -285,12 +342,13 @@ class ConanRhythmAdapter(nn.Module):
                 dtype=content_embed.dtype,
                 device=content.device,
             )
-        ret["rhythm_teacher_projector_force_full_commit"] = torch.full(
-            (content.size(0), 1),
-            1.0 if teacher_projector_force_full_commit else 0.0,
-            dtype=content_embed.dtype,
-            device=content.device,
-        )
+        if teacher_projector_force_full_commit is not None:
+            ret["rhythm_teacher_projector_force_full_commit"] = torch.full(
+                (content.size(0), 1),
+                1.0 if teacher_projector_force_full_commit else 0.0,
+                dtype=content_embed.dtype,
+                device=content.device,
+            )
         if teacher_projector_soft_pause_selection is not None:
             ret["rhythm_teacher_projector_soft_pause_selection"] = torch.full(
                 (content.size(0), 1),
@@ -310,10 +368,10 @@ class ConanRhythmAdapter(nn.Module):
             rhythm_ref_conditioning=rhythm_ref_conditioning,
             rhythm_source_cache=rhythm_source_cache,
             rhythm_offline_source_cache=rhythm_offline_source_cache,
-            enable_dual_mode_teacher=dual_mode_teacher_enabled,
-            enable_learned_offline_teacher=runtime_teacher_enabled,
+            enable_dual_mode_teacher=dual_mode_teacher_requested,
+            enable_learned_offline_teacher=teacher_runtime_available,
             enable_algorithmic_teacher=algorithmic_teacher_enabled,
-            teacher_as_main=teacher_as_main,
+            teacher_as_main=teacher_as_main_requested,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
@@ -323,9 +381,19 @@ class ConanRhythmAdapter(nn.Module):
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             phase_decoupled_timing=phase_decoupled_timing,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
+            debt_control_scale=debt_control_scale,
+            debt_pause_priority=debt_pause_priority,
+            debt_speech_priority=debt_speech_priority,
+            projector_debt_leak=projector_debt_leak,
+            projector_debt_max_abs=projector_debt_max_abs,
+            projector_debt_correction_horizon=projector_debt_correction_horizon,
             projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
             projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
-            teacher_projector_force_full_commit=teacher_projector_force_full_commit,
+            teacher_projector_force_full_commit=bool(teacher_projector_force_full_commit)
+            if teacher_projector_force_full_commit is not None
+            else True,
             teacher_projector_soft_pause_selection=teacher_projector_soft_pause_selection,
             streaming_prefix_train=bool(self.hparams.get("rhythm_streaming_prefix_train", False)),
         )

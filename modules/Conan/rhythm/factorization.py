@@ -46,6 +46,14 @@ INTERVENTION_REBUILD_KEYS = (
     "selector_meta_scores",
     "selector_meta_starts",
     "selector_meta_ends",
+    "ref_phrase_trace",
+    "planner_ref_phrase_trace",
+    "ref_phrase_valid",
+    "ref_phrase_lengths",
+    "ref_phrase_starts",
+    "ref_phrase_ends",
+    "ref_phrase_boundary_strength",
+    "ref_phrase_stats",
 )
 
 _REF_STATS_PAUSE_IDX = 0

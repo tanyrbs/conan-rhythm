@@ -98,6 +98,7 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         debt_leak=float(hparams.get('rhythm_projector_debt_leak', 0.05)),
         debt_max_abs=float(hparams.get('rhythm_projector_debt_max_abs', 12.0)),
         debt_correction_horizon=float(hparams.get('rhythm_projector_debt_correction_horizon', 4.0)),
+        weak_boundary_pause_cap=float(hparams.get('rhythm_projector_weak_boundary_pause_cap', 1.0)),
     )
 
 
@@ -238,6 +239,9 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
             )
         ),
         runtime_phrase_select_window=int(hparams.get('rhythm_runtime_phrase_select_window', 3)),
+        runtime_phrase_neighbor_mix_alpha=float(
+            hparams.get('rhythm_runtime_phrase_neighbor_mix_alpha', 0.15)
+        ),
         phrase_selection_boundary_weight=float(hparams.get('rhythm_phrase_selection_boundary_weight', 0.28)),
         phrase_selection_local_rate_weight=float(hparams.get('rhythm_phrase_selection_local_rate_weight', 0.28)),
         phrase_selection_pause_weight=float(hparams.get('rhythm_phrase_selection_pause_weight', 0.18)),
@@ -276,6 +280,14 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         trace_offset_lookahead_units=int(hparams.get('rhythm_trace_offset_lookahead_units', 0)),
         chunk_state_enable=bool(hparams.get('rhythm_chunk_state_enable', True)),
         budget_phase_feature_scale=float(hparams.get('rhythm_budget_phase_feature_scale', 0.0)),
+        weak_boundary_threshold=float(hparams.get('rhythm_weak_boundary_threshold', 0.40)),
+        phrase_boundary_threshold=float(
+            hparams.get(
+                'rhythm_phrase_boundary_threshold',
+                hparams.get('rhythm_source_phrase_threshold', 0.55),
+            )
+        ),
+        boundary_lengthening_max=float(hparams.get('rhythm_boundary_lengthening_max', 0.18)),
         phase_decoupled_timing=phase_decoupled_timing,
         phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
         phase_decoupled_boundary_style_residual_scale=float(

@@ -30,7 +30,151 @@ The current local successor branch already assumes:
 - duration / pause budgeting is the explicit control surface
 - projector execution remains the binding authority
 - reference is treated as global / phrase prior, not as a long continuous control script
-- `phase_ptr`, trace reliability, cold-start gating, and active-tail sampling remain mainly diagnostics / compatibility controls
+- `phase_ptr` remains observer/telemetry; phase-decoupled timing is the canonical maintained runtime direction, but compatibility-default configs may still need explicit `rhythm_phase_decoupled_timing: true`
+
+Read the current runtime literally:
+
+- rhythm control here means **timeline control** first
+  (`duration + pause + boundary-related local lengthening hints`)
+- full accent / full F0 contour is not the maintained rhythm-controller claim
+- `JOIN / WEAK / PHRASE` primarily govern local realization and projector pause
+  behavior; phrase-bank retrieval is currently driven by the persisted runtime
+  pointer `ref_phrase_ptr`
+
+The maintained runtime meaning is now narrower and more explicit:
+
+- the mainline controller is a **timing controller**
+- planner responsibility is:
+  - speech duration budget
+  - pause budget
+  - unit-level redistribution
+  - boundary-related local lengthening hints / side signals
+- full accent / F0 contour / expressive intonation are **not** the maintained
+  runtime control target of this stack
+
+Boundary handling is also typed:
+
+- `JOIN`: no runtime pause insertion
+- `WEAK`: weak local junction, local timing variation allowed, runtime pause capped
+- `PHRASE`: main carrier for redistributed editable-tail pause mass
+
+Reference conditioning is therefore used as:
+
+- global rhythm prior
+- phrase prior selected by persisted `ref_phrase_ptr`
+- bounded local boundary-style residual
+
+not as a wall-clock script.
+
+### Canonical runtime names
+
+Use these names in new configs and handoffs:
+
+- `rhythm_phase_decoupled_timing`
+- `rhythm_phase_decoupled_phrase_gate_boundary_threshold`
+- `rhythm_phase_decoupled_boundary_style_residual_scale`
+
+Legacy aliases remain only for compatibility:
+
+- `rhythm_phase_free_timing`
+- `rhythm_phase_free_phrase_boundary_threshold`
+- `rhythm_phase_decoupled_phrase_boundary_threshold`
+
+### Sidecar terminology
+
+Keep the two sidecar concepts separate:
+
+1. `rhythm_emit_reference_sidecar`
+   - reference-conditioning sidecars
+   - slow/planner auxiliaries used by the module
+2. `rhythm_export_debug_sidecars`
+   - dataset/sample/cache debug export fields
+
+`rhythm_emit_reference_sidecar` may also auto-enable in some regimes such as:
+
+- external sampled reference bootstrap
+- `rhythm_cached_reference_policy=sample_ref`
+- descriptor bootstrap losses
+- trace-reliability fallback regimes
+
+Phrase-bank conditioning should be tracked separately from the generic
+reference-sidecar switch:
+
+- it may be emitted together with reference sidecars
+- it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
+- it may be passed directly inside `ref_conditioning` as `ref_phrase_*`
+
+### Runtime entry and teacher semantics
+
+- public runtime entry: `ConanRhythmAdapter.forward`
+- low-level helper: `run_rhythm_frontend()`
+
+`rhythm_teacher_as_main=true` should be read as:
+
+- run the learned offline teacher as the teacher-only execution branch
+- offline/full-commit semantics for audit/export style stages
+- not a streaming deployment replacement
+- `forward_teacher()` internally rebuilds a closed/full-commit teacher view
+  with `open_run_mask=0`, `sealed_mask=1`, and a fresh teacher state
+
+Canonical teacher projector knobs:
+
+- `rhythm_teacher_projector_force_full_commit`
+- `rhythm_teacher_projector_soft_pause_selection`
+
+`rhythm_enable_dual_mode_teacher=true` means:
+
+- run streaming execution and learned offline teacher together during training
+- keep `infer=true` free of teacher runtime branches
+
+### Runtime override surface to use operationally
+
+The maintained runtime override surface is intentionally constrained. The knobs
+operators should expect to A/B at runtime are:
+
+- trace controls
+  - `trace_horizon`
+  - `trace_active_tail_only`
+  - `trace_offset_lookahead_units`
+  - `trace_cold_start_min_visible_units`
+  - `trace_cold_start_full_visible_units`
+- phase-decoupled phrase gating
+  - `phase_decoupled_timing`
+  - `phase_decoupled_phrase_gate_boundary_threshold`
+- streaming-only scheduler / debt shaping
+  - `phase_decoupled_boundary_style_residual_scale`
+  - `debt_control_scale`
+  - `debt_pause_priority`
+  - `debt_speech_priority`
+- source-boundary scaling
+  - `source_boundary_scale_override`
+  - `teacher_source_boundary_scale_override`
+- projector sparsity / commit controls
+  - `projector_pause_topk_ratio_override`
+  - `projector_force_full_commit`
+  - `teacher_projector_force_full_commit`
+  - `teacher_projector_soft_pause_selection`
+- projector debt anti-windup
+  - `projector_debt_leak`
+  - `projector_debt_max_abs`
+  - `projector_debt_correction_horizon`
+
+Do not assume every training hparam is also a supported runtime override, and
+do not assume teacher-only runtime consumes the full streaming scheduler
+override surface.
+
+Public cache/reference contract reminder:
+
+- `ref_rhythm_stats [B,6]`
+- `ref_rhythm_trace [B,bins,5]`
+
+Planner-facing compact views are 2-D:
+
+- `planner_ref_stats [B,2]`
+- `planner_ref_trace [B,bins,2]`
+- `planner_slow_rhythm_memory [B,K,2]`
+- `planner_slow_rhythm_summary [B,2]`
+- `planner_ref_phrase_trace [B,P,bins,2]`
 
 ## 3. Cloud1 preservation / local-successor rule
 
@@ -49,6 +193,13 @@ cloud resources:
 - treat cloud checkpoints as **weight-only warm-start**, not exact optimizer-state continuation
 - for the train100+train360 cloud line, prefer:
   - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_cloud1_handoff.yaml`
+
+Teacher-path operational note:
+
+- `rhythm_teacher_as_main: true` means **offline/full-commit teacher audit/export runtime**
+- do not read it as "teacher becomes the final streaming deployment path"
+- canonical teacher pause sparsity knob is `rhythm_teacher_projector_soft_pause_selection`
+- canonical teacher full-commit knob is `rhythm_teacher_projector_force_full_commit`
 
 ## 4. Required assets on AutoDL
 
@@ -82,6 +233,15 @@ Use strict preflight before every real stage launch:
 python scripts/preflight_rhythm_v2.py --config <stage_config> --binary_data_dir <binary_dir> --processed_data_dir <processed_dir> --splits train valid --inspect_items 4 --model_dry_run --strict_processed_data_dir
 ```
 
+If you enable runtime reference sidecars, remember the distinction:
+
+- `rhythm_emit_reference_sidecar` controls rhythm-module conditioning artifacts
+- `rhythm_export_debug_sidecars` controls what is exported into dataset/runtime
+  samples for audit/debug
+- phrase-bank conditioning may come from emitted sidecars, explicit
+  `rhythm_runtime_phrase_bank_enable`, or already-populated `ref_phrase_*`
+  fields
+
 ## 6. Operator gates before stage handoff
 
 ### 6.1 Teacher stabilization gate
@@ -102,6 +262,29 @@ teacher-control set together:
 
 Operationally, teacher steady-state means a **small rolling validation window**
 is stable, not that one checkpoint spikes higher than the rest.
+
+Also note:
+
+- streaming-only scheduler knobs
+  (`rhythm_phase_decoupled_boundary_style_residual_scale`,
+  `rhythm_debt_control_scale`,
+  `rhythm_debt_pause_priority`,
+  `rhythm_debt_speech_priority`)
+  are not the knobs that determine offline teacher planning
+- teacher branches still use phase-decoupled phrase selection / trace-gate
+  semantics when `rhythm_phase_decoupled_timing=true`, but they do not consume
+  the streaming scheduler/controller debt-priority surface
+- shared projector debt knobs
+  (`rhythm_projector_debt_leak`,
+  `rhythm_projector_debt_max_abs`,
+  `rhythm_projector_debt_correction_horizon`)
+  do affect both streaming and teacher projector execution
+- debt is therefore two-level in this checkout:
+  - streaming budget-controller proposal shaping uses
+    `rhythm_debt_control_scale`, `rhythm_debt_pause_priority`,
+    `rhythm_debt_speech_priority`
+  - projector state update uses `rhythm_projector_debt_*` leak / clamp /
+    correction controls
 
 ### 6.2 Teacher handoff checkpoint selection
 

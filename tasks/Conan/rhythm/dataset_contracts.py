@@ -273,6 +273,7 @@ class RhythmDatasetCacheContract:
         stats_dim = int(self.hparams.get("rhythm_stats_dim", 6))
         trace_bins = int(self.hparams.get("rhythm_trace_bins", 24))
         trace_dim = int(self.hparams.get("rhythm_trace_dim", 5))
+        planner_trace_dim = int(self.hparams.get("rhythm_planner_trace_dim", 2))
         if stats.reshape(-1).shape[0] != stats_dim:
             raise RuntimeError(
                 f"Rhythm stats shape mismatch in {item_name}: found={tuple(stats.shape)}, expected_last_dim={stats_dim}."
@@ -283,20 +284,20 @@ class RhythmDatasetCacheContract:
             )
         slow_topk = int(self.hparams.get("rhythm_slow_topk", 6))
 
-        def _validate_slow_sidecar(memory_key: str, summary_key: str, *, label: str) -> int:
+        def _validate_slow_sidecar(memory_key: str, summary_key: str, *, label: str, feature_dim: int) -> int:
             slow_memory = np.asarray(conditioning[memory_key])
             slow_summary = np.asarray(conditioning[summary_key])
-            if slow_memory.ndim != 2 or slow_memory.shape[1] != trace_dim:
+            if slow_memory.ndim != 2 or slow_memory.shape[1] != feature_dim:
                 raise RuntimeError(
-                    f"{label} memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{trace_dim})."
+                    f"{label} memory shape mismatch in {item_name}: found={tuple(slow_memory.shape)}, expected=(*,{feature_dim})."
                 )
             if slow_memory.shape[0] > slow_topk:
                 raise RuntimeError(
                     f"{label} memory count mismatch in {item_name}: found={slow_memory.shape[0]}, expected<= {slow_topk}."
                 )
-            if slow_summary.reshape(-1).shape[0] != trace_dim:
+            if slow_summary.reshape(-1).shape[0] != feature_dim:
                 raise RuntimeError(
-                    f"{label} summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={trace_dim}."
+                    f"{label} summary shape mismatch in {item_name}: found={tuple(slow_summary.shape)}, expected_last_dim={feature_dim}."
                 )
             return int(slow_memory.shape[0])
 
@@ -315,6 +316,7 @@ class RhythmDatasetCacheContract:
                 "slow_rhythm_memory",
                 "slow_rhythm_summary",
                 label="Slow rhythm",
+                feature_dim=trace_dim,
             )
             selector_indices = np.asarray(conditioning["selector_meta_indices"]).reshape(-1)
             selector_scores = np.asarray(conditioning["selector_meta_scores"]).reshape(-1)
@@ -346,7 +348,68 @@ class RhythmDatasetCacheContract:
                 "planner_slow_rhythm_memory",
                 "planner_slow_rhythm_summary",
                 label="Planner slow rhythm",
+                feature_dim=planner_trace_dim,
             )
+        phrase_sidecar_keys = getattr(self.owner, "_RHYTHM_REF_PHRASE_CACHE_KEYS", ())
+        if phrase_sidecar_keys and _require_complete_optional_group(phrase_sidecar_keys, label="Reference phrase-bank"):
+            ref_phrase_trace = np.asarray(conditioning["ref_phrase_trace"])
+            planner_ref_phrase_trace = np.asarray(conditioning["planner_ref_phrase_trace"])
+            ref_phrase_valid = np.asarray(conditioning["ref_phrase_valid"]).reshape(-1)
+            ref_phrase_lengths = np.asarray(conditioning["ref_phrase_lengths"]).reshape(-1)
+            ref_phrase_starts = np.asarray(conditioning["ref_phrase_starts"]).reshape(-1)
+            ref_phrase_ends = np.asarray(conditioning["ref_phrase_ends"]).reshape(-1)
+            ref_phrase_boundary_strength = np.asarray(conditioning["ref_phrase_boundary_strength"]).reshape(-1)
+            ref_phrase_stats = np.asarray(conditioning["ref_phrase_stats"])
+            phrase_bins = int(
+                self.hparams.get(
+                    "rhythm_runtime_phrase_bank_bins",
+                    max(4, int(self.hparams.get("rhythm_selector_cell_size", 3)) * 2 + 2),
+                )
+            )
+            phrase_count = int(ref_phrase_valid.shape[0])
+            if ref_phrase_trace.ndim != 3 or ref_phrase_trace.shape[0] != phrase_count:
+                raise RuntimeError(
+                    f"Reference phrase trace shape mismatch in {item_name}: "
+                    f"found={tuple(ref_phrase_trace.shape)}, expected=({phrase_count}, {phrase_bins}, {trace_dim})."
+                )
+            if ref_phrase_trace.shape[1] != phrase_bins or ref_phrase_trace.shape[2] != trace_dim:
+                raise RuntimeError(
+                    f"Reference phrase trace shape mismatch in {item_name}: "
+                    f"found={tuple(ref_phrase_trace.shape)}, expected=({phrase_count}, {phrase_bins}, {trace_dim})."
+                )
+            if (
+                planner_ref_phrase_trace.ndim != 3
+                or planner_ref_phrase_trace.shape[0] != phrase_count
+                or planner_ref_phrase_trace.shape[1] != phrase_bins
+                or planner_ref_phrase_trace.shape[2] != planner_trace_dim
+            ):
+                raise RuntimeError(
+                    f"Planner reference phrase trace shape mismatch in {item_name}: "
+                    f"found={tuple(planner_ref_phrase_trace.shape)}, "
+                    f"expected=({phrase_count}, {phrase_bins}, {planner_trace_dim})."
+                )
+            for key, value in {
+                "ref_phrase_lengths": ref_phrase_lengths,
+                "ref_phrase_starts": ref_phrase_starts,
+                "ref_phrase_ends": ref_phrase_ends,
+                "ref_phrase_boundary_strength": ref_phrase_boundary_strength,
+            }.items():
+                if int(value.shape[0]) != phrase_count:
+                    raise RuntimeError(
+                        f"Reference phrase-bank metadata length mismatch in {item_name} for {key}: "
+                        f"found={int(value.shape[0])}, expected={phrase_count}."
+                    )
+            if ref_phrase_stats.ndim != 2 or ref_phrase_stats.shape != (phrase_count, trace_dim):
+                raise RuntimeError(
+                    f"Reference phrase stats shape mismatch in {item_name}: "
+                    f"found={tuple(ref_phrase_stats.shape)}, expected=({phrase_count}, {trace_dim})."
+                )
+            if np.any(ref_phrase_lengths < 0):
+                raise RuntimeError(f"Reference phrase lengths must be non-negative in {item_name}.")
+            if np.any(ref_phrase_starts < 0) or np.any(ref_phrase_ends < 0):
+                raise RuntimeError(f"Reference phrase spans must be non-negative in {item_name}.")
+            if np.any(ref_phrase_starts > ref_phrase_ends):
+                raise RuntimeError(f"Reference phrase spans invalid in {item_name}: starts exceed ends.")
 
     def validate_target_shapes(self, targets, *, item_name: str, expected_units: int):
         unit_keys = [

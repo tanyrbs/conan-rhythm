@@ -62,6 +62,8 @@ rhythm_pause_breath_reset_threshold: 0.55
 
 # Teacher-offline recall ablations may optionally keep full-commit semantics
 # while still enabling soft sparse pause selection during training so near-top-k
-# pause candidates receive gradient.
+# pause candidates receive gradient. This knob belongs to the offline teacher
+# branch / teacher_as_main path; it is not the student streaming pause-selection
+# knob.
 rhythm_teacher_projector_force_full_commit: true
 rhythm_teacher_projector_soft_pause_selection: false

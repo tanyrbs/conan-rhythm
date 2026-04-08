@@ -4,6 +4,11 @@ import torch
 import torch.nn.functional as F
 
 
+BOUNDARY_TYPE_JOIN = 0
+BOUNDARY_TYPE_WEAK = 1
+BOUNDARY_TYPE_PHRASE = 2
+
+
 def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     total = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
@@ -47,6 +52,100 @@ def build_source_boundary_cue(
         cue = cue * (0.80 + 0.20 * sealed_mask.float())
 
     return cue.clamp(0.0, 1.0) * unit_mask
+
+
+def classify_boundary_type_unit(
+    *,
+    unit_mask: torch.Tensor,
+    source_boundary_cue: torch.Tensor | None = None,
+    boundary_score_unit: torch.Tensor | None = None,
+    sep_hint: torch.Tensor | None = None,
+    open_run_mask: torch.Tensor | None = None,
+    sealed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    weak_boundary_threshold: float = 0.40,
+    phrase_boundary_threshold: float = 0.55,
+) -> torch.Tensor:
+    """Classify unit-level junctions into JOIN / WEAK / PHRASE.
+
+    The returned code for unit i describes the boundary *after* unit i.
+    The maintained runtime uses these types to:
+      - keep phrase retrieval tied to committed PHRASE boundaries only
+      - allow weak local timing variation without forcing phrase retrieval
+      - keep JOIN slots pause-free in the projector
+    """
+
+    unit_mask_f = unit_mask.float()
+    source = (
+        source_boundary_cue.float().clamp(0.0, 1.0)
+        if source_boundary_cue is not None
+        else unit_mask_f.new_zeros(unit_mask_f.shape)
+    )
+    planner = (
+        boundary_score_unit.float().clamp(0.0, 1.0)
+        if boundary_score_unit is not None
+        else unit_mask_f.new_zeros(unit_mask_f.shape)
+    )
+    sep = (
+        sep_hint.float().clamp(0.0, 1.0)
+        if sep_hint is not None
+        else unit_mask_f.new_zeros(unit_mask_f.shape)
+    )
+    conf = (
+        boundary_confidence.float().clamp(0.0, 1.0)
+        if boundary_confidence is not None
+        else unit_mask_f.new_zeros(unit_mask_f.shape)
+    )
+    sealed = (
+        sealed_mask.float().clamp(0.0, 1.0)
+        if sealed_mask is not None
+        else unit_mask_f.new_ones(unit_mask_f.shape)
+    )
+    open_tail = (
+        open_run_mask.float().clamp(0.0, 1.0)
+        if open_run_mask is not None
+        else unit_mask_f.new_zeros(unit_mask_f.shape)
+    )
+
+    weak_threshold = float(max(0.0, min(1.0, weak_boundary_threshold)))
+    phrase_threshold = float(max(weak_threshold, min(1.0, phrase_boundary_threshold)))
+
+    weak_strength = (
+        0.40 * source
+        + 0.30 * planner
+        + 0.20 * sep
+        + 0.10 * conf
+    )
+    phrase_strength = (
+        0.45 * planner
+        + 0.30 * source
+        + 0.15 * conf
+        + 0.10 * sep
+    )
+    valid = (unit_mask_f > 0.5) & (sealed > 0.5) & ~(open_tail > 0.5)
+    boundary_type = torch.full_like(unit_mask_f, BOUNDARY_TYPE_JOIN, dtype=torch.long)
+    weak_mask = valid & (weak_strength >= weak_threshold)
+    phrase_mask = valid & (phrase_strength >= phrase_threshold)
+    boundary_type = torch.where(weak_mask, torch.full_like(boundary_type, BOUNDARY_TYPE_WEAK), boundary_type)
+    boundary_type = torch.where(phrase_mask, torch.full_like(boundary_type, BOUNDARY_TYPE_PHRASE), boundary_type)
+    boundary_type = torch.where(unit_mask_f > 0.5, boundary_type, torch.zeros_like(boundary_type))
+    return boundary_type
+
+
+def build_boundary_type_masks(
+    boundary_type_unit: torch.Tensor | None,
+    *,
+    unit_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    unit_mask_f = unit_mask.float()
+    if boundary_type_unit is None:
+        zeros = unit_mask_f.new_zeros(unit_mask_f.shape)
+        return zeros, zeros, zeros
+    boundary_type_unit = boundary_type_unit.long().to(device=unit_mask.device)
+    join_mask = (boundary_type_unit == BOUNDARY_TYPE_JOIN).float() * unit_mask_f
+    weak_mask = (boundary_type_unit == BOUNDARY_TYPE_WEAK).float() * unit_mask_f
+    phrase_mask = (boundary_type_unit == BOUNDARY_TYPE_PHRASE).float() * unit_mask_f
+    return join_mask, weak_mask, phrase_mask
 
 
 def compose_boundary_score_unit(

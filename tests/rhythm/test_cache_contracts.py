@@ -175,6 +175,33 @@ class RhythmCacheContractTests(unittest.TestCase):
             any("Primary surface is teacher but rhythm_binarize_teacher_targets is false." in warning for warning in report.warnings)
         )
 
+    def test_export_debug_sidecars_require_phrase_bank_sidecar_groups(self) -> None:
+        hparams = {
+            "rhythm_enable_v2": True,
+            "rhythm_stage": "transitional",
+            "rhythm_strict_mainline": False,
+            "rhythm_cache_version": 5,
+            "rhythm_dataset_target_mode": "cached_only",
+            "rhythm_primary_target_surface": "guidance",
+            "rhythm_distill_surface": "none",
+            "rhythm_enable_dual_mode_teacher": False,
+            "rhythm_enable_learned_offline_teacher": False,
+            "rhythm_runtime_enable_learned_offline_teacher": False,
+            "rhythm_teacher_as_main": False,
+            "rhythm_export_debug_sidecars": True,
+            "lambda_rhythm_guidance": 0.0,
+            "lambda_rhythm_plan": 0.0,
+            "lambda_rhythm_distill": 0.0,
+            "lambda_rhythm_teacher_aux": 0.0,
+        }
+        report = validate_cache_field_contract(build_contract_context(hparams, model_dry_run=True))
+        groups = set(report.required_field_groups)
+
+        self.assertIn(("planner_slow_rhythm_memory",), groups)
+        self.assertIn(("ref_phrase_trace",), groups)
+        self.assertIn(("planner_ref_phrase_trace",), groups)
+        self.assertIn(("ref_phrase_boundary_strength",), groups)
+
 
 if __name__ == "__main__":
     unittest.main()

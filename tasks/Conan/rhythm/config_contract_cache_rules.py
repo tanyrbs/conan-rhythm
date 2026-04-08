@@ -102,6 +102,16 @@ _PLANNER_REFERENCE_SIDECAR_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
     ("planner_slow_rhythm_memory",),
     ("planner_slow_rhythm_summary",),
 )
+_PHRASE_REFERENCE_SIDECAR_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("ref_phrase_trace",),
+    ("planner_ref_phrase_trace",),
+    ("ref_phrase_valid",),
+    ("ref_phrase_lengths",),
+    ("ref_phrase_starts",),
+    ("ref_phrase_ends",),
+    ("ref_phrase_boundary_strength",),
+    ("ref_phrase_stats",),
+)
 
 
 def validate_cache_field_contract(
@@ -155,6 +165,7 @@ def validate_cache_field_contract(
     if bool(hp.get("rhythm_export_debug_sidecars", False)):
         expected_groups.extend(_REFERENCE_SIDECAR_FIELD_GROUPS)
         expected_groups.extend(_PLANNER_REFERENCE_SIDECAR_FIELD_GROUPS)
+        expected_groups.extend(_PHRASE_REFERENCE_SIDECAR_FIELD_GROUPS)
 
     if float(hp.get("lambda_rhythm_distill", 0.0)) > 0.0:
         if distill == "none":

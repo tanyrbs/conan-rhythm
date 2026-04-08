@@ -255,6 +255,111 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
         self.assertTrue(bundle is not None)
         self.assertTrue(frontend.mark_last_open)
 
+    def test_run_rhythm_frontend_inherits_module_phase_decoupled_default_without_override(self) -> None:
+        class _FakeFrontend:
+            def from_content_tensor(self, content, *, content_lengths=None, mark_last_open=True):
+                return type(
+                    "Batch",
+                    (),
+                    {
+                        "content_units": content.long(),
+                        "dur_anchor_src": torch.ones_like(content, dtype=torch.long),
+                        "unit_mask": torch.ones_like(content, dtype=torch.float32),
+                        "open_run_mask": torch.zeros_like(content, dtype=torch.long),
+                        "sealed_mask": torch.ones_like(content, dtype=torch.float32),
+                        "sep_hint": torch.zeros_like(content, dtype=torch.long),
+                        "boundary_confidence": torch.zeros_like(content, dtype=torch.float32),
+                    },
+                )()
+
+        class _FakeModule:
+            phase_decoupled_timing = True
+            enable_learned_offline_teacher = False
+
+            def __init__(self) -> None:
+                self.forward_kwargs = None
+
+            @staticmethod
+            def build_reference_conditioning(*, ref_conditioning=None, ref_mel=None):
+                return {"ref_rhythm_stats": torch.zeros((1, 6)), "ref_rhythm_trace": torch.zeros((1, 8, 5))}
+
+            def __call__(self, **kwargs):
+                self.forward_kwargs = kwargs
+                return {"ok": True, "state": kwargs.get("state")}
+
+        frontend = _FakeFrontend()
+        module = _FakeModule()
+        run_rhythm_frontend(
+            rhythm_enable_v2=True,
+            rhythm_unit_frontend=frontend,
+            rhythm_module=module,
+            content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ref=torch.zeros((1, 4, 80), dtype=torch.float32),
+            infer=False,
+        )
+        self.assertIsNotNone(module.forward_kwargs)
+        self.assertTrue(bool(module.forward_kwargs["phase_decoupled_timing"]))
+
+    def test_run_rhythm_frontend_teacher_as_main_does_not_forward_streaming_only_scheduler_overrides(self) -> None:
+        class _FakeFrontend:
+            def from_content_tensor(self, content, *, content_lengths=None, mark_last_open=True):
+                return type(
+                    "Batch",
+                    (),
+                    {
+                        "content_units": content.long(),
+                        "dur_anchor_src": torch.ones_like(content, dtype=torch.long),
+                        "unit_mask": torch.ones_like(content, dtype=torch.float32),
+                        "open_run_mask": torch.zeros_like(content, dtype=torch.long),
+                        "sealed_mask": torch.ones_like(content, dtype=torch.float32),
+                        "sep_hint": torch.zeros_like(content, dtype=torch.long),
+                        "boundary_confidence": torch.zeros_like(content, dtype=torch.float32),
+                    },
+                )()
+
+        class _FakeModule:
+            phase_decoupled_timing = True
+            enable_learned_offline_teacher = True
+
+            def __init__(self) -> None:
+                self.teacher_kwargs = None
+
+            @staticmethod
+            def build_reference_conditioning(*, ref_conditioning=None, ref_mel=None):
+                return {"ref_rhythm_stats": torch.zeros((1, 6)), "ref_rhythm_trace": torch.zeros((1, 8, 5))}
+
+            def forward_teacher(self, **kwargs):
+                self.teacher_kwargs = kwargs
+                return {"ok": True}, {"overall": torch.ones((1, 1), dtype=torch.float32)}
+
+        module = _FakeModule()
+        run_rhythm_frontend(
+            rhythm_enable_v2=True,
+            rhythm_unit_frontend=_FakeFrontend(),
+            rhythm_module=module,
+            content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ref=torch.zeros((1, 4, 80), dtype=torch.float32),
+            infer=False,
+            teacher_as_main=True,
+            teacher_projector_force_full_commit=True,
+            teacher_projector_soft_pause_selection=True,
+            phase_decoupled_boundary_style_residual_scale=0.3,
+            debt_control_scale=2.0,
+            debt_pause_priority=0.2,
+            debt_speech_priority=0.4,
+            projector_debt_leak=0.1,
+        )
+        self.assertIsNotNone(module.teacher_kwargs)
+        assert module.teacher_kwargs is not None
+        self.assertNotIn("phase_decoupled_boundary_style_residual_scale", module.teacher_kwargs)
+        self.assertNotIn("debt_control_scale", module.teacher_kwargs)
+        self.assertNotIn("debt_pause_priority", module.teacher_kwargs)
+        self.assertNotIn("debt_speech_priority", module.teacher_kwargs)
+        self.assertIn("projector_debt_leak", module.teacher_kwargs)
+        self.assertIn("projector_force_full_commit", module.teacher_kwargs)
+        self.assertIn("projector_soft_pause_selection", module.teacher_kwargs)
+        self.assertTrue(bool(module.teacher_kwargs["projector_soft_pause_selection"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from modules.Conan.diff.net import CausalConv1d
+from .compat import resolve_phase_decoupled_flag
 from .contracts import BoundaryCommitDecision, StreamingRhythmState
 from .pause_features import build_pause_support_feature_bundle
 
@@ -26,30 +27,6 @@ def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> t
     probs = torch.where(torch.isfinite(probs), probs, torch.zeros_like(probs))
     denom = probs.sum(dim=dim, keepdim=True).clamp_min(1e-6)
     return probs / denom
-
-
-def _resolve_phase_decoupled_flag(
-    *,
-    default: bool,
-    phase_decoupled_timing: bool | None,
-    phase_free_timing: bool | None,
-    where: str,
-) -> bool:
-    if (
-        phase_decoupled_timing is not None
-        and phase_free_timing is not None
-        and bool(phase_decoupled_timing) != bool(phase_free_timing)
-    ):
-        raise ValueError(
-            f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
-        )
-    if phase_decoupled_timing is not None:
-        return bool(phase_decoupled_timing)
-    if phase_free_timing is not None:
-        return bool(phase_free_timing)
-    return bool(default)
-
-
 def resolve_budget_views_from_total_and_pause_share(
     *,
     total_budget: torch.Tensor,
@@ -437,7 +414,7 @@ class WindowBudgetController(nn.Module):
         self.min_speech_frames = float(min_speech_frames)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.phase_feature_scale = float(min(max(phase_feature_scale, 0.0), 1.0))
-        self.phase_decoupled_timing = _resolve_phase_decoupled_flag(
+        self.phase_decoupled_timing = resolve_phase_decoupled_flag(
             default=False,
             phase_decoupled_timing=phase_decoupled_timing,
             phase_free_timing=phase_free_timing,
@@ -494,6 +471,9 @@ class WindowBudgetController(nn.Module):
         prompt_reliability: torch.Tensor | None = None,
         phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
+        debt_control_scale: float | None = None,
+        debt_pause_priority: float | None = None,
+        debt_speech_priority: float | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
@@ -529,11 +509,20 @@ class WindowBudgetController(nn.Module):
         structure_progress = frontier_ratio
         if chunk_state is not None:
             structure_progress = chunk_state.structure_progress.float()
-        effective_phase_decoupled_timing = _resolve_phase_decoupled_flag(
+        effective_phase_decoupled_timing = resolve_phase_decoupled_flag(
             default=self.phase_decoupled_timing,
             phase_decoupled_timing=phase_decoupled_timing,
             phase_free_timing=phase_free_timing,
             where="WindowBudgetController.forward",
+        )
+        effective_debt_control_scale = float(
+            self.debt_control_scale if debt_control_scale is None else max(float(debt_control_scale), 1.0e-3)
+        )
+        effective_debt_pause_priority = float(
+            self.debt_pause_priority if debt_pause_priority is None else max(float(debt_pause_priority), 0.0)
+        )
+        effective_debt_speech_priority = float(
+            self.debt_speech_priority if debt_speech_priority is None else max(float(debt_speech_priority), 0.0)
         )
         if (not effective_phase_decoupled_timing) and self.phase_feature_scale > 0.0:
             if chunk_state is not None or commit_frontier is not None:
@@ -552,7 +541,7 @@ class WindowBudgetController(nn.Module):
         else:
             phase_like = structure_progress.view(-1, 1, 1).expand(-1, unit_states.size(1), -1)
         clock_delta = clock_delta.float()
-        clock_ctrl = torch.tanh(clock_delta / float(self.debt_control_scale))
+        clock_ctrl = torch.tanh(clock_delta / effective_debt_control_scale)
         clock_pos = clock_ctrl.clamp_min(0.0)
         clock_neg = (-clock_ctrl).clamp_min(0.0)
         clock_pair = torch.stack([clock_pos, clock_neg], dim=-1)
@@ -595,8 +584,8 @@ class WindowBudgetController(nn.Module):
         raw_total_logratio = torch.tanh(self.total_budget_head(global_hidden)) * self.max_total_logratio
         raw_total_logratio = (
             raw_total_logratio
-            - clock_pos.unsqueeze(-1) * self.debt_speech_priority
-            + 0.25 * clock_neg.unsqueeze(-1) * self.debt_speech_priority
+            - clock_pos.unsqueeze(-1) * effective_debt_speech_priority
+            + 0.25 * clock_neg.unsqueeze(-1) * effective_debt_speech_priority
         ).clamp(-self.max_total_logratio, self.max_total_logratio)
         pause_ratio_hint = planner_ref_stats[:, 1:2].float().clamp(self.pause_share_min, self.pause_share_max)
         pause_share_delta = (
@@ -605,8 +594,8 @@ class WindowBudgetController(nn.Module):
         pause_share = (
             pause_ratio_hint
             + pause_share_delta
-            + clock_neg.unsqueeze(-1) * self.debt_pause_priority
-            - clock_pos.unsqueeze(-1) * (0.5 * self.debt_pause_priority)
+            + clock_neg.unsqueeze(-1) * effective_debt_pause_priority
+            - clock_pos.unsqueeze(-1) * (0.5 * effective_debt_pause_priority)
         ).clamp(self.pause_share_min, self.pause_share_max)
 
         src_total = (dur_anchor_src.float() * unit_mask).sum(dim=1, keepdim=True).clamp_min(1.0)

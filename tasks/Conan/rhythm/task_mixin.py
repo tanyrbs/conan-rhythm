@@ -647,14 +647,12 @@ class RhythmConanTaskMixin:
             dur_anchor_src=unit_batch.dur_anchor_src,
             ref_conditioning=rhythm_ref_conditioning,
             unit_mask=unit_batch.unit_mask,
-            open_run_mask=torch.zeros_like(unit_batch.content_units),
-            sealed_mask=torch.ones_like(unit_batch.unit_mask).float(),
             sep_hint=unit_batch.sep_hint,
             boundary_confidence=unit_batch.boundary_confidence,
             projector_pause_topk_ratio_override=pause_ratio,
             source_boundary_scale_override=teacher_scale,
             projector_force_full_commit=teacher_force_full_commit,
-            projector_soft_pause_selection_override=teacher_soft_pause_selection,
+            projector_soft_pause_selection=teacher_soft_pause_selection,
         )
         output = {
             "rhythm_execution": execution,

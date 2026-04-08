@@ -62,6 +62,38 @@ class ReferenceSelector:
         gathered = value.gather(1, gather_index)
         return gathered.squeeze(1)
 
+    @staticmethod
+    def _mix_phrase_bank_rows(
+        value: torch.Tensor | None,
+        *,
+        center_index: torch.Tensor,
+        valid_mask: torch.Tensor,
+        mix_alpha: float,
+    ) -> torch.Tensor | None:
+        if value is None:
+            return None
+        alpha = float(max(0.0, min(0.49, mix_alpha)))
+        center = ReferenceSelector._gather_phrase_bank_rows(value, center_index)
+        if center is None or alpha <= 0.0:
+            return center
+        prev_index = (center_index.long() - 1).clamp_min(0)
+        next_index = torch.minimum(center_index.long() + 1, valid_mask.long().sum(dim=1).clamp_min(1) - 1)
+        prev_valid = (center_index.long() > 0).float().reshape(center_index.size(0), *([1] * (center.dim() - 1)))
+        next_valid = (
+            center_index.long() < (valid_mask.long().sum(dim=1).clamp_min(1) - 1)
+        ).float().reshape(center_index.size(0), *([1] * (center.dim() - 1)))
+        prev_value = ReferenceSelector._gather_phrase_bank_rows(value, prev_index)
+        next_value = ReferenceSelector._gather_phrase_bank_rows(value, next_index)
+        prev_weight = alpha * prev_valid
+        next_weight = alpha * next_valid
+        center_weight = 1.0 - (prev_weight + next_weight)
+        mixed = center.float() * center_weight
+        if prev_value is not None:
+            mixed = mixed + prev_value.float() * prev_weight
+        if next_value is not None:
+            mixed = mixed + next_value.float() * next_weight
+        return mixed
+
     def _select_anchor_indices(self, score: torch.Tensor) -> torch.Tensor:
         trace_bins = int(score.size(0))
         topk = min(self.slow_topk, trace_bins)
@@ -193,6 +225,79 @@ class ReferenceSelector:
         )
 
     @staticmethod
+    def _compose_runtime_phrase_score(
+        *,
+        ref_phrase_trace: torch.Tensor,
+        ref_phrase_stats: torch.Tensor | None,
+        ref_phrase_lengths: torch.Tensor,
+        ref_phrase_valid: torch.Tensor,
+        ref_phrase_boundary_strength: torch.Tensor,
+        base_index: torch.Tensor,
+        query_chunk_summary: torch.Tensor | None,
+        query_commit_confidence: torch.Tensor | None,
+        query_phrase_close_prob: torch.Tensor | None,
+        monotonic_window: int,
+        boundary_weight: float,
+        local_rate_weight: float,
+        pause_weight: float,
+        voiced_weight: float,
+        final_bias_weight: float,
+        monotonic_bias: float,
+        phrase_length_bias: float,
+    ) -> torch.Tensor:
+        steps = torch.arange(ref_phrase_valid.size(1), device=ref_phrase_valid.device)[None, :]
+        candidate_mask = (ref_phrase_valid.float() > 0.5) & (steps >= base_index[:, None])
+        candidate_mask = candidate_mask & (steps < (base_index[:, None] + max(1, int(monotonic_window))))
+        if ref_phrase_stats is None:
+            if ref_phrase_trace.dim() == 4:
+                phrase_stats = ref_phrase_trace.float().mean(dim=2)
+            elif ref_phrase_trace.dim() == 3:
+                phrase_stats = ref_phrase_trace.float()
+            else:
+                raise ValueError(
+                    "ref_phrase_trace must be rank-3 [B,P,D] or rank-4 [B,P,T,D], "
+                    f"got {tuple(ref_phrase_trace.shape)}"
+                )
+        else:
+            phrase_stats = ref_phrase_stats.float()
+        zeros = torch.zeros_like(ref_phrase_boundary_strength.float())
+        pause_score = phrase_stats[:, :, 0].clamp(0.0, 1.0) if phrase_stats.size(-1) > 0 else zeros
+        local_rate_score = phrase_stats[:, :, 1].abs() if phrase_stats.size(-1) > 1 else zeros
+        voiced_score = phrase_stats[:, :, 4].clamp(0.0, 1.0) if phrase_stats.size(-1) > 4 else torch.ones_like(zeros)
+        boundary_score = ref_phrase_boundary_strength.float().clamp(0.0, 1.0)
+        max_len = ref_phrase_lengths.float().amax(dim=1, keepdim=True).clamp_min(1.0)
+        norm_len = ref_phrase_lengths.float() / max_len
+        if query_phrase_close_prob is None:
+            if query_commit_confidence is not None:
+                commit_conf = query_commit_confidence.float().reshape(base_index.size(0), 1)
+            else:
+                commit_conf = torch.ones((base_index.size(0), 1), device=ref_phrase_valid.device) * 0.5
+        else:
+            commit_conf = query_phrase_close_prob.float().reshape(base_index.size(0), 1)
+        structure_progress = (
+            query_chunk_summary.float()[:, 0:1]
+            if query_chunk_summary is not None
+            else torch.full_like(commit_conf, 0.5)
+        )
+        valid_counts = ref_phrase_valid.long().sum(dim=1).clamp_min(1)
+        final_index = (valid_counts - 1)[:, None]
+        final_bias = steps.eq(final_index).float()
+        distance = (steps - base_index[:, None]).float().clamp_min(0.0)
+        distance_penalty = (0.15 + max(float(monotonic_bias), 0.0)) * distance
+        score = (
+            float(boundary_weight) * boundary_score
+            + float(local_rate_weight) * local_rate_score
+            + float(pause_weight) * pause_score
+            + float(voiced_weight) * voiced_score
+            + float(final_bias_weight) * final_bias
+            + float(phrase_length_bias) * norm_len
+            + 0.15 * commit_conf
+            + 0.10 * structure_progress
+            - distance_penalty
+        )
+        return score.masked_fill(~candidate_mask, float("-inf"))
+
+    @staticmethod
     def select_monotonic_phrase(
         *,
         ref_phrase_trace: torch.Tensor,
@@ -209,78 +314,145 @@ class ReferenceSelector:
         query_phrase_close_prob: torch.Tensor | None = None,
         monotonic_window: int = 3,
         strict_pointer_only: bool = False,
+        neighbor_mix_alpha: float = 0.0,
+        boundary_weight: float = 0.40,
+        local_rate_weight: float = 0.25,
+        pause_weight: float = 0.10,
+        voiced_weight: float = 0.05,
+        final_bias_weight: float = 0.05,
+        monotonic_bias: float = 0.0,
+        phrase_length_bias: float = 0.25,
     ) -> dict[str, torch.Tensor]:
         valid_counts = ref_phrase_valid.long().sum(dim=1).clamp_min(1)
         base_index = ref_phrase_ptr.long().clamp_min(0)
         base_index = torch.minimum(base_index, valid_counts - 1)
         selected_index = base_index
         if not strict_pointer_only:
-            window = max(1, int(monotonic_window))
-            steps = torch.arange(ref_phrase_valid.size(1), device=ref_phrase_valid.device)[None, :]
-            candidate_mask = (ref_phrase_valid.float() > 0.5) & (steps >= base_index[:, None])
-            candidate_mask = candidate_mask & (steps < (base_index[:, None] + window))
-            if query_phrase_close_prob is None:
-                if query_commit_confidence is not None:
-                    commit_conf = query_commit_confidence.float().reshape(base_index.size(0), 1)
-                else:
-                    commit_conf = torch.ones((base_index.size(0), 1), device=ref_phrase_valid.device) * 0.5
-            else:
-                commit_conf = query_phrase_close_prob.float().reshape(base_index.size(0), 1)
-            structure_progress = (
-                query_chunk_summary.float()[:, 0:1]
-                if query_chunk_summary is not None
-                else torch.full_like(commit_conf, 0.5)
+            score = ReferenceSelector._compose_runtime_phrase_score(
+                ref_phrase_trace=ref_phrase_trace,
+                ref_phrase_stats=ref_phrase_stats,
+                ref_phrase_lengths=ref_phrase_lengths,
+                ref_phrase_valid=ref_phrase_valid,
+                ref_phrase_boundary_strength=ref_phrase_boundary_strength,
+                base_index=base_index,
+                query_chunk_summary=query_chunk_summary,
+                query_commit_confidence=query_commit_confidence,
+                query_phrase_close_prob=query_phrase_close_prob,
+                monotonic_window=monotonic_window,
+                boundary_weight=boundary_weight,
+                local_rate_weight=local_rate_weight,
+                pause_weight=pause_weight,
+                voiced_weight=voiced_weight,
+                final_bias_weight=final_bias_weight,
+                monotonic_bias=monotonic_bias,
+                phrase_length_bias=phrase_length_bias,
             )
-            max_len = ref_phrase_lengths.float().amax(dim=1, keepdim=True).clamp_min(1.0)
-            norm_len = ref_phrase_lengths.float() / max_len
-            boundary_score = ref_phrase_boundary_strength.float()
-            distance = (steps - base_index[:, None]).float()
-            monotonic_bias = -0.15 * distance
-            score = (
-                0.40 * boundary_score
-                + 0.25 * norm_len
-                + 0.15 * commit_conf
-                + 0.10 * structure_progress
-                + monotonic_bias
-            )
-            score = score.masked_fill(~candidate_mask, float("-inf"))
             winner = torch.argmax(score, dim=1)
-            has_candidate = candidate_mask.any(dim=1)
+            has_candidate = torch.isfinite(score).any(dim=1)
             selected_index = torch.where(has_candidate, winner.long(), base_index)
+        selected_ref_phrase_trace = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_trace,
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_planner_ref_phrase_trace = ReferenceSelector._mix_phrase_bank_rows(
+            planner_ref_phrase_trace,
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_ref_phrase_valid = ReferenceSelector._gather_phrase_bank_rows(
+            ref_phrase_valid.float(),
+            selected_index,
+        )
+        selected_ref_phrase_length = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_lengths.float(),
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_ref_phrase_start = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_starts.float(),
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_ref_phrase_end = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_ends.float(),
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_ref_phrase_boundary_strength = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_boundary_strength.float(),
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
+        selected_ref_phrase_stats = ReferenceSelector._mix_phrase_bank_rows(
+            ref_phrase_stats,
+            center_index=selected_index,
+            valid_mask=ref_phrase_valid,
+            mix_alpha=neighbor_mix_alpha,
+        )
         selection = {
             "selected_ref_phrase_index": selected_index,
-            "selected_ref_phrase_trace": ReferenceSelector._gather_phrase_bank_rows(ref_phrase_trace, selected_index),
-            "selected_planner_ref_phrase_trace": ReferenceSelector._gather_phrase_bank_rows(
-                planner_ref_phrase_trace,
-                selected_index,
-            ),
-            "selected_ref_phrase_valid": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_valid.float(),
-                selected_index,
-            ),
-            "selected_ref_phrase_length": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_lengths.float(),
-                selected_index,
-            ),
-            "selected_ref_phrase_start": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_starts.float(),
-                selected_index,
-            ),
-            "selected_ref_phrase_end": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_ends.float(),
-                selected_index,
-            ),
-            "selected_ref_phrase_boundary_strength": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_boundary_strength.float(),
-                selected_index,
-            ),
-            "selected_ref_phrase_stats": ReferenceSelector._gather_phrase_bank_rows(
-                ref_phrase_stats,
-                selected_index,
-            ),
+            "selected_ref_phrase_trace": selected_ref_phrase_trace,
+            "selected_planner_ref_phrase_trace": selected_planner_ref_phrase_trace,
+            "selected_ref_phrase_valid": selected_ref_phrase_valid,
+            "selected_ref_phrase_length": selected_ref_phrase_length,
+            "selected_ref_phrase_start": selected_ref_phrase_start,
+            "selected_ref_phrase_end": selected_ref_phrase_end,
+            "selected_ref_phrase_boundary_strength": selected_ref_phrase_boundary_strength,
+            "selected_ref_phrase_stats": selected_ref_phrase_stats,
         }
         selection.update(ReferenceSelector.build_phrase_prototype(selection))
         return selection
+
+    def select_monotonic_phrase_bank(
+        self,
+        *,
+        ref_phrase_trace: torch.Tensor,
+        planner_ref_phrase_trace: torch.Tensor,
+        ref_phrase_valid: torch.Tensor,
+        ref_phrase_lengths: torch.Tensor,
+        ref_phrase_starts: torch.Tensor,
+        ref_phrase_ends: torch.Tensor,
+        ref_phrase_boundary_strength: torch.Tensor,
+        ref_phrase_stats: torch.Tensor | None,
+        ref_phrase_ptr: torch.Tensor,
+        query_chunk_summary: torch.Tensor | None = None,
+        query_commit_confidence: torch.Tensor | None = None,
+        query_phrase_close_prob: torch.Tensor | None = None,
+        monotonic_window: int | None = None,
+        strict_pointer_only: bool = False,
+        neighbor_mix_alpha: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
+        return self.select_monotonic_phrase(
+            ref_phrase_trace=ref_phrase_trace,
+            planner_ref_phrase_trace=planner_ref_phrase_trace,
+            ref_phrase_valid=ref_phrase_valid,
+            ref_phrase_lengths=ref_phrase_lengths,
+            ref_phrase_starts=ref_phrase_starts,
+            ref_phrase_ends=ref_phrase_ends,
+            ref_phrase_boundary_strength=ref_phrase_boundary_strength,
+            ref_phrase_stats=ref_phrase_stats,
+            ref_phrase_ptr=ref_phrase_ptr,
+            query_chunk_summary=query_chunk_summary,
+            query_commit_confidence=query_commit_confidence,
+            query_phrase_close_prob=query_phrase_close_prob,
+            monotonic_window=self.phrase_select_window if monotonic_window is None else monotonic_window,
+            strict_pointer_only=strict_pointer_only,
+            neighbor_mix_alpha=neighbor_mix_alpha,
+            boundary_weight=self.boundary_weight,
+            local_rate_weight=self.local_rate_weight,
+            pause_weight=self.pause_weight,
+            voiced_weight=self.voiced_weight,
+            final_bias_weight=self.final_bias_weight,
+            monotonic_bias=self.monotonic_bias,
+            phrase_length_bias=self.phrase_length_bias,
+        )
 
     @staticmethod
     def build_phrase_prototype(selection: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

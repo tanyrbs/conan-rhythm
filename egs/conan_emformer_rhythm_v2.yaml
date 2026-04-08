@@ -35,6 +35,25 @@ rhythm_max_total_logratio: 0.8
 rhythm_max_unit_logratio: 0.6
 rhythm_pause_share_max: 0.45
 rhythm_pause_share_residual_max: 0.12
+# Maintained timing-controller semantics:
+# - phase-decoupled, boundary-aware temporal pacing is the canonical direction,
+#   but compatibility-default configs may still need explicit enable
+# - current phrase-bank retrieval is driven by persisted ref_phrase_ptr /
+#   committed-frontier progress, not PHRASE-only pointer gating yet
+# - duration / pause / boundary-lengthening are mainline timing controls
+# Canonical knobs live under the `rhythm_*` names:
+#   rhythm_phase_decoupled_timing
+#   rhythm_phase_decoupled_phrase_gate_boundary_threshold
+#   rhythm_phase_decoupled_boundary_style_residual_scale
+#   rhythm_debt_control_scale / rhythm_debt_pause_priority / rhythm_debt_speech_priority
+#   rhythm_projector_debt_leak / rhythm_projector_debt_max_abs / rhythm_projector_debt_correction_horizon
+#   rhythm_runtime_phrase_bank_enable / rhythm_runtime_phrase_select_window / rhythm_runtime_phrase_neighbor_mix_alpha
+#   rhythm_weak_boundary_threshold / rhythm_phrase_boundary_threshold
+#   rhythm_boundary_lengthening_max / rhythm_projector_weak_boundary_pause_cap
+# Deprecated config aliases are compatibility-only:
+#   rhythm_phase_free_timing
+#   rhythm_phase_free_phrase_boundary_threshold
+#   rhythm_phase_decoupled_phrase_boundary_threshold
 # Keep source-boundary cues as soft priors, not dominant pause-placement owners.
 rhythm_boundary_feature_scale: 0.35
 rhythm_boundary_source_cue_weight: 0.65
@@ -63,6 +82,11 @@ rhythm_enable_algorithmic_teacher: false
 rhythm_enable_dual_mode_teacher: false
 rhythm_enable_learned_offline_teacher: false
 rhythm_runtime_enable_learned_offline_teacher: false
+# Leave `rhythm_emit_reference_sidecar` unset in this transitional base so
+# factory auto-enable can still turn it on for external-reference bootstrap,
+# `sample_ref` cached-reference policy, descriptor bootstrap losses, or trace
+# fallback. `rhythm_export_debug_sidecars` is a different switch: it exports
+# audit/debug fields into samples rather than controlling module conditioning.
 rhythm_teacher_target_source: learned_offline
 rhythm_use_retimed_target_if_available: true
 rhythm_retimed_target_mode: cached

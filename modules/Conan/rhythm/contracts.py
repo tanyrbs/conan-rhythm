@@ -98,6 +98,12 @@ class StreamingRhythmState:
         return self.ref_phrase_ptr
 
     @property
+    def committed_boundary_count(self) -> Optional[torch.Tensor]:
+        """Phase-decoupled hard count of committed PHRASE boundaries."""
+
+        return self.ref_phrase_ptr
+
+    @property
     def phrase_alpha(self) -> Optional[torch.Tensor]:
         return self.intra_phrase_alpha
 
@@ -181,6 +187,8 @@ class RhythmPlannerOutputs:
     global_rate_scalar: Optional[torch.Tensor] = None
     global_style_vec: Optional[torch.Tensor] = None
     boundary_style_residual_unit: Optional[torch.Tensor] = None
+    boundary_type_unit: Optional[torch.Tensor] = None
+    boundary_lengthening_unit: Optional[torch.Tensor] = None
     commit_boundary_logit_unit: Optional[torch.Tensor] = None
     commit_mask_unit: Optional[torch.Tensor] = None
     commit_eligible_mask_unit: Optional[torch.Tensor] = None
