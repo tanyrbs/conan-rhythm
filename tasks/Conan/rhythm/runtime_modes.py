@@ -147,6 +147,14 @@ def build_rhythm_ref_conditioning(sample, *, explicit=None):
         "selector_meta_scores",
         "selector_meta_starts",
         "selector_meta_ends",
+        "ref_phrase_trace",
+        "planner_ref_phrase_trace",
+        "ref_phrase_valid",
+        "ref_phrase_lengths",
+        "ref_phrase_starts",
+        "ref_phrase_ends",
+        "ref_phrase_boundary_strength",
+        "ref_phrase_stats",
     ):
         extra_value = sample.get(extra_key)
         if extra_value is not None:
@@ -181,10 +189,22 @@ def collect_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]
         "pause_support_logit_unit",
         "pause_run_length_unit",
         "pause_breath_debt_unit",
+        "trace_reliability",
+        "local_trace_path_weight",
+        "boundary_trace_path_weight",
         "trace_phase_gap_runtime",
         "trace_phase_gap_anchor",
         "trace_coverage_alpha",
         "trace_blend",
+        "trace_phrase_blend",
+        "trace_global_blend",
+        "trace_tail_alpha",
+        "trace_gap_alpha",
+        "trace_reuse_alpha",
+        "trace_tail_reuse_count",
+        "ref_phrase_index",
+        "commit_confidence",
+        "planned_commit_frontier",
     ):
         attr_value = getattr(planner, attr_name, None)
         if attr_value is not None:

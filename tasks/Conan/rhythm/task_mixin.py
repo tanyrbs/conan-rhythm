@@ -955,8 +955,10 @@ class RhythmConanTaskMixin:
             return
         loss_scale = float(max(0.0, loss_scale))
         content = output.get("content", sample['content'])
-        f0 = output.get("retimed_f0_tgt", sample.get('f0'))
-        uv = output.get("retimed_uv_tgt", sample.get('uv'))
+        acoustic_target_source = str(output.get("acoustic_target_source", "") or "").lower()
+        use_retimed_pitch = acoustic_target_source == "online"
+        f0 = output.get("retimed_f0_tgt") if use_retimed_pitch else sample.get('f0')
+        uv = output.get("retimed_uv_tgt") if use_retimed_pitch else sample.get('uv')
         if f0 is None or uv is None:
             return
         nonpadding = output.get("tgt_nonpadding")

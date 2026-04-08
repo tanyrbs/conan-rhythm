@@ -27,3 +27,8 @@ rhythm_trace_cold_start_full_visible_units: 8
 # Optional: slightly tighten the local reference window so near-tail phrase-final cues
 # do not dominate too much of the stream.
 rhythm_trace_horizon: 0.30
+
+# Phase-free runtime mainline: keep phase as telemetry, and let streaming control
+# rely on prefix-stable phrase/global priors plus source-side boundary evidence.
+rhythm_phase_free_timing: true
+rhythm_phase_free_phrase_boundary_threshold: 0.55

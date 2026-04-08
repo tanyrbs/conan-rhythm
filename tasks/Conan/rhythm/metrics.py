@@ -109,6 +109,46 @@ def _optional_scalar(x: Any, device: torch.device) -> torch.Tensor | None:
     return None
 
 
+def _trace_bundle_value(bundle: Any, key: str) -> Any:
+    if bundle is None:
+        return None
+    if isinstance(bundle, dict):
+        return bundle.get(key)
+    return getattr(bundle, key, None)
+
+
+def _resolve_trace_runtime_diagnostics(execution: Any) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+    if execution is None:
+        return None, None, None, None, None, None, None
+    trace_reliability = getattr(execution, "trace_reliability", None)
+    planner = getattr(execution, "planner", None)
+    runtime_gap = _trace_bundle_value(trace_reliability, "phase_gap_runtime")
+    anchor_gap = _trace_bundle_value(trace_reliability, "phase_gap_anchor")
+    local_gate = _trace_bundle_value(trace_reliability, "local_gate")
+    if local_gate is None:
+        local_gate = _trace_bundle_value(trace_reliability, "local_trace_path_weight")
+    coverage_alpha = _trace_bundle_value(trace_reliability, "coverage_alpha")
+    blend = _trace_bundle_value(trace_reliability, "blend")
+    phrase_blend = _trace_bundle_value(trace_reliability, "phrase_blend")
+    global_blend = _trace_bundle_value(trace_reliability, "global_blend")
+    if planner is not None:
+        if runtime_gap is None:
+            runtime_gap = getattr(planner, "trace_phase_gap_runtime", None)
+        if anchor_gap is None:
+            anchor_gap = getattr(planner, "trace_phase_gap_anchor", None)
+        if local_gate is None:
+            local_gate = getattr(planner, "local_trace_path_weight", None)
+        if coverage_alpha is None:
+            coverage_alpha = getattr(planner, "trace_coverage_alpha", None)
+        if blend is None:
+            blend = getattr(planner, "trace_blend", None)
+        if phrase_blend is None:
+            phrase_blend = getattr(planner, "trace_phrase_blend", None)
+        if global_blend is None:
+            global_blend = getattr(planner, "trace_global_blend", None)
+    return runtime_gap, anchor_gap, local_gate, coverage_alpha, blend, phrase_blend, global_blend
+
+
 def _resolve_pause_topk_ratio_tensor(
     output: dict[str, Any],
     *,
@@ -487,38 +527,9 @@ def _update_state_metrics(
                 (phase_gap < -1e-6).float()
             )
     execution = output.get("rhythm_execution")
-    trace_reliability = getattr(execution, "trace_reliability", None) if execution is not None else None
-    planner = getattr(execution, "planner", None) if execution is not None else None
-    def _bundle_value(bundle, key):
-        if bundle is None:
-            return None
-        if isinstance(bundle, dict):
-            return bundle.get(key)
-        return getattr(bundle, key, None)
-    runtime_gap = None
-    anchor_gap = None
-    local_gate = None
-    coverage_alpha = None
-    blend = None
-    if trace_reliability is not None:
-        runtime_gap = _bundle_value(trace_reliability, "phase_gap_runtime")
-        anchor_gap = _bundle_value(trace_reliability, "phase_gap_anchor")
-        local_gate = _bundle_value(trace_reliability, "local_trace_path_weight")
-        if local_gate is None:
-            local_gate = _bundle_value(trace_reliability, "local_gate")
-        coverage_alpha = _bundle_value(trace_reliability, "coverage_alpha")
-        blend = _bundle_value(trace_reliability, "blend")
-    if planner is not None:
-        if runtime_gap is None:
-            runtime_gap = getattr(planner, "trace_phase_gap_runtime", None)
-        if anchor_gap is None:
-            anchor_gap = getattr(planner, "trace_phase_gap_anchor", None)
-        if local_gate is None:
-            local_gate = getattr(planner, "local_trace_path_weight", None)
-        if coverage_alpha is None:
-            coverage_alpha = getattr(planner, "trace_coverage_alpha", None)
-        if blend is None:
-            blend = getattr(planner, "trace_blend", None)
+    runtime_gap, anchor_gap, local_gate, coverage_alpha, blend, phrase_blend, global_blend = _resolve_trace_runtime_diagnostics(
+        execution
+    )
     if runtime_gap is not None:
         metrics["rhythm_metric_phase_gap_runtime_mean"] = _safe_mean(runtime_gap.float())
         metrics["rhythm_metric_phase_gap_runtime_abs_mean"] = _safe_mean(runtime_gap.float().abs())
@@ -531,6 +542,10 @@ def _update_state_metrics(
         metrics["rhythm_metric_trace_coverage_alpha_mean"] = _safe_mean(coverage_alpha.float())
     if blend is not None:
         metrics["rhythm_metric_trace_blend_mean"] = _safe_mean(blend.float())
+    if phrase_blend is not None:
+        metrics["rhythm_metric_trace_phrase_blend_mean"] = _safe_mean(phrase_blend.float())
+    if global_blend is not None:
+        metrics["rhythm_metric_trace_global_blend_mean"] = _safe_mean(global_blend.float())
     state_prev = output.get("rhythm_state_prev")
     if state_prev is not None and state_next is not None:
         phase_delta = state_next.phase_ptr.float() - state_prev.phase_ptr.float()

@@ -26,11 +26,26 @@ class StreamingRhythmState:
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
     phase_anchor: Optional[torch.Tensor] = None
+    phase_anchor_visible_total: Optional[torch.Tensor] = None
     trace_tail_reuse_count: Optional[torch.Tensor] = None
+    ref_phrase_ptr: Optional[torch.Tensor] = None
+    active_phrase_start: Optional[torch.Tensor] = None
+    active_phrase_end: Optional[torch.Tensor] = None
+    local_rho_unit: Optional[torch.Tensor] = None
+    intra_phrase_alpha: Optional[torch.Tensor] = None
+    commit_confidence: Optional[torch.Tensor] = None
 
     @property
     def backlog(self) -> torch.Tensor:
         return self.clock_delta.clamp_min(0.0)
+
+    @property
+    def clock_ahead(self) -> torch.Tensor:
+        return self.clock_delta.clamp_min(0.0)
+
+    @property
+    def clock_behind(self) -> torch.Tensor:
+        return (-self.clock_delta).clamp_min(0.0)
 
     @property
     def phase_anchor_progress(self) -> Optional[torch.Tensor]:
@@ -45,11 +60,26 @@ class StreamingRhythmState:
         return self.phase_anchor[..., 1]
 
     @property
+    def phase_anchor_denominator(self) -> Optional[torch.Tensor]:
+        return self.phase_anchor_total
+
+    @property
+    def phase_visible_progress_ratio(self) -> Optional[torch.Tensor]:
+        if self.phase_anchor is None or self.phase_anchor_visible_total is None:
+            return None
+        progress = self.phase_anchor[..., 0].float()
+        total = self.phase_anchor_visible_total.float().clamp_min(1.0)
+        return progress / total
+
+    @property
     def phase_progress_ratio(self) -> Optional[torch.Tensor]:
         if self.phase_anchor is None:
             return None
         progress = self.phase_anchor[..., 0].float()
-        total = self.phase_anchor[..., 1].float().clamp_min(1.0)
+        total = self.phase_anchor_denominator
+        if total is None:
+            return None
+        total = total.float().clamp_min(1.0)
         return progress / total
 
     @property
@@ -62,6 +92,20 @@ class StreamingRhythmState:
     @property
     def previous_blank_exec(self) -> Optional[torch.Tensor]:
         return self.previous_pause_exec
+
+    @property
+    def phrase_idx(self) -> Optional[torch.Tensor]:
+        return self.ref_phrase_ptr
+
+    @property
+    def phrase_alpha(self) -> Optional[torch.Tensor]:
+        return self.intra_phrase_alpha
+
+    @property
+    def committed_reference_index(self) -> Optional[torch.Tensor]:
+        """Frozen committed retrieval pointer used by phase-decoupled timing."""
+
+        return self.ref_phrase_ptr
 
 
 @dataclass
@@ -79,6 +123,22 @@ class TraceReliabilityBundle:
     reuse_alpha: torch.Tensor
     tail_reuse_count: torch.Tensor
     tail_active: torch.Tensor
+    local_gate: torch.Tensor
+    phrase_blend: torch.Tensor
+    global_blend: torch.Tensor
+
+
+@dataclass
+class BoundaryCommitDecision:
+    commit_end: torch.Tensor
+    committed: torch.Tensor
+    commit_score_unit: torch.Tensor
+    eligible_mask_unit: torch.Tensor
+    commit_confidence: torch.Tensor
+
+    @property
+    def planned_commit_frontier(self) -> torch.Tensor:
+        return self.commit_end.long()
 
 
 @dataclass
@@ -103,10 +163,46 @@ class RhythmPlannerOutputs:
     trace_phase_gap_anchor: Optional[torch.Tensor] = None
     trace_coverage_alpha: Optional[torch.Tensor] = None
     trace_blend: Optional[torch.Tensor] = None
+    trace_phrase_blend: Optional[torch.Tensor] = None
+    trace_global_blend: Optional[torch.Tensor] = None
     trace_tail_reuse_count: Optional[torch.Tensor] = None
     trace_tail_alpha: Optional[torch.Tensor] = None
     trace_gap_alpha: Optional[torch.Tensor] = None
     trace_reuse_alpha: Optional[torch.Tensor] = None
+    chunk_summary: Optional[torch.Tensor] = None
+    chunk_structure_progress: Optional[torch.Tensor] = None
+    chunk_commit_prob: Optional[torch.Tensor] = None
+    phrase_open_prob: Optional[torch.Tensor] = None
+    phrase_close_prob: Optional[torch.Tensor] = None
+    phrase_role_prob: Optional[torch.Tensor] = None
+    phrase_prototype_summary: Optional[torch.Tensor] = None
+    phrase_prototype_stats: Optional[torch.Tensor] = None
+    prompt_reliability: Optional[torch.Tensor] = None
+    global_rate_scalar: Optional[torch.Tensor] = None
+    global_style_vec: Optional[torch.Tensor] = None
+    boundary_style_residual_unit: Optional[torch.Tensor] = None
+    commit_boundary_logit_unit: Optional[torch.Tensor] = None
+    commit_mask_unit: Optional[torch.Tensor] = None
+    commit_eligible_mask_unit: Optional[torch.Tensor] = None
+    planned_commit_frontier: Optional[torch.Tensor] = None
+    commit_confidence: Optional[torch.Tensor] = None
+    phrase_speech_budget_win: Optional[torch.Tensor] = None
+    phrase_pause_budget_win: Optional[torch.Tensor] = None
+    phrase_rate_delta_unit: Optional[torch.Tensor] = None
+    ref_phrase_index: Optional[torch.Tensor] = None
+    ref_phrase_trace: Optional[torch.Tensor] = None
+    ref_phrase_stats: Optional[torch.Tensor] = None
+    segment_mask_unit: Optional[torch.Tensor] = None
+    pause_segment_mask_unit: Optional[torch.Tensor] = None
+    active_phrase_start: Optional[torch.Tensor] = None
+    active_phrase_end: Optional[torch.Tensor] = None
+    local_rho_unit: Optional[torch.Tensor] = None
+    local_trace_ctx_unit: Optional[torch.Tensor] = None
+    intra_phrase_alpha: Optional[torch.Tensor] = None
+
+    @property
+    def phrase_idx(self) -> Optional[torch.Tensor]:
+        return self.ref_phrase_index
 
     @property
     def blank_budget_win(self) -> torch.Tensor:

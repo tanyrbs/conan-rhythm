@@ -119,6 +119,8 @@ def run_rhythm_frontend(
     trace_offset_lookahead_units: int | None = None,
     trace_cold_start_min_visible_units: int | None = None,
     trace_cold_start_full_visible_units: int | None = None,
+    phase_free_timing: bool | None = None,
+    streaming_prefix_train: bool = False,
     projector_reuse_prefix: bool = True,
     projector_force_full_commit: bool = False,
     teacher_projector_force_full_commit: bool = True,
@@ -145,7 +147,7 @@ def run_rhythm_frontend(
         unit_batch = rhythm_unit_frontend.from_content_tensor(
             content,
             content_lengths=resolved_lengths,
-            mark_last_open=bool(infer),
+            mark_last_open=bool(infer) or bool(streaming_prefix_train),
         )
     rhythm_ref_conditioning = rhythm_module.build_reference_conditioning(
         ref_conditioning=rhythm_ref_conditioning,
@@ -165,10 +167,12 @@ def run_rhythm_frontend(
             source_boundary_scale_override=teacher_source_boundary_scale_override,
             projector_force_full_commit=teacher_projector_force_full_commit,
             projector_soft_pause_selection_override=teacher_projector_soft_pause_selection,
+            trace_horizon=trace_horizon,
             trace_active_tail_only=trace_active_tail_only,
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+            phase_free_timing=phase_free_timing,
         )
         return {
             "unit_batch": unit_batch,
@@ -217,6 +221,7 @@ def run_rhythm_frontend(
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+            phase_free_timing=phase_free_timing,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             offline_content_units=offline_unit_batch.content_units if offline_unit_batch is not None else None,
@@ -247,6 +252,7 @@ def run_rhythm_frontend(
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+            phase_free_timing=phase_free_timing,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,

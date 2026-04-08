@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 import torch.nn as nn
 
@@ -241,6 +243,9 @@ class ConanRhythmAdapter(nn.Module):
         )
         if trace_cold_start_full_visible_units is not None:
             trace_cold_start_full_visible_units = int(trace_cold_start_full_visible_units)
+        phase_free_timing = runtime_overrides.pop("phase_free_timing", None)
+        if phase_free_timing is not None:
+            phase_free_timing = bool(phase_free_timing)
         ret["rhythm_stage"] = stage
         ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
         ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
@@ -302,11 +307,19 @@ class ConanRhythmAdapter(nn.Module):
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
+            phase_free_timing=phase_free_timing,
             projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
             projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
             teacher_projector_force_full_commit=teacher_projector_force_full_commit,
             teacher_projector_soft_pause_selection=teacher_projector_soft_pause_selection,
+            streaming_prefix_train=bool(self.hparams.get("rhythm_streaming_prefix_train", False)),
         )
+        if runtime_overrides:
+            warnings.warn(
+                "Unused rhythm runtime overrides: "
+                + ", ".join(sorted(str(key) for key in runtime_overrides.keys())),
+                stacklevel=2,
+            )
         content_embed, tgt_nonpadding = attach_rhythm_outputs(
             ret=ret,
             rhythm_bundle=rhythm_bundle,

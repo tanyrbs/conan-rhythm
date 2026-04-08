@@ -177,6 +177,35 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
         self.assertIn("uv", losses)
         self.assertTrue(torch.isfinite(losses["uv"]))
 
+    def test_add_pitch_loss_prefers_source_pitch_when_cached_target_is_active(self) -> None:
+        class _DummyTask(RhythmConanTaskMixin):
+            pass
+
+        task = _DummyTask()
+        output = {
+            "content": torch.ones((1, 4), dtype=torch.long),
+            "tgt_nonpadding": torch.ones((1, 4), dtype=torch.float32),
+            "acoustic_target_source": "cached",
+            "retimed_f0_tgt": torch.full((1, 4), 200.0, dtype=torch.float32),
+            "retimed_uv_tgt": torch.ones((1, 4), dtype=torch.float32),
+            "uv_pred": torch.full((1, 4, 1), 6.0, dtype=torch.float32),
+            "fdiff": torch.tensor(0.0),
+        }
+        sample = {
+            "content": torch.ones((1, 4), dtype=torch.long),
+            "f0": torch.full((1, 4), 100.0, dtype=torch.float32),
+            "uv": torch.zeros((1, 4), dtype=torch.float32),
+        }
+        losses = {}
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_mixin.hparams",
+            {"f0_gen": "diff", "lambda_uv": 1.0},
+            clear=True,
+        ):
+            task.add_pitch_loss(output, sample, losses)
+        self.assertIn("uv", losses)
+        self.assertGreater(float(losses["uv"]), 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

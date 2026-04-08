@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from modules.Conan.rhythm.bridge import run_rhythm_frontend
+from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
@@ -200,6 +202,58 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(metrics["rhythm_metric_reference_self_rate"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(metrics["rhythm_metric_reference_external_rate"], torch.tensor(1.0)))
+
+    def test_from_precomputed_rebuilds_tail_open_masks_when_cache_sidecars_are_missing(self) -> None:
+        frontend = RhythmUnitFrontend(tail_open_units=1)
+        batch = frontend.from_precomputed(
+            content_units=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            dur_anchor_src=torch.tensor([[1, 1, 1]], dtype=torch.long),
+        )
+        self.assertTrue(torch.equal(batch.open_run_mask, torch.tensor([[0, 0, 1]], dtype=torch.long)))
+        self.assertTrue(torch.allclose(batch.sealed_mask, torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32)))
+
+    def test_run_rhythm_frontend_uses_open_tail_during_training_when_streaming_prefix_train_enabled(self) -> None:
+        class _FakeFrontend:
+            def __init__(self) -> None:
+                self.mark_last_open = None
+
+            def from_content_tensor(self, content, *, content_lengths=None, mark_last_open=True):
+                self.mark_last_open = bool(mark_last_open)
+                return type(
+                    "Batch",
+                    (),
+                    {
+                        "content_units": content.long(),
+                        "dur_anchor_src": torch.ones_like(content, dtype=torch.long),
+                        "unit_mask": torch.ones_like(content, dtype=torch.float32),
+                        "open_run_mask": torch.zeros_like(content, dtype=torch.long),
+                        "sealed_mask": torch.ones_like(content, dtype=torch.float32),
+                        "sep_hint": torch.zeros_like(content, dtype=torch.long),
+                        "boundary_confidence": torch.zeros_like(content, dtype=torch.float32),
+                    },
+                )()
+
+        class _FakeModule:
+            @staticmethod
+            def build_reference_conditioning(*, ref_conditioning=None, ref_mel=None):
+                return {"ref_rhythm_stats": torch.zeros((1, 6)), "ref_rhythm_trace": torch.zeros((1, 8, 5))}
+
+            def __call__(self, **kwargs):
+                return {"ok": True, "state": kwargs.get("state")}
+
+        frontend = _FakeFrontend()
+        module = _FakeModule()
+        bundle = run_rhythm_frontend(
+            rhythm_enable_v2=True,
+            rhythm_unit_frontend=frontend,
+            rhythm_module=module,
+            content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ref=torch.zeros((1, 4, 80), dtype=torch.float32),
+            infer=False,
+            streaming_prefix_train=True,
+        )
+        self.assertTrue(bundle is not None)
+        self.assertTrue(frontend.mark_last_open)
 
 
 if __name__ == "__main__":

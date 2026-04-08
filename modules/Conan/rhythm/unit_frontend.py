@@ -235,6 +235,21 @@ class RhythmUnitFrontend:
             rebuilt_rows.append(row)
         return torch.stack(rebuilt_rows, dim=0) * unit_mask.float()
 
+    def _rebuild_open_and_sealed_from_cache(
+        self,
+        *,
+        unit_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        open_run_mask = torch.zeros_like(unit_mask, dtype=torch.long)
+        for batch_idx in range(unit_mask.size(0)):
+            visible = int(unit_mask[batch_idx].sum().item())
+            if visible <= 0:
+                continue
+            keep_open_from = max(0, visible - self.tail_open_units)
+            open_run_mask[batch_idx, keep_open_from:visible] = 1
+        sealed_mask = (1 - open_run_mask).clamp_min(0).float() * unit_mask.float()
+        return open_run_mask, sealed_mask
+
     def from_precomputed(
         self,
         *,
@@ -252,8 +267,13 @@ class RhythmUnitFrontend:
             unit_mask = dur_anchor_src.gt(0).float()
         else:
             unit_mask = unit_mask.float()
-        if open_run_mask is None:
-            open_run_mask = torch.zeros_like(content_units)
+        if open_run_mask is None and sealed_mask is None:
+            open_run_mask, sealed_mask = self._rebuild_open_and_sealed_from_cache(unit_mask=unit_mask)
+        elif open_run_mask is None:
+            sealed_mask = sealed_mask.float() * unit_mask.float()
+            open_run_mask = ((sealed_mask <= 0.0).long() * unit_mask.long()).long()
+        else:
+            open_run_mask = open_run_mask.long() * unit_mask.long()
         if sep_hint is None:
             sep_hint = torch.zeros_like(content_units)
         if sealed_mask is None:

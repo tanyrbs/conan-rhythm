@@ -157,9 +157,20 @@ if __name__ == '__main__':
         'rhythm_enable_learned_offline_teacher': False,
     })
     strict_model = build_streaming_rhythm_module_from_hparams(strict_hparams)
-    assert strict_model.projector.config.pause_selection_mode == 'simple'
-    assert strict_model.projector.config.use_boundary_commit_guard is False
-    assert strict_model.projector.config.build_render_plan is False
+    assert strict_model.projector.config.pause_selection_mode == 'sparse'
+    assert strict_model.projector.config.use_boundary_commit_guard is True
+    assert strict_model.projector.config.build_render_plan is True
+
+    explicit_simple_hparams = dict(strict_hparams)
+    explicit_simple_hparams.update({
+        'rhythm_projector_pause_selection_mode': 'simple',
+        'rhythm_projector_use_boundary_commit_guard': False,
+        'rhythm_projector_build_render_plan': False,
+    })
+    explicit_simple_model = build_streaming_rhythm_module_from_hparams(explicit_simple_hparams)
+    assert explicit_simple_model.projector.config.pause_selection_mode == 'simple'
+    assert explicit_simple_model.projector.config.use_boundary_commit_guard is False
+    assert explicit_simple_model.projector.config.build_render_plan is False
     simple_pause = _project_pause_simple_impl(
         pause_weight_unit=torch.full((1, 4), 0.25),
         boundary_score_unit=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
@@ -318,11 +329,26 @@ if __name__ == '__main__':
         ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
         state=strict_model.init_state(batch_size=2, device=torch.device('cpu')),
     )
-    assert strict_out.slot_duration_exec is None
-    assert strict_out.slot_mask is None
-    assert strict_out.slot_is_blank is None
-    assert strict_out.slot_unit_index is None
-    assert strict_out.frame_plan is None
+    assert strict_out.slot_duration_exec is not None
+    assert strict_out.slot_mask is not None
+    assert strict_out.slot_is_blank is not None
+    assert strict_out.slot_unit_index is not None
+    assert strict_out.frame_plan is not None
+
+    explicit_simple_out = explicit_simple_model(
+        content_units=batch.content_units,
+        dur_anchor_src=batch.dur_anchor_src,
+        unit_mask=batch.unit_mask,
+        open_run_mask=batch.open_run_mask,
+        ref_rhythm_stats=ref_conditioning['ref_rhythm_stats'],
+        ref_rhythm_trace=ref_conditioning['ref_rhythm_trace'],
+        state=explicit_simple_model.init_state(batch_size=2, device=torch.device('cpu')),
+    )
+    assert explicit_simple_out.slot_duration_exec is None
+    assert explicit_simple_out.slot_mask is None
+    assert explicit_simple_out.slot_is_blank is None
+    assert explicit_simple_out.slot_unit_index is None
+    assert explicit_simple_out.frame_plan is None
 
     forced_planner = RhythmPlannerOutputs(
         speech_budget_win=torch.zeros((1, 1), dtype=torch.float32, requires_grad=True),

@@ -139,6 +139,9 @@ def _build_window_offsets(
         if anchor_durations is not None
         else int(visible_sizes.max().item()) if visible_sizes.numel() > 0 else window_size
     )
+    total_units = max(total_units, 1)
+    if active_tail_only and (lookahead_units is None or int(lookahead_units) <= 0):
+        lookahead_units = max(1, min(int(window_size), 8))
     for batch_idx in range(batch_size):
         effective_visible = int(min(max(int(visible_sizes[batch_idx].item()), 0), total_units))
         if effective_visible <= 0:
@@ -146,7 +149,7 @@ def _build_window_offsets(
         start = int(commit_frontier[batch_idx].item()) if active_tail_only else 0
         start = max(0, min(start, effective_visible))
         end = effective_visible
-        if lookahead_units is not None and int(lookahead_units) > 0:
+        if active_tail_only and lookahead_units is not None and int(lookahead_units) > 0:
             end = min(end, start + int(lookahead_units))
         active_len = max(0, min(end - start, window_size))
         if active_len <= 0:
@@ -166,10 +169,9 @@ def _build_window_offsets(
             anchor_progress = torch.cat([duration.new_zeros(1), prefix[:-1]], dim=0) / total.clamp_min(1.0e-6)
             valid_offsets = anchor_progress * float(horizon)
         offsets[batch_idx, :active_len] = valid_offsets
-        fill_from = active_len
-        if fill_from < window_size:
+        if active_len < window_size:
             tail_offset = valid_offsets[-1] if active_len > 0 else offsets.new_zeros(())
-            offsets[batch_idx, fill_from:] = tail_offset
+            offsets[batch_idx, active_len:] = tail_offset
     return offsets
 
 
@@ -244,6 +246,152 @@ def sample_progress_trace(
     gathered_left = trace.gather(1, left.unsqueeze(-1).expand(-1, -1, trace_dim))
     gathered_right = trace.gather(1, right.unsqueeze(-1).expand(-1, -1, trace_dim))
     return gathered_left * (1.0 - alpha) + gathered_right * alpha
+
+
+def _detect_phrase_spans_from_trace(
+    ref_rhythm_trace: torch.Tensor,
+    *,
+    max_phrases: int,
+    min_phrase_bins: int = 2,
+) -> dict[str, torch.Tensor]:
+    if ref_rhythm_trace.dim() != 3:
+        raise ValueError(f"ref_rhythm_trace must be [B,T,D], got {tuple(ref_rhythm_trace.shape)}")
+    batch_size, trace_bins, _ = ref_rhythm_trace.shape
+    device = ref_rhythm_trace.device
+    max_phrases = max(1, int(max_phrases))
+    min_phrase_bins = max(1, int(min_phrase_bins))
+    phrase_starts = torch.zeros((batch_size, max_phrases), dtype=torch.long, device=device)
+    phrase_ends = torch.zeros((batch_size, max_phrases), dtype=torch.long, device=device)
+    phrase_valid = torch.zeros((batch_size, max_phrases), dtype=torch.bool, device=device)
+    phrase_lengths = torch.zeros((batch_size, max_phrases), dtype=torch.long, device=device)
+    phrase_boundary_strength = torch.zeros((batch_size, max_phrases), dtype=ref_rhythm_trace.dtype, device=device)
+    boundary = ref_rhythm_trace[:, :, 2].float()
+    pause = ref_rhythm_trace[:, :, 0].float()
+    score = 0.7 * boundary + 0.3 * pause
+    for batch_idx in range(batch_size):
+        row_score = score[batch_idx]
+        if trace_bins <= 0:
+            continue
+        if trace_bins == 1:
+            phrase_starts[batch_idx, 0] = 0
+            phrase_ends[batch_idx, 0] = 1
+            phrase_valid[batch_idx, 0] = True
+            phrase_lengths[batch_idx, 0] = 1
+            phrase_boundary_strength[batch_idx, 0] = row_score[0]
+            continue
+        threshold = float(torch.quantile(row_score, 0.70).item())
+        peaks: list[int] = []
+        for idx in range(trace_bins - 1):
+            left = row_score[idx - 1] if idx > 0 else row_score[idx]
+            right = row_score[idx + 1]
+            current = row_score[idx]
+            current_value = float(current.item())
+            if current_value >= threshold and current_value >= float(left.item()) and current_value >= float(right.item()):
+                peaks.append(idx)
+        if (trace_bins - 1) not in peaks:
+            peaks.append(trace_bins - 1)
+        peaks = sorted(set(max(0, min(trace_bins - 1, int(idx))) for idx in peaks))
+        spans: list[tuple[int, int, float]] = []
+        start = 0
+        for end_inclusive in peaks:
+            end = max(start + 1, min(trace_bins, int(end_inclusive) + 1))
+            phrase_score = float(row_score[end - 1].item())
+            if spans and (end - start) < min_phrase_bins:
+                prev_start, _, prev_score = spans[-1]
+                spans[-1] = (prev_start, end, max(prev_score, phrase_score))
+            else:
+                spans.append((start, end, phrase_score))
+            start = end
+        if start < trace_bins:
+            tail_score = float(row_score[-1].item())
+            if spans:
+                prev_start, _, prev_score = spans[-1]
+                spans[-1] = (prev_start, trace_bins, max(prev_score, tail_score))
+            else:
+                spans.append((0, trace_bins, tail_score))
+        if len(spans) > max_phrases:
+            kept = spans[: max_phrases - 1]
+            last_start = kept[-1][1] if kept else 0
+            tail_score = max(score_value for _, _, score_value in spans[max_phrases - 1 :])
+            kept.append((last_start, trace_bins, tail_score))
+            spans = kept
+        for phrase_idx, (start, end, phrase_score) in enumerate(spans[:max_phrases]):
+            phrase_starts[batch_idx, phrase_idx] = int(start)
+            phrase_ends[batch_idx, phrase_idx] = int(end)
+            phrase_valid[batch_idx, phrase_idx] = True
+            phrase_lengths[batch_idx, phrase_idx] = int(max(0, end - start))
+            phrase_boundary_strength[batch_idx, phrase_idx] = float(phrase_score)
+    return {
+        "ref_phrase_starts": phrase_starts,
+        "ref_phrase_ends": phrase_ends,
+        "ref_phrase_valid": phrase_valid,
+        "ref_phrase_lengths": phrase_lengths,
+        "ref_phrase_boundary_strength": phrase_boundary_strength,
+    }
+
+
+def _resample_phrase_span(span_trace: torch.Tensor, phrase_trace_bins: int) -> torch.Tensor:
+    if span_trace.dim() != 2:
+        raise ValueError(f"span_trace must be [T,D], got {tuple(span_trace.shape)}")
+    phrase_trace_bins = max(1, int(phrase_trace_bins))
+    span_len, trace_dim = span_trace.shape
+    if span_len <= 0:
+        return span_trace.new_zeros((phrase_trace_bins, trace_dim))
+    if span_len == 1 or phrase_trace_bins == 1:
+        return span_trace[:1].expand(phrase_trace_bins, -1).clone()
+    src = torch.linspace(0.0, 1.0, span_len, device=span_trace.device, dtype=span_trace.dtype)
+    tgt = torch.linspace(0.0, 1.0, phrase_trace_bins, device=span_trace.device, dtype=span_trace.dtype)
+    resampled = span_trace.new_zeros((phrase_trace_bins, trace_dim))
+    for idx, value in enumerate(tgt):
+        right = int(torch.searchsorted(src, value, right=False).item())
+        if right <= 0:
+            resampled[idx] = span_trace[0]
+            continue
+        if right >= span_len:
+            resampled[idx] = span_trace[-1]
+            continue
+        left = right - 1
+        denom = (src[right] - src[left]).abs().clamp_min(1.0e-6)
+        alpha = ((value - src[left]) / denom).clamp(0.0, 1.0)
+        resampled[idx] = span_trace[left] * (1.0 - alpha) + span_trace[right] * alpha
+    return resampled
+
+
+def build_reference_phrase_bank(
+    *,
+    ref_rhythm_trace: torch.Tensor,
+    max_phrases: int,
+    phrase_trace_bins: int,
+    min_phrase_bins: int = 2,
+) -> dict[str, torch.Tensor]:
+    spans = _detect_phrase_spans_from_trace(
+        ref_rhythm_trace,
+        max_phrases=max_phrases,
+        min_phrase_bins=min_phrase_bins,
+    )
+    batch_size, _, trace_dim = ref_rhythm_trace.shape
+    max_phrases = max(1, int(max_phrases))
+    phrase_trace_bins = max(1, int(phrase_trace_bins))
+    ref_phrase_trace = ref_rhythm_trace.new_zeros((batch_size, max_phrases, phrase_trace_bins, trace_dim))
+    ref_phrase_stats = ref_rhythm_trace.new_zeros((batch_size, max_phrases, trace_dim))
+    for batch_idx in range(batch_size):
+        for phrase_idx in range(max_phrases):
+            if not bool(spans["ref_phrase_valid"][batch_idx, phrase_idx].item()):
+                continue
+            start = int(spans["ref_phrase_starts"][batch_idx, phrase_idx].item())
+            end = int(spans["ref_phrase_ends"][batch_idx, phrase_idx].item())
+            span_trace = ref_rhythm_trace[batch_idx, start:end]
+            if span_trace.numel() <= 0:
+                continue
+            ref_phrase_trace[batch_idx, phrase_idx] = _resample_phrase_span(span_trace, phrase_trace_bins)
+            ref_phrase_stats[batch_idx, phrase_idx] = span_trace.float().mean(dim=0)
+    planner_ref_phrase_trace = ref_phrase_trace[:, :, :, 1:3]
+    return {
+        "ref_phrase_trace": ref_phrase_trace,
+        "planner_ref_phrase_trace": planner_ref_phrase_trace,
+        "ref_phrase_stats": ref_phrase_stats,
+        **spans,
+    }
 
 
 class ReferenceRhythmEncoder(nn.Module):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .controller import BoundaryCommitController, CommitConfig
 from .module import StreamingRhythmModule
 from .offline_teacher import OfflineTeacherConfig
 from .policy import (
@@ -51,6 +52,27 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
             hparams.get('rhythm_projector_build_render_plan', True)
         ),
     )
+
+
+def build_commit_config_from_hparams(hparams) -> CommitConfig:
+    mode = str(hparams.get('rhythm_commit_mode', 'legacy_projector') or 'legacy_projector').strip().lower()
+    if mode not in {'legacy_projector', 'boundary_phrase'}:
+        raise ValueError(f'Unsupported rhythm_commit_mode: {mode}')
+    return CommitConfig(
+        mode=mode,
+        threshold=float(hparams.get('rhythm_commit_threshold', 0.65)),
+        require_sealed_boundary=bool(hparams.get('rhythm_commit_require_sealed_boundary', True)),
+        min_phrase_units=int(hparams.get('rhythm_commit_min_phrase_units', 2)),
+        max_lookahead_units=int(hparams.get('rhythm_commit_max_lookahead_units', 3)),
+        sep_hint_bonus=float(hparams.get('rhythm_commit_sep_hint_bonus', 0.20)),
+        boundary_confidence_weight=float(hparams.get('rhythm_commit_boundary_confidence_weight', 0.40)),
+        source_boundary_weight=float(hparams.get('rhythm_commit_source_boundary_weight', 0.35)),
+        planner_boundary_weight=float(hparams.get('rhythm_commit_planner_boundary_weight', 0.25)),
+    )
+
+
+def build_boundary_commit_controller_from_hparams(hparams) -> BoundaryCommitController:
+    return BoundaryCommitController(build_commit_config_from_hparams(hparams))
 
 
 def resolve_runtime_offline_teacher_enable(hparams, *, stage: str | None = None, config_path: str | None = None) -> bool:
@@ -121,6 +143,9 @@ def build_offline_teacher_config_from_hparams(hparams) -> OfflineTeacherConfig:
 
 
 def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule:
+    # Parse discrete-commit config early so unsupported values fail fast even
+    # before the runtime/module wiring fully migrates to commit-first authority.
+    build_commit_config_from_hparams(hparams)
     num_units = resolve_content_vocab_size(hparams)
     emit_reference_sidecar = hparams.get(
         'rhythm_emit_reference_sidecar',
@@ -148,6 +173,27 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         trace_smooth_kernel=int(hparams.get('rhythm_trace_smooth_kernel', 5)),
         maintained_stats_trace_only=bool(hparams.get('rhythm_maintained_stats_trace_only', True)),
         emit_reference_sidecar=emit_reference_sidecar,
+        runtime_phrase_bank_enable=bool(hparams.get('rhythm_runtime_phrase_bank_enable', False)),
+        runtime_phrase_bank_max_phrases=int(
+            hparams.get(
+                'rhythm_runtime_phrase_bank_max_phrases',
+                hparams.get('rhythm_slow_topk', 6),
+            )
+        ),
+        runtime_phrase_bank_bins=int(
+            hparams.get(
+                'rhythm_runtime_phrase_bank_bins',
+                max(4, int(hparams.get('rhythm_selector_cell_size', 3)) * 2 + 2),
+            )
+        ),
+        runtime_phrase_select_window=int(hparams.get('rhythm_runtime_phrase_select_window', 3)),
+        phrase_selection_boundary_weight=float(hparams.get('rhythm_phrase_selection_boundary_weight', 0.28)),
+        phrase_selection_local_rate_weight=float(hparams.get('rhythm_phrase_selection_local_rate_weight', 0.28)),
+        phrase_selection_pause_weight=float(hparams.get('rhythm_phrase_selection_pause_weight', 0.18)),
+        phrase_selection_voice_weight=float(hparams.get('rhythm_phrase_selection_voice_weight', 0.16)),
+        phrase_selection_final_bias_weight=float(hparams.get('rhythm_phrase_selection_final_bias_weight', 0.10)),
+        phrase_selection_monotonic_bias=float(hparams.get('rhythm_phrase_selection_monotonic_bias', 0.0)),
+        phrase_selection_length_bias=float(hparams.get('rhythm_phrase_selection_length_bias', 0.0)),
         max_total_logratio=float(hparams.get('rhythm_max_total_logratio', 0.8)),
         max_unit_logratio=float(hparams.get('rhythm_max_unit_logratio', 0.6)),
         pause_share_max=float(hparams.get('rhythm_pause_share_max', 0.45)),
@@ -177,6 +223,13 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         ),
         trace_active_tail_only=bool(hparams.get('rhythm_trace_active_tail_only', False)),
         trace_offset_lookahead_units=int(hparams.get('rhythm_trace_offset_lookahead_units', 0)),
+        chunk_state_enable=bool(hparams.get('rhythm_chunk_state_enable', True)),
+        budget_phase_feature_scale=float(hparams.get('rhythm_budget_phase_feature_scale', 0.0)),
+        phase_free_timing=bool(hparams.get('rhythm_phase_free_timing', False)),
+        phase_free_phrase_boundary_threshold=float(
+            hparams.get('rhythm_phase_free_phrase_boundary_threshold', 0.55)
+        ),
+        commit_config=build_commit_config_from_hparams(hparams),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),

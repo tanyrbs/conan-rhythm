@@ -4,56 +4,86 @@
 
 # Conan Rhythm Branch
 
-This repository is a Conan-based engineering fork focused on the maintained Rhythm V2 / minimal strong-rhythm path.
+This repository maintains a **teacher-first rhythm stack**.
 
-> This README describes the current maintained branch behavior, not the original upstream Conan packaging.
+## Mainline in one sentence
 
-## Maintained focus
+The maintained path is:
 
-Current maintained priorities:
+1. train a strong non-causal offline teacher into a stable, auditable, exportable rhythm oracle;
+2. verify those teacher assets through **teacher-conditioned audio closure**;
+3. distill the deployment-facing student from those teacher assets;
+4. close student acoustic behavior in retimed stage 3.
 
-- explicit `descriptor -> scheduler -> projector -> renderer` timing chain
-- projector execution as the binding timing authority
-- teacher-first rhythm training chain:
-  - `teacher_offline`
-  - `student_kd`
-  - `student_retimed`
-- experimental upper-bound extension:
-  - `student_ref_bootstrap` between `student_kd` and `student_retimed`
-- cache-backed reproducibility, preflight checks, and retimed closure
+This is the current engineering mainline of the repo.
 
-Canonical documentation is intentionally reduced to:
+## What the current implementation actually is
+
+The maintained control story is:
+
+> **source-side boundary / commit evidence -> explicit speech/pause budget planning -> projector execution authority -> renderer**  
+> **reference acts as global / phrase prior**  
+> **phase / trace remain diagnostics and compatibility paths**
+
+In concrete terms:
+
+- **source side**: discrete units plus boundary evidence such as `sep_hint`, `open_run_mask`, `sealed_mask`, and `boundary_confidence`
+- **planner side**: explicit speech / pause budgeting and unit-level redistribution
+- **execution side**: the projector remains the binding execution authority
+- **reference side**: reference conditioning is treated as global / phrase prior, not as the main continuous control script
+- **diagnostics only**: `phase_ptr`, local trace sampling, trace reliability, cold-start gating, and active-tail sampling remain available for observability and compatibility
+
+## Maintained stage map
+
+| Stage | Meaning | Current implementation |
+|---|---|---|
+| `T1-surface` | stable offline teacher surface | `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` |
+| `T2-audio` | teacher-conditioned audio closure, audit, and export | procedure centered on `scripts/export_rhythm_teacher_targets.py` |
+| `S2-kd` | conservative teacher-conditioned student KD | `egs/conan_emformer_rhythm_v2_student_kd.yaml` |
+| `S3-retimed` | student acoustic closure | `egs/conan_emformer_rhythm_v2_student_retimed.yaml` |
+
+## Main operator gates
+
+- **Teacher first**: do not hand off to the student because one pause scalar improves; watch the full teacher-control set together.
+- **Checkpoint selection**: choose teacher checkpoints by being **exportable, audible, and inheritable**, not by `total_loss` alone and not by pause `F1` alone.
+- **Stage 2 role**: let `S2-kd` absorb the remaining streaming/prefix mismatch while keeping the teacher export truth fixed.
+- **Stage 3 role**: keep `S3-retimed` cached-first first, then A/B the later `hybrid` route only after teacher and stage-2 handoff are both stable.
+
+For the detailed operator rules, use `docs/autodl_training_handoff.md`.
+
+## Canonical docs
+
+The maintained documentation surface is intentionally reduced to:
 
 1. `README.md`
 2. `docs/rhythm_migration_plan.md`
 3. `docs/autodl_training_handoff.md`
+4. `docs/cloud1_autodl_project_status_snapshot_2026-04-08.md` (**archive only**)
 
-Historical rhythm notes were retired from `docs/` so training guidance now stays concentrated in one branch overview, one migration/audit note, and one cloud-launch handoff.
+The cloud snapshot is preserved for historical state, but it is not the live
+design document for new work.
 
-## Quickstart
+## Config and script map
 
-Recommended maintained stage order:
+| Surface | File |
+|---|---|
+| maintained teacher stage | `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` |
+| maintained student KD stage | `egs/conan_emformer_rhythm_v2_student_kd.yaml` |
+| maintained student retimed stage | `egs/conan_emformer_rhythm_v2_student_retimed.yaml` |
+| stage preflight | `scripts/preflight_rhythm_v2.py` |
+| teacher asset export | `scripts/export_rhythm_teacher_targets.py` |
+| teacher -> student smoke integration | `scripts/integration_teacher_export_student_kd.py` |
+| maintained smoke | `scripts/smoke_test_rhythm_v2.py` |
 
-1. prepare and verify a real binary cache
-2. run `teacher_offline`
-3. export learned-offline teacher targets
-4. rebuild student-facing cache from exported teacher assets
-5. run `student_kd`
-6. optional upper-bound extension: run `student_ref_bootstrap`
-7. prepare retimed cache + F0 side files
-8. run `student_retimed`
+## Current checkout status
 
-Formal student runs are not meaningful until the teacher export and cache rebuild are complete.
+This checkout is code-ready for the maintained path, but formal runs still
+depend on external assets:
 
-If your goal is specifically to improve reference-driven rhythm transfer instead of just preserving the maintained baseline, the recommended practical chain on April 6, 2026 is:
-
-1. `teacher_offline`
-2. export teacher targets / rebuild student cache
-3. `student_kd`
-4. `student_ref_bootstrap`
-5. `student_retimed`
-
-For the practical AutoDL launch sequence, see `docs/autodl_training_handoff.md`.
+- formal processed data and binary caches are not fully checked in
+- teacher export assets are not checked in
+- `S3-retimed` still requires retimed cache plus matched F0/UV side data
+- checked-in smoke assets are for structural verification only, not formal training claims
 
 ## Installation
 
@@ -65,643 +95,13 @@ conda activate conan
 pip install -r requirements.txt
 ```
 
-Optional / path-specific dependencies:
-
-- `resemblyzer`: speaker embedding extraction
-- `pyworld`: `pe=pw` or RMVPE audio-refinement path
-- `pretty_midi`, `mir_eval`: MIDI export / evaluation helpers
-
-## Environment
-
-Preferred workflow assumes the `conan` Conda environment:
-
-```bash
-conda activate conan
-```
-
-- Python 3.10 is the maintained baseline.
-- `pip install -r requirements.txt` covers the maintained rhythm stack.
-- Optional extras are only needed for the specific paths that mention them.
-- Normal `python tasks/run.py ...` launches no longer force `OMP/MKL/...=1`; if you need a low-noise debug run, set `CONAN_SINGLE_THREAD_ENV=1` explicitly.
-
-## Current checkout status
-
-### Formal training blockers
-
-This shared checkout still does **not** contain the maintained formal dataset assets:
-
-- `data/binary/vc_6layer/{train,valid}.{data,idx}` are missing
-- `data/processed/vc` is only a placeholder/example path, not a real processed corpus
-- `data/teacher_targets/...` is absent
-- dedicated formal retimed cache / F0 side files for `student_retimed` are absent
-
-So formal `teacher_offline -> student_kd -> student_retimed` runs are still blocked by data, not by code. The same asset caveat also applies to the experimental `student_ref_bootstrap` stage; it additionally needs same-speaker splits that do not collapse to singletons after filtering.
-
-### Local smoke / probe assets that do exist
-
-This repo does contain lightweight smoke assets that are good enough for structural verification:
-
-- `data/binary/libritts_single_smoke_rhythm_v4`
-- `data/processed/libritts_local_real_smoke`
-- `artifacts/rhythm_teacher_export_student_kd/<run-id>/...`:
-  - bootstrap teacher checkpoint
-  - teacher export for `train/valid/test`
-  - rebuilt student binary for stage-2 smoke
-
-They are for probe/smoke validation only, not for formal maintained training claims.
-
-Important caveats:
-
-- the `artifacts/rhythm_teacher_export_student_kd/...` teacher checkpoint is `bootstrap_random_init`, so that chain is an integration smoke, not a real learned teacher asset
-- `data/binary/libritts_single_smoke_rhythm_v4` is train-only in practice:
-  - `valid.data` is empty
-  - `test.data` is empty
-- the checked-in `libritts_single_smoke_rhythm_v4` items are rhythm-cache **v4 compatibility smoke**, not maintained v5 training assets
-- the generated stage-2 `student_binary` smoke assets already contain learned-offline teacher + retimed targets, but they still **do not include F0**, so default `student_retimed` smoke remains blocked when `use_pitch_embed=true`
-- retimed mel supervision now refuses to silently reuse source-axis pitch by default; without matched `retimed_f0_tgt` / `retimed_uv_tgt`, pitch supervision is disabled first and fail-fast checks can still escalate during formal stage-3 training
-
-### Runnable now vs blocked now
-
-| Surface | Current smoke checkout status |
-|---|---|
-| `teacher_offline` preflight / probe | runnable on `data/binary/libritts_single_smoke_rhythm_v4` **train only** |
-| `student_kd` preflight / smoke | runnable on `artifacts/rhythm_teacher_export_student_kd/<run-id>/student_binary` |
-| `student_retimed` default smoke | blocked on this checkout by missing F0 in the smoke `student_binary` |
-| `student_retimed --hparams use_pitch_embed=False` | structurally runnable only; not a formal stage-3 pass |
-
-## Preflight and validation
-
-Run preflight before probe or training. The script accepts both binary and processed path overrides:
-
-```bash
-python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/your_dataset   --processed_data_dir data/processed/your_dataset   --splits train valid   --inspect_items 2   --model_dry_run
-```
-
-Preflight is intentionally **binary-cache-first**. It validates indexed rhythm/cache fields and stage contracts first. By default `processed_data_dir` is still only lightly checked, but formal readiness runs can now add `--strict_processed_data_dir` to escalate missing or placeholder processed paths into hard errors instead of warnings.
-
-Useful local verification commands:
+## Minimal local verification
 
 ```bash
 python -m compileall -q modules tasks scripts tests utils data_gen
 python -m unittest discover -s tests/rhythm -p "test_*.py"
 python -u scripts/smoke_test_rhythm_v2.py
-python scripts/integration_teacher_export_student_kd.py --help
 python scripts/preflight_rhythm_v2.py --help
-```
-
-## Reference descriptor diagnostics
-
-The maintained repo now includes `scripts/plot_rhythm_diagnostics.py` for
-descriptor inspection. This script is intentionally aligned with the **actual**
-local reference contract:
-
-- maintained cache contract:
-  - `ref_rhythm_stats`: 6-D
-  - `ref_rhythm_trace`: 5-D
-- compact planner-facing contract derived from it:
-  - `global_rate`
-  - `pause_ratio`
-  - `local_rate_trace`
-  - `boundary_trace`
-
-In other words, it does **not** assume the simplified external layout
-`ref_rhythm_stats=[global_rate, pause_ratio]` or `ref_rhythm_trace=[local, boundary]`
-as the canonical on-disk format.
-
-Supported inputs:
-
-- direct audio (`.wav`, `.flac`, ...)
-- feature bundles (`.npz`, `.pt`, `.pth`, `.json`)
-- descriptor bundle selectors such as:
-  - `artifacts/.../descriptors.json::sample_id=S01`
-  - `artifacts/.../descriptors.json::index=0`
-
-Typical usage:
-
-```bash
-# single-sample diagnostics from a bundle record
-python scripts/plot_rhythm_diagnostics.py single \
-  --input artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S01 \
-  --output artifacts/reference_descriptor_review/train_clean_100_20260407/plots/single_S01.png
-
-# direct audio path: raw time-axis diagnostics + planner traces
-python scripts/plot_rhythm_diagnostics.py single \
-  --input G:/streamVC/LibriTTS_local/LibriTTS/train-clean-100/7067/76047/7067_76047_000046_000009.wav \
-  --output artifacts/reference_descriptor_review/train_clean_100_20260407/plots/single_audio_S01.png
-
-# source / ref / output triplet comparison
-python scripts/plot_rhythm_diagnostics.py compare \
-  --source artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S01 \
-  --reference artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S02 \
-  --output_input artifacts/reference_descriptor_review/train_clean_100_20260407/descriptors.json::sample_id=S03 \
-  --output_png artifacts/reference_descriptor_review/train_clean_100_20260407/plots/triplet_compare.png
-
-# corpus-level distributions / heatmaps
-python scripts/plot_rhythm_diagnostics.py corpus \
-  --input_dir artifacts/reference_descriptor_review/train_clean_100_20260407 \
-  --save_prefix artifacts/reference_descriptor_review/train_clean_100_20260407/plots/diagnostic_bundle
-
-# richer review pack: enhanced dashboards + regenerated per-sample panels + copied audio
-python scripts/plot_rhythm_diagnostics.py corpus \
-  --input_dir artifacts/reference_descriptor_review/train_clean_100_20260407 \
-  --save_prefix artifacts/reference_descriptor_review/train_clean_100_20260407/plots/enhanced_review \
-  --single_output_dir artifacts/reference_descriptor_review/train_clean_100_20260407/plots/enhanced_single \
-  --export_audio_dir artifacts/reference_descriptor_review/train_clean_100_20260407/audio
-```
-
-Plotting conventions:
-
-- `global_rate`, `pause_ratio`: scalar distribution view
-- `local_rate_trace`, `boundary_trace`: progress-domain curve / heatmap view
-- mel: background layer only
-- if direct audio or mel is available, the script also renders repo-aligned raw
-  diagnostics:
-  - `energy_z`
-  - `delta`
-  - `pause_mask`
-  - `voiced`
-  - `local_rate_raw`
-  - `boundary_strength`
-  - `boundary_events`
-
-For large exported bundles where you only want planner/global views, add
-`--disable_audio_backfill` so the script does not reopen each record's source
-audio just to reconstruct raw time-axis proxies.
-
-The enhanced corpus review path is aimed at **human diagnosis**:
-
-- `*_global_dashboard.png`: sorted bars + scatter + metric heatmap
-- `*_progress_cards.png`: per-sample local/boundary small multiples
-- `--single_output_dir`: regenerated sample-level panels
-- `--export_audio_dir`: copied review audio + `audio_manifest.csv` + `.m3u`
-
-That richer plotting / audio export improves qualitative inspection, but it is
-still **not** the same thing as paper-grade evidence for descriptor sufficiency.
-The main missing future ablations are:
-
-1. source-compression sufficiency:
-   - does the compressed unit sequence preserve enough information relative to
-     the uncompressed token/source sequence for target-rhythm prediction?
-2. descriptor causal sufficiency:
-   - intervention monotonicity
-   - ablation specificity
-   - leakage analysis
-3. descriptor-to-annotation alignment:
-   - correlation with human pause / boundary labels
-   - correlation with forced-alignment pause durations
-   - consistency with speaking-rate annotations
-
-Those evidence gaps are documented as future evaluation work in
-`docs/rhythm_migration_plan.md`; they are not claimed as solved by the current
-maintained branch.
-
-## Conda `conan` environment validation actually run
-
-The following checks were run in the `conan` environment on April 4-5, 2026.
-
-### 1) Compile / unit / maintained smoke checks
-
-```bash
-conda run -n conan python -m compileall -q modules tasks scripts tests utils data_gen
-conda run -n conan python -m unittest discover -s tests/rhythm -p "test_*.py"
-conda run -n conan python -u scripts/smoke_test_rhythm_v2.py
-```
-
-Result:
-
-- compileall: **passed**
-- rhythm unittests: **243 passed**
-- maintained smoke test: **passed**
-- strict `teacher_offline` preflight + dry-run on smoke assets: **passed**
-- strict `student_kd` preflight + dry-run on the maintained smoke integration binary: **passed**
-- strict default `student_retimed` preflight on the smoke stage-3 binary: **fails as expected** on missing `f0`; a `use_pitch_embed=False` override still passes only as a structural smoke check
-
-This latest rerun includes the new coverage added for:
-
-- frame-plan preserved-sum integer rounding
-- projector hot-path invariants after vectorization
-- context-matched KD gating / dedupe interaction
-- conservative EMA group loss balancing
-- module-only train/valid objective alignment
-- teacher-offline validation using the real offline-teacher branch
-- optional dependency guards for lazy text frontend import and no-op tensorboard fallback
-- weighted retimed acoustic loss normalization over full broadcasted weight mass
-- conservative retimed-pitch guard that disables wrong-axis source-pitch fallback unless explicitly opted in
-- validation / smoke metrics now surface runtime flags such as skipped acoustic objectives and missing matched retimed pitch targets
-
-The longer 2000-step probe results below remain the latest recorded long-run measurements for the maintained default configs; the new `context_match` / `balanced` configs are still experimental and were not silently promoted to the maintained baseline.
-
-### 2) Teacher-offline preflight + model dry-run on smoke assets
-
-```bash
-conda run -n conan python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --splits train   --inspect_items 2   --model_dry_run
-```
-
-Result: **passed on `train`**.
-
-Counter-check:
-
-```bash
-conda run -n conan python scripts/preflight_rhythm_v2.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --splits train valid   --inspect_items 2   --model_dry_run
-```
-
-Result: **fails on `valid`** because `data/binary/libritts_single_smoke_rhythm_v4/valid.data` is empty. That is a smoke-asset defect, not a stage-contract or model-logic failure.
-
-### 3) Teacher export -> student KD integration smoke
-
-```bash
-conda run -n conan python scripts/integration_teacher_export_student_kd.py   --teacher_config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --student_config egs/conan_emformer_rhythm_v2_student_kd.yaml   --processed_data_dir data/processed/libritts_local_real_smoke
-```
-
-Result: **passed**.
-
-Integration notes:
-
-- export coverage now includes `train/valid/test`
-- summary artifact is written under `artifacts/rhythm_teacher_export_student_kd/<run-id>/summary.json`
-- this is still smoke-only because the teacher ckpt mode is `bootstrap_random_init`
-- on the checked-in LibriTTS smoke corpus, split inference relies on the generated `build_summary.json`
-
-### 4) 2000-step CPU probe: `teacher_offline`
-
-```bash
-conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --binary_data_dir data/binary/libritts_single_smoke_rhythm_v4   --processed_data_dir data/processed/libritts_local_real_smoke   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/teacher_offline_cpu_probe_2000_clean.json
-```
-
-Result summary:
-
-- completed **2000/2000** steps
-- `total_loss`: `0.3854 -> 0.1044`
-- `L_rhythm_exec`: `0.2483 -> 0.0962`
-- `L_stream_state`: `0.1371 -> 0.0082`
-- mean step time: `240.71 ms`
-- throughput: `4.154 steps/s`
-- peak CPU RSS: `1159.91 MB`
-
-### 5) 2000-step CPU probe: `student_kd`
-
-```bash
-conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary   --processed_data_dir data/processed/libritts_local_real_smoke   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/student_kd_cpu_probe_2000_default_chain.json
-```
-
-Result summary:
-
-- completed **2000/2000** steps
-- `total_loss`: `0.0154 -> 0.0111`
-- `L_rhythm_exec`: `0.0070 -> 0.0069`
-- `L_stream_state`: `0.0075 -> 0.00018`
-- mean step time: `46.53 ms`
-- throughput: about `21.49 steps/s`
-- peak CPU RSS: about `977.65 MB`
-
-### 6) 2000-step CPU probe: `student_retimed` smoke
-
-```bash
-conda run -n conan python scripts/cpu_probe_rhythm_train.py   --config egs/conan_emformer_rhythm_v2_student_retimed.yaml   --binary_data_dir artifacts/rhythm_teacher_export_student_kd/5e1bc8ca5f/student_binary   --processed_data_dir data/processed/libritts_local_real_smoke   --hparams use_pitch_embed=False   --steps 2000   --warmup_steps 10   --device cpu   --profile_json artifacts/probe/student_retimed_cpu_probe_2000_smoke.json
-```
-
-Result summary:
-
-- completed **2000/2000** steps
-- `total_loss`: `48.41 -> 2.67`
-- `L_base` dominates the objective
-- `grad_norm_before_clip`: mean about `158.86`, max about `275.92`
-- this is a structural smoke pass only, **not** a clean stage-3 readiness signal
-
-## Training commands
-
-Teacher stage template:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --exp_name conan_rhythm_v2_teacher_offline   --reset
-```
-
-Maintained stage-1 semantics note:
-
-- `teacher_offline` is currently a **cached-guidance bootstrap** for the learned
-  offline teacher branch
-- it keeps `rhythm_dataset_target_mode: cached_only` and
-  `rhythm_primary_target_surface: guidance`
-- so do **not** oversell the checked-in config as "offline teacher directly
-  learns from runtime algorithmic teacher targets"; that is a separate research
-  direction, not the maintained default in this repo
-
-For real runs, also override the actual dataset roots, for example:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --exp_name conan_rhythm_v2_teacher_offline   --reset   -hp "binary_data_dir='data/binary/your_dataset',processed_data_dir='data/processed/your_dataset'"
-```
-
-Export teacher targets template:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/export_rhythm_teacher_targets.py   --config egs/conan_emformer_rhythm_v2_teacher_offline.yaml   --ckpt checkpoints/conan_rhythm_v2_teacher_offline   --output_dir data/teacher_targets/conan_rhythm_v2   --splits train valid test
-```
-
-Student KD template:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --exp_name conan_rhythm_v2_teacher_kd   --reset
-```
-
-Example with required overrides:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_kd.yaml   --exp_name conan_rhythm_v2_teacher_kd   --reset   -hp "binary_data_dir='data/binary/your_stage2_binary',processed_data_dir='data/processed/your_dataset',rhythm_teacher_target_dir='data/teacher_targets/conan_rhythm_v2'"
-```
-
-Student external-reference bootstrap template:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml   --exp_name conan_rhythm_v2_student_ref_bootstrap   --reset
-```
-
-Example with required overrides:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_ref_bootstrap.yaml   --exp_name conan_rhythm_v2_student_ref_bootstrap   --reset   -hp "binary_data_dir='data/binary/your_stage2_binary',processed_data_dir='data/processed/your_dataset',load_ckpt='checkpoints/your_student_kd_ckpt',load_ckpt_strict=False"
-```
-
-Notes:
-
-- this stage is intentionally `runtime_only + sample_ref + teacher/algorithmic`
-- it hard-fails by default when sampled same-speaker reference collapses back to self (`rhythm_require_external_reference: true`)
-- for true one-to-many bootstrap, add a fixed `rhythm_pair_manifest_path` so the dataset expands explicit `A|A + A|B_fast + A|B_mid + A|B_slow/...` pairs instead of relying on random same-speaker sampling
-- pair-manifest runs now keep same-`A` groups contiguous in `ordered_indices()`, so grouped batches are much more likely to contain the full one-to-many bundle
-- explicit identity anchors are now supported with `rhythm_allow_identity_pairs: true`, so `A|A` can coexist with the external-reference fail-fast guard
-- stage-2.5 now exposes extra anti-collapse supervision:
-  - `lambda_rhythm_ref_descriptor_stats`
-  - `lambda_rhythm_ref_descriptor_trace`
-  - `lambda_rhythm_ref_group_contrastive`
-- monitor `rhythm_metric_reference_self_rate` / `rhythm_metric_reference_external_rate`; a healthy formal run should keep self-rate near `0`
-- keep scope discipline: the current maintained high-value landing is still the
-  runtime-only stage-2.5 bootstrap, not the full future ceiling stack. The
-  following are intentionally documented as later research / engineering
-  directions rather than current rollout requirements:
-  - `teacher_pairwise_refine`
-  - pairwise offline cache / export
-  - `teacher_pairwise_joint_upper_bound`
-  - full runtime-matched teacher export pipeline
-
-If you need the short-reference / long-stream safety profile, copy the values from
-`egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` into your run
-config or a small derived override yaml. That profile enables slow-memory sidecars,
-runtime/metric phase-gap diagnostics, cold-start coverage gating, active-tail
-anchor-aware local trace sampling, and trace-exhaustion fallback so runtime does not
-keep replaying the reference tail forever once the local phase has effectively run
-out.
-
-Student retimed template:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tasks/run.py   --config egs/conan_emformer_rhythm_v2_student_retimed.yaml   --exp_name conan_rhythm_v2_retimed   --reset
-```
-
-Real stage-3 runs additionally require a binary cache that already contains retimed targets plus valid F0 side data. The checked-in smoke `student_binary` does not satisfy that default `use_pitch_embed=true` contract.
-
-### Warm-start loading note
-
-These maintained stage configs now set `load_ckpt_strict: false` on purpose. The
-intended chain is partial-load warm-start, not exact-architecture resume:
-
-- `teacher_offline` can warm-start from a base Conan checkpoint that has no Rhythm V2 modules
-- `student_kd` can warm-start from `teacher_offline`, which includes offline-teacher-only params that stage-2 does not instantiate
-- `student_ref_bootstrap` can warm-start from `student_kd`, but it intentionally switches the rhythm path from cached self-conditioned supervision to runtime external-reference teacher targets
-- `student_retimed` can warm-start from `student_kd`, which may have been trained with `use_pitch_embed=false`, so stage-3 pitch embed / predictor weights may be missing
-
-When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched keys:
-
-- expected missing Rhythm V2 / offline-teacher / pitch keys are normal for cross-stage warm-start
-- missing core backbone keys such as encoder / decoder / speaker-related weights are a stop-and-debug signal
-- the non-strict loader now prints missing/unexpected key counts with a preview, so warm-start strength is no longer silent
-
-## Config matrix
-
-| Config | Status | Purpose | Needs teacher cache | Needs retimed cache | Needs F0 |
-|---|---|---|---:|---:|---:|
-| `conan_emformer_rhythm_v2_teacher_offline.yaml` | maintained | cached-guidance bootstrap for the learned offline teacher stage | no | no | usually no |
-| `conan_emformer_rhythm_v2_student_kd.yaml` | maintained | student runtime + cached teacher supervision; maintained path usually keeps KD shape-only | yes | no | no |
-| `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
-| `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
-| `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` | experimental | alias of the pairwise external-reference stage-2.5 config | no | no | no |
-| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream robustness profile with trace-reliability gating, cold-start coverage control, and active-tail anchor-aware trace sampling | no | no | no |
-| `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
-| `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
-| `conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml` | experimental | cached-first stage-3 branch that switches to hybrid online retimed targets after the configured warmup | yes | yes | yes |
-| `conan_emformer_rhythm_v2_minimal_v1.yaml` | maintained | minimal maintained profile / contract baseline | yes | no | stage-dependent |
-| `conan_emformer_rhythm_v2.yaml` | transitional | migration / debug path | optional | optional | stage-dependent |
-| `conan_emformer_rhythm_v2_schedule_only.yaml` | legacy | schedule-only ablation; not part of maintained training prep | optional | no | no |
-| `conan_emformer_rhythm_v2_dual_mode_kd.yaml` | legacy | runtime dual-mode teacher research / ablation | optional | no | no |
-
-## Training-prep conclusion
-
-Current branch conclusion after code review, probes, and smoke integration:
-
-- `teacher_offline`: **code-ready**, but the checked-in smoke `valid` split is defective
-- `student_kd`: **structurally ready** once a real trained teacher export exists for all required splits
-- `student_ref_bootstrap`: **code-ready as an experimental stage-2.5**, but meaningful runs require real same-speaker pools plus external-reference coverage monitoring
-- fixed pair-manifest bootstrap is now supported:
-  - explicit one-to-many pair expansion
-  - grouped batch ordering for same-`A` bundles
-  - optional `A|A` identity anchors without disabling the external-reference fail-fast guard
-- stage-2.5 also now has explicit anti-collapse supervision beyond `L_algo`:
-  - descriptor-consistency against `global_rate / pause_ratio / local_rate_trace / boundary_trace`
-  - same-`A` group contrastive matching when batch groups contain multiple references
-- `student_retimed`: **not formally ready to bless** from this checkout; the current smoke student binary is missing F0, so default stage-3 smoke fails unless pitch embed is disabled, and even then gradient pressure stays high
-- short-ref / longer-source robustness is now treated as a **separate opt-in profile**, not a silent mainline semantic change:
-  - full/global teacher remains intact
-  - runtime/student side now uses an explicit `trace_reliability` gate instead of mutating the raw trace values
-  - anchor-aware local trace sampling can be enabled so `dur_anchor_src` rather than flat unit count controls local progress spacing
-  - the fallback path prefers existing slow/global rhythm branches and suppresses phrase-final slow-memory bias when reference evidence is clearly exhausted
-
-Latest 2000-step smoke profile (`artifacts/probe/student_retimed_cpu_probe_2000_smoke.json`) still says the same thing numerically:
-
-- `L_base.mean ~= 6.526`
-- `L_rhythm_exec.mean ~= 0.00279`
-- `L_stream_state.mean ~= 0.000746`
-- `L_pitch.mean = 0.0` in that smoke run because it had to override `use_pitch_embed=False`
-- `grad_norm_before_clip.mean ~= 158.86`, `max ~= 275.92`
-
-So stage-3 is runnable as a smoke path, but not yet something this checkout should market as formally training-ready.
-
-A fresh 2-step retimed probe after the newest observability patch also confirmed the runtime flags are now visible directly in probe output:
-
-- `rhythm_metric_pitch_supervision_disabled = 1.0`
-- `rhythm_metric_skip_acoustic_objective = 0.0`
-- `rhythm_metric_acoustic_target_is_retimed = 1.0`
-
-So the next formal sequence should be:
-
-1. train a real `teacher_offline` checkpoint
-2. export teacher targets for `train/valid/test`
-3. rebuild stage-2 binary from that export
-4. validate `student_kd`
-5. if you want better reference-driven rhythm transfer, run `student_ref_bootstrap` and verify `rhythm_metric_reference_self_rate ~= 0`
-6. prepare dedicated retimed cache + F0 side files
-7. re-check `student_retimed` with real assets before long training
-
-Experimental notes:
-
-- `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
-- `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
-- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in robustness profile for short-reference / long-stream regimes; it keeps the teacher global, leaves raw reference traces untouched, reports both anchor-gap and runtime-gap diagnostics, gates local/boundary trace paths by `trace_reliability`, adds cold-start coverage suppression plus active-tail/lookahead anchor-aware local trace sampling, and lets slow/global rhythm memory take over when the reference tail keeps getting reused
-- `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
-- future ceiling directions are explicitly **not** part of the current minimal maintained landing:
-  - `teacher_pairwise_refine`
-  - pairwise offline cache / export
-  - `teacher_pairwise_joint_upper_bound`
-  - full runtime-matched teacher export pipeline
-- maintained readiness claims in this README still refer to the default `teacher_offline -> student_kd -> student_retimed` chain
-
-## Inference boundary
-
-Current checked-in inference is best treated as a streaming-oriented evaluation path, not a polished native low-latency production deployment.
-
-See `inference/README.md` for that separate boundary.
-
-If historical notes mention fixed latency numbers or SOTA-style claims, read them as upstream / historical context, not as a fresh claim for this branch state.
-
-Also note that the legacy `inference/run_voice_conversion*.py` runners are not maintained branch-quality entrypoints for this rhythm fork; use the latency-report helper and training/preflight scripts as the maintained surface.
-
-## Performance notes
-
-Recent branch work improved the maintained path around:
-
-- sum-preserving frame-plan integerization for speech / blank groups and `dur_anchor_src`
-- cache-contract hardening and fail-fast preflight
-- train/valid objective alignment for module-only stages such as `teacher_offline` and `student_kd`
-- correct teacher-offline validation routing instead of silently falling back to the student/runtime branch
-- reduced duplicate Python work in the maintained student path
-- vectorized projector outer hot paths such as pause projection, commit-frontier resolution, and state advance
-- smaller orchestration entrypoints for preflight/metrics
-- removal of a deprecated local TorchScript helper in `modules/Conan/diff/net.py`
-- weighted retimed acoustic losses now normalize by full broadcasted weight mass instead of frame count only
-- retimed mel supervision now blocks accidental source-axis pitch fallback unless explicitly allowed for debugging
-- pause supervision can now optionally use a **support-first** auxiliary event loss (`rhythm_pause_event_*`) for the common regime where pause precision is acceptable but pause recall is too low:
-  - keep the original pause-magnitude regression as the main term
-  - add a BCE-style pause-event objective on `pause_exec_tgt > threshold`
-  - expose `L_exec_pause_value` and `L_pause_event` so operators can separate "pause amount" from "pause support / recall"
-- teacher-offline recall repair now also has an **opt-in structural path** when event-only tuning is not enough:
-  - split planner pause support vs allocation with `rhythm_pause_support_split_enable`
-  - add lightweight run-length / breath-debt pause features with `rhythm_pause_breath_features_enable`
-  - expose `L_pause_allocation` plus planner-side observability such as `rhythm_metric_planner_pause_event_recall`, `rhythm_metric_pause_event_recall_drop_projector`, `rhythm_metric_pause_target_exceeds_topk_rate`, and `rhythm_metric_pause_fn_boundary_q*_share`
-  - staged overlay ladder now lives in:
-    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_a_soft_teacher_selection.yaml`
-    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_b_lower_boundary.yaml`
-    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_run_c_event_threshold.yaml`
-    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_next.yaml`
-    - `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall_structural.yaml`
-- CPU probe summaries now surface runtime observability flags for:
-  - module-only / acoustic-skip stages
-  - retimed pitch supervision disablement
-  - missing matched retimed pitch targets
-  - pre-align acoustic length mismatch / resample / trim events
-- rhythm-only imports no longer require the English text frontend or tensorboard at import time
-
-Recent branch work also added opt-in experimental surfaces:
-
-- bounded `ema_group` rhythm-loss balancing (`rhythm_loss_balance_mode: none` remains the default)
-- context-matched KD gating for prefix-truncated stage-2 experiments (`rhythm_enable_distill_context_match: false` remains the default)
-
-### Pause-support troubleshooting note
-
-If a stage-1 / stage-2 run shows a pattern like:
-
-- `pause_event_precision >> pause_event_recall`
-- `L_exec_pause` improves only slowly
-- `prefix_drift_l1` also falls slowly
-
-then the more likely bottleneck is **pause support / event recall**, not `L_budget`.
-
-Interpretation:
-
-- the model is not "stopping everywhere"
-- it is usually stopping only at a few high-confidence locations
-- many target pause events are still missing, which also slows prefix-clock closure
-
-The maintained code now supports an opt-in auxiliary loss for this case:
-
-- `rhythm_pause_event_weight`
-- `rhythm_pause_event_threshold`
-- `rhythm_pause_event_temperature`
-- `rhythm_pause_event_pos_weight`
-
-Recommended conservative starting point:
-
-```yaml
-rhythm_pause_event_weight: 0.20
-rhythm_pause_event_threshold: 0.5
-rhythm_pause_event_temperature: 0.20
-rhythm_pause_event_pos_weight: 2.5
-```
-
-What to watch after enabling it:
-
-- `L_exec_pause_value`: the original pause-magnitude regression term
-- `L_pause_event`: the new support / recall term
-- `pause_event_precision`
-- `pause_event_recall`
-- `pause_event_f1`
-
-If recall improves offline but streaming behavior is still conservative, the next lever is usually not more budget weight. Prefer the staged pause-recall overlays above: first test teacher-side soft sparse selection, then lower late boundary bias, then soften the event definition, and only then opt into the structural support/allocation split. Avoid blindly increasing late boundary bias and top-k at the same time.
-
-### Pause-recall overlay ladder
-
-For the maintained `teacher_offline` recall-repair workflow, the repo now ships a small ablation ladder instead of one monolithic "more boundary" recipe:
-
-- **Run A**: `...pause_recall_run_a_soft_teacher_selection.yaml`
-  - isolates soft sparse pause selection on the active teacher path during training
-- **Run B**: `...pause_recall_run_b_lower_boundary.yaml`
-  - lowers late planner/projector/loss-side boundary pressure without rebuilding caches
-- **Run C**: `...pause_recall_run_c_event_threshold.yaml`
-  - softens the pause-event definition so smaller-but-real pause targets contribute recall gradients earlier
-- **Recommended next**: `...pause_recall_next.yaml`
-  - combines soft teacher sparse selection, warmer sparse gating, and lower late boundary bias
-- **Structural upgrade**: `...pause_recall_structural.yaml`
-  - keeps `load_ckpt_strict: false` on purpose because older checkpoints will not contain the new `pause_allocation_head` / `pause_feature_proj` parameters
-  - enables planner-side support/allocation split plus run-length / breath-debt features
-  - adds `rhythm_pause_allocation_weight` / `L_pause_allocation` so recall repair is not forced to ride only on one normalized planner distribution
-
-This structural path is an opt-in research/repair overlay, not a claim that the maintained default stage has "solved" pause recall.
-
-Current performance headroom is still mostly in:
-
-- data loading / item reuse
-- batch transfer efficiency
-- binarization throughput
-- Windows-vs-Linux preprocessing throughput
-
-## Multi-binary `train_sets` note
-
-The codebase now hardens `train_sets` more than before:
-
-- train-set preflight checks now inspect extra `train` sidecars
-- the train dataloader now checks shared JSON artifacts across `binary_data_dir` and every entry in `train_sets`
-- known condition maps (`style` / `emotion` / `accent`) are compared when present
-
-But the practical recommendation is still conservative:
-
-- `train_sets` only affects the **train** dataloader; `valid` / `test` still come from `binary_data_dir`
-- for a first formal baseline, prefer one unified preprocess/binarize pass that produces a single `binary_data_dir`
-- use `train_sets` only when you intentionally accept multi-binary protocol coupling and have verified those artifacts match
-
-## Repository hygiene
-
-- generated `artifacts/` should stay untracked except curated patch/probe summaries that you explicitly want to keep
-- `.gitattributes` pins text files to LF to reduce Windows CRLF noise
-- the rhythm CI lane should cover both Ubuntu and Windows
-
-## Citation
-
-If you use the upstream Conan work, cite the original paper/reference:
-
-```bibtex
-@article{zhang2025conan,
-  title={Conan: A Chunkwise Online Network for Zero-Shot Adaptive Voice Conversion},
-  author={Zhang, Yu and Tian, Baotong and Duan, Zhiyao},
-  journal={arXiv preprint arXiv:2507.14534},
-  year={2025}
-}
 ```
 
 ## License
