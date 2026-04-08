@@ -10,6 +10,50 @@ from .projector import ProjectorConfig
 from .teacher import AlgorithmicTeacherConfig
 
 
+def _resolve_alias_value(
+    hparams,
+    *,
+    canonical_key: str,
+    legacy_key: str,
+    default,
+    cast,
+    extra_legacy_keys: tuple[str, ...] = (),
+):
+    if canonical_key in hparams and hparams.get(canonical_key) is not None:
+        canonical_value = hparams.get(canonical_key)
+        for key in (legacy_key,) + tuple(extra_legacy_keys):
+            if key in hparams and hparams.get(key) is not None and cast(hparams.get(key)) != cast(canonical_value):
+                raise ValueError(
+                    f"Conflicting values for {canonical_key} and deprecated alias {key}."
+                )
+        return cast(canonical_value)
+    for key in (legacy_key,) + tuple(extra_legacy_keys):
+        if key in hparams and hparams.get(key) is not None:
+            return cast(hparams.get(key))
+    return cast(default)
+
+
+def resolve_phase_decoupled_timing_from_hparams(hparams) -> bool:
+    return _resolve_alias_value(
+        hparams,
+        canonical_key='rhythm_phase_decoupled_timing',
+        legacy_key='rhythm_phase_free_timing',
+        default=False,
+        cast=bool,
+    )
+
+
+def resolve_phase_decoupled_phrase_gate_boundary_threshold_from_hparams(hparams) -> float:
+    return _resolve_alias_value(
+        hparams,
+        canonical_key='rhythm_phase_decoupled_phrase_gate_boundary_threshold',
+        legacy_key='rhythm_phase_free_phrase_boundary_threshold',
+        extra_legacy_keys=('rhythm_phase_decoupled_phrase_boundary_threshold',),
+        default=0.55,
+        cast=float,
+    )
+
+
 def resolve_content_vocab_size(hparams) -> int:
     for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "content_embedding_dim"):
         value = hparams.get(key, None)
@@ -51,6 +95,9 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
             # observability paths stay aligned with the execution authority.
             hparams.get('rhythm_projector_build_render_plan', True)
         ),
+        debt_leak=float(hparams.get('rhythm_projector_debt_leak', 0.05)),
+        debt_max_abs=float(hparams.get('rhythm_projector_debt_max_abs', 12.0)),
+        debt_correction_horizon=float(hparams.get('rhythm_projector_debt_correction_horizon', 4.0)),
     )
 
 
@@ -159,6 +206,10 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         # sidecar knob manually. Those regimes are the ones that benefit most
         # from slow-memory summaries and trace-exhaustion fallback.
         emit_reference_sidecar = _should_auto_enable_reference_sidecar(hparams)
+    phase_decoupled_timing = resolve_phase_decoupled_timing_from_hparams(hparams)
+    phase_decoupled_phrase_gate_boundary_threshold = (
+        resolve_phase_decoupled_phrase_gate_boundary_threshold_from_hparams(hparams)
+    )
     return StreamingRhythmModule(
         num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
@@ -225,10 +276,14 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         trace_offset_lookahead_units=int(hparams.get('rhythm_trace_offset_lookahead_units', 0)),
         chunk_state_enable=bool(hparams.get('rhythm_chunk_state_enable', True)),
         budget_phase_feature_scale=float(hparams.get('rhythm_budget_phase_feature_scale', 0.0)),
-        phase_free_timing=bool(hparams.get('rhythm_phase_free_timing', False)),
-        phase_free_phrase_boundary_threshold=float(
-            hparams.get('rhythm_phase_free_phrase_boundary_threshold', 0.55)
+        phase_decoupled_timing=phase_decoupled_timing,
+        phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+        phase_decoupled_boundary_style_residual_scale=float(
+            hparams.get('rhythm_phase_decoupled_boundary_style_residual_scale', 0.18)
         ),
+        debt_control_scale=float(hparams.get('rhythm_debt_control_scale', 4.0)),
+        debt_pause_priority=float(hparams.get('rhythm_debt_pause_priority', 0.15)),
+        debt_speech_priority=float(hparams.get('rhythm_debt_speech_priority', 0.25)),
         commit_config=build_commit_config_from_hparams(hparams),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),

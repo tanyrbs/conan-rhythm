@@ -108,6 +108,81 @@ class ProjectorInvariantTests(unittest.TestCase):
         self.assertTrue(torch.allclose(state.phase_progress_ratio, torch.tensor([0.30], dtype=torch.float32)))
         self.assertTrue(torch.allclose(state.phase_ptr_gap, torch.tensor([0.30], dtype=torch.float32)))
 
+    def test_projector_advance_state_applies_debt_leak(self) -> None:
+        projector = StreamingRhythmProjector(
+            ProjectorConfig(
+                build_render_plan=False,
+                debt_leak=0.25,
+                debt_max_abs=20.0,
+                debt_correction_horizon=10.0,
+            )
+        )
+        state = StreamingRhythmState(
+            phase_ptr=torch.tensor([0.0], dtype=torch.float32),
+            clock_delta=torch.tensor([4.0], dtype=torch.float32),
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+        )
+        next_state = projector._advance_state(
+            state=state,
+            dur_anchor_src=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            effective_duration_exec=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+            speech_duration_exec=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(float(next_state.clock_delta.item()), 3.0, places=5)
+
+    def test_projector_advance_state_clamps_debt_correction_horizon(self) -> None:
+        projector = StreamingRhythmProjector(
+            ProjectorConfig(
+                build_render_plan=False,
+                debt_leak=0.0,
+                debt_max_abs=20.0,
+                debt_correction_horizon=1.5,
+            )
+        )
+        state = StreamingRhythmState(
+            phase_ptr=torch.tensor([0.0], dtype=torch.float32),
+            clock_delta=torch.tensor([0.0], dtype=torch.float32),
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+        )
+        next_state = projector._advance_state(
+            state=state,
+            dur_anchor_src=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            effective_duration_exec=torch.tensor([[5.0, 0.0]], dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+            speech_duration_exec=torch.tensor([[5.0, 0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(float(next_state.clock_delta.item()), 1.5, places=5)
+
+    def test_projector_advance_state_clips_debt_max_abs(self) -> None:
+        projector = StreamingRhythmProjector(
+            ProjectorConfig(
+                build_render_plan=False,
+                debt_leak=0.0,
+                debt_max_abs=2.5,
+                debt_correction_horizon=10.0,
+            )
+        )
+        state = StreamingRhythmState(
+            phase_ptr=torch.tensor([0.0], dtype=torch.float32),
+            clock_delta=torch.tensor([1.0], dtype=torch.float32),
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+        )
+        next_state = projector._advance_state(
+            state=state,
+            dur_anchor_src=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            unit_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            effective_duration_exec=torch.tensor([[5.0, 0.0]], dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+            speech_duration_exec=torch.tensor([[5.0, 0.0]], dtype=torch.float32),
+            pause_after_exec=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        )
+        self.assertAlmostEqual(float(next_state.clock_delta.item()), 2.5, places=5)
+
     def test_total_budget_and_pause_share_are_derived_surfaces(self) -> None:
         planner = RhythmPlannerOutputs(
             speech_budget_win=torch.tensor([[2.0], [3.0]], dtype=torch.float32),

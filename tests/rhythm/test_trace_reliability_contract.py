@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from modules.Conan.rhythm.contracts import TraceReliabilityBundle
+from modules.Conan.rhythm.controller import ChunkStateBundle
 from modules.Conan.rhythm.factory import build_streaming_rhythm_module_from_hparams
 
 
@@ -54,7 +55,7 @@ class TraceReliabilityContractTests(unittest.TestCase):
             )
         return build_streaming_rhythm_module_from_hparams(hparams)
 
-    def _build_phase_free_module(self) -> object:
+    def _build_phase_decoupled_module(self) -> object:
         return build_streaming_rhythm_module_from_hparams(
             {
                 "hidden_size": 16,
@@ -63,7 +64,8 @@ class TraceReliabilityContractTests(unittest.TestCase):
                 "rhythm_trace_bins": 8,
                 "rhythm_emit_reference_sidecar": True,
                 "rhythm_runtime_phrase_bank_enable": True,
-                "rhythm_phase_free_timing": True,
+                "rhythm_phase_decoupled_timing": True,
+                "rhythm_phase_decoupled_boundary_style_residual_scale": 0.50,
                 "rhythm_trace_cold_start_min_visible_units": 0,
                 "rhythm_trace_cold_start_full_visible_units": 0,
             }
@@ -214,8 +216,8 @@ class TraceReliabilityContractTests(unittest.TestCase):
         self.assertGreaterEqual(float(reliability.phrase_blend.item()), 0.99)
         self.assertLessEqual(float(reliability.global_blend.item()), 1.0e-6)
 
-    def test_phase_free_trace_pair_is_independent_of_phase_ptr_for_conditioning(self) -> None:
-        module = self._build_phase_free_module()
+    def test_phase_decoupled_trace_pair_is_independent_of_phase_ptr_for_conditioning(self) -> None:
+        module = self._build_phase_decoupled_module()
         stats, trace = self._dummy_reference(trace_bins=8)
         conditioning = module.build_reference_conditioning(
             ref_rhythm_stats=stats,
@@ -246,7 +248,7 @@ class TraceReliabilityContractTests(unittest.TestCase):
             device=torch.device("cpu"),
             strict_pointer_only=True,
         )
-        trace_a, planner_a, reliability_a = module._sample_phase_free_trace_pair(
+        trace_a, planner_a, reliability_a = module._sample_phase_decoupled_trace_pair(
             ref_conditioning=conditioning,
             window_size=4,
             unit_mask=unit_mask,
@@ -254,7 +256,7 @@ class TraceReliabilityContractTests(unittest.TestCase):
             phrase_selection=phrase_selection_a,
             dur_anchor_src=torch.ones((1, 4), dtype=torch.float32),
         )
-        trace_b, planner_b, reliability_b = module._sample_phase_free_trace_pair(
+        trace_b, planner_b, reliability_b = module._sample_phase_decoupled_trace_pair(
             ref_conditioning=conditioning,
             window_size=4,
             unit_mask=unit_mask,
@@ -267,28 +269,101 @@ class TraceReliabilityContractTests(unittest.TestCase):
         self.assertTrue(torch.allclose(reliability_a.phrase_blend, reliability_b.phrase_blend))
         self.assertFalse(torch.allclose(reliability_a.phase_gap_runtime, reliability_b.phase_gap_runtime))
 
-    def test_phase_free_scheduler_boundary_score_is_source_driven(self) -> None:
-        module = self._build_phase_free_module()
-        stats, trace_a = self._dummy_reference(trace_bins=8)
-        trace_b = trace_a.clone()
-        trace_b[:, :, 2] = 1.0 - trace_b[:, :, 2]
-        kwargs = dict(
-            content_units=torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-            dur_anchor_src=torch.tensor([[2.0, 2.0, 2.0, 2.0]], dtype=torch.float32),
+    def test_phase_decoupled_strict_pointer_selection_ignores_live_chunk_queries(self) -> None:
+        module = self._build_phase_decoupled_module()
+        stats, trace = self._dummy_reference(trace_bins=8)
+        conditioning = module.build_reference_conditioning(
+            ref_rhythm_stats=stats,
+            ref_rhythm_trace=trace,
+        )
+        state = module.init_state(batch_size=1, device=torch.device("cpu"))
+        state.ref_phrase_ptr = torch.tensor([0], dtype=torch.long)
+        chunk_state_a = ChunkStateBundle(
+            chunk_summary=torch.tensor([[0.2, 0.1, 0.7, 0.4, 0.3, 0.2]], dtype=torch.float32),
+            structure_progress=torch.tensor([0.2], dtype=torch.float32),
+            commit_now_prob=torch.tensor([0.1], dtype=torch.float32),
+            phrase_open_prob=torch.tensor([0.8], dtype=torch.float32),
+            phrase_close_prob=torch.tensor([0.1], dtype=torch.float32),
+            phrase_role_prob=torch.tensor([[0.7, 0.2, 0.1]], dtype=torch.float32),
+            active_tail_mask=torch.ones((1, 4), dtype=torch.float32),
+        )
+        chunk_state_b = ChunkStateBundle(
+            chunk_summary=torch.tensor([[0.9, 0.8, 0.1, 0.6, 0.5, 0.4]], dtype=torch.float32),
+            structure_progress=torch.tensor([0.9], dtype=torch.float32),
+            commit_now_prob=torch.tensor([0.9], dtype=torch.float32),
+            phrase_open_prob=torch.tensor([0.1], dtype=torch.float32),
+            phrase_close_prob=torch.tensor([0.9], dtype=torch.float32),
+            phrase_role_prob=torch.tensor([[0.1, 0.2, 0.7]], dtype=torch.float32),
+            active_tail_mask=torch.ones((1, 4), dtype=torch.float32),
+        )
+        selection_a = module._select_scheduler_phrase_bank(
+            ref_conditioning=conditioning,
+            state=state,
+            batch_size=1,
+            device=torch.device("cpu"),
+            chunk_state=chunk_state_a,
+            strict_pointer_only=True,
+        )
+        selection_b = module._select_scheduler_phrase_bank(
+            ref_conditioning=conditioning,
+            state=state,
+            batch_size=1,
+            device=torch.device("cpu"),
+            chunk_state=chunk_state_b,
+            strict_pointer_only=True,
+        )
+        self.assertEqual(int(state.committed_reference_index.item()), 0)
+        self.assertTrue(
+            torch.equal(
+                selection_a["selected_ref_phrase_index"].long(),
+                selection_b["selected_ref_phrase_index"].long(),
+            )
+        )
+        self.assertEqual(int(selection_a["selected_ref_phrase_index"].item()), 0)
+        self.assertTrue(
+            torch.allclose(
+                selection_a["selected_phrase_prototype_summary"],
+                selection_b["selected_phrase_prototype_summary"],
+            )
+        )
+
+    def test_phase_decoupled_boundary_style_residual_cannot_create_support_outside_source_cue(self) -> None:
+        module = self._build_phase_decoupled_module()
+        boundary_score, residual = module.scheduler._apply_phase_decoupled_boundary_style_residual(
+            source_boundary_cue=torch.tensor([[0.0, 0.4, 0.0, 0.7]], dtype=torch.float32),
             unit_mask=torch.ones((1, 4), dtype=torch.float32),
-            state=module.init_state(batch_size=1, device=torch.device("cpu")),
+            phrase_selection={
+                "selected_phrase_prototype_boundary_strength": torch.tensor([1.0], dtype=torch.float32),
+            },
+            prompt_reliability=torch.tensor([[1.0]], dtype=torch.float32),
         )
-        exec_a = module(
-            ref_rhythm_stats=stats,
-            ref_rhythm_trace=trace_a,
+        zero_support = torch.tensor([True, False, True, False])
+        self.assertTrue(torch.allclose(boundary_score[0, zero_support], torch.zeros(2)))
+        self.assertTrue(torch.allclose(residual[0, zero_support], torch.zeros(2)))
+
+    def test_phase_decoupled_boundary_style_residual_modulates_existing_source_boundaries(self) -> None:
+        module = self._build_phase_decoupled_module()
+        kwargs = dict(
+            source_boundary_cue=torch.tensor([[0.2, 0.0, 0.6, 0.4]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            prompt_reliability=torch.tensor([[1.0]], dtype=torch.float32),
+        )
+        boosted, _ = module.scheduler._apply_phase_decoupled_boundary_style_residual(
+            phrase_selection={
+                "selected_phrase_prototype_boundary_strength": torch.tensor([1.0], dtype=torch.float32),
+            },
             **kwargs,
         )
-        exec_b = module(
-            ref_rhythm_stats=stats,
-            ref_rhythm_trace=trace_b,
+        damped, _ = module.scheduler._apply_phase_decoupled_boundary_style_residual(
+            phrase_selection={
+                "selected_phrase_prototype_boundary_strength": torch.tensor([0.0], dtype=torch.float32),
+            },
             **kwargs,
         )
-        self.assertTrue(torch.allclose(exec_a.planner.boundary_score_unit, exec_b.planner.boundary_score_unit))
+        self.assertGreater(float(boosted[0, 0].item()), float(damped[0, 0].item()))
+        self.assertGreater(float(boosted[0, 2].item()), float(damped[0, 2].item()))
+        self.assertTrue(torch.allclose(boosted[:, 1], torch.zeros((1,), dtype=boosted.dtype)))
+        self.assertTrue(torch.allclose(damped[:, 1], torch.zeros((1,), dtype=damped.dtype)))
 
 
 if __name__ == "__main__":

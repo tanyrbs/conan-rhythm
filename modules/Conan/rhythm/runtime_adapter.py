@@ -17,6 +17,23 @@ from .supervision import build_online_retimed_bundle
 from .unit_frontend import RhythmUnitFrontend
 
 
+def _resolve_phase_decoupled_override(runtime_overrides: dict) -> bool | None:
+    phase_decoupled_timing = runtime_overrides.pop("phase_decoupled_timing", None)
+    phase_free_timing = runtime_overrides.pop("phase_free_timing", None)
+    if (
+        phase_decoupled_timing is not None
+        and phase_free_timing is not None
+        and bool(phase_decoupled_timing) != bool(phase_free_timing)
+    ):
+        raise ValueError(
+            "Conflicting rhythm runtime overrides: phase_decoupled_timing and deprecated phase_free_timing."
+        )
+    resolved = phase_decoupled_timing if phase_decoupled_timing is not None else phase_free_timing
+    if resolved is None:
+        return None
+    return bool(resolved)
+
+
 class ConanRhythmAdapter(nn.Module):
     """Own the rhythm-specific runtime path used by Conan.
 
@@ -243,9 +260,7 @@ class ConanRhythmAdapter(nn.Module):
         )
         if trace_cold_start_full_visible_units is not None:
             trace_cold_start_full_visible_units = int(trace_cold_start_full_visible_units)
-        phase_free_timing = runtime_overrides.pop("phase_free_timing", None)
-        if phase_free_timing is not None:
-            phase_free_timing = bool(phase_free_timing)
+        phase_decoupled_timing = _resolve_phase_decoupled_override(runtime_overrides)
         ret["rhythm_stage"] = stage
         ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
         ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
@@ -307,7 +322,7 @@ class ConanRhythmAdapter(nn.Module):
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
             projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
             projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
             teacher_projector_force_full_commit=teacher_projector_force_full_commit,

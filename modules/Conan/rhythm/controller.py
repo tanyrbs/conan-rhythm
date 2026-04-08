@@ -28,6 +28,28 @@ def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> t
     return probs / denom
 
 
+def _resolve_phase_decoupled_flag(
+    *,
+    default: bool,
+    phase_decoupled_timing: bool | None,
+    phase_free_timing: bool | None,
+    where: str,
+) -> bool:
+    if (
+        phase_decoupled_timing is not None
+        and phase_free_timing is not None
+        and bool(phase_decoupled_timing) != bool(phase_free_timing)
+    ):
+        raise ValueError(
+            f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
+        )
+    if phase_decoupled_timing is not None:
+        return bool(phase_decoupled_timing)
+    if phase_free_timing is not None:
+        return bool(phase_free_timing)
+    return bool(default)
+
+
 def resolve_budget_views_from_total_and_pause_share(
     *,
     total_budget: torch.Tensor,
@@ -400,7 +422,8 @@ class WindowBudgetController(nn.Module):
         min_speech_frames: float = 1.0,
         boundary_feature_scale: float = 0.35,
         phase_feature_scale: float = 0.0,
-        phase_free_timing: bool = False,
+        phase_decoupled_timing: bool | None = None,
+        phase_free_timing: bool | None = None,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
         debt_speech_priority: float = 0.25,
@@ -414,7 +437,13 @@ class WindowBudgetController(nn.Module):
         self.min_speech_frames = float(min_speech_frames)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.phase_feature_scale = float(min(max(phase_feature_scale, 0.0), 1.0))
-        self.phase_free_timing = bool(phase_free_timing)
+        self.phase_decoupled_timing = _resolve_phase_decoupled_flag(
+            default=False,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="WindowBudgetController.__init__",
+        )
+        self.phase_free_timing = self.phase_decoupled_timing
         self.debt_control_scale = float(max(debt_control_scale, 1.0e-3))
         self.debt_pause_priority = float(max(debt_pause_priority, 0.0))
         self.debt_speech_priority = float(max(debt_speech_priority, 0.0))
@@ -463,6 +492,7 @@ class WindowBudgetController(nn.Module):
         phrase_prototype_summary: torch.Tensor | None = None,
         phrase_prototype_stats: torch.Tensor | None = None,
         prompt_reliability: torch.Tensor | None = None,
+        phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
@@ -499,8 +529,13 @@ class WindowBudgetController(nn.Module):
         structure_progress = frontier_ratio
         if chunk_state is not None:
             structure_progress = chunk_state.structure_progress.float()
-        effective_phase_free_timing = self.phase_free_timing if phase_free_timing is None else bool(phase_free_timing)
-        if (not effective_phase_free_timing) and self.phase_feature_scale > 0.0:
+        effective_phase_decoupled_timing = _resolve_phase_decoupled_flag(
+            default=self.phase_decoupled_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="WindowBudgetController.forward",
+        )
+        if (not effective_phase_decoupled_timing) and self.phase_feature_scale > 0.0:
             if chunk_state is not None or commit_frontier is not None:
                 structure_progress = (
                     structure_progress * (1.0 - self.phase_feature_scale)
@@ -508,7 +543,7 @@ class WindowBudgetController(nn.Module):
                 )
             else:
                 structure_progress = phase_ptr.float()
-        if effective_phase_free_timing:
+        if effective_phase_decoupled_timing:
             phase_like = torch.zeros(
                 (unit_states.size(0), unit_states.size(1), 1),
                 device=unit_states.device,

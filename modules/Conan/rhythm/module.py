@@ -100,12 +100,18 @@ class StreamingRhythmModule(nn.Module):
         enable_learned_offline_teacher: bool = False,
     ) -> None:
         super().__init__()
-        if phase_decoupled_timing is None:
-            phase_decoupled_timing = False if phase_free_timing is None else bool(phase_free_timing)
-        if phase_decoupled_phrase_gate_boundary_threshold is None:
-            phase_decoupled_phrase_gate_boundary_threshold = (
-                0.55 if phase_free_phrase_boundary_threshold is None else float(phase_free_phrase_boundary_threshold)
-            )
+        phase_decoupled_timing = self._resolve_phase_decoupled_flag(
+            default=False,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="StreamingRhythmModule.__init__",
+        )
+        phase_decoupled_phrase_gate_boundary_threshold = self._resolve_phase_decoupled_threshold(
+            default=0.55,
+            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
+            phase_free_phrase_boundary_threshold=phase_free_phrase_boundary_threshold,
+            where="StreamingRhythmModule.__init__",
+        )
         expected_public_stats_dim = len(REF_RHYTHM_STATS_KEYS)
         expected_public_trace_dim = len(REF_RHYTHM_TRACE_KEYS)
         self.public_stats_dim = int(stats_dim)
@@ -166,7 +172,7 @@ class StreamingRhythmModule(nn.Module):
             min_speech_frames=min_speech_frames,
             chunk_state_enable=chunk_state_enable,
             budget_phase_feature_scale=budget_phase_feature_scale,
-            phase_free_timing=bool(phase_decoupled_timing),
+            phase_decoupled_timing=bool(phase_decoupled_timing),
             phase_decoupled_boundary_style_residual_scale=phase_decoupled_boundary_style_residual_scale,
             debt_control_scale=debt_control_scale,
             debt_pause_priority=debt_pause_priority,
@@ -219,6 +225,7 @@ class StreamingRhythmModule(nn.Module):
         self.chunk_state_enable = bool(chunk_state_enable)
         self.budget_phase_feature_scale = float(min(max(budget_phase_feature_scale, 0.0), 1.0))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
+        # Deprecated compatibility aliases; internal logic should use phase_decoupled_* only.
         self.phase_free_timing = self.phase_decoupled_timing
         self.phase_decoupled_phrase_gate_boundary_threshold = float(
             min(max(phase_decoupled_phrase_gate_boundary_threshold, 0.0), 1.0)
@@ -232,6 +239,53 @@ class StreamingRhythmModule(nn.Module):
 
     def init_state(self, batch_size: int, device: torch.device) -> StreamingRhythmState:
         return self.projector.init_state(batch_size=batch_size, device=device)
+
+    @staticmethod
+    def _resolve_phase_decoupled_flag(
+        *,
+        default: bool,
+        phase_decoupled_timing: bool | None,
+        phase_free_timing: bool | None,
+        where: str,
+    ) -> bool:
+        if (
+            phase_decoupled_timing is not None
+            and phase_free_timing is not None
+            and bool(phase_decoupled_timing) != bool(phase_free_timing)
+        ):
+            raise ValueError(
+                f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
+            )
+        if phase_decoupled_timing is not None:
+            return bool(phase_decoupled_timing)
+        if phase_free_timing is not None:
+            return bool(phase_free_timing)
+        return bool(default)
+
+    @staticmethod
+    def _resolve_phase_decoupled_threshold(
+        *,
+        default: float,
+        phase_decoupled_phrase_gate_boundary_threshold: float | None,
+        phase_free_phrase_boundary_threshold: float | None,
+        where: str,
+    ) -> float:
+        if (
+            phase_decoupled_phrase_gate_boundary_threshold is not None
+            and phase_free_phrase_boundary_threshold is not None
+            and float(phase_decoupled_phrase_gate_boundary_threshold)
+            != float(phase_free_phrase_boundary_threshold)
+        ):
+            raise ValueError(
+                f"{where}: conflicting values for "
+                "phase_decoupled_phrase_gate_boundary_threshold and "
+                "deprecated phase_free_phrase_boundary_threshold."
+            )
+        if phase_decoupled_phrase_gate_boundary_threshold is not None:
+            return float(phase_decoupled_phrase_gate_boundary_threshold)
+        if phase_free_phrase_boundary_threshold is not None:
+            return float(phase_free_phrase_boundary_threshold)
+        return float(default)
 
     @staticmethod
     def _scale_source_boundary_cue(source_boundary_cue: torch.Tensor, scale: float | None) -> torch.Tensor:
@@ -817,6 +871,12 @@ class StreamingRhythmModule(nn.Module):
         )
         return trace_context, planner_trace_context, trace_reliability
 
+    def _resolve_phase_free_phrase_gate(self, **kwargs) -> torch.Tensor:
+        return self._resolve_phase_decoupled_phrase_gate(**kwargs)
+
+    def _sample_phase_free_trace_pair(self, **kwargs) -> tuple[torch.Tensor, torch.Tensor, TraceReliabilityBundle]:
+        return self._sample_phase_decoupled_trace_pair(**kwargs)
+
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._finalize_reference_conditioning(self.reference_descriptor(ref_mel))
 
@@ -1398,11 +1458,12 @@ class StreamingRhythmModule(nn.Module):
         effective_trace_horizon = (
             self.reference_descriptor.encoder.trace_horizon if trace_horizon is None else float(trace_horizon)
         )
-        effective_phase_decoupled_timing = self.phase_decoupled_timing
-        if phase_free_timing is not None:
-            effective_phase_decoupled_timing = bool(phase_free_timing)
-        if phase_decoupled_timing is not None:
-            effective_phase_decoupled_timing = bool(phase_decoupled_timing)
+        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
+            default=self.phase_decoupled_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="StreamingRhythmModule.forward",
+        )
         unit_embed = self.unit_embedding(content_units.long().clamp_min(0))
         chunk_state = None
         if getattr(self.scheduler, "chunk_state_head", None) is not None:
@@ -1467,7 +1528,7 @@ class StreamingRhythmModule(nn.Module):
             trace_reliability=trace_reliability,
             trace_exhaustion_final_cell_suppress=self.trace_exhaustion_final_cell_suppress,
             chunk_state=chunk_state,
-            phase_free_timing=effective_phase_decoupled_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
         )
         if phrase_selection is not None:
             planner.ref_phrase_index = phrase_selection.get("selected_ref_phrase_index")
@@ -1620,6 +1681,12 @@ class StreamingRhythmModule(nn.Module):
                 "forward_dual requires learned offline teacher runtime branch, but it is disabled. "
                 "Enable `rhythm_enable_dual_mode_teacher` or `rhythm_runtime_enable_learned_offline_teacher`."
             )
+        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
+            default=self.phase_decoupled_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="StreamingRhythmModule.forward_dual",
+        )
         streaming_execution = self.forward(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
@@ -1638,8 +1705,7 @@ class StreamingRhythmModule(nn.Module):
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,
@@ -1677,8 +1743,7 @@ class StreamingRhythmModule(nn.Module):
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
         )
         algorithmic_teacher = self.compute_algorithmic_teacher(
             content_units=offline_content_units,
@@ -1724,9 +1789,16 @@ class StreamingRhythmModule(nn.Module):
         trace_offset_lookahead_units: int | None = None,
         trace_cold_start_min_visible_units: int | None = None,
         trace_cold_start_full_visible_units: int | None = None,
+        phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
     ) -> tuple[object, dict[str, torch.Tensor]]:
-        del phase_free_timing
+        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
+            default=self.phase_decoupled_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="StreamingRhythmModule.forward_teacher",
+        )
+        del effective_phase_decoupled_timing
         if self.offline_teacher is None:
             raise RuntimeError(
                 "forward_teacher requires learned offline teacher runtime branch, but it is disabled. "

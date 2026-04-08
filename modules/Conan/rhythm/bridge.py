@@ -9,6 +9,28 @@ from .renderer import render_rhythm_sequence
 from .source_boundary import resolve_boundary_score_unit
 
 
+def _resolve_phase_decoupled_flag(
+    *,
+    default: bool,
+    phase_decoupled_timing: bool | None,
+    phase_free_timing: bool | None,
+    where: str,
+) -> bool:
+    if (
+        phase_decoupled_timing is not None
+        and phase_free_timing is not None
+        and bool(phase_decoupled_timing) != bool(phase_free_timing)
+    ):
+        raise ValueError(
+            f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
+        )
+    if phase_decoupled_timing is not None:
+        return bool(phase_decoupled_timing)
+    if phase_free_timing is not None:
+        return bool(phase_free_timing)
+    return bool(default)
+
+
 def resolve_content_lengths(content: torch.Tensor, content_lengths: torch.Tensor | None = None) -> torch.Tensor:
     if content_lengths is not None:
         return content_lengths.long().to(device=content.device)
@@ -119,6 +141,7 @@ def run_rhythm_frontend(
     trace_offset_lookahead_units: int | None = None,
     trace_cold_start_min_visible_units: int | None = None,
     trace_cold_start_full_visible_units: int | None = None,
+    phase_decoupled_timing: bool | None = None,
     phase_free_timing: bool | None = None,
     streaming_prefix_train: bool = False,
     projector_reuse_prefix: bool = True,
@@ -130,6 +153,12 @@ def run_rhythm_frontend(
         return None
     if ref is None and rhythm_ref_conditioning is None:
         return None
+    effective_phase_decoupled_timing = _resolve_phase_decoupled_flag(
+        default=False,
+        phase_decoupled_timing=phase_decoupled_timing,
+        phase_free_timing=phase_free_timing,
+        where="run_rhythm_frontend",
+    )
     runtime_dual_mode_teacher = bool(enable_dual_mode_teacher) and bool(enable_learned_offline_teacher) and not bool(infer)
     runtime_teacher_as_main = bool(teacher_as_main) and bool(enable_learned_offline_teacher) and not bool(infer)
     if rhythm_source_cache is not None:
@@ -172,7 +201,7 @@ def run_rhythm_frontend(
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
         )
         return {
             "unit_batch": unit_batch,
@@ -221,7 +250,7 @@ def run_rhythm_frontend(
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             offline_content_units=offline_unit_batch.content_units if offline_unit_batch is not None else None,
@@ -252,7 +281,7 @@ def run_rhythm_frontend(
             trace_offset_lookahead_units=trace_offset_lookahead_units,
             trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
             trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
-            phase_free_timing=phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
             projector_reuse_prefix=projector_reuse_prefix,
             projector_force_full_commit=projector_force_full_commit,
             projector_pause_topk_ratio_override=projector_pause_topk_ratio_override,

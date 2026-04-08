@@ -8,6 +8,28 @@ from .contracts import RhythmPlannerOutputs, StreamingRhythmState, TraceReliabil
 from .source_boundary import compose_boundary_score_unit
 
 
+def _resolve_phase_decoupled_flag(
+    *,
+    default: bool,
+    phase_decoupled_timing: bool | None,
+    phase_free_timing: bool | None,
+    where: str,
+) -> bool:
+    if (
+        phase_decoupled_timing is not None
+        and phase_free_timing is not None
+        and bool(phase_decoupled_timing) != bool(phase_free_timing)
+    ):
+        raise ValueError(
+            f"{where}: conflicting values for phase_decoupled_timing and deprecated phase_free_timing."
+        )
+    if phase_decoupled_timing is not None:
+        return bool(phase_decoupled_timing)
+    if phase_free_timing is not None:
+        return bool(phase_free_timing)
+    return bool(default)
+
+
 class MonotonicRhythmScheduler(nn.Module):
     """Hierarchical monotonic rhythm planner.
 
@@ -35,7 +57,8 @@ class MonotonicRhythmScheduler(nn.Module):
         pause_breath_reset_threshold: float = 0.55,
         chunk_state_enable: bool = True,
         budget_phase_feature_scale: float = 0.0,
-        phase_free_timing: bool = False,
+        phase_decoupled_timing: bool | None = None,
+        phase_free_timing: bool | None = None,
         phase_decoupled_boundary_style_residual_scale: float = 0.18,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
@@ -44,7 +67,13 @@ class MonotonicRhythmScheduler(nn.Module):
         super().__init__()
         self.boundary_source_cue_weight = float(boundary_source_cue_weight)
         self.chunk_state_enable = bool(chunk_state_enable)
-        self.phase_free_timing = bool(phase_free_timing)
+        self.phase_decoupled_timing = _resolve_phase_decoupled_flag(
+            default=False,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="MonotonicRhythmScheduler.__init__",
+        )
+        self.phase_free_timing = self.phase_decoupled_timing
         self.phase_decoupled_boundary_style_residual_scale = float(
             max(0.0, phase_decoupled_boundary_style_residual_scale)
         )
@@ -62,7 +91,7 @@ class MonotonicRhythmScheduler(nn.Module):
             min_speech_frames=min_speech_frames,
             boundary_feature_scale=boundary_feature_scale,
             phase_feature_scale=budget_phase_feature_scale,
-            phase_free_timing=self.phase_free_timing,
+            phase_decoupled_timing=self.phase_decoupled_timing,
             debt_control_scale=self.debt_control_scale,
             debt_pause_priority=self.debt_pause_priority,
             debt_speech_priority=self.debt_speech_priority,
@@ -190,9 +219,15 @@ class MonotonicRhythmScheduler(nn.Module):
         trace_reliability: TraceReliabilityBundle | None = None,
         trace_exhaustion_final_cell_suppress: float = 0.0,
         chunk_state: ChunkStateBundle | None = None,
+        phase_decoupled_timing: bool | None = None,
         phase_free_timing: bool | None = None,
     ) -> RhythmPlannerOutputs:
-        effective_phase_free_timing = self.phase_free_timing if phase_free_timing is None else bool(phase_free_timing)
+        effective_phase_decoupled_timing = _resolve_phase_decoupled_flag(
+            default=self.phase_decoupled_timing,
+            phase_decoupled_timing=phase_decoupled_timing,
+            phase_free_timing=phase_free_timing,
+            where="MonotonicRhythmScheduler.forward",
+        )
         planner_ref_stats = self._resolve_planner_stats(ref_conditioning)
         slow_rhythm_summary = self._resolve_planner_slow_summary(
             ref_conditioning,
@@ -219,14 +254,14 @@ class MonotonicRhythmScheduler(nn.Module):
                 dtype=planner_trace_context.dtype,
             )
         )
-        if effective_phase_free_timing:
+        if effective_phase_decoupled_timing:
             effective_planner_trace_context = planner_trace_context
         else:
             effective_planner_trace_context = planner_trace_context * local_trace_path_weight[:, None, None]
         if trace_reliability is not None:
             prompt_metric = (
                 trace_reliability.phrase_blend
-                if effective_phase_free_timing
+                if effective_phase_decoupled_timing
                 else trace_reliability.trace_reliability
             )
             prompt_reliability = prompt_metric.float().reshape(unit_mask.size(0), 1)
@@ -247,7 +282,7 @@ class MonotonicRhythmScheduler(nn.Module):
             if selected_valid is not None:
                 selected_valid = selected_valid.float().reshape(unit_mask.size(0), 1).clamp(0.0, 1.0)
                 prompt_reliability = prompt_reliability * selected_valid
-        if effective_phase_free_timing:
+        if effective_phase_decoupled_timing:
             boundary_score_unit, boundary_style_residual_unit = self._apply_phase_decoupled_boundary_style_residual(
                 source_boundary_cue=source_boundary_cue,
                 unit_mask=unit_mask,
@@ -294,7 +329,7 @@ class MonotonicRhythmScheduler(nn.Module):
             phrase_prototype_summary=phrase_prototype_summary,
             phrase_prototype_stats=phrase_prototype_stats,
             prompt_reliability=prompt_reliability,
-            phase_free_timing=effective_phase_free_timing,
+            phase_decoupled_timing=effective_phase_decoupled_timing,
         )
         redistribution_outputs = self.unit_redistribution(
             unit_states=unit_states,
