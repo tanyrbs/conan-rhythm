@@ -4,7 +4,6 @@ from typing import Callable
 
 import torch
 
-from .compat import resolve_phase_decoupled_flag
 from .frame_plan import build_frame_plan, build_interleaved_blank_slot_schedule
 from .renderer import render_rhythm_sequence
 from .source_boundary import resolve_boundary_score_unit
@@ -175,7 +174,6 @@ def run_rhythm_frontend(
     trace_cold_start_min_visible_units: int | None = None,
     trace_cold_start_full_visible_units: int | None = None,
     phase_decoupled_timing: bool | None = None,
-    phase_free_timing: bool | None = None,
     phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
     phase_decoupled_boundary_style_residual_scale: float | None = None,
     debt_control_scale: float | None = None,
@@ -210,14 +208,11 @@ def run_rhythm_frontend(
         return None
     if ref is None and rhythm_ref_conditioning is None:
         return None
-    effective_phase_decoupled_timing = resolve_phase_decoupled_flag(
-        default=getattr(rhythm_module, "phase_decoupled_timing", False),
-        phase_decoupled_timing=phase_decoupled_timing,
-        phase_free_timing=phase_free_timing,
-        where="run_rhythm_frontend",
+    effective_phase_decoupled_timing = (
+        bool(getattr(rhythm_module, "phase_decoupled_timing", False))
+        if phase_decoupled_timing is None
+        else bool(phase_decoupled_timing)
     )
-    if effective_phase_decoupled_timing is None:
-        effective_phase_decoupled_timing = bool(getattr(rhythm_module, "phase_decoupled_timing", False))
     effective_enable_learned_offline_teacher = (
         bool(getattr(rhythm_module, "enable_learned_offline_teacher", False))
         if enable_learned_offline_teacher is None

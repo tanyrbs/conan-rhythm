@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
-from .compat import resolve_phase_decoupled_flag
 from .controller import ChunkStateHead, UnitRedistributionHead, WindowBudgetController, masked_mean
 from .contracts import RhythmPlannerOutputs, StreamingRhythmState, TraceReliabilityBundle
 from .source_boundary import compose_boundary_score_unit
@@ -36,8 +34,7 @@ class MonotonicRhythmScheduler(nn.Module):
         pause_breath_reset_threshold: float = 0.55,
         chunk_state_enable: bool = True,
         budget_phase_feature_scale: float = 0.0,
-        phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
+        phase_decoupled_timing: bool = False,
         phase_decoupled_boundary_style_residual_scale: float = 0.18,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
@@ -46,13 +43,7 @@ class MonotonicRhythmScheduler(nn.Module):
         super().__init__()
         self.boundary_source_cue_weight = float(boundary_source_cue_weight)
         self.chunk_state_enable = bool(chunk_state_enable)
-        self.phase_decoupled_timing = resolve_phase_decoupled_flag(
-            default=False,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="MonotonicRhythmScheduler.__init__",
-        )
-        self.phase_free_timing = self.phase_decoupled_timing
+        self.phase_decoupled_timing = bool(phase_decoupled_timing)
         self.phase_decoupled_boundary_style_residual_scale = float(
             max(0.0, phase_decoupled_boundary_style_residual_scale)
         )
@@ -205,17 +196,15 @@ class MonotonicRhythmScheduler(nn.Module):
         trace_exhaustion_final_cell_suppress: float = 0.0,
         chunk_state: ChunkStateBundle | None = None,
         phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
         phase_decoupled_boundary_style_residual_scale: float | None = None,
         debt_control_scale: float | None = None,
         debt_pause_priority: float | None = None,
         debt_speech_priority: float | None = None,
     ) -> RhythmPlannerOutputs:
-        effective_phase_decoupled_timing = resolve_phase_decoupled_flag(
-            default=self.phase_decoupled_timing,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="MonotonicRhythmScheduler.forward",
+        effective_phase_decoupled_timing = (
+            self.phase_decoupled_timing
+            if phase_decoupled_timing is None
+            else bool(phase_decoupled_timing)
         )
         planner_ref_stats = self._resolve_planner_stats(ref_conditioning)
         slow_rhythm_summary = self._resolve_planner_slow_summary(

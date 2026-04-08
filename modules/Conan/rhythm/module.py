@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import warnings
 
 import torch
 import torch.nn as nn
 
-from .compat import resolve_bool_alias, resolve_phase_decoupled_flag, resolve_phase_decoupled_threshold
+from .compat import resolve_bool_alias
 from .contracts import BoundaryCommitDecision, RhythmTeacherTargets, StreamingRhythmState, TraceReliabilityBundle
 from .controller import BoundaryCommitController, ChunkStateBundle, CommitConfig
 from .offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
@@ -102,8 +103,6 @@ class StreamingRhythmModule(nn.Module):
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
         debt_speech_priority: float = 0.25,
-        phase_free_timing: bool | None = None,
-        phase_free_phrase_boundary_threshold: float | None = None,
         commit_config: CommitConfig | None = None,
         projector_config: ProjectorConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
@@ -111,17 +110,11 @@ class StreamingRhythmModule(nn.Module):
         enable_learned_offline_teacher: bool = False,
     ) -> None:
         super().__init__()
-        phase_decoupled_timing = self._resolve_phase_decoupled_flag(
-            default=False,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="StreamingRhythmModule.__init__",
-        )
-        phase_decoupled_phrase_gate_boundary_threshold = self._resolve_phase_decoupled_threshold(
-            default=0.55,
-            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
-            phase_free_phrase_boundary_threshold=phase_free_phrase_boundary_threshold,
-            where="StreamingRhythmModule.__init__",
+        phase_decoupled_timing = False if phase_decoupled_timing is None else bool(phase_decoupled_timing)
+        phase_decoupled_phrase_gate_boundary_threshold = (
+            0.55
+            if phase_decoupled_phrase_gate_boundary_threshold is None
+            else float(phase_decoupled_phrase_gate_boundary_threshold)
         )
         expected_public_stats_dim = len(REF_RHYTHM_STATS_KEYS)
         expected_public_trace_dim = len(REF_RHYTHM_TRACE_KEYS)
@@ -242,12 +235,9 @@ class StreamingRhythmModule(nn.Module):
         )
         self.boundary_lengthening_max = float(max(0.0, boundary_lengthening_max))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
-        # Deprecated compatibility aliases; internal logic should use phase_decoupled_* only.
-        self.phase_free_timing = self.phase_decoupled_timing
         self.phase_decoupled_phrase_gate_boundary_threshold = float(
             min(max(phase_decoupled_phrase_gate_boundary_threshold, 0.0), 1.0)
         )
-        self.phase_free_phrase_boundary_threshold = self.phase_decoupled_phrase_gate_boundary_threshold
 
         # Compatibility aliases for the older V2 surface.
         self.reference_encoder = self.reference_descriptor.encoder
@@ -256,38 +246,6 @@ class StreamingRhythmModule(nn.Module):
 
     def init_state(self, batch_size: int, device: torch.device) -> StreamingRhythmState:
         return self.projector.init_state(batch_size=batch_size, device=device)
-
-    @staticmethod
-    def _resolve_phase_decoupled_flag(
-        *,
-        default: bool,
-        phase_decoupled_timing: bool | None,
-        phase_free_timing: bool | None,
-        where: str,
-    ) -> bool:
-        resolved = resolve_phase_decoupled_flag(
-            default=default,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where=where,
-        )
-        return bool(resolved)
-
-    @staticmethod
-    def _resolve_phase_decoupled_threshold(
-        *,
-        default: float,
-        phase_decoupled_phrase_gate_boundary_threshold: float | None,
-        phase_free_phrase_boundary_threshold: float | None,
-        where: str,
-    ) -> float:
-        resolved = resolve_phase_decoupled_threshold(
-            default=default,
-            phase_decoupled_phrase_gate_boundary_threshold=phase_decoupled_phrase_gate_boundary_threshold,
-            phase_free_phrase_boundary_threshold=phase_free_phrase_boundary_threshold,
-            where=where,
-        )
-        return float(resolved)
 
     @staticmethod
     def _resolve_teacher_soft_pause_selection(
@@ -906,12 +864,6 @@ class StreamingRhythmModule(nn.Module):
         )
         return trace_context, planner_trace_context, trace_reliability
 
-    def _resolve_phase_free_phrase_gate(self, **kwargs) -> torch.Tensor:
-        return self._resolve_phase_decoupled_phrase_gate(**kwargs)
-
-    def _sample_phase_free_trace_pair(self, **kwargs) -> tuple[torch.Tensor, torch.Tensor, TraceReliabilityBundle]:
-        return self._sample_phase_decoupled_trace_pair(**kwargs)
-
     def encode_reference(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
         return self._finalize_reference_conditioning(self.reference_descriptor(ref_mel))
 
@@ -997,6 +949,85 @@ class StreamingRhythmModule(nn.Module):
             if value is not None:
                 enriched[key] = value
         return enriched
+
+    @staticmethod
+    def _tensor_contract_equal(lhs: torch.Tensor | None, rhs: torch.Tensor | None) -> bool:
+        if lhs is None or rhs is None:
+            return lhs is None and rhs is None
+        if tuple(lhs.shape) != tuple(rhs.shape):
+            return False
+        lhs_cpu = lhs.detach().to(device="cpu")
+        rhs_cpu = rhs.detach().to(device="cpu")
+        if lhs_cpu.dtype != rhs_cpu.dtype:
+            if torch.is_floating_point(lhs_cpu) or torch.is_floating_point(rhs_cpu):
+                lhs_cpu = lhs_cpu.float()
+                rhs_cpu = rhs_cpu.float()
+            else:
+                return False
+        if torch.is_floating_point(lhs_cpu):
+            return bool(torch.allclose(lhs_cpu, rhs_cpu, atol=1.0e-6, rtol=1.0e-5))
+        return bool(torch.equal(lhs_cpu, rhs_cpu))
+
+    def _sanitize_reference_sidecars(
+        self,
+        *,
+        rebuilt_reference: dict[str, torch.Tensor],
+        ref_conditioning: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        if not ref_conditioning:
+            return ref_conditioning
+        rebuildable_sidecar_keys = {
+            "slow_rhythm_memory",
+            "slow_rhythm_summary",
+            "planner_slow_rhythm_memory",
+            "planner_slow_rhythm_summary",
+            "selector_meta_indices",
+            "selector_meta_scores",
+            "selector_meta_starts",
+            "selector_meta_ends",
+            "ref_phrase_trace",
+            "planner_ref_phrase_trace",
+            "ref_phrase_valid",
+            "ref_phrase_lengths",
+            "ref_phrase_starts",
+            "ref_phrase_ends",
+            "ref_phrase_boundary_strength",
+            "ref_phrase_stats",
+        }
+        if not any(key in ref_conditioning for key in rebuildable_sidecar_keys):
+            return ref_conditioning
+        compact_contract_keys = {
+            "global_rate",
+            "pause_ratio",
+            "local_rate_trace",
+            "boundary_trace",
+            "planner_ref_stats",
+            "planner_ref_trace",
+        }
+        mismatched_compact_keys = [
+            key
+            for key in compact_contract_keys
+            if key in ref_conditioning
+            and key in rebuilt_reference
+            and not self._tensor_contract_equal(ref_conditioning.get(key), rebuilt_reference.get(key))
+        ]
+        if not mismatched_compact_keys:
+            return ref_conditioning
+        sanitized = dict(ref_conditioning)
+        dropped_keys = []
+        for key in rebuildable_sidecar_keys:
+            if key in sanitized:
+                dropped_keys.append(key)
+                sanitized.pop(key, None)
+        if dropped_keys:
+            warnings.warn(
+                "build_reference_conditioning dropped external reference sidecars because the "
+                "incoming compact/raw reference contract drifted from the rebuilt raw contract. "
+                f"Mismatched compact keys: {', '.join(sorted(mismatched_compact_keys))}. "
+                f"Dropped sidecars: {', '.join(sorted(dropped_keys))}.",
+                stacklevel=2,
+            )
+        return sanitized
 
     @staticmethod
     def _resolve_ref_phrase_ptr(
@@ -1409,9 +1440,13 @@ class StreamingRhythmModule(nn.Module):
                 runtime_phrase_bank_max_phrases=self.reference_descriptor.runtime_phrase_bank_max_phrases,
                 runtime_phrase_bank_bins=self.reference_descriptor.runtime_phrase_bank_bins,
             )
+            sanitized_ref_conditioning = self._sanitize_reference_sidecars(
+                rebuilt_reference=enriched,
+                ref_conditioning={k: v for k, v in ref_conditioning.items() if v is not None},
+            )
             enriched = self._merge_reference_sidecars(
                 enriched,
-                {k: v for k, v in ref_conditioning.items() if v is not None},
+                sanitized_ref_conditioning,
             )
             return self._finalize_reference_conditioning(enriched)
         if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
@@ -1501,7 +1536,6 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_min_visible_units: int | None = None,
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
         phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
         phase_decoupled_boundary_style_residual_scale: float | None = None,
         debt_control_scale: float | None = None,
@@ -1534,11 +1568,8 @@ class StreamingRhythmModule(nn.Module):
         effective_trace_horizon = (
             self.reference_descriptor.encoder.trace_horizon if trace_horizon is None else float(trace_horizon)
         )
-        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
-            default=self.phase_decoupled_timing,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="StreamingRhythmModule.forward",
+        effective_phase_decoupled_timing = (
+            self.phase_decoupled_timing if phase_decoupled_timing is None else bool(phase_decoupled_timing)
         )
         effective_phase_decoupled_phrase_gate_boundary_threshold = (
             self.phase_decoupled_phrase_gate_boundary_threshold
@@ -1756,7 +1787,6 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_min_visible_units: int | None = None,
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
         phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
         phase_decoupled_boundary_style_residual_scale: float | None = None,
         debt_control_scale: float | None = None,
@@ -1785,11 +1815,8 @@ class StreamingRhythmModule(nn.Module):
                 "forward_dual requires learned offline teacher runtime branch, but it is disabled. "
                 "Enable `rhythm_enable_dual_mode_teacher` or `rhythm_runtime_enable_learned_offline_teacher`."
             )
-        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
-            default=self.phase_decoupled_timing,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="StreamingRhythmModule.forward_dual",
+        effective_phase_decoupled_timing = (
+            self.phase_decoupled_timing if phase_decoupled_timing is None else bool(phase_decoupled_timing)
         )
         streaming_execution = self.forward(
             content_units=content_units,
@@ -1902,7 +1929,6 @@ class StreamingRhythmModule(nn.Module):
         trace_cold_start_min_visible_units: int | None = None,
         trace_cold_start_full_visible_units: int | None = None,
         phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
         phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
         projector_debt_leak: float | None = None,
         projector_debt_max_abs: float | None = None,
@@ -1916,11 +1942,8 @@ class StreamingRhythmModule(nn.Module):
         trace sampling / phrase gating, source-boundary scaling, pause sparsity,
         and projector debt anti-windup.
         """
-        effective_phase_decoupled_timing = self._resolve_phase_decoupled_flag(
-            default=self.phase_decoupled_timing,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="StreamingRhythmModule.forward_teacher",
+        effective_phase_decoupled_timing = (
+            self.phase_decoupled_timing if phase_decoupled_timing is None else bool(phase_decoupled_timing)
         )
         if self.offline_teacher is None:
             raise RuntimeError(

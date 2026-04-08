@@ -103,6 +103,9 @@ reference-sidecar switch:
 - it may be emitted together with reference sidecars
 - it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
 - it may be passed directly inside `ref_conditioning` as `ref_phrase_*`
+- if external sidecars drift from the rebuilt compact/raw reference contract,
+  the module now drops those stale sidecars and rebuilds from the raw cached
+  reference contract instead of silently trusting them
 
 ### Runtime entry and teacher semantics
 

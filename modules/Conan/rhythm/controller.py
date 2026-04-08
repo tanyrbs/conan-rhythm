@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 
 from modules.Conan.diff.net import CausalConv1d
-from .compat import resolve_phase_decoupled_flag
 from .contracts import BoundaryCommitDecision, StreamingRhythmState
 from .pause_features import build_pause_support_feature_bundle
 
@@ -399,8 +398,7 @@ class WindowBudgetController(nn.Module):
         min_speech_frames: float = 1.0,
         boundary_feature_scale: float = 0.35,
         phase_feature_scale: float = 0.0,
-        phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
+        phase_decoupled_timing: bool = False,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
         debt_speech_priority: float = 0.25,
@@ -414,13 +412,7 @@ class WindowBudgetController(nn.Module):
         self.min_speech_frames = float(min_speech_frames)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.phase_feature_scale = float(min(max(phase_feature_scale, 0.0), 1.0))
-        self.phase_decoupled_timing = resolve_phase_decoupled_flag(
-            default=False,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="WindowBudgetController.__init__",
-        )
-        self.phase_free_timing = self.phase_decoupled_timing
+        self.phase_decoupled_timing = bool(phase_decoupled_timing)
         self.debt_control_scale = float(max(debt_control_scale, 1.0e-3))
         self.debt_pause_priority = float(max(debt_pause_priority, 0.0))
         self.debt_speech_priority = float(max(debt_speech_priority, 0.0))
@@ -470,7 +462,6 @@ class WindowBudgetController(nn.Module):
         phrase_prototype_stats: torch.Tensor | None = None,
         prompt_reliability: torch.Tensor | None = None,
         phase_decoupled_timing: bool | None = None,
-        phase_free_timing: bool | None = None,
         debt_control_scale: float | None = None,
         debt_pause_priority: float | None = None,
         debt_speech_priority: float | None = None,
@@ -509,11 +500,10 @@ class WindowBudgetController(nn.Module):
         structure_progress = frontier_ratio
         if chunk_state is not None:
             structure_progress = chunk_state.structure_progress.float()
-        effective_phase_decoupled_timing = resolve_phase_decoupled_flag(
-            default=self.phase_decoupled_timing,
-            phase_decoupled_timing=phase_decoupled_timing,
-            phase_free_timing=phase_free_timing,
-            where="WindowBudgetController.forward",
+        effective_phase_decoupled_timing = (
+            self.phase_decoupled_timing
+            if phase_decoupled_timing is None
+            else bool(phase_decoupled_timing)
         )
         effective_debt_control_scale = float(
             self.debt_control_scale if debt_control_scale is None else max(float(debt_control_scale), 1.0e-3)

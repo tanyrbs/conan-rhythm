@@ -135,6 +135,9 @@ Phrase-bank conditioning is related but not identical:
 - it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
 - it may also be consumed directly when `ref_conditioning` already carries
   `ref_phrase_*` fields
+- if external sidecars drift from the rebuilt compact/raw reference contract,
+  `build_reference_conditioning()` now drops those stale sidecars and rebuilds
+  from the raw cached contract instead of silently trusting them
 
 ### Runtime entrypoints
 

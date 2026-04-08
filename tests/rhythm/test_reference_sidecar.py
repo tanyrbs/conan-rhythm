@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 import torch
@@ -344,21 +345,75 @@ class ReferenceSidecarTests(unittest.TestCase):
         stats, trace = self._dummy_inputs(trace_bins=8)
         stale_trace = torch.full((1, 8, 2), 9.0, dtype=torch.float32)
         planner_memory = torch.randn(1, 6, 2)
-        conditioning = module.build_reference_conditioning(
-            ref_conditioning={
-                "ref_rhythm_stats": stats,
-                "ref_rhythm_trace": trace,
-                "planner_ref_trace": stale_trace,
-                "planner_ref_stats": torch.full((1, 2), 7.0, dtype=torch.float32),
-                "global_rate": torch.full((1, 1), 5.0, dtype=torch.float32),
-                "pause_ratio": torch.full((1, 1), 6.0, dtype=torch.float32),
-                "planner_slow_rhythm_memory": planner_memory,
-            }
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            conditioning = module.build_reference_conditioning(
+                ref_conditioning={
+                    "ref_rhythm_stats": stats,
+                    "ref_rhythm_trace": trace,
+                    "planner_ref_trace": stale_trace,
+                    "planner_ref_stats": torch.full((1, 2), 7.0, dtype=torch.float32),
+                    "global_rate": torch.full((1, 1), 5.0, dtype=torch.float32),
+                    "pause_ratio": torch.full((1, 1), 6.0, dtype=torch.float32),
+                    "planner_slow_rhythm_memory": planner_memory,
+                }
+            )
         self.assertTrue(torch.allclose(conditioning["global_rate"], module.reference_descriptor.from_stats_trace(stats, trace)["global_rate"]))
         self.assertTrue(torch.allclose(conditioning["pause_ratio"], stats[:, 0:1]))
         self.assertFalse(torch.allclose(conditioning["planner_ref_trace"], stale_trace))
-        self.assertTrue(torch.allclose(conditioning["planner_slow_rhythm_memory"], planner_memory))
+        self.assertFalse(torch.allclose(conditioning["planner_slow_rhythm_memory"], planner_memory))
+        self.assertTrue(
+            any("dropped external reference sidecars" in str(item.message) for item in caught)
+        )
+
+    def test_build_reference_conditioning_drops_stale_phrase_bank_when_compact_contract_drifts(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_emit_reference_sidecar": True,
+                "rhythm_runtime_phrase_bank_enable": True,
+            }
+        )
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        baseline = module.build_reference_conditioning(
+            ref_rhythm_stats=stats,
+            ref_rhythm_trace=trace,
+        )
+        stale_phrase_trace = baseline["ref_phrase_trace"].clone()
+        stale_planner_phrase_trace = baseline["planner_ref_phrase_trace"].clone()
+        mutated_trace = trace.clone()
+        mutated_trace[:, :, 1] = torch.linspace(1.0, 0.0, mutated_trace.size(1))
+        expected = module.build_reference_conditioning(
+            ref_rhythm_stats=stats,
+            ref_rhythm_trace=mutated_trace,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rebuilt = module.build_reference_conditioning(
+                ref_conditioning={
+                    "ref_rhythm_stats": stats,
+                    "ref_rhythm_trace": mutated_trace,
+                    "global_rate": baseline["global_rate"],
+                    "pause_ratio": baseline["pause_ratio"],
+                    "planner_ref_trace": baseline["planner_ref_trace"],
+                    "ref_phrase_trace": stale_phrase_trace,
+                    "planner_ref_phrase_trace": stale_planner_phrase_trace,
+                    "ref_phrase_valid": baseline["ref_phrase_valid"],
+                    "ref_phrase_lengths": baseline["ref_phrase_lengths"],
+                    "ref_phrase_starts": baseline["ref_phrase_starts"],
+                    "ref_phrase_ends": baseline["ref_phrase_ends"],
+                    "ref_phrase_boundary_strength": baseline["ref_phrase_boundary_strength"],
+                    "ref_phrase_stats": baseline["ref_phrase_stats"],
+                }
+            )
+        self.assertTrue(torch.allclose(rebuilt["planner_ref_trace"], expected["planner_ref_trace"]))
+        self.assertTrue(torch.allclose(rebuilt["ref_phrase_trace"], expected["ref_phrase_trace"]))
+        self.assertTrue(torch.allclose(rebuilt["planner_ref_phrase_trace"], expected["planner_ref_phrase_trace"]))
+        self.assertTrue(
+            any("dropped external reference sidecars" in str(item.message) for item in caught)
+        )
 
     def test_build_reference_conditioning_tags_summary_provenance(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
