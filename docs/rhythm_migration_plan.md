@@ -112,6 +112,9 @@ Deprecated compatibility aliases:
 - `rhythm_phase_free_phrase_boundary_threshold`
 - `rhythm_phase_decoupled_phrase_boundary_threshold`
 
+Some `phase_free_*` compatibility attributes are still materialized internally
+so older tests/callers do not break, but new configs should not use them.
+
 Public runtime interface:
 
 - `ConanRhythmAdapter.forward` = maintained public runtime entry
@@ -146,9 +149,9 @@ Phrase-bank conditioning is adjacent but separately materializable:
 - it may be emitted with sidecars
 - it may be enabled by `rhythm_runtime_phrase_bank_enable`
 - it may be consumed directly when `ref_phrase_*` is already present
-- if external sidecars drift from the rebuilt compact/raw contract,
+- if those external sidecars drift from the rebuilt compact/raw contract,
   `build_reference_conditioning()` now drops those stale sidecars and rebuilds
-  from the raw cached reference contract
+  from the raw cached reference contract; matching sidecars are still kept
 
 Runtime override rule of thumb:
 

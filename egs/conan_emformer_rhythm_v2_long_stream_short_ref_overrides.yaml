@@ -29,9 +29,8 @@ rhythm_trace_cold_start_full_visible_units: 8
 # do not dominate too much of the stream.
 rhythm_trace_horizon: 0.30
 
-# Canonical phase-decoupled runtime mainline: keep phase as telemetry, and let
-# streaming control rely on committed-boundary-driven phrase/global priors plus
-# source-side boundary evidence. New configs should prefer `phase_decoupled_*`
-# names; `phase_free_*` remains compatibility-only.
+# Prefer canonical `phase_decoupled_*` names. This overlay switches runtime
+# control toward boundary-driven phrase/global priors rather than continuous
+# phase-trace control.
 rhythm_phase_decoupled_timing: true
 rhythm_phase_decoupled_phrase_gate_boundary_threshold: 0.55

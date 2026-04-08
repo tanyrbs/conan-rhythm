@@ -80,6 +80,9 @@ Legacy aliases remain only for compatibility:
 - `rhythm_phase_free_phrase_boundary_threshold`
 - `rhythm_phase_decoupled_phrase_boundary_threshold`
 
+Some `phase_free_*` compatibility attributes are still materialized internally
+so older tests/callers do not break, but new configs should not use them.
+
 ### Sidecar terminology
 
 Keep the two sidecar concepts separate:
@@ -103,9 +106,11 @@ reference-sidecar switch:
 - it may be emitted together with reference sidecars
 - it may be materialized explicitly by `rhythm_runtime_phrase_bank_enable`
 - it may be passed directly inside `ref_conditioning` as `ref_phrase_*`
-- if external sidecars drift from the rebuilt compact/raw reference contract,
+- if those external sidecars drift from the rebuilt compact/raw reference
+  contract,
   the module now drops those stale sidecars and rebuilds from the raw cached
-  reference contract instead of silently trusting them
+  reference contract instead of silently trusting them; matching sidecars are
+  still preserved
 
 ### Runtime entry and teacher semantics
 

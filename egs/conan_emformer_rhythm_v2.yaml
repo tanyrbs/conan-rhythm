@@ -41,19 +41,8 @@ rhythm_pause_share_residual_max: 0.12
 # - current phrase-bank retrieval is driven by persisted ref_phrase_ptr /
 #   committed-frontier progress, not PHRASE-only pointer gating yet
 # - duration / pause / boundary-lengthening are mainline timing controls
-# Canonical knobs live under the `rhythm_*` names:
-#   rhythm_phase_decoupled_timing
-#   rhythm_phase_decoupled_phrase_gate_boundary_threshold
-#   rhythm_phase_decoupled_boundary_style_residual_scale
-#   rhythm_debt_control_scale / rhythm_debt_pause_priority / rhythm_debt_speech_priority
-#   rhythm_projector_debt_leak / rhythm_projector_debt_max_abs / rhythm_projector_debt_correction_horizon
-#   rhythm_runtime_phrase_bank_enable / rhythm_runtime_phrase_select_window / rhythm_runtime_phrase_neighbor_mix_alpha
-#   rhythm_weak_boundary_threshold / rhythm_phrase_boundary_threshold
-#   rhythm_boundary_lengthening_max / rhythm_projector_weak_boundary_pause_cap
-# Deprecated config aliases are compatibility-only:
-#   rhythm_phase_free_timing
-#   rhythm_phase_free_phrase_boundary_threshold
-#   rhythm_phase_decoupled_phrase_boundary_threshold
+# Prefer canonical `rhythm_phase_decoupled_*` names; `phase_free_*` stays
+# compatibility-only for older configs/tests.
 # Keep source-boundary cues as soft priors, not dominant pause-placement owners.
 rhythm_boundary_feature_scale: 0.35
 rhythm_boundary_source_cue_weight: 0.65
@@ -100,10 +89,8 @@ rhythm_export_cache_audit_to_sample: false
 rhythm_retimed_target_start_steps: 0
 rhythm_retimed_pause_frame_weight: 0.20
 rhythm_retimed_stretch_weight_min: 0.35
-# Transitional setting:
-# use cached targets first, but do not assume missing learned-offline teacher/retimed
-# surfaces can be rebuilt at runtime. In this checkout, "prefer_cache" only stays
-# conservative when the learned-offline cache path already exists.
+# Transitional setting: use cached targets first, but do not assume missing
+# learned-offline teacher/retimed surfaces can be rebuilt at runtime.
 # Maintained experiments should move through:
 #   teacher_offline -> export learned_offline teacher assets
 #   student_kd -> student_retimed
