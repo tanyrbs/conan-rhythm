@@ -155,6 +155,12 @@ if __name__ == '__main__':
     strict_hparams.update({
         'rhythm_strict_mainline': True,
         'rhythm_enable_learned_offline_teacher': False,
+        # Strict-mainline no longer implies these projector knobs by default;
+        # keep them explicit here so the smoke test still exercises the
+        # deterministic simple pause path it was designed to validate.
+        'rhythm_projector_pause_selection_mode': 'simple',
+        'rhythm_projector_use_boundary_commit_guard': False,
+        'rhythm_projector_build_render_plan': False,
     })
     strict_model = build_streaming_rhythm_module_from_hparams(strict_hparams)
     assert strict_model.projector.config.pause_selection_mode == 'simple'
@@ -162,6 +168,8 @@ if __name__ == '__main__':
     assert strict_model.projector.config.build_render_plan is False
     simple_pause = _project_pause_simple_impl(
         pause_weight_unit=torch.full((1, 4), 0.25),
+        pause_support_prob_unit=None,
+        pause_amount_weight_unit=None,
         boundary_score_unit=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
         unit_mask=torch.ones(1, 4),
         pause_budget_win=torch.tensor([[4.0]], dtype=torch.float32),
@@ -170,6 +178,7 @@ if __name__ == '__main__':
         reuse_prefix=False,
         pause_min_boundary_weight=0.10,
         pause_boundary_bias_weight=0.15,
+        pause_boundary_mode='additive',
     )
     assert float(simple_pause[0, 2].item()) > float(simple_pause[0, 0].item())
     compat_item = materialize_rhythm_cache_compat_fields({
@@ -180,8 +189,11 @@ if __name__ == '__main__':
     assert infer_teacher_target_source_id_from_surface_name(RHYTHM_TEACHER_SURFACE_ALGORITHMIC_NAME) == RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC
     assert int(np.asarray(compat_item["rhythm_teacher_target_source_id"]).reshape(-1)[0]) == RHYTHM_TEACHER_TARGET_SOURCE_ALGORITHMIC
     assert int(np.asarray(compat_item["rhythm_retimed_target_source_id"]).reshape(-1)[0]) == 0
-    assert is_rhythm_cache_version_compatible(4, RHYTHM_CACHE_VERSION) is True
-    assert 4 in compatible_rhythm_cache_versions(RHYTHM_CACHE_VERSION)
+    # The maintained v6 cache no longer advertises v4 compatibility directly;
+    # keep the smoke aligned with the explicit compatibility table.
+    assert is_rhythm_cache_version_compatible(4, RHYTHM_CACHE_VERSION) is False
+    assert 4 not in compatible_rhythm_cache_versions(RHYTHM_CACHE_VERSION)
+    assert RHYTHM_CACHE_VERSION in compatible_rhythm_cache_versions(RHYTHM_CACHE_VERSION)
 
     cache_kd_hparams = dict(strict_hparams)
     cache_kd_hparams.update({
@@ -472,6 +484,8 @@ if __name__ == '__main__':
     assert out1.pause_after_exec.requires_grad
     zero_pause = _project_pause_impl(
         pause_weight_unit=torch.randn(1, 4, requires_grad=True),
+        pause_support_prob_unit=None,
+        pause_amount_weight_unit=None,
         boundary_score_unit=torch.randn(1, 4, requires_grad=True),
         unit_mask=torch.ones(1, 4),
         pause_budget_win=torch.zeros(1, 1, requires_grad=True),
@@ -482,6 +496,7 @@ if __name__ == '__main__':
         topk_ratio=0.5,
         pause_min_boundary_weight=0.10,
         pause_boundary_bias_weight=0.15,
+        pause_boundary_mode='additive',
         temperature=0.12,
     )
     assert zero_pause.requires_grad

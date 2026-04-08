@@ -251,6 +251,27 @@ class ProjectorInvariantTests(unittest.TestCase):
         self.assertTrue(torch.allclose(pause[:, :1], torch.tensor([[2.0]], dtype=torch.float32)))
         self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([3.0], dtype=torch.float32)))
 
+    def test_sparse_pause_projection_fallback_respects_topk_selection(self) -> None:
+        pause = _project_pause_impl(
+            pause_weight_unit=torch.zeros((1, 4), dtype=torch.float32),
+            pause_support_prob_unit=torch.zeros((1, 4), dtype=torch.float32),
+            pause_amount_weight_unit=torch.full((1, 4), 0.25, dtype=torch.float32),
+            boundary_score_unit=torch.zeros((1, 4), dtype=torch.float32),
+            unit_mask=torch.ones((1, 4), dtype=torch.float32),
+            pause_budget_win=torch.tensor([[2.0]], dtype=torch.float32),
+            previous_pause_exec=None,
+            commit_frontier=torch.zeros(1, dtype=torch.long),
+            reuse_prefix=False,
+            soft_pause_selection=False,
+            topk_ratio=0.25,
+            pause_min_boundary_weight=0.0,
+            pause_boundary_bias_weight=0.0,
+            pause_boundary_mode="gain",
+            temperature=0.12,
+        )
+        self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([2.0], dtype=torch.float32)))
+        self.assertEqual(int((pause > 1e-6).sum().item()), 1)
+
     def test_compose_pause_candidate_scores_can_factor_support_and_allocation(self) -> None:
         scores = compose_pause_candidate_scores(
             pause_weight_unit=torch.tensor([[0.3, 0.3, 0.4]], dtype=torch.float32),

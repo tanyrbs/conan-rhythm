@@ -978,6 +978,8 @@ class RhythmConanTaskMixin:
         targets = self._build_rhythm_loss_targets(output, sample)
         if targets is None:
             return
+        output["rhythm_pause_event_threshold"] = float(targets.pause_event_threshold)
+        output["rhythm_pause_support_threshold"] = float(targets.pause_support_threshold)
         rhythm_execution = output["rhythm_execution"]
         rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
         scaled_rhythm_losses = scale_rhythm_loss_terms(

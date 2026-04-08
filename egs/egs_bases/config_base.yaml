@@ -27,6 +27,9 @@ print_nan_grads: false
 load_ckpt: ''
 save_best: false
 num_ckpt_keep: 3
+extra_valid_monitor_key: ''
+extra_valid_monitor_mode: 'max'
+extra_valid_monitor_filename: 'model_ckpt_pause_best.pt'
 clip_grad_norm: 0
 accumulate_grad_batches: 1
 tb_log_interval: 100

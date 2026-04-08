@@ -251,6 +251,9 @@ class BaseTask(nn.Module):
             monitor_mode=hparams['valid_monitor_mode'],
             num_ckpt_keep=hparams['num_ckpt_keep'],
             save_best=hparams['save_best'],
+            extra_monitor_key=hparams.get('extra_valid_monitor_key', ''),
+            extra_monitor_mode=hparams.get('extra_valid_monitor_mode', 'max'),
+            extra_monitor_filename=hparams.get('extra_valid_monitor_filename', 'model_ckpt_pause_best.pt'),
             seed=hparams['seed'],
             debug=hparams['debug']
         )

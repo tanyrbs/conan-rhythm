@@ -74,6 +74,9 @@ class Trainer(TrainerLoopMixin):
             monitor_mode='min',
             num_ckpt_keep=5,
             save_best=True,
+            extra_monitor_key='',
+            extra_monitor_mode='max',
+            extra_monitor_filename='model_ckpt_pause_best.pt',
             resume_from_checkpoint=0,
             seed=1234,
             debug=False,
@@ -111,6 +114,16 @@ class Trainer(TrainerLoopMixin):
         self.monitor_op = np.less if monitor_mode == 'min' else np.greater
         self.best_val_results = np.Inf if monitor_mode == 'min' else -np.Inf
         self.mode = monitor_mode
+        self.extra_monitor_key = str(extra_monitor_key or '').strip()
+        self.extra_monitor_filename = str(extra_monitor_filename or 'model_ckpt_pause_best.pt').strip()
+        if self.extra_monitor_key:
+            self.extra_monitor_op = np.less if extra_monitor_mode == 'min' else np.greater
+            self.extra_monitor_best = np.Inf if extra_monitor_mode == 'min' else -np.Inf
+            self.extra_monitor_mode = extra_monitor_mode
+        else:
+            self.extra_monitor_op = None
+            self.extra_monitor_best = None
+            self.extra_monitor_mode = extra_monitor_mode
 
         visible_env = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         visible_tokens = [x.strip() for x in visible_env.split(",") if x.strip() != ""]
@@ -255,11 +268,20 @@ class Trainer(TrainerLoopMixin):
         if self.on_gpu:
             task_ref.cuda(self.root_gpu)
         # load training state (affects trainer only)
-        self.best_val_results = checkpoint['checkpoint_callback_best']
+        self.best_val_results = checkpoint.get('checkpoint_callback_best', self.best_val_results)
         self.global_step = checkpoint['global_step']
         self.current_epoch = checkpoint['epoch']
         self.last_saved_ckpt_step = self.global_step
         task_ref.global_step = self.global_step
+        extra_monitor_state = checkpoint.get('extra_monitor_state', None)
+        if (
+                isinstance(extra_monitor_state, dict)
+                and self.extra_monitor_key
+                and str(extra_monitor_state.get('key', '')) == self.extra_monitor_key
+        ):
+            restored_best = extra_monitor_state.get('best', None)
+            if restored_best is not None:
+                self.extra_monitor_best = float(restored_best)
 
         # wait for all models to restore weights
         if self.use_ddp:
@@ -294,7 +316,6 @@ class Trainer(TrainerLoopMixin):
         return did_restore
 
     def save_checkpoint(self, epoch, logs=None):
-        monitor_op = self.monitor_op
         ckpt_path = f'{self.work_dir}/model_ckpt_steps_{self.global_step}.ckpt'
         logging.info(f'Epoch {epoch:05d}@{self.global_step}: saving model to {ckpt_path}')
         self._atomic_save(ckpt_path)
@@ -303,17 +324,61 @@ class Trainer(TrainerLoopMixin):
         for old_ckpt in get_all_ckpts(self.work_dir)[self.num_ckpt_keep:]:
             remove_file(old_ckpt)
             logging.info(f'Delete ckpt: {os.path.basename(old_ckpt)}')
-        current = None
-        if logs is not None and self.monitor_key in logs:
-            current = logs[self.monitor_key]
-        if current is not None and self.save_best:
-            if monitor_op(current, self.best_val_results):
-                best_filepath = f'{self.work_dir}/model_ckpt_best.pt'
-                self.best_val_results = current
-                logging.info(
-                    f'Epoch {epoch:05d}@{self.global_step}: {self.monitor_key} reached {current:0.5f}. '
-                    f'Saving model to {best_filepath}')
-                self._atomic_save(best_filepath)
+        if self.save_best:
+            self._maybe_save_best_alias(
+                epoch=epoch,
+                logs=logs,
+                monitor_key=self.monitor_key,
+                monitor_op=self.monitor_op,
+                current_best_attr='best_val_results',
+                filename='model_ckpt_best.pt',
+            )
+            if self.extra_monitor_key and self.extra_monitor_op is not None:
+                self._maybe_save_best_alias(
+                    epoch=epoch,
+                    logs=logs,
+                    monitor_key=self.extra_monitor_key,
+                    monitor_op=self.extra_monitor_op,
+                    current_best_attr='extra_monitor_best',
+                    filename=self.extra_monitor_filename,
+                )
+
+    @staticmethod
+    def _resolve_logged_metric(logs, monitor_key):
+        if logs is None or not monitor_key:
+            return None
+        if monitor_key in logs and isinstance(logs.get(monitor_key), (int, float, np.number)):
+            return float(logs[monitor_key])
+        tb_log = logs.get('tb_log', None)
+        if isinstance(tb_log, dict):
+            if monitor_key in tb_log and isinstance(tb_log.get(monitor_key), (int, float, np.number)):
+                return float(tb_log[monitor_key])
+            val_key = f'val/{monitor_key}'
+            if val_key in tb_log and isinstance(tb_log.get(val_key), (int, float, np.number)):
+                return float(tb_log[val_key])
+        return None
+
+    def _maybe_save_best_alias(
+            self,
+            *,
+            epoch,
+            logs,
+            monitor_key,
+            monitor_op,
+            current_best_attr,
+            filename,
+    ):
+        current = self._resolve_logged_metric(logs, monitor_key)
+        if current is None:
+            return
+        best_so_far = getattr(self, current_best_attr)
+        if best_so_far is None or monitor_op(current, best_so_far):
+            setattr(self, current_best_attr, current)
+            best_filepath = f'{self.work_dir}/{filename}'
+            logging.info(
+                f'Epoch {epoch:05d}@{self.global_step}: {monitor_key} reached {current:0.5f}. '
+                f'Saving model to {best_filepath}')
+            self._atomic_save(best_filepath)
 
     def _atomic_save(self, filepath):
         checkpoint = self.dump_checkpoint()
@@ -324,6 +389,13 @@ class Trainer(TrainerLoopMixin):
     def dump_checkpoint(self):
         checkpoint = {'epoch': self.current_epoch, 'global_step': self.global_step,
                       'checkpoint_callback_best': self.best_val_results}
+        if self.extra_monitor_key:
+            checkpoint['extra_monitor_state'] = {
+                'key': self.extra_monitor_key,
+                'mode': self.extra_monitor_mode,
+                'best': self.extra_monitor_best,
+                'filename': self.extra_monitor_filename,
+            }
         # save optimizers
         optimizer_states = []
         for i, optimizer in enumerate(self.optimizers):

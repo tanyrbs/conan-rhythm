@@ -65,6 +65,7 @@ def _prefix_sum_from_cumsum(cumsum: torch.Tensor, counts: torch.Tensor) -> torch
 def _allocate_pause_budget(
     *,
     candidate_scores: torch.Tensor,
+    fallback_mask: torch.Tensor | None,
     unit_mask: torch.Tensor,
     pause_budget_win: torch.Tensor,
     previous_pause_exec: torch.Tensor | None,
@@ -92,10 +93,19 @@ def _allocate_pause_budget(
     tail_candidate = candidate_scores.float().clamp_min(0.0) * tail_mask
     tail_total = tail_candidate.sum(dim=1, keepdim=True)
     tail_slots = tail_mask.sum(dim=1, keepdim=True)
+    if fallback_mask is None:
+        tail_fallback_mask = tail_mask
+    else:
+        tail_fallback_mask = fallback_mask.float().clamp_min(0.0) * tail_mask
+    tail_fallback_slots = tail_fallback_mask.sum(dim=1, keepdim=True)
     fallback = torch.where(
-        tail_slots > 0.0,
-        tail_mask / tail_slots.clamp_min(1.0),
-        torch.zeros_like(tail_mask),
+        tail_fallback_slots > 0.0,
+        tail_fallback_mask / tail_fallback_slots.clamp_min(1.0),
+        torch.where(
+            tail_slots > 0.0,
+            tail_mask / tail_slots.clamp_min(1.0),
+            torch.zeros_like(tail_mask),
+        ),
     )
     tail_distribution = torch.where(
         tail_total > 1e-6,
@@ -184,6 +194,7 @@ def _project_pause_impl(
     topk = torch.where(visible > 0, topk.clamp(min=1), topk).clamp(max=visible)
     valid_mask = unit_mask.float() > 0.5
     sparse_scores = scores.new_zeros(scores.shape)
+    sparse_selector = scores.new_zeros(scores.shape)
     if bool(torch.any(topk > 0).item()):
         k_max = max(1, int(topk.max().item()))
         masked_scores = scores.masked_fill(~valid_mask, float("-inf"))
@@ -191,6 +202,7 @@ def _project_pause_impl(
         rank_mask = (
             torch.arange(k_max, device=scores.device)[None, :] < topk[:, None]
         ) & (top_values > float("-inf"))
+        sparse_selector.scatter_(1, top_indices, rank_mask.to(dtype=scores.dtype))
         if soft_pause_selection:
             full_keep = topk >= visible
             threshold_index = (topk.clamp_min(1) - 1).unsqueeze(1)
@@ -198,11 +210,10 @@ def _project_pause_impl(
             gated = scores * torch.sigmoid((scores - threshold) / float(temperature))
             sparse_scores = torch.where(full_keep[:, None], scores, gated) * unit_mask.float()
         else:
-            selector = torch.zeros_like(scores)
-            selector.scatter_(1, top_indices, rank_mask.to(dtype=scores.dtype))
-            sparse_scores = scores * selector
+            sparse_scores = scores * sparse_selector
     return _allocate_pause_budget(
         candidate_scores=sparse_scores,
+        fallback_mask=sparse_selector,
         unit_mask=unit_mask,
         pause_budget_win=pause_budget_win,
         previous_pause_exec=previous_pause_exec,
@@ -242,6 +253,7 @@ def _project_pause_simple_impl(
     )
     return _allocate_pause_budget(
         candidate_scores=scores,
+        fallback_mask=None,
         unit_mask=unit_mask,
         pause_budget_win=pause_budget_win,
         previous_pause_exec=previous_pause_exec,

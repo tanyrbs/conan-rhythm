@@ -84,6 +84,15 @@ def _masked_event_f1(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor, 
     return precision, recall, f1
 
 
+def _resolve_pause_metric_thresholds(output: dict[str, Any]) -> tuple[float, float]:
+    pause_event_threshold = max(0.0, float(output.get("rhythm_pause_event_threshold", 0.5) or 0.5))
+    pause_support_threshold = max(
+        0.0,
+        float(output.get("rhythm_pause_support_threshold", pause_event_threshold) or pause_event_threshold),
+    )
+    return pause_event_threshold, pause_support_threshold
+
+
 def _masked_event_stats(
     pred: torch.Tensor,
     tgt: torch.Tensor,
@@ -848,6 +857,7 @@ def _update_sample_supervision_metrics(
     output: dict[str, Any],
     ctx: RhythmMetricContext,
 ) -> None:
+    pause_event_threshold, _ = _resolve_pause_metric_thresholds(output)
     pause_target_key, pause_budget_key, teacher_pause_key = _resolve_sample_pause_keys(sample)
     if "rhythm_speech_budget_tgt" in sample:
         metrics["rhythm_metric_budget_speech_l1"] = (
@@ -882,6 +892,8 @@ def _update_sample_supervision_metrics(
             ctx.blank_exec,
             pause_target,
             ctx.unit_mask,
+            pred_threshold=float(pause_event_threshold),
+            target_threshold=float(pause_event_threshold),
         )
         metrics["rhythm_metric_pause_event_precision"] = pause_p
         metrics["rhythm_metric_pause_event_recall"] = pause_r
@@ -893,7 +905,7 @@ def _update_sample_supervision_metrics(
             ctx.blank_exec,
             pause_target,
             ctx.unit_mask,
-            target_threshold=0.5,
+            target_threshold=float(pause_event_threshold),
         )
         metrics["rhythm_metric_pause_event_best_precision"] = best_pause_p
         metrics["rhythm_metric_pause_event_best_recall"] = best_pause_r
@@ -921,6 +933,8 @@ def _update_sample_supervision_metrics(
                 planner_pause_surface,
                 pause_target,
                 ctx.unit_mask,
+                pred_threshold=float(pause_event_threshold),
+                target_threshold=float(pause_event_threshold),
             )
             metrics["rhythm_metric_planner_pause_event_precision"] = planner_p
             metrics["rhythm_metric_planner_pause_event_recall"] = planner_r
@@ -939,7 +953,7 @@ def _update_sample_supervision_metrics(
             elif pause_topk_ratio.numel() != ctx.visible_units.shape[0]:
                 pause_topk_ratio = pause_topk_ratio.mean().expand(ctx.visible_units.shape[0])
             pause_topk_slots = torch.round(ctx.visible_units.float() * pause_topk_ratio).clamp_min(1.0)
-            pause_target_events = ((pause_target > 0.5) & (ctx.unit_mask > 0)).float().sum(dim=1)
+            pause_target_events = ((pause_target > float(pause_event_threshold)) & (ctx.unit_mask > 0)).float().sum(dim=1)
             pause_topk_excess = (pause_target_events - pause_topk_slots).clamp_min(0.0)
             metrics["rhythm_metric_pause_topk_slots_mean"] = _safe_mean(pause_topk_slots.float())
             metrics["rhythm_metric_pause_target_over_topk_excess_mean"] = _safe_mean(pause_topk_excess.float())
@@ -982,7 +996,7 @@ def _update_sample_supervision_metrics(
                         torch.arange(k_max, device=score.device)[None, :] < pause_topk_slots[:, None]
                     )
                     sparse_selector.scatter_(1, top_indices, rank_mask.to(dtype=score.dtype))
-                target_evt = (pause_target > 0.5) & valid_mask
+                target_evt = (pause_target > float(pause_event_threshold)) & valid_mask
                 selected_evt = sparse_selector > 0.5
                 selected_target = (selected_evt & target_evt).float().sum(dim=1)
                 target_count = target_evt.float().sum(dim=1).clamp_min(1.0)
@@ -991,8 +1005,8 @@ def _update_sample_supervision_metrics(
         boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
         if boundary_score is not None:
             mask_bool = ctx.unit_mask > 0
-            pred_evt = (ctx.blank_exec.float() > 0.5) & mask_bool
-            tgt_evt = (pause_target > 0.5) & mask_bool
+            pred_evt = (ctx.blank_exec.float() > float(pause_event_threshold)) & mask_bool
+            tgt_evt = (pause_target > float(pause_event_threshold)) & mask_bool
             fn_evt = (~pred_evt) & tgt_evt
             tp_evt = pred_evt & tgt_evt
             boundary_high = (boundary_score.float() > 0.5) & mask_bool

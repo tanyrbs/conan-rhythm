@@ -24,6 +24,7 @@ DS_WORKERS="${DS_WORKERS:-4}"
 STOP_EXISTING="${STOP_EXISTING:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 HP_EXTRA="${HP_EXTRA:-}"
+PAUSE_TOPK_ANCHOR_STEP="${PAUSE_TOPK_ANCHOR_STEP:-}"
 
 WORK_DIR="checkpoints/${EXP_NAME}"
 CONFIG_PATH="${WORK_DIR}/config.yaml"
@@ -150,6 +151,16 @@ DEFAULT_HP_EXTRA="binary_data_dir='${TRAIN100_BIN}',processed_data_dir='${TRAIN1
 if [[ "$ALLOW_LEGACY_CACHE_RESUME" == "1" ]]; then
   DEFAULT_HP_EXTRA="${DEFAULT_HP_EXTRA},rhythm_cache_version=${LEGACY_CACHE_VERSION},rhythm_allow_legacy_cache_resume=True"
 fi
+if [[ "$PAUSE_TOPK_ANCHOR_STEP" == "auto" ]]; then
+  PAUSE_TOPK_ANCHOR_STEP="$LATEST_STEP"
+fi
+if [[ -n "$PAUSE_TOPK_ANCHOR_STEP" ]]; then
+  if [[ ! "$PAUSE_TOPK_ANCHOR_STEP" =~ ^[0-9]+$ ]]; then
+    echo "[pause-recall-resume] PAUSE_TOPK_ANCHOR_STEP must be an integer or 'auto', got: $PAUSE_TOPK_ANCHOR_STEP" >&2
+    exit 1
+  fi
+  DEFAULT_HP_EXTRA="${DEFAULT_HP_EXTRA},rhythm_projector_pause_topk_anchor_step=${PAUSE_TOPK_ANCHOR_STEP}"
+fi
 if [[ -n "$HP_EXTRA" ]]; then
   HP_EXTRA="${DEFAULT_HP_EXTRA},${HP_EXTRA}"
 else
@@ -182,6 +193,7 @@ cat > "$NOTE_PATH" <<EOF
 - train360_binary: ${TRAIN360_BIN}
 - processed_data_dir: ${TRAIN100_PROC}
 - hp_extra: ${HP_EXTRA}
+- pause_topk_anchor_step: ${PAUSE_TOPK_ANCHOR_STEP:-N/A}
 
 This resume keeps the mixed lineage explicit:
 
@@ -204,6 +216,7 @@ Expected semantics:
 - preserve optimizer/scheduler/global_step
 - new config takes effect via RESET=1
 - metric thresholds stay unchanged; only loss-side pause support changes
+- optional top-k anchor can restart the pause-topk schedule relative to the copied checkpoint step
 EOF
 
 echo "[pause-recall-resume] repo       : $REPO_ROOT"
@@ -214,6 +227,7 @@ echo "[pause-recall-resume] target step: $MAX_UPDATES"
 echo "[pause-recall-resume] val every  : $VAL_CHECK_INTERVAL"
 echo "[pause-recall-resume] train100   : $TRAIN100_BIN"
 echo "[pause-recall-resume] train360   : $TRAIN360_BIN"
+echo "[pause-recall-resume] topk anchor: ${PAUSE_TOPK_ANCHOR_STEP:-N/A}"
 echo "[pause-recall-resume] note       : $NOTE_PATH"
 if [[ -n "${CONFIG_BACKUP:-}" ]]; then
   echo "[pause-recall-resume] cfg backup : $CONFIG_BACKUP"

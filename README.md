@@ -1,113 +1,131 @@
 # Conan Rhythm Branch
 
-## 当前唯一维护中的训练路线
+## 当前唯一维护主线（2026-04-08 UTC）
 
-虽然仓库里仍保留多种 stage 配置，但**当前项目计划已经切成 teacher-first 路线**：
+当前仓库唯一维护中的训练主线已经收敛为：
 
-1. `teacher_offline` Stage 1（当前正在跑）
-2. teacher Stage 2（同合同 teacher polish / upper-bound continuation）
-3. teacher v2.5（强节奏变化 / external-reference teacher 增强）
-4. teacher v3（鲁棒性 / cache 刷新 / 必要时 soft-boundary 重建）
-5. 固化并归档各 teacher 阶段最佳 checkpoint / audit 结果 / export 资产
-6. **最后**再进入学生蒸馏，优先考虑 `student_kd`
-7. `student_ref_bootstrap`、`student_retimed` 现在都不是眼前主线
+- `teacher_offline`
+- `train100 + train360` mixed stage-1
+- `v6` binary / cache lineage
+- `split-head pause support + allocation`
+- `weight-only warm-start`
+- 统一启动入口：`scripts/autodl_train_stage1_mixed_v6_split_heads.sh`
 
-> 也就是说：**先把 teacher 提到上限，再做学生。**
-
----
-
-## 当前状态（2026-04-07 UTC）
-
-### 已有资产
-
-- `train100` processed：`data/processed/libritts_train100_formal`
-- `train100` binary：`data/binary/libritts_train100_formal_rhythm_v5`
-- `train360` processed：`data/processed/libritts_train360_formal_trainset`
-- `train360` binary：`data/binary/libritts_train360_formal_trainset_rhythm_v5`
-- `train100` warmup ckpt：`checkpoints/teacher_offline_train100_warmup/model_ckpt_steps_20000.ckpt`
-
-### 当前正在跑什么
-
-- mixed `train100 + train360` 的 `teacher_offline` formal Stage 1
-- 启动脚本：`scripts/autodl_recovery_mixed100360_v3_trainonly.sh`
-- 状态文件目前只会停在：
-  - `logs/stage1_recovery_mixed100360_v3_trainonly.status`
-  - `FORMAL_STAGE1_RUN_START`
-- **真实进度要看训练日志 / ckpt**，不要只看 status 文件
-
-### 当前最新已观察到的有效验证窗口
-
-来自 `logs/stage1_recovery_mixed100360_v3_trainonly.log`：
-
-- step `65000`
-- `total_loss = 0.2219`
-- `L_exec_pause = 0.1138`
-- `L_prefix_state = 0.0337`
-- `rhythm_metric_pause_event_precision = 0.6692`
-- `rhythm_metric_pause_event_recall = 0.5904`
-- `rhythm_metric_pause_event_f1 = 0.5861`
-- `rhythm_metric_prefix_drift_l1 = 23.5898`
-- `rhythm_metric_exec_total_corr = 0.8873`
-- `rhythm_metric_budget_projection_repair_ratio_mean = 0.0`
-- `L_base = 0.0`
-- `L_pitch = 0.0`
-
-结论：
-
-- Stage 1 还在继续
-- 阶段契约目前是对的
-- 但还没有到“teacher 已经定稿，可以开始学生蒸馏”的时点
+> 结论：现在不要再把 `train360-only / legacy v5`、`pause_recall exact-resume`、`recovery_v3_trainonly` 视为当前主线。
 
 ---
 
-## 为什么现在不先做 student
+## 当前数据资产
 
-因为当前最重要的不是“尽快蒸一个 student”，而是：
+### train100 v6
+- processed: `data/processed/libritts_train100_formal`
+- binary: `data/binary/libritts_train100_formal_rhythm_v6`
+- 角色：`base dataset`
+  - 提供 train / valid / test
+  - mixed 训练时承担验证与测试语义基座
 
-- 先把 teacher 的 pause / prefix / 强节奏变化学稳
-- 先把 teacher 的听感和控制上限做出来
-- 先把 teacher 的 target 语义做干净、做稳定
-
-否则后面学生蒸馏只会把一个还不够成熟的 teacher 更快复制一遍。
+### train360 v6
+- processed: `data/processed/libritts_train360_formal_trainset`
+- binary: `data/binary/libritts_train360_formal_trainset_rhythm_v6`
+- 角色：`train-only supplemental dataset`
+  - mixed 训练时通过 `train_sets='train100|train360'` 拼接进入训练
+  - 不承担 valid / test 基座语义
 
 ---
 
+## 当前训练语义
 
-## cache / binary 注意事项
+### warm-start
+- 语义：`weight-only warm-start`
+- 不是：`exact resume`
+- 默认 bootstrap 位置：`checkpoints/bootstrap/model_ckpt_steps_17500.ckpt`
 
-Repository head 现在把 soft-boundary `ref_rhythm_trace` 语义记为 **cache version 6**。
+### 主配置
+- `egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml`
 
-这意味着：
+### 主脚本
+- `scripts/autodl_train_stage1_mixed_v6_split_heads.sh`
 
-- 当前**已经在跑**的 Stage 1 进程不受影响
-- 但未来任何基于当前代码头的新 `cached_only` 启动，都不能再假装沿用旧 `v5` binary
-- 如果要真正声明 soft-boundary 生效，必须先恢复 raw，再重建 binary/cache
+这个入口会统一做：
+- mixed v6 data override
+- split-head config 选择
+- preflight dry-run
+- `val_check_interval=5000`
+- `max_updates=80000`
+- checkpoint 保留最近 `3` 个 step ckpt
+- 同时保留：
+  - `model_ckpt_best.pt`（整体最优）
+  - `model_ckpt_pause_best.pt`（pause 最优，按 `rhythm_metric_pause_event_f1`）
+
+---
+
+## 当前建议启动命令
+
+```bash
+cd /root/autodl-tmp/project/conan-rhythm
+bash scripts/autodl_train_stage1_mixed_v6_split_heads.sh
+```
+
+如需显式指定 17500 warm-start：
+
+```bash
+cd /root/autodl-tmp/project/conan-rhythm
+BOOTSTRAP_CKPT=checkpoints/bootstrap/model_ckpt_steps_17500.ckpt \
+MAX_UPDATES=80000 \
+VAL_CHECK_INTERVAL=5000 \
+bash scripts/autodl_train_stage1_mixed_v6_split_heads.sh
+```
+
+---
+
+## 当前重点监控指标
+
+基础指标：
+- `total_loss`
+- `L_exec_pause`
+- `L_prefix_state`
+- `rhythm_metric_pause_event_precision`
+- `rhythm_metric_pause_event_recall`
+- `rhythm_metric_pause_event_f1`
+- `rhythm_metric_prefix_drift_l1`
+- `rhythm_metric_exec_total_corr`
+- `rhythm_metric_budget_projection_repair_ratio_mean`
+
+pause 结构性诊断指标：
+- `rhythm_metric_pause_support_cover_at_topk`
+- `rhythm_metric_pause_recall_drop_post_from_planner`
+- `rhythm_metric_pause_f1_drop_post_from_planner`
+- `rhythm_metric_pause_target_over_topk_rate`
+- `rhythm_metric_pause_event_recall_boundary`
+- `rhythm_metric_pause_event_recall_nonboundary`
+
+监控命令：
+
+```bash
+python scripts/monitor_stage1_metrics.py \
+  --log logs/teacher_offline_train100_360_v6_split_heads_warm17500.log \
+  --tail 5
+```
+
+---
+
+## 历史/旧线说明
+
+以下内容仍保留在仓库里，但不再作为默认主线入口：
+
+- `scripts/autodl_recovery_mixed100360_v3_trainonly.sh`
+- `scripts/autodl_resume_stage1_pause_recall.sh`
+- `train360-only / legacy v5` 相关 handoff 记录
+
+它们只应被视为：
+- 历史实验记录
+- legacy/debug 辅助脚本
+- 对照/迁移参考
+
+---
 
 ## 当前文档入口
 
 1. `README.md`
 2. `docs/autodl_training_handoff.md`
 3. `docs/training_plan.md`
-
-这 3 份是当前唯一维护的训练文档。
-
----
-
-## 当前建议命令
-
-启动/续跑当前 teacher Stage 1：
-
-```bash
-cd /root/autodl-tmp/project-1/conan-rhythm
-bash scripts/autodl_recovery_mixed100360_v3_trainonly.sh
-```
-
-监控当前 teacher Stage 1：
-
-```bash
-cat logs/stage1_recovery_mixed100360_v3_trainonly.status
-tail -f logs/stage1_recovery_mixed100360_v3_trainonly.log
-python scripts/monitor_stage1_metrics.py \
-  --log logs/stage1_recovery_mixed100360_v3_trainonly.log \
-  --tail 5
-```

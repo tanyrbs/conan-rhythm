@@ -218,6 +218,46 @@ class RhythmMetricMaskingTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_boundary"].item()), 1.0, places=4)
         self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_nonboundary"].item()), 0.0, places=4)
 
+    def test_pause_event_metrics_follow_output_threshold_contract(self) -> None:
+        unit_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        dur_anchor = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        pause_tgt = torch.tensor([[0.4, 0.0]], dtype=torch.float32)
+        pause_exec = torch.tensor([[0.4, 0.0]], dtype=torch.float32)
+        planner = SimpleNamespace(
+            speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_speech_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            raw_pause_budget_win=torch.tensor([[1.0]], dtype=torch.float32),
+            dur_shape_unit=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+            pause_shape_unit=torch.tensor([[0.4, 0.0]], dtype=torch.float32),
+            boundary_score_unit=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            trace_context=torch.zeros((1, 2, 3), dtype=torch.float32),
+        )
+        execution = SimpleNamespace(
+            speech_duration_exec=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            blank_duration_exec=pause_exec,
+            pause_after_exec=pause_exec,
+            planner=planner,
+            commit_frontier=torch.tensor([2], dtype=torch.long),
+        )
+        sample = {
+            "rhythm_speech_exec_tgt": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "rhythm_pause_exec_tgt": pause_tgt,
+        }
+        output = {
+            "rhythm_execution": execution,
+            "rhythm_unit_batch": SimpleNamespace(unit_mask=unit_mask, dur_anchor_src=dur_anchor),
+            "rhythm_pause_event_threshold": 0.30,
+            "rhythm_projector_pause_topk_ratio": torch.tensor([[0.5]], dtype=torch.float32),
+        }
+
+        metrics = build_rhythm_metric_dict(output, sample=sample)
+
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall"].item()), 1.0, places=4)
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_precision"].item()), 1.0, places=4)
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_target_over_topk_rate"].item()), 0.0, places=4)
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_support_cover_at_topk"].item()), 1.0, places=4)
+
     def test_acoustic_target_metrics_expose_length_mismatch_and_alignment_mode(self) -> None:
         unit_mask = torch.tensor([[1.0]], dtype=torch.float32)
         dur_anchor = torch.tensor([[1.0]], dtype=torch.float32)

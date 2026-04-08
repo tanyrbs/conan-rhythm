@@ -15,6 +15,9 @@ S_KEYS = [
     "L_prefix_state",
     "rhythm_metric_prefix_drift_l1",
     "rhythm_metric_pause_event_f1",
+    "rhythm_metric_planner_pause_event_f1",
+    "rhythm_metric_pause_recall_drop_post_from_planner",
+    "rhythm_metric_pause_f1_drop_post_from_planner",
     "rhythm_metric_budget_projection_repair_ratio_mean",
     "L_base",
     "L_pitch",
@@ -28,6 +31,8 @@ A_KEYS = [
     "L_exec_pause_value",
     "L_pause_event",
     "L_pause_support",
+    "L_pause_support_event",
+    "L_pause_support_count",
     "L_budget",
     "L_stream_state",
     "L_rhythm_exec",
@@ -36,6 +41,9 @@ A_KEYS = [
     "rhythm_metric_exec_speech_l1",
     "rhythm_metric_pause_event_precision",
     "rhythm_metric_pause_event_recall",
+    "rhythm_metric_pause_support_cover_at_topk",
+    "rhythm_metric_pause_target_over_topk_rate",
+    "rhythm_metric_pause_topk_slots_mean",
     "rhythm_metric_budget_violation_mean",
     "rhythm_metric_phase_nonretro_rate",
 ]
@@ -46,6 +54,10 @@ B_KEYS = [
     "rhythm_metric_pause_share_mean",
     "rhythm_metric_expand_ratio_mean",
     "rhythm_metric_budget_projection_repair_active_rate",
+    "rhythm_metric_pause_event_recall_boundary",
+    "rhythm_metric_pause_event_recall_nonboundary",
+    "rhythm_metric_pause_fn_boundary_mean",
+    "rhythm_metric_pause_tp_boundary_mean",
 ]
 
 
