@@ -445,9 +445,11 @@ Notes:
 
 If you need the short-reference / long-stream safety profile, copy the values from
 `egs/conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` into your run
-config or a small derived override yaml. That profile enables slow-memory sidecars
-plus trace-exhaustion fallback so runtime does not keep replaying the reference tail
-forever once the local phase has effectively run out.
+config or a small derived override yaml. That profile enables slow-memory sidecars,
+runtime/metric phase-gap diagnostics, cold-start coverage gating, active-tail
+anchor-aware local trace sampling, and trace-exhaustion fallback so runtime does not
+keep replaying the reference tail forever once the local phase has effectively run
+out.
 
 Student retimed template:
 
@@ -482,7 +484,7 @@ When using `load_ckpt`, watch startup logs for missing, unexpected, or unmatched
 | `conan_emformer_rhythm_v2_student_kd_context_match.yaml` | experimental | prefix-truncated stage-2 branch with context-matched KD gate + conservative EMA loss balance | yes | no | no |
 | `conan_emformer_rhythm_v2_student_pairwise_ref_runtime_teacher.yaml` | experimental | stage-2.5 runtime-only external-reference teacher bootstrap | no | no | no |
 | `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` | experimental | alias of the pairwise external-reference stage-2.5 config | no | no | no |
-| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream robustness profile with trace-reliability gating and anchor-aware trace sampling | no | no | no |
+| `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` | experimental override | short-ref / long-stream robustness profile with trace-reliability gating, cold-start coverage control, and active-tail anchor-aware trace sampling | no | no | no |
 | `conan_emformer_rhythm_v2_student_retimed.yaml` | maintained | retimed acoustic closure | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` | experimental | stage-3 retimed branch with conservative EMA group loss balancing | yes | yes | yes |
 | `conan_emformer_rhythm_v2_student_retimed_hybrid_ablation.yaml` | experimental | cached-first stage-3 branch that switches to hybrid online retimed targets after the configured warmup | yes | yes | yes |
@@ -542,7 +544,7 @@ Experimental notes:
 
 - `conan_emformer_rhythm_v2_student_kd_context_match.yaml` is an opt-in stage-2 research branch, not the maintained default
 - `conan_emformer_rhythm_v2_student_ref_bootstrap.yaml` is the recommended stage-2.5 upper-bound extension when you want the rhythm path to respond to an external same-speaker reference instead of self-conditioned cached surfaces
-- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in robustness profile for short-reference / long-stream regimes; it keeps the teacher global, leaves raw reference traces untouched, gates local/boundary trace paths by `trace_reliability`, enables anchor-aware local trace sampling, and lets slow/global rhythm memory take over when the reference tail keeps getting reused
+- `conan_emformer_rhythm_v2_long_stream_short_ref_overrides.yaml` is an opt-in robustness profile for short-reference / long-stream regimes; it keeps the teacher global, leaves raw reference traces untouched, reports both anchor-gap and runtime-gap diagnostics, gates local/boundary trace paths by `trace_reliability`, adds cold-start coverage suppression plus active-tail/lookahead anchor-aware local trace sampling, and lets slow/global rhythm memory take over when the reference tail keeps getting reused
 - `conan_emformer_rhythm_v2_student_retimed_balanced.yaml` is an opt-in stage-3 A/B config, not a blessed replacement for `student_retimed`
 - future ceiling directions are explicitly **not** part of the current minimal maintained landing:
   - `teacher_pairwise_refine`
