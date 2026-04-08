@@ -19,6 +19,10 @@ rhythm_trace_exhaustion_final_cell_suppress: 0.65
 # Use source anchor durations when laying the local trace window over the current
 # unit sequence so long units consume more of the local progress span than short ones.
 rhythm_trace_anchor_aware_sampling: true
+rhythm_trace_active_tail_only: true
+rhythm_trace_offset_lookahead_units: 8
+rhythm_trace_cold_start_min_visible_units: 3
+rhythm_trace_cold_start_full_visible_units: 8
 
 # Optional: slightly tighten the local reference window so near-tail phrase-final cues
 # do not dominate too much of the stream.

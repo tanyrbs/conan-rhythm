@@ -223,6 +223,24 @@ class ConanRhythmAdapter(nn.Module):
         )
         if teacher_projector_soft_pause_selection is not None:
             teacher_projector_soft_pause_selection = bool(teacher_projector_soft_pause_selection)
+        trace_active_tail_only = runtime_overrides.pop("trace_active_tail_only", None)
+        if trace_active_tail_only is not None:
+            trace_active_tail_only = bool(trace_active_tail_only)
+        trace_offset_lookahead_units = runtime_overrides.pop("trace_offset_lookahead_units", None)
+        if trace_offset_lookahead_units is not None:
+            trace_offset_lookahead_units = int(trace_offset_lookahead_units)
+        trace_cold_start_min_visible_units = runtime_overrides.pop(
+            "trace_cold_start_min_visible_units",
+            None,
+        )
+        if trace_cold_start_min_visible_units is not None:
+            trace_cold_start_min_visible_units = int(trace_cold_start_min_visible_units)
+        trace_cold_start_full_visible_units = runtime_overrides.pop(
+            "trace_cold_start_full_visible_units",
+            None,
+        )
+        if trace_cold_start_full_visible_units is not None:
+            trace_cold_start_full_visible_units = int(trace_cold_start_full_visible_units)
         ret["rhythm_stage"] = stage
         ret["rhythm_teacher_runtime_enabled"] = float(runtime_teacher_enabled)
         ret["rhythm_teacher_as_main_requested"] = float(bool(teacher_as_main))
@@ -280,6 +298,10 @@ class ConanRhythmAdapter(nn.Module):
             source_boundary_scale_override=source_boundary_scale_override,
             teacher_source_boundary_scale_override=teacher_source_boundary_scale_override,
             trace_horizon=runtime_overrides.pop("trace_horizon", None),
+            trace_active_tail_only=trace_active_tail_only,
+            trace_offset_lookahead_units=trace_offset_lookahead_units,
+            trace_cold_start_min_visible_units=trace_cold_start_min_visible_units,
+            trace_cold_start_full_visible_units=trace_cold_start_full_visible_units,
             projector_reuse_prefix=bool(runtime_overrides.pop("projector_reuse_prefix", True)),
             projector_force_full_commit=bool(runtime_overrides.pop("projector_force_full_commit", False)),
             teacher_projector_force_full_commit=teacher_projector_force_full_commit,

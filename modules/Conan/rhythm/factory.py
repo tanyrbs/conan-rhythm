@@ -169,6 +169,14 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
             hparams.get('rhythm_trace_exhaustion_final_cell_suppress', 0.65)
         ),
         trace_anchor_aware_sampling=bool(hparams.get('rhythm_trace_anchor_aware_sampling', False)),
+        trace_cold_start_min_visible_units=int(
+            hparams.get('rhythm_trace_cold_start_min_visible_units', 0)
+        ),
+        trace_cold_start_full_visible_units=int(
+            hparams.get('rhythm_trace_cold_start_full_visible_units', 0)
+        ),
+        trace_active_tail_only=bool(hparams.get('rhythm_trace_active_tail_only', False)),
+        trace_offset_lookahead_units=int(hparams.get('rhythm_trace_offset_lookahead_units', 0)),
         projector_config=build_projector_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),

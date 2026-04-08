@@ -70,6 +70,10 @@ class TraceReliabilityBundle:
     local_trace_path_weight: torch.Tensor
     boundary_trace_path_weight: torch.Tensor
     phase_gap: torch.Tensor
+    phase_gap_runtime: torch.Tensor
+    phase_gap_anchor: torch.Tensor
+    coverage_alpha: torch.Tensor
+    blend: torch.Tensor
     tail_alpha: torch.Tensor
     gap_alpha: torch.Tensor
     reuse_alpha: torch.Tensor
@@ -95,6 +99,10 @@ class RhythmPlannerOutputs:
     local_trace_path_weight: Optional[torch.Tensor] = None
     boundary_trace_path_weight: Optional[torch.Tensor] = None
     trace_phase_gap: Optional[torch.Tensor] = None
+    trace_phase_gap_runtime: Optional[torch.Tensor] = None
+    trace_phase_gap_anchor: Optional[torch.Tensor] = None
+    trace_coverage_alpha: Optional[torch.Tensor] = None
+    trace_blend: Optional[torch.Tensor] = None
     trace_tail_reuse_count: Optional[torch.Tensor] = None
     trace_tail_alpha: Optional[torch.Tensor] = None
     trace_gap_alpha: Optional[torch.Tensor] = None
@@ -213,6 +221,7 @@ class RhythmExecution:
     frame_plan: Optional["RhythmFramePlan"]
     planner: RhythmPlannerOutputs
     next_state: StreamingRhythmState
+    trace_reliability: Optional[TraceReliabilityBundle] = None
 
     @property
     def blank_slot_duration_exec(self) -> Optional[torch.Tensor]:

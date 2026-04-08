@@ -486,6 +486,51 @@ def _update_state_metrics(
             metrics["rhythm_metric_phase_ptr_below_progress_ratio"] = _safe_mean(
                 (phase_gap < -1e-6).float()
             )
+    execution = output.get("rhythm_execution")
+    trace_reliability = getattr(execution, "trace_reliability", None) if execution is not None else None
+    planner = getattr(execution, "planner", None) if execution is not None else None
+    def _bundle_value(bundle, key):
+        if bundle is None:
+            return None
+        if isinstance(bundle, dict):
+            return bundle.get(key)
+        return getattr(bundle, key, None)
+    runtime_gap = None
+    anchor_gap = None
+    local_gate = None
+    coverage_alpha = None
+    blend = None
+    if trace_reliability is not None:
+        runtime_gap = _bundle_value(trace_reliability, "phase_gap_runtime")
+        anchor_gap = _bundle_value(trace_reliability, "phase_gap_anchor")
+        local_gate = _bundle_value(trace_reliability, "local_trace_path_weight")
+        if local_gate is None:
+            local_gate = _bundle_value(trace_reliability, "local_gate")
+        coverage_alpha = _bundle_value(trace_reliability, "coverage_alpha")
+        blend = _bundle_value(trace_reliability, "blend")
+    if planner is not None:
+        if runtime_gap is None:
+            runtime_gap = getattr(planner, "trace_phase_gap_runtime", None)
+        if anchor_gap is None:
+            anchor_gap = getattr(planner, "trace_phase_gap_anchor", None)
+        if local_gate is None:
+            local_gate = getattr(planner, "local_trace_path_weight", None)
+        if coverage_alpha is None:
+            coverage_alpha = getattr(planner, "trace_coverage_alpha", None)
+        if blend is None:
+            blend = getattr(planner, "trace_blend", None)
+    if runtime_gap is not None:
+        metrics["rhythm_metric_phase_gap_runtime_mean"] = _safe_mean(runtime_gap.float())
+        metrics["rhythm_metric_phase_gap_runtime_abs_mean"] = _safe_mean(runtime_gap.float().abs())
+    if anchor_gap is not None:
+        metrics["rhythm_metric_phase_gap_anchor_mean"] = _safe_mean(anchor_gap.float())
+        metrics["rhythm_metric_phase_gap_anchor_abs_mean"] = _safe_mean(anchor_gap.float().abs())
+    if local_gate is not None:
+        metrics["rhythm_metric_trace_local_gate_mean"] = _safe_mean(local_gate.float())
+    if coverage_alpha is not None:
+        metrics["rhythm_metric_trace_coverage_alpha_mean"] = _safe_mean(coverage_alpha.float())
+    if blend is not None:
+        metrics["rhythm_metric_trace_blend_mean"] = _safe_mean(blend.float())
     state_prev = output.get("rhythm_state_prev")
     if state_prev is not None and state_next is not None:
         phase_delta = state_next.phase_ptr.float() - state_prev.phase_ptr.float()

@@ -216,6 +216,9 @@ class RefRhythmDescriptor(nn.Module):
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
         anchor_durations: torch.Tensor | None = None,
+        commit_frontier: torch.Tensor | None = None,
+        lookahead_units: int | None = None,
+        active_tail_only: bool = False,
     ) -> torch.Tensor:
         effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
@@ -225,6 +228,9 @@ class RefRhythmDescriptor(nn.Module):
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
             anchor_durations=anchor_durations,
+            commit_frontier=commit_frontier,
+            lookahead_units=lookahead_units,
+            active_tail_only=active_tail_only,
         )
 
     def sample_planner_trace_window(
@@ -236,6 +242,9 @@ class RefRhythmDescriptor(nn.Module):
         horizon: float | None = None,
         visible_sizes: torch.Tensor | None = None,
         anchor_durations: torch.Tensor | None = None,
+        commit_frontier: torch.Tensor | None = None,
+        lookahead_units: int | None = None,
+        active_tail_only: bool = False,
     ) -> torch.Tensor:
         effective_horizon = self.encoder.trace_horizon if horizon is None else horizon
         return self.encoder.sample_trace_window(
@@ -245,4 +254,7 @@ class RefRhythmDescriptor(nn.Module):
             horizon=effective_horizon,
             visible_sizes=visible_sizes,
             anchor_durations=anchor_durations,
+            commit_frontier=commit_frontier,
+            lookahead_units=lookahead_units,
+            active_tail_only=active_tail_only,
         )

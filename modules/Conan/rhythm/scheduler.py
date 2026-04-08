@@ -205,6 +205,16 @@ class MonotonicRhythmScheduler(nn.Module):
             local_trace_path_weight=local_trace_path_weight,
             boundary_trace_path_weight=boundary_trace_path_weight,
             trace_phase_gap=(trace_reliability.phase_gap if trace_reliability is not None else None),
+            trace_phase_gap_runtime=(
+                trace_reliability.phase_gap_runtime if trace_reliability is not None else None
+            ),
+            trace_phase_gap_anchor=(
+                trace_reliability.phase_gap_anchor if trace_reliability is not None else None
+            ),
+            trace_coverage_alpha=(
+                trace_reliability.coverage_alpha if trace_reliability is not None else None
+            ),
+            trace_blend=(trace_reliability.blend if trace_reliability is not None else None),
             trace_tail_reuse_count=(
                 trace_reliability.tail_reuse_count if trace_reliability is not None else None
             ),

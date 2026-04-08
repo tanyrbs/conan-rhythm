@@ -181,6 +181,10 @@ def collect_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]
         "pause_support_logit_unit",
         "pause_run_length_unit",
         "pause_breath_debt_unit",
+        "trace_phase_gap_runtime",
+        "trace_phase_gap_anchor",
+        "trace_coverage_alpha",
+        "trace_blend",
     ):
         attr_value = getattr(planner, attr_name, None)
         if attr_value is not None:

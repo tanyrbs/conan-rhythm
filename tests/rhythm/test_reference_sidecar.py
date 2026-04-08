@@ -270,6 +270,54 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertLess(float(anchored[0, 1, 0]), float(uniform[0, 1, 0]))
         self.assertGreater(float(anchored[0, 2, 0]), float(uniform[0, 2, 0]))
 
+    def test_sample_trace_window_active_tail_only_keeps_current_tail(self) -> None:
+        trace = torch.linspace(0.0, 1.0, 8, dtype=torch.float32).view(1, 8, 1)
+        phase_ptr = torch.tensor([0.0], dtype=torch.float32)
+        anchor_short = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        anchor_full = torch.tensor([[1.0, 1.0, 1.0, 10.0]], dtype=torch.float32)
+        visible_short = torch.tensor([3], dtype=torch.long)
+        visible_full = torch.tensor([4], dtype=torch.long)
+
+        baseline = sample_progress_trace(
+            trace,
+            phase_ptr=phase_ptr,
+            window_size=4,
+            horizon=1.0,
+            visible_sizes=visible_short,
+            anchor_durations=anchor_short,
+        )
+        tail_only = sample_progress_trace(
+            trace,
+            phase_ptr=phase_ptr,
+            window_size=4,
+            horizon=1.0,
+            visible_sizes=visible_full,
+            anchor_durations=anchor_full,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            lookahead_units=3,
+            active_tail_only=True,
+        )
+        self.assertTrue(torch.allclose(baseline[0, :3, 0], tail_only[0, :3, 0], atol=1e-4))
+        self.assertGreater(float(tail_only[0, 3, 0]), 0.0)
+
+    def test_sample_trace_window_lookahead_limits_offsets(self) -> None:
+        trace = torch.linspace(0.0, 1.0, 8, dtype=torch.float32).view(1, 8, 1)
+        phase_ptr = torch.tensor([0.0], dtype=torch.float32)
+        anchor = torch.tensor([[1.0] * 8], dtype=torch.float32)
+        visible = torch.tensor([8], dtype=torch.long)
+        lookahead = sample_progress_trace(
+            trace,
+            phase_ptr=phase_ptr,
+            window_size=8,
+            horizon=1.0,
+            visible_sizes=visible,
+            anchor_durations=anchor,
+            commit_frontier=torch.tensor([0], dtype=torch.long),
+            lookahead_units=3,
+            active_tail_only=True,
+        )
+        self.assertTrue(torch.allclose(lookahead[0, 3:, 0], lookahead[0, 2, 0]))
+
     def test_dataset_contract_rejects_partial_planner_sidecar(self) -> None:
         dataset = self._DummyDataset()
         stats, trace = self._dummy_inputs(trace_bins=8)
