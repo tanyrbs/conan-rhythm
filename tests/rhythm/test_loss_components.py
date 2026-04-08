@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from tasks.Conan.rhythm.losses import (
     RhythmLossTargets,
+    _resolve_pause_exec_mask,
     build_predicted_reference_descriptor_bundle,
     build_rhythm_loss_dict,
 )
@@ -235,6 +236,22 @@ class RhythmLossComponentTests(unittest.TestCase):
             float(decoupled_losses["rhythm_pause_event"].item()),
             float(weighted_losses["rhythm_pause_event"].item()),
         )
+
+    def test_pause_exec_boundary_mask_prefers_blended_boundary_score_when_available(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause = torch.zeros_like(speech)
+        execution = self._execution(
+            speech,
+            pause,
+            source_boundary_cue=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
+        )
+        execution.planner.boundary_score_unit = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+        mask = _resolve_pause_exec_mask(
+            execution,
+            torch.ones_like(speech),
+            boundary_weight=1.0,
+        )
+        self.assertGreater(float(mask[0, 0].item()), float(mask[0, 2].item()))
 
     def test_pause_support_aux_penalizes_misaligned_planner_distribution(self) -> None:
         speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)

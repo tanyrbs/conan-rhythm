@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .commit_controller import CommitConfig
 from .module import StreamingRhythmModule
 from .offline_teacher import OfflineTeacherConfig
 from .policy import resolve_runtime_offline_teacher_enable as resolve_runtime_offline_teacher_enable_from_policy
@@ -28,7 +29,7 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
     ).strip().lower()
     if pause_selection_mode not in {'simple', 'sparse'}:
         raise ValueError(f'Unsupported rhythm_projector_pause_selection_mode: {pause_selection_mode}')
-    pause_boundary_mode = str(hparams.get('rhythm_projector_pause_boundary_mode', 'additive') or 'additive').strip().lower()
+    pause_boundary_mode = str(hparams.get('rhythm_projector_pause_boundary_mode', 'gain') or 'gain').strip().lower()
     if pause_boundary_mode not in {'additive', 'gain'}:
         raise ValueError(f'Unsupported rhythm_projector_pause_boundary_mode: {pause_boundary_mode}')
     return ProjectorConfig(
@@ -40,6 +41,7 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
         pause_min_boundary_weight=float(hparams.get('rhythm_projector_pause_min_boundary_weight', 0.10)),
         pause_boundary_bias_weight=float(hparams.get('rhythm_projector_pause_boundary_bias_weight', 0.15)),
         pause_boundary_mode=pause_boundary_mode,
+        pause_boundary_slot_threshold=float(hparams.get('rhythm_projector_pause_boundary_slot_threshold', 0.5)),
         pause_train_soft=bool(hparams.get('rhythm_projector_pause_train_soft', True)),
         pause_soft_temperature=float(hparams.get('rhythm_projector_pause_soft_temperature', 0.12)),
         pause_selection_mode=pause_selection_mode,
@@ -52,6 +54,23 @@ def build_projector_config_from_hparams(hparams) -> ProjectorConfig:
             # observability paths stay aligned with execution authority.
             hparams.get('rhythm_projector_build_render_plan', True)
         ),
+    )
+
+
+def build_commit_config_from_hparams(hparams) -> CommitConfig:
+    mode = str(hparams.get('rhythm_commit_mode', 'boundary_phrase') or 'boundary_phrase').strip().lower()
+    if mode not in {'boundary_phrase'}:
+        raise ValueError(f'Unsupported rhythm_commit_mode: {mode}')
+    return CommitConfig(
+        mode=mode,
+        threshold=float(hparams.get('rhythm_commit_threshold', 0.55)),
+        require_sealed_boundary=bool(hparams.get('rhythm_commit_require_sealed_boundary', True)),
+        min_phrase_units=int(hparams.get('rhythm_commit_min_phrase_units', 2)),
+        max_lookahead_units=int(hparams.get('rhythm_commit_max_lookahead_units', 0) or 0),
+        sep_hint_bonus=float(hparams.get('rhythm_commit_sep_hint_bonus', 0.15)),
+        boundary_confidence_weight=float(hparams.get('rhythm_commit_boundary_confidence_weight', 0.20)),
+        source_boundary_weight=float(hparams.get('rhythm_commit_source_boundary_weight', 0.45)),
+        planner_boundary_weight=float(hparams.get('rhythm_commit_planner_boundary_weight', 0.35)),
     )
 
 
@@ -128,6 +147,7 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         trace_exhaustion_gap_end=float(hparams.get('rhythm_trace_exhaustion_gap_end', 0.22)),
         trace_exhaustion_local_floor=float(hparams.get('rhythm_trace_exhaustion_local_floor', 0.20)),
         projector_config=build_projector_config_from_hparams(hparams),
+        commit_config=build_commit_config_from_hparams(hparams),
         enable_learned_offline_teacher=resolve_runtime_offline_teacher_enable(hparams),
         offline_teacher_config=build_offline_teacher_config_from_hparams(hparams),
         teacher_config=AlgorithmicTeacherConfig(

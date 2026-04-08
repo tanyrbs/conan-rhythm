@@ -382,7 +382,16 @@ class OfflineRhythmTeacherPlanner(nn.Module):
             pause_amount_weight = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask
             pause_candidate_score = pause_support_prob * pause_amount_weight * unit_mask
             candidate_total = pause_candidate_score.sum(dim=1, keepdim=True)
-            fallback = pause_amount_weight / pause_amount_weight.sum(dim=1, keepdim=True).clamp_min(1.0)
+            boundary_fallback = masked_softmax(
+                boundary_score_unit.float() / 0.30,
+                unit_mask,
+                dim=1,
+            ) * unit_mask
+            fallback = torch.where(
+                boundary_score_unit.float().sum(dim=1, keepdim=True) > 1e-6,
+                boundary_fallback,
+                pause_amount_weight / pause_amount_weight.sum(dim=1, keepdim=True).clamp_min(1.0),
+            )
             pause_weight = torch.where(
                 candidate_total > 1e-6,
                 pause_candidate_score / candidate_total.clamp_min(1e-6),

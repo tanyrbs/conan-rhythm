@@ -19,10 +19,27 @@ class RhythmPublicInputs:
 
 
 @dataclass
+class BoundaryCommitDecision:
+    commit_end: torch.Tensor
+    committed: torch.Tensor
+    commit_score_unit: torch.Tensor
+    eligible_mask_unit: torch.Tensor
+    commit_confidence: torch.Tensor
+
+    @property
+    def commit_frontier(self) -> torch.Tensor:
+        return (self.commit_end.long() + 1).clamp_min(0)
+
+
+@dataclass
 class StreamingRhythmState:
     phase_ptr: torch.Tensor
     clock_delta: torch.Tensor
     commit_frontier: torch.Tensor
+    ref_phrase_ptr: Optional[torch.Tensor] = None
+    active_phrase_start: Optional[torch.Tensor] = None
+    active_phrase_end: Optional[torch.Tensor] = None
+    local_rho_unit: Optional[torch.Tensor] = None
     previous_speech_exec: Optional[torch.Tensor] = None
     previous_pause_exec: Optional[torch.Tensor] = None
     phase_anchor: Optional[torch.Tensor] = None
@@ -71,7 +88,18 @@ class RhythmPlannerOutputs:
     pause_weight_unit: torch.Tensor
     boundary_score_unit: torch.Tensor
     trace_context: torch.Tensor
+    global_rate_scalar: Optional[torch.Tensor] = None
+    global_style_vec: Optional[torch.Tensor] = None
     source_boundary_cue: Optional[torch.Tensor] = None
+    commit_boundary_logit_unit: Optional[torch.Tensor] = None
+    commit_mask_unit: Optional[torch.Tensor] = None
+    commit_confidence: Optional[torch.Tensor] = None
+    phrase_speech_budget_win: Optional[torch.Tensor] = None
+    phrase_pause_budget_win: Optional[torch.Tensor] = None
+    phrase_rate_delta_unit: Optional[torch.Tensor] = None
+    ref_phrase_index: Optional[torch.Tensor] = None
+    local_rho_unit: Optional[torch.Tensor] = None
+    local_trace_ctx_unit: Optional[torch.Tensor] = None
     pause_support_logit_unit: Optional[torch.Tensor] = None
     pause_support_prob_unit: Optional[torch.Tensor] = None
     pause_amount_weight_unit: Optional[torch.Tensor] = None

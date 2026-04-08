@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .commit_controller import BoundaryCommitController, CommitConfig
 from .contracts import RhythmTeacherTargets, StreamingRhythmState
 from .offline_teacher import OfflineRhythmTeacherPlanner, OfflineTeacherConfig
 from .projector import ProjectorConfig, StreamingRhythmProjector
@@ -54,6 +55,7 @@ class StreamingRhythmModule(nn.Module):
         trace_exhaustion_gap_end: float = 0.22,
         trace_exhaustion_local_floor: float = 0.20,
         projector_config: ProjectorConfig | None = None,
+        commit_config: CommitConfig | None = None,
         teacher_config: AlgorithmicTeacherConfig | None = None,
         offline_teacher_config: OfflineTeacherConfig | None = None,
         enable_learned_offline_teacher: bool = False,
@@ -121,6 +123,7 @@ class StreamingRhythmModule(nn.Module):
             else None
         )
         self.projector = StreamingRhythmProjector(projector_config)
+        self.commit_controller = BoundaryCommitController(commit_config)
         self.teacher = AlgorithmicRhythmTeacher(teacher_config)
         self.enable_trace_exhaustion_fallback = bool(enable_trace_exhaustion_fallback)
         self.trace_exhaustion_gap_start = float(max(0.0, trace_exhaustion_gap_start))
@@ -524,6 +527,19 @@ class StreamingRhythmModule(nn.Module):
             state=state,
             source_boundary_cue=source_boundary_cue,
         )
+        commit_decision = self.commit_controller(
+            boundary_score_unit=planner.boundary_score_unit,
+            source_boundary_cue=source_boundary_cue,
+            boundary_confidence=boundary_confidence,
+            sep_hint=sep_hint,
+            unit_mask=unit_mask,
+            open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            state=state,
+        )
+        planner.commit_boundary_logit_unit = commit_decision.commit_score_unit
+        planner.commit_mask_unit = commit_decision.eligible_mask_unit
+        planner.commit_confidence = commit_decision.commit_confidence
         planner.trace_reliability = trace_reliability
         planner.trace_reliability_local_gate = trace_reliability.get("local_gate")
         planner.trace_reliability_blend = trace_reliability.get("blend")
@@ -537,7 +553,10 @@ class StreamingRhythmModule(nn.Module):
             boundary_score_unit=planner.boundary_score_unit,
             state=state,
             open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            sep_hint=sep_hint,
             planner=planner,
+            commit_decision=commit_decision,
             reuse_prefix=projector_reuse_prefix,
             force_full_commit=projector_force_full_commit,
             pause_topk_ratio_override=projector_pause_topk_ratio_override,
@@ -737,6 +756,20 @@ class StreamingRhythmModule(nn.Module):
             full_trace_context=trace_context,
             source_boundary_cue=source_boundary_cue,
         )
+        teacher_state = self.init_state(batch_size=content_units.size(0), device=content_units.device)
+        commit_decision = self.commit_controller(
+            boundary_score_unit=planner.boundary_score_unit,
+            source_boundary_cue=source_boundary_cue,
+            boundary_confidence=boundary_confidence,
+            sep_hint=sep_hint,
+            unit_mask=unit_mask,
+            open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            state=teacher_state,
+        )
+        planner.commit_boundary_logit_unit = commit_decision.commit_score_unit
+        planner.commit_mask_unit = commit_decision.eligible_mask_unit
+        planner.commit_confidence = commit_decision.commit_confidence
         planner.trace_reliability = trace_reliability
         planner.trace_reliability_local_gate = trace_reliability.get("local_gate")
         planner.trace_reliability_blend = trace_reliability.get("blend")
@@ -748,9 +781,12 @@ class StreamingRhythmModule(nn.Module):
             dur_logratio_unit=planner.dur_logratio_unit,
             pause_weight_unit=planner.pause_weight_unit,
             boundary_score_unit=planner.boundary_score_unit,
-            state=self.init_state(batch_size=content_units.size(0), device=content_units.device),
+            state=teacher_state,
             open_run_mask=torch.zeros_like(content_units) if open_run_mask is None else open_run_mask,
+            sealed_mask=torch.ones_like(unit_mask).float() if sealed_mask is None else sealed_mask,
+            sep_hint=sep_hint,
             planner=planner,
+            commit_decision=commit_decision,
             reuse_prefix=False,
             force_full_commit=True,
             allow_soft_pause_selection_with_force_full_commit=True,

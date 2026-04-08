@@ -55,9 +55,13 @@ B_KEYS = [
     "rhythm_metric_expand_ratio_mean",
     "rhythm_metric_budget_projection_repair_active_rate",
     "rhythm_metric_pause_event_recall_boundary",
+    "rhythm_metric_pause_event_recall_boundary_valid",
+    "rhythm_metric_planner_pause_event_recall_boundary_valid",
     "rhythm_metric_pause_event_recall_nonboundary",
+    "rhythm_metric_pause_event_recall_nonboundary_valid",
     "rhythm_metric_pause_fn_boundary_mean",
     "rhythm_metric_pause_tp_boundary_mean",
+    "rhythm_metric_pause_support_cover_at_topk_boundary_valid",
 ]
 
 

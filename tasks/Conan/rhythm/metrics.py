@@ -158,6 +158,21 @@ def _masked_selected_recall(pred_evt: torch.Tensor, tgt_evt: torch.Tensor, selec
     return recall.mean()
 
 
+def _masked_selected_recall_valid_only(
+    pred_evt: torch.Tensor,
+    tgt_evt: torch.Tensor,
+    selector: torch.Tensor,
+) -> torch.Tensor:
+    selector = selector.bool()
+    tp = (pred_evt & tgt_evt & selector).float().sum(dim=1)
+    tgt = (tgt_evt & selector).float().sum(dim=1)
+    valid = tgt > 0
+    if not bool(valid.any().item()):
+        return pred_evt.float().new_tensor(0.0)
+    recall = tp[valid] / tgt[valid].clamp_min(1.0)
+    return recall.mean()
+
+
 def _masked_kl(pred: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = mask.float()
     pred = (pred.float() * mask).clamp_min(1e-6)
@@ -1001,6 +1016,20 @@ def _update_sample_supervision_metrics(
                 selected_target = (selected_evt & target_evt).float().sum(dim=1)
                 target_count = target_evt.float().sum(dim=1).clamp_min(1.0)
                 metrics["rhythm_metric_pause_support_cover_at_topk"] = _safe_mean(selected_target / target_count)
+                boundary_selector = (boundary_score.float() > 0.5) & valid_mask
+                boundary_target = target_evt & boundary_selector
+                boundary_target_count = boundary_target.float().sum(dim=1)
+                boundary_selected = (selected_evt & boundary_target).float().sum(dim=1)
+                valid_boundary = boundary_target_count > 0
+                if bool(valid_boundary.any().item()):
+                    metrics["rhythm_metric_pause_support_cover_at_topk_boundary_valid"] = (
+                        boundary_selected[valid_boundary] / boundary_target_count[valid_boundary].clamp_min(1.0)
+                    ).mean()
+                else:
+                    metrics["rhythm_metric_pause_support_cover_at_topk_boundary_valid"] = score.new_tensor(0.0)
+                metrics["rhythm_metric_pause_support_cover_at_topk_boundary"] = _safe_mean(
+                    boundary_selected / boundary_target_count.clamp_min(1.0)
+                )
 
         boundary_score = getattr(ctx.planner, "boundary_score_unit", None)
         if boundary_score is not None:
@@ -1016,7 +1045,17 @@ def _update_sample_supervision_metrics(
                 tgt_evt,
                 boundary_high,
             )
+            metrics["rhythm_metric_pause_event_recall_boundary_valid"] = _masked_selected_recall_valid_only(
+                pred_evt,
+                tgt_evt,
+                boundary_high,
+            )
             metrics["rhythm_metric_pause_event_recall_nonboundary"] = _masked_selected_recall(
+                pred_evt,
+                tgt_evt,
+                boundary_low,
+            )
+            metrics["rhythm_metric_pause_event_recall_nonboundary_valid"] = _masked_selected_recall_valid_only(
                 pred_evt,
                 tgt_evt,
                 boundary_low,
@@ -1029,6 +1068,18 @@ def _update_sample_supervision_metrics(
                 boundary_score.float(),
                 tp_evt,
             )
+            planner_pause_shape = getattr(ctx.planner, "pause_shape_unit", None)
+            if planner_pause_shape is None:
+                planner_pause_shape = getattr(ctx.planner, "pause_weight_unit", None)
+            planner_pause_budget = getattr(ctx.planner, "pause_budget_win", None)
+            if planner_pause_shape is not None and planner_pause_budget is not None:
+                planner_pause_surface = planner_pause_shape.float() * planner_pause_budget.float()
+                planner_evt = (planner_pause_surface > float(pause_event_threshold)) & mask_bool
+                metrics["rhythm_metric_planner_pause_event_recall_boundary_valid"] = _masked_selected_recall_valid_only(
+                    planner_evt,
+                    tgt_evt,
+                    boundary_high,
+                )
     if "rhythm_speech_exec_tgt" in sample and pause_target_key in sample:
         metrics["rhythm_metric_exec_total_corr"] = _masked_corr(
             ctx.execution.speech_duration_exec + ctx.blank_exec,

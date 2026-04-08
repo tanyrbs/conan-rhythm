@@ -5,7 +5,9 @@ from .bridge import (
     resolve_rhythm_apply_mode,
     run_rhythm_frontend,
 )
+from .commit_controller import BoundaryCommitController, CommitConfig, build_segment_mask
 from .contracts import (
+    BoundaryCommitDecision,
     RhythmExecution,
     RhythmPlannerOutputs,
     RhythmPublicInputs,
@@ -138,6 +140,9 @@ __all__ = [
     'CompactPlannerIntervention',
     'apply_compact_reference_intervention',
     'attach_rhythm_outputs',
+    'BoundaryCommitDecision',
+    'BoundaryCommitController',
+    'CommitConfig',
     'build_content_nonpadding',
     'build_frame_plan',
     'build_frame_plan_from_execution',
@@ -187,6 +192,7 @@ __all__ = [
     'resolve_pause_boundary_weight',
     'build_algorithmic_teacher_targets',
     'build_interleaved_blank_slot_schedule',
+    'build_segment_mask',
     'sample_tensor_by_frame_plan',
     'resolve_content_lengths',
     'resolve_rhythm_apply_mode',

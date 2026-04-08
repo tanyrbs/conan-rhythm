@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from modules.Conan.rhythm.contracts import RhythmPlannerOutputs, StreamingRhythmState
+from modules.Conan.rhythm.commit_controller import BoundaryCommitController, CommitConfig, build_segment_mask
 from modules.Conan.rhythm.controller import resolve_budget_views_from_total_and_pause_share
 from modules.Conan.rhythm.feasibility import lift_projector_budgets_to_feasible_region
 from modules.Conan.rhythm.prefix_state import (
@@ -22,6 +23,7 @@ from modules.Conan.rhythm.projector import (
     StreamingRhythmProjector,
     _project_pause_impl,
     apply_pause_boundary_prior,
+    build_eligible_pause_mask,
     compose_pause_candidate_scores,
 )
 from modules.Conan.rhythm.scheduler import MonotonicRhythmScheduler
@@ -271,6 +273,49 @@ class ProjectorInvariantTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(pause.sum(dim=1), torch.tensor([2.0], dtype=torch.float32)))
         self.assertEqual(int((pause > 1e-6).sum().item()), 1)
+
+    def test_boundary_commit_controller_prefers_rightmost_stable_boundary(self) -> None:
+        controller = BoundaryCommitController(
+            CommitConfig(
+                threshold=0.55,
+                min_phrase_units=2,
+                max_lookahead_units=0,
+            )
+        )
+        state = StreamingRhythmState(
+            phase_ptr=torch.zeros((1,), dtype=torch.float32),
+            clock_delta=torch.zeros((1,), dtype=torch.float32),
+            commit_frontier=torch.tensor([1], dtype=torch.long),
+        )
+        decision = controller(
+            boundary_score_unit=torch.tensor([[0.1, 0.2, 0.7, 0.3, 0.8]], dtype=torch.float32),
+            source_boundary_cue=torch.tensor([[0.0, 0.1, 0.8, 0.2, 0.9]], dtype=torch.float32),
+            boundary_confidence=torch.tensor([[0.0, 0.0, 0.8, 0.0, 0.9]], dtype=torch.float32),
+            sep_hint=torch.tensor([[0, 0, 1, 0, 1]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 5), dtype=torch.float32),
+            open_run_mask=torch.zeros((1, 5), dtype=torch.float32),
+            sealed_mask=torch.ones((1, 5), dtype=torch.float32),
+            state=state,
+        )
+        self.assertTrue(bool(decision.committed.item()))
+        self.assertEqual(int(decision.commit_end.item()), 4)
+        self.assertEqual(int(decision.commit_frontier.item()), 5)
+
+    def test_boundary_pause_mask_prefers_boundary_slots_inside_active_segment(self) -> None:
+        segment_mask = build_segment_mask(
+            unit_mask=torch.ones((1, 5), dtype=torch.float32),
+            start=torch.tensor([1], dtype=torch.long),
+            end=torch.tensor([4], dtype=torch.long),
+        )
+        eligible = build_eligible_pause_mask(
+            unit_mask=torch.ones((1, 5), dtype=torch.float32),
+            pause_domain_mask=segment_mask,
+            boundary_score_unit=torch.tensor([[0.1, 0.2, 0.8, 0.2, 0.9]], dtype=torch.float32),
+            sealed_mask=torch.ones((1, 5), dtype=torch.float32),
+            sep_hint=torch.tensor([[0, 0, 0, 1, 0]], dtype=torch.float32),
+            threshold=0.5,
+        )
+        self.assertTrue(torch.allclose(eligible, torch.tensor([[0.0, 0.0, 1.0, 1.0, 0.0]], dtype=torch.float32)))
 
     def test_compose_pause_candidate_scores_can_factor_support_and_allocation(self) -> None:
         scores = compose_pause_candidate_scores(

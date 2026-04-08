@@ -314,6 +314,14 @@ def attach_rhythm_outputs(
         ret["pause_amount_weight_unit"] = execution.planner.pause_amount_weight_unit
     if getattr(execution.planner, "pause_candidate_score_unit", None) is not None:
         ret["pause_candidate_score_unit"] = execution.planner.pause_candidate_score_unit
+    if getattr(execution.planner, "commit_boundary_logit_unit", None) is not None:
+        ret["commit_boundary_logit_unit"] = execution.planner.commit_boundary_logit_unit
+    if getattr(execution.planner, "commit_mask_unit", None) is not None:
+        ret["commit_mask_unit"] = execution.planner.commit_mask_unit
+    if getattr(execution.planner, "commit_confidence", None) is not None:
+        ret["commit_confidence"] = execution.planner.commit_confidence
+    if getattr(execution.planner, "local_rho_unit", None) is not None:
+        ret["local_rho_unit"] = execution.planner.local_rho_unit
     boundary_score_unit = resolve_boundary_score_unit(execution.planner)
     ret["boundary_score_unit"] = boundary_score_unit
     ret["boundary_latent"] = boundary_score_unit
@@ -323,6 +331,16 @@ def attach_rhythm_outputs(
     ret["pause_after_exec"] = execution.pause_after_exec
     ret["effective_duration_exec"] = execution.effective_duration_exec
     ret["commit_frontier"] = execution.commit_frontier
+    if getattr(execution, "pause_domain_mask", None) is not None:
+        ret["pause_domain_mask"] = execution.pause_domain_mask
+    if getattr(execution, "eligible_pause_mask", None) is not None:
+        ret["eligible_pause_mask"] = execution.eligible_pause_mask
+    if getattr(execution, "active_phrase_start", None) is not None:
+        ret["active_phrase_start"] = execution.active_phrase_start
+    if getattr(execution, "active_phrase_end", None) is not None:
+        ret["active_phrase_end"] = execution.active_phrase_end
+    if getattr(execution, "local_rho_unit", None) is not None:
+        ret["local_rho_unit_exec"] = execution.local_rho_unit
     if execution.frame_plan is not None:
         ret["rhythm_frame_plan"] = execution.frame_plan
     _attach_slot_outputs(ret, execution)

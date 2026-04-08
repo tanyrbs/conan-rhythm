@@ -896,11 +896,12 @@ def _resolve_pause_exec_mask(
     if boundary_weight <= 0.0 or execution is None or getattr(execution, "planner", None) is None:
         return unit_mask
     planner = execution.planner
-    boundary_hint = getattr(planner, "source_boundary_cue", None)
+    # Keep supervision weighting aligned with the projector/metrics boundary
+    # semantics. When available, prefer the blended planner-side boundary score
+    # (source cue + reference trace) instead of the raw source cue alone.
+    boundary_hint = resolve_boundary_score_unit(planner)
     if boundary_hint is None:
-        boundary_hint = resolve_boundary_score_unit(planner)
-        if boundary_hint is not None:
-            boundary_hint = boundary_hint.detach()
+        boundary_hint = getattr(planner, "source_boundary_cue", None)
     if boundary_hint is None:
         return unit_mask
     boundary_hint = boundary_hint.float().clamp_min(0.0) * unit_mask

@@ -41,7 +41,7 @@
   },
   "current_status": {
     "active_exp": "teacher_offline_train100_360_v6_split_heads_restart17500_fix1",
-    "latest_train_step_token": 29019,
+    "latest_train_step_token": 30000,
     "latest_validated_step": 25000,
     "overall_best_step": 15000,
     "pause_best_step": 20000,

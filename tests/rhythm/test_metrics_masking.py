@@ -216,7 +216,9 @@ class RhythmMetricMaskingTests(unittest.TestCase):
             0.0,
         )
         self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_boundary"].item()), 1.0, places=4)
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_boundary_valid"].item()), 1.0, places=4)
         self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_nonboundary"].item()), 0.0, places=4)
+        self.assertAlmostEqual(float(metrics["rhythm_metric_pause_event_recall_nonboundary_valid"].item()), 0.0, places=4)
 
     def test_pause_event_metrics_follow_output_threshold_contract(self) -> None:
         unit_mask = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
