@@ -1,45 +1,50 @@
 {
   "repo_root": "/root/autodl-tmp/project/conan-rhythm",
-  "raw_root": "/root/autodl-tmp/data/LibriTTS",
-  "core_docs": [
-    "README.md",
-    "docs/autodl_training_handoff.md",
-    "docs/training_plan.md"
-  ],
+  "docs": {
+    "mainline": "README.md",
+    "code_config": "docs/code_config_guide.md",
+    "project_status": "docs/project_status.md"
+  },
   "mainline": {
     "name": "teacher_offline_mixed100_360_v6_split_heads_stage1",
     "stage": "teacher_offline",
-    "data_lineage": "mixed_train100_v6_plus_train360_v6",
-    "resume_semantics": "weight_only_warm_start",
+    "roadmap": [
+      "stage1",
+      "stage2",
+      "v2.5",
+      "v3",
+      "student_kd",
+      "student_ref_bootstrap",
+      "student_retimed"
+    ],
     "config": "egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml",
     "launcher": "scripts/autodl_train_stage1_mixed_v6_split_heads.sh",
-    "bootstrap_ckpt": "checkpoints/bootstrap/model_ckpt_steps_17500.ckpt"
+    "bootstrap_ckpt": "checkpoints/bootstrap/model_ckpt_steps_17500.ckpt",
+    "resume_semantics": "weight_only_warm_start",
+    "data": {
+      "binary_data_dir": "data/binary/libritts_train100_formal_rhythm_v6",
+      "processed_data_dir": "data/processed/libritts_train100_formal",
+      "train_sets": [
+        "data/binary/libritts_train100_formal_rhythm_v6",
+        "data/binary/libritts_train360_formal_trainset_rhythm_v6"
+      ],
+      "rhythm_cache_version": 6
+    },
+    "runtime": {
+      "max_updates": 80000,
+      "val_check_interval": 5000,
+      "num_ckpt_keep": 3,
+      "best_alias": "model_ckpt_best.pt",
+      "pause_best_alias": "model_ckpt_pause_best.pt",
+      "pause_best_monitor_key": "rhythm_metric_pause_event_f1"
+    }
   },
-  "core_configs": {
-    "mainline_stage1_mixed_v6_split_heads": "egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_split_heads_resume.yaml",
-    "teacher_stage1_train100": "egs/conan_emformer_rhythm_v2_teacher_offline_train100.yaml",
-    "legacy_pause_recall_resume": "egs/conan_emformer_rhythm_v2_teacher_offline_train100_360_pause_recall.yaml"
-  },
-  "core_scripts": {
-    "verify": "scripts/verify_core_training_assets.py",
-    "preflight": "scripts/preflight_rhythm_v2.py",
-    "train_stage1": "scripts/autodl_train_stage1.sh",
-    "mainline_stage1": "scripts/autodl_train_stage1_mixed_v6_split_heads.sh",
-    "monitor_stage1_metrics": "scripts/monitor_stage1_metrics.py",
-    "legacy_recovery_v3_trainonly": "scripts/autodl_recovery_mixed100360_v3_trainonly.sh",
-    "legacy_resume_stage1_pause_recall": "scripts/autodl_resume_stage1_pause_recall.sh"
-  },
-  "core_outputs": {
-    "train100_processed": "data/processed/libritts_train100_formal",
-    "train100_binary": "data/binary/libritts_train100_formal_rhythm_v6",
-    "train360_processed": "data/processed/libritts_train360_formal_trainset",
-    "train360_binary": "data/binary/libritts_train360_formal_trainset_rhythm_v6",
-    "bootstrap_ckpt_17500": "checkpoints/bootstrap/model_ckpt_steps_17500.ckpt"
-  },
-  "command_templates": {
-    "verify": "python scripts/verify_core_training_assets.py",
-    "preflight_mainline": "PREFLIGHT_ONLY=1 BOOTSTRAP_CKPT=checkpoints/bootstrap/model_ckpt_steps_17500.ckpt bash scripts/autodl_train_stage1_mixed_v6_split_heads.sh",
-    "train_mainline": "BOOTSTRAP_CKPT=checkpoints/bootstrap/model_ckpt_steps_17500.ckpt MAX_UPDATES=80000 VAL_CHECK_INTERVAL=5000 bash scripts/autodl_train_stage1_mixed_v6_split_heads.sh",
-    "monitor_stage1_metrics": "python scripts/monitor_stage1_metrics.py --log logs/teacher_offline_train100_360_v6_split_heads_warm17500.log --tail 5"
+  "current_status": {
+    "active_exp": "teacher_offline_train100_360_v6_split_heads_restart17500_fix1",
+    "latest_train_step_token": 29019,
+    "latest_validated_step": 25000,
+    "overall_best_step": 15000,
+    "pause_best_step": 20000,
+    "log": "logs/teacher_offline_train100_360_v6_split_heads_restart17500_fix1.log"
   }
 }
