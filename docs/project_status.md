@@ -19,11 +19,10 @@
 
 ### 当前运行状态
 - 训练进程仍在运行
-- latest train step token in log: **30000**
-- 已完成 validation step：`5000 / 10000 / 15000 / 20000 / 25000`
-- `@30000` validation 在记录本次状态时尚未写入完整结果
+- latest observed train step token in log: **33236**
+- 已完成 validation step：`5000 / 10000 / 15000 / 20000 / 25000 / 30000`
 
-> 注意：当前正在运行的进程早于本地未提交代码修改启动，因此它反映的是**旧的进程内代码**，不是当前工作区里尚未重启的新逻辑。
+> 注意：当前正在运行的进程早于最近一次代码提交启动，因此它反映的是**旧的进程内代码**，不是当前仓库 HEAD 对应的新逻辑。
 
 ---
 
@@ -36,11 +35,12 @@
 | 15000 | 0.8215 | 0.9172 | 21.4709 | 0.9344 | 0.0460 | 0.0018 |
 | 20000 | 0.8268 | 0.9180 | 21.3356 | 0.9366 | 0.0491 | 0.0019 |
 | 25000 | 0.8226 | 0.9203 | 21.4935 | 0.9367 | 0.0474 | 0.0019 |
+| 30000 | 0.8271 | 0.9185 | 21.8889 | 0.9355 | 0.0531 | 0.0019 |
 
 ### 当前 best 记录
 - overall best (`model_ckpt_best.pt`): **@15000**，按 `val_loss=0.22422`
-- pause best (`model_ckpt_pause_best.pt`): **@20000**，按 `rhythm_metric_pause_event_f1=0.82680`
-- 最近 step ckpt：`15000 / 20000 / 25000`
+- pause best (`model_ckpt_pause_best.pt`): **@30000**，按 `rhythm_metric_pause_event_f1=0.82708`
+- 最近 step ckpt：`20000 / 25000 / 30000`
 
 ---
 
@@ -51,10 +51,10 @@
 
 ### 支持这个判断的事实
 - `pause_event_f1` 整体维持在 `0.81~0.83` 区间，没有主线崩坏迹象
-- `exec_total_corr` 维持高位，并在 `@25000` 达到 `0.9203`
-- `prefix_drift_l1` 维持在 `21~22` 区间，没有出现持续恶化
+- `exec_total_corr` 维持高位，`@25000=0.9203`、`@30000=0.9185`
+- `prefix_drift_l1` 维持在 `21~22` 区间，`@30000` 略有上行但未失控
 - `pause_support_cover_at_topk` 维持在 `0.93+`，说明 planner → projector 的主要 support 覆盖仍健康
-- `pause_recall_drop_post_from_planner` 约 `0.04~0.05`，属于可接受但仍需盯紧的损耗
+- `pause_recall_drop_post_from_planner` 约 `0.04~0.05`，`@30000` 略抬到 `0.0531`，仍需盯紧
 - `boundary recall` 持续约 `0.0018~0.0019`，说明 boundary 子集收益尚未体现出来
 
 ### 当前最重要风险
@@ -66,7 +66,7 @@
 
 ## 4. 当前代码与训练的关系
 
-当前工作区里已经存在一批**未提交**修改，主要包括：
+当前仓库 HEAD 已经包含一批代码与文档修复，主要包括：
 - 文档主线收敛
 - commit controller / projector / metrics / losses 的若干修复
 - boundary valid-only 指标与监控补强
