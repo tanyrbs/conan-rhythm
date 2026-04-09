@@ -56,6 +56,11 @@ def resolve_task_runtime_state(
     has_f0: bool,
     has_uv: bool,
 ) -> TaskRuntimeState:
+    rhythm_enabled = bool(
+        hparams.get("rhythm_enable_v2", False)
+        or hparams.get("rhythm_enable_v3", False)
+        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_ref_memory"
+    )
     effective_global_step = 200000 if test else int(global_step)
     use_reference = (
         test
@@ -94,7 +99,7 @@ def resolve_task_runtime_state(
     module_only_objective = bool(
         not test
         and not apply_rhythm_render
-        and bool(hparams.get("rhythm_enable_v2", False))
+        and rhythm_enabled
         and bool(hparams.get("rhythm_optimize_module_only", False))
     )
     disable_acoustic_train_path = bool(
@@ -124,6 +129,28 @@ def resolve_task_runtime_state(
 def build_rhythm_ref_conditioning(sample, *, explicit=None):
     if explicit is not None:
         return explicit
+    has_v3_memory = all(sample.get(key) is not None for key in ("global_rate", "role_value", "role_coverage"))
+    if has_v3_memory:
+        conditioning = {
+            "global_rate": sample["global_rate"],
+            "role_value": sample["role_value"],
+            "role_coverage": sample["role_coverage"],
+        }
+        for extra_key in (
+            "role_keys",
+            "prompt_role_feat",
+            "prompt_rel_stretch",
+            "prompt_mask",
+            "prompt_role_attention",
+            "prompt_reconstruction",
+            "role_summary",
+            "ref_rhythm_stats",
+            "ref_rhythm_trace",
+        ):
+            extra_value = sample.get(extra_key)
+            if extra_value is not None:
+                conditioning[extra_key] = extra_value
+        return conditioning
     ref_stats = sample.get("ref_rhythm_stats")
     ref_trace = sample.get("ref_rhythm_trace")
     if ref_stats is None or ref_trace is None:

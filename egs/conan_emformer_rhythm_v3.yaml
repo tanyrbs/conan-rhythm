@@ -1,0 +1,53 @@
+base_config: egs/conan_emformer.yaml
+mel_losses: "l1:1.0"
+
+binarization_args:
+  with_rhythm_cache: true
+
+# Duration-only rhythm_v3 bootstrap.
+# This is a runnable starter config for the static prompt-memory path, not a
+# teacher/export recipe like the audited v2 stack.
+rhythm_enable_v2: false
+rhythm_enable_v3: true
+rhythm_minimal_style_only: true
+rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, ref_rhythm_stats, ref_rhythm_trace]
+rhythm_public_outputs: [speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
+rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_mem, rhythm_v3_pref, rhythm_v3_anti]
+
+content_vocab_size: 102
+rhythm_hidden_size: 256
+rhythm_anchor_hidden_size: 128
+rhythm_anchor_min_frames: 1.0
+rhythm_anchor_max_frames: 12.0
+
+rhythm_role_dim: 64
+rhythm_role_codebook_size: 12
+rhythm_role_window_left: 4
+rhythm_role_window_right: 0
+rhythm_trace_bins: 24
+rhythm_ref_coverage_floor: 0.05
+
+rhythm_prefix_drift_gain: 0.25
+rhythm_prefix_drift_clip: 0.05
+rhythm_max_logstretch: 1.0
+rhythm_anti_pos_bins: 8
+rhythm_anti_pos_grl_scale: 1.0
+
+rhythm_force_reference_conditioning: true
+rhythm_apply_mode: infer
+rhythm_streaming_prefix_train: true
+rhythm_streaming_prefix_deterministic: true
+rhythm_streaming_prefix_min_ratio: 0.50
+rhythm_streaming_prefix_max_ratio: 0.95
+rhythm_streaming_prefix_min_tokens: 8
+rhythm_streaming_prefix_multiple: 4
+
+lambda_rhythm_dur: 1.0
+lambda_rhythm_mem: 0.25
+lambda_rhythm_pref: 0.20
+lambda_rhythm_anti: 0.05
+
+# Keep v3 target building strict by default: do not silently fall back to
+# source run-length anchors as supervision.
+rhythm_v3_allow_anchor_fallback: false
+rhythm_v3_strict_target_alignment: true

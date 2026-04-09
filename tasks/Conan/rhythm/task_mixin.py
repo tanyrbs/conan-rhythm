@@ -50,7 +50,9 @@ from tasks.Conan.rhythm.task_config import (
     validate_rhythm_training_hparams,
 )
 from tasks.Conan.rhythm.targets import (
+    DurationV3TargetBuildConfig,
     RhythmTargetBuildConfig,
+    build_duration_v3_loss_targets,
     build_identity_rhythm_loss_targets,
     build_rhythm_loss_targets_from_sample,
     scale_rhythm_loss_terms,
@@ -150,7 +152,7 @@ class RhythmConanTaskMixin:
         validate_rhythm_training_hparams(hparams)
 
     def _collect_rhythm_gen_params(self):
-        if self.model is None or not getattr(self.model, "rhythm_enable_v2", False):
+        if self.model is None or not getattr(self.model, "rhythm_enabled", getattr(self.model, "rhythm_enable_v2", False)):
             return []
         params = []
         if getattr(self.model, "rhythm_module", None) is not None:
@@ -158,7 +160,11 @@ class RhythmConanTaskMixin:
                 if self._should_skip_rhythm_named_param(name):
                     continue
                 params.append(param)
-        if bool(hparams.get("rhythm_optimize_pause_state", False)) and getattr(self.model, "rhythm_pause_state", None) is not None:
+        if (
+            bool(hparams.get("rhythm_optimize_pause_state", False))
+            and getattr(self.model, "rhythm_pause_state", None) is not None
+            and getattr(self.model, "rhythm_enable_v2", False)
+        ):
             params.append(self.model.rhythm_pause_state)
         optimize_render_params = should_optimize_render_params(hparams)
         if optimize_render_params and getattr(self.model, "rhythm_render_phase_mlp", None) is not None:
@@ -246,10 +252,13 @@ class RhythmConanTaskMixin:
         keys = (
             "content_units",
             "dur_anchor_src",
+            "unit_mask",
             "open_run_mask",
             "sealed_mask",
             "sep_hint",
             "boundary_confidence",
+            "unit_anchor_base",
+            "edge_cue",
         )
         payload = {}
         for key in keys:
@@ -319,6 +328,9 @@ class RhythmConanTaskMixin:
 
     def _build_rhythm_target_build_config(self) -> RhythmTargetBuildConfig:
         return self._task_runtime_support().build_rhythm_target_build_config()
+
+    def _build_duration_v3_target_build_config(self) -> DurationV3TargetBuildConfig:
+        return self._task_runtime_support().build_duration_v3_target_build_config()
 
     def _maybe_balance_rhythm_loss_terms(self, losses: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return self._rhythm_loss_balancer().apply(
@@ -718,7 +730,7 @@ class RhythmConanTaskMixin:
         )
         stage = runtime_state.stage
         teacher_as_main = runtime_state.teacher_as_main
-        if stage == "teacher_offline" and not teacher_as_main:
+        if stage == "teacher_offline" and not teacher_as_main and getattr(self.model, "rhythm_enable_v2", False):
             teacher_only_result = self._run_offline_teacher_model(
                 sample,
                 infer=infer,
@@ -779,7 +791,8 @@ class RhythmConanTaskMixin:
             test=test,
             current_step=effective_global_step,
         )
-        output.update(collect_planner_runtime_outputs(output.get("rhythm_execution")))
+        if output.get("rhythm_version") != "v3":
+            output.update(collect_planner_runtime_outputs(output.get("rhythm_execution")))
         
         losses = {}
         acoustic_target, acoustic_weight = runtime_helper.attach_acoustic_target_bundle(
@@ -1019,6 +1032,12 @@ class RhythmConanTaskMixin:
     def _build_rhythm_loss_targets(self, output, sample):
         if "rhythm_execution" not in output or output["rhythm_execution"] is None:
             return None
+        if output.get("rhythm_version") == "v3":
+            return build_duration_v3_loss_targets(
+                sample=sample,
+                output=output,
+                config=self._build_duration_v3_target_build_config(),
+            )
         unit_batch = output.get("rhythm_unit_batch")
         if unit_batch is None:
             return None
@@ -1051,6 +1070,9 @@ class RhythmConanTaskMixin:
             return
         rhythm_execution = output["rhythm_execution"]
         rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
+        if output.get("rhythm_version") == "v3":
+            losses.update(rhythm_losses)
+            return
         scaled_rhythm_losses = scale_rhythm_loss_terms(
             rhythm_losses,
             hparams=hparams,

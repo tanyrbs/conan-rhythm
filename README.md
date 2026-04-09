@@ -4,7 +4,12 @@
 
 # Conan Rhythm Branch
 
-This repository maintains a **teacher-first rhythm stack**.
+This repository currently ships **two rhythm backends**:
+
+- **v2**: the teacher-first, planner-heavy, audited/default path with full
+  YAML / teacher / export assets
+- **v3**: a runnable **duration-only bootstrap** built around shared role
+  codebooks and static prompt duration memory
 
 ## Mainline in one sentence
 
@@ -15,7 +20,9 @@ The maintained path is:
 3. distill the deployment-facing student from those teacher assets;
 4. close student acoustic behavior in retimed stage 3.
 
-This is the current engineering mainline of the repo.
+The current audited engineering mainline is still **v2**. The repo also now
+contains a runnable **v3** branch, but that branch is still a bootstrap path
+instead of a fully standalone recipe.
 
 ## What the current implementation actually is
 
@@ -80,6 +87,31 @@ pause behavior; a stricter PHRASE-only pointer update remains a future contract
 change rather than current code truth. The reference is not treated as a
 wall-clock script.
 
+At the same time, the repo now treats that phrase-pointer path as
+**compatibility-era code truth, not the preferred next-step duration design**.
+New duration work should move toward a **static prompt-memory** formulation:
+
+- **shared role codebook**: globally shared duration-role prototypes
+- **prompt-specific static duration memory**: per-prompt values filled into that shared codebook
+- **single duration head**: one author for unit stretch prediction
+- **very weak deterministic prefix stabilizer**: clip-only drift correction outside memory retrieval
+
+The critical design rule is:
+
+> do not consume the reference timeline; distill the prompt once into static
+> duration memory and query it content-synchronously from the current source unit
+
+That means new work should **not** keep expanding the older
+`reference segment bank + soft progress + planner + side controllers` stack for
+duration transfer. Phrase-bank / pointer logic may remain for compatibility,
+ablation, or bounded residual shaping, but it should not keep growing as the
+main duration-conditioning path.
+
+This checkout now includes a first runnable bootstrap of that idea under
+`modules/Conan/rhythm_v3/`, enabled by `rhythm_enable_v3: true`.
+`rhythm_mode: duration_ref_memory` is still accepted as a compatibility alias,
+but it is not a separate backend family.
+
 ### Phase-decoupled naming
 
 Canonical runtime naming is now:
@@ -143,15 +175,38 @@ Phrase-bank conditioning is related but not identical:
   from the raw cached contract instead of silently trusting them; matching
   sidecars are still preserved
 
+SRMDP / static-role-memory sidecars should be read as **auxiliary and
+rebuildable conditioning**, not as a replacement for the stable raw reference
+contract in **v2**. The v2 raw public contract remains:
+
+- `ref_rhythm_stats`
+- `ref_rhythm_trace`
+
+For **v3**, the main runtime contract is instead `ReferenceDurationMemory`.
+`ref_rhythm_stats` / `ref_rhythm_trace` are still mirrored out for
+compatibility/debugging, but v3 runtime does not consume phrase-bank sidecars.
+
+If role-memory sidecars are emitted, the intended semantic direction is:
+
+- shared role-codebook keys stay globally interpretable
+- prompt-specific slot values capture that prompt's duration bias for each role
+- source units query those static slots by local role
+- no reference cursor or processed-ratio signal should be required for the
+  main duration prediction path
+
 ### Runtime entrypoints
 
-- **public runtime entry**: `modules/Conan/rhythm/runtime_adapter.py::ConanRhythmAdapter`
-- **lower-level helper**: `modules/Conan/rhythm/bridge.py::run_rhythm_frontend`
+- **model-level runtime entry**: `modules/Conan/Conan.py::Conan.forward`
+- **v2 adapter**: `modules/Conan/rhythm/runtime_adapter.py::ConanRhythmAdapter`
+- **v3 adapter**: `modules/Conan/rhythm_v3/runtime_adapter.py::ConanDurationAdapter`
+- **lower-level legacy helper**: `modules/Conan/rhythm/bridge.py::run_rhythm_frontend`
 
-`run_rhythm_frontend()` is still used in tests and integration glue, but the
-adapter is the maintained public runtime surface.
+`run_rhythm_frontend()` and `ConanRhythmAdapter` are legacy-v2 surfaces.
+`Conan.forward -> _run_rhythm_stage` is the backend-agnostic entrypoint.
 
 ### Teacher runtime semantics
+
+The following teacher semantics are **v2-only**:
 
 - `rhythm_teacher_as_main=true` means **run the learned offline teacher as the main
   execution branch for teacher-only audit/export style stages**
@@ -175,6 +230,10 @@ adapter is the maintained public runtime surface.
   affect both streaming and teacher projector execution
 
 ### Runtime override surface
+
+The override surface below is **legacy v2**. The v3 adapter currently ignores
+`rhythm_runtime_overrides` and does not implement pause-topk or
+source-boundary runtime override knobs.
 
 The maintained runtime override surface is intentionally smaller than the full
 training hparam surface. Supported operator-facing overrides include:
@@ -219,6 +278,10 @@ treats them as unused runtime overrides rather than silently consuming them.
 | `T2-audio` | teacher-conditioned audio closure, audit, and export | procedure centered on `scripts/export_rhythm_teacher_targets.py` |
 | `S2-kd` | conservative teacher-conditioned student KD | `egs/conan_emformer_rhythm_v2_student_kd.yaml` |
 | `S3-retimed` | student acoustic closure | `egs/conan_emformer_rhythm_v2_student_retimed.yaml` |
+
+For v3 bootstrap experiments, a minimal starter config is now provided at:
+
+- `egs/conan_emformer_rhythm_v3.yaml`
 
 ## Main operator gates
 
@@ -280,6 +343,7 @@ python -m compileall -q modules tasks scripts tests utils data_gen
 python -m unittest discover -s tests/rhythm -p "test_*.py"
 python -u scripts/smoke_test_rhythm_v2.py
 python scripts/preflight_rhythm_v2.py --help
+pytest -q tests/rhythm/test_rhythm_v3_runtime.py tests/rhythm/test_rhythm_v3_losses.py tests/rhythm/test_rhythm_v3_metrics.py tests/rhythm/test_streaming_chunk_metrics.py
 ```
 
 ## License

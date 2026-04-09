@@ -1106,6 +1106,77 @@ def _collect_sample_supervision_metric_dict(
     return metrics
 
 
+def _build_duration_v3_metric_sections(
+    output: dict[str, Any],
+    sample: dict[str, Any] | None = None,
+) -> dict[str, dict[str, torch.Tensor]]:
+    execution = output.get("rhythm_execution")
+    if execution is None:
+        return {}
+    device = execution.speech_duration_exec.device
+    unit_batch = output.get("rhythm_unit_batch")
+    unit_mask = unit_batch.unit_mask.float() if unit_batch is not None else torch.ones_like(execution.speech_duration_exec)
+    total_exec = (execution.speech_duration_exec.float() * unit_mask).sum(dim=1)
+    visible_units = unit_mask.sum(dim=1).clamp_min(1.0)
+    role_attention = output.get("role_attention", getattr(execution, "role_attention", None))
+    if isinstance(role_attention, torch.Tensor):
+        entropy = -(role_attention.clamp_min(1.0e-6) * role_attention.clamp_min(1.0e-6).log()).sum(dim=-1)
+        role_entropy = _masked_mean(entropy, unit_mask)
+    else:
+        role_entropy = torch.tensor(0.0, device=device)
+    runtime_state = output.get("rhythm_state_next")
+    state_metrics = {}
+    if runtime_state is not None:
+        state_metrics = {
+            "rhythm_metric_commit_frontier_mean": _safe_mean(runtime_state.commit_frontier.float()),
+            "rhythm_metric_backlog_mean": _safe_mean(runtime_state.backlog),
+            "rhythm_metric_clock_delta_mean": _safe_mean(runtime_state.clock_delta),
+            "rhythm_metric_clock_delta_abs_mean": _safe_mean(runtime_state.clock_delta.abs()),
+        }
+    core_metrics = {
+        "rhythm_metric_exec_total_mean": _safe_mean(total_exec),
+        "rhythm_metric_visible_units_mean": _safe_mean(visible_units),
+        "rhythm_metric_unit_duration_mean": _masked_mean(execution.speech_duration_exec.float(), unit_mask),
+        "rhythm_metric_logstretch_abs_mean": _masked_mean(execution.unit_logstretch.abs(), unit_mask),
+        "rhythm_metric_role_entropy": role_entropy,
+        "rhythm_metric_frame_plan_present": execution.speech_duration_exec.new_tensor(
+            1.0 if output.get("rhythm_frame_plan") is not None else 0.0
+        ),
+    }
+    if isinstance(output.get("global_rate"), torch.Tensor):
+        core_metrics["rhythm_metric_global_rate_mean"] = _safe_mean(output["global_rate"])
+    if isinstance(output.get("role_coverage"), torch.Tensor):
+        core_metrics["rhythm_metric_role_coverage_mean"] = _safe_mean(output["role_coverage"])
+    if sample is not None and "rhythm_speech_exec_tgt" in sample:
+        target = sample["rhythm_speech_exec_tgt"].float().to(device=device)
+        core_metrics["rhythm_metric_exec_speech_l1"] = _masked_l1(
+            execution.speech_duration_exec.float(),
+            target,
+            unit_mask,
+        )
+        pred_prefix = torch.cumsum(execution.speech_duration_exec.float() * unit_mask, dim=1)
+        tgt_prefix = torch.cumsum(target * unit_mask, dim=1)
+        core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
+        core_metrics["rhythm_metric_cumplan_l1"] = core_metrics["rhythm_metric_prefix_drift_l1"]
+    for loss_key in (
+        "L_exec_speech",
+        "L_exec_stretch",
+        "L_exec_pause",
+        "L_cumplan",
+        "rhythm_v3_dur",
+        "rhythm_v3_mem",
+        "rhythm_v3_pref",
+        "rhythm_v3_anti",
+    ):
+        value = output.get(loss_key)
+        if isinstance(value, torch.Tensor):
+            core_metrics[f"rhythm_metric_{loss_key}"] = _safe_mean(value)
+    return {
+        "plan_surfaces": core_metrics,
+        "runtime_state": state_metrics,
+    }
+
+
 def build_rhythm_metric_sections(
     output: dict[str, Any],
     sample: dict[str, Any] | None = None,
@@ -1113,6 +1184,8 @@ def build_rhythm_metric_sections(
     execution = output.get("rhythm_execution")
     if execution is None:
         return {}
+    if output.get("rhythm_version") == "v3" or getattr(execution, "planner", None) is None:
+        return _build_duration_v3_metric_sections(output, sample=sample)
     ctx = _build_rhythm_metric_context(output, execution)
     sections = {
         "plan_surfaces": _collect_plan_surface_metrics(output, ctx),

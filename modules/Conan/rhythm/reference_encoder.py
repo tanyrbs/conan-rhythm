@@ -419,11 +419,38 @@ class ReferenceRhythmEncoder(nn.Module):
         self.trace_dim = len(REF_RHYTHM_TRACE_KEYS)
         self.stats_dim = len(REF_RHYTHM_STATS_KEYS)
 
-    def forward(self, ref_mel: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        ref_mel: torch.Tensor,
+        ref_lengths: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         ref_mel = _ensure_btf(ref_mel).float()
+        if ref_lengths is not None:
+            ref_lengths = ref_lengths.long().reshape(-1).to(device=ref_mel.device)
+            if ref_lengths.size(0) != ref_mel.size(0):
+                raise ValueError(
+                    f"ref_lengths batch mismatch: ref_mel={tuple(ref_mel.shape)}, ref_lengths={tuple(ref_lengths.shape)}"
+                )
+            outputs = []
+            for batch_idx in range(ref_mel.size(0)):
+                valid_len = int(ref_lengths[batch_idx].item())
+                valid_len = max(0, min(valid_len, int(ref_mel.size(1))))
+                if valid_len <= 0:
+                    outputs.append(
+                        {
+                            "ref_rhythm_stats": ref_mel.new_zeros((1, self.stats_dim)),
+                            "ref_rhythm_trace": ref_mel.new_zeros((1, self.trace_bins, self.trace_dim)),
+                        }
+                    )
+                    continue
+                outputs.append(self.forward(ref_mel[batch_idx : batch_idx + 1, :valid_len], ref_lengths=None))
+            return {
+                "ref_rhythm_stats": torch.cat([item["ref_rhythm_stats"] for item in outputs], dim=0),
+                "ref_rhythm_trace": torch.cat([item["ref_rhythm_trace"] for item in outputs], dim=0),
+            }
         energy = ref_mel.mean(dim=-1)
         energy_mean = energy.mean(dim=1, keepdim=True)
-        energy_std = energy.std(dim=1, keepdim=True).clamp_min(1e-6)
+        energy_std = energy.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-6)
         energy_z = (energy - energy_mean) / energy_std
         delta = torch.zeros_like(energy)
         delta[:, 1:] = (energy[:, 1:] - energy[:, :-1]).abs()
@@ -465,7 +492,7 @@ class ReferenceRhythmEncoder(nn.Module):
         # binary event rate in the global stats. This gives downstream planning
         # a graded boundary salience signal instead of a hard 0/1 trace.
         boundary_mean = boundary_strength.mean(dim=1, keepdim=True)
-        boundary_std = boundary_strength.std(dim=1, keepdim=True).clamp_min(1e-6)
+        boundary_std = boundary_strength.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-6)
         boundary_strength_soft = torch.sigmoid((boundary_strength - boundary_mean) / boundary_std)
 
         feature_track = torch.stack(

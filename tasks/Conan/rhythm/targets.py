@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import torch
 
-from .losses import RhythmLossTargets
+from .losses import DurationV3LossTargets, RhythmLossTargets
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,17 @@ class RhythmTargetBuildConfig:
     @property
     def use_distill_pause_shape(self) -> bool:
         return self.use_distill and self.distill_pause_shape_weight > 0.0
+
+
+@dataclass(frozen=True)
+class DurationV3TargetBuildConfig:
+    lambda_dur: float
+    lambda_mem: float
+    lambda_pref: float
+    lambda_anti: float
+    anti_pos_bins: int = 8
+    allow_anchor_fallback: bool = False
+    strict_target_alignment: bool = True
 
 
 @dataclass(frozen=True)
@@ -811,6 +822,73 @@ def build_rhythm_loss_targets_from_sample(
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
+    )
+
+
+def build_duration_v3_loss_targets(
+    *,
+    sample: dict,
+    output: dict,
+    config: DurationV3TargetBuildConfig,
+) -> DurationV3LossTargets | None:
+    execution = output.get("rhythm_execution")
+    unit_batch = output.get("rhythm_unit_batch")
+    if execution is None or unit_batch is None:
+        return None
+    unit_duration_tgt = None
+    for key in ("unit_duration_tgt", "rhythm_unit_duration_tgt", "rhythm_speech_exec_tgt"):
+        candidate = sample.get(key)
+        if candidate is not None:
+            unit_duration_tgt = candidate
+            break
+    if unit_duration_tgt is None and bool(config.allow_anchor_fallback):
+        unit_duration_tgt = sample.get("dur_anchor_src")
+    if unit_duration_tgt is None:
+        raise ValueError(
+            "Duration V3 training requires an explicit unit duration target "
+            "(one of: unit_duration_tgt, rhythm_unit_duration_tgt, rhythm_speech_exec_tgt)."
+        )
+    unit_mask = unit_batch.unit_mask.float()
+    if not isinstance(unit_duration_tgt, torch.Tensor):
+        raise TypeError(f"Duration V3 target must be a tensor, got {type(unit_duration_tgt)!r}")
+    if unit_duration_tgt.dim() != 2:
+        raise ValueError(f"Duration V3 target must be rank-2 [B, U], got shape={tuple(unit_duration_tgt.shape)}")
+    if unit_duration_tgt.size(0) != unit_mask.size(0):
+        raise ValueError(
+            f"Duration V3 target batch mismatch: target={tuple(unit_duration_tgt.shape)}, unit_mask={tuple(unit_mask.shape)}"
+        )
+    if unit_duration_tgt.size(1) != unit_mask.size(1):
+        if bool(config.strict_target_alignment):
+            raise ValueError(
+                "Duration V3 target/unit alignment mismatch: "
+                f"target={tuple(unit_duration_tgt.shape)}, unit_mask={tuple(unit_mask.shape)}"
+            )
+        unit_duration_tgt = unit_duration_tgt[:, : unit_mask.size(1)]
+        if unit_duration_tgt.size(1) < unit_mask.size(1):
+            pad = unit_duration_tgt.new_zeros((unit_duration_tgt.size(0), unit_mask.size(1) - unit_duration_tgt.size(1)))
+            unit_duration_tgt = torch.cat([unit_duration_tgt, pad], dim=1)
+    unit_anchor_base = output.get("unit_anchor_base", getattr(unit_batch, "unit_anchor_base", None))
+    if unit_anchor_base is None:
+        return None
+    prompt_rel_stretch_tgt = output.get("rhythm_prompt_rel_stretch")
+    prompt_mask = output.get("rhythm_prompt_mask")
+    anti_pos_bins = max(2, int(config.anti_pos_bins))
+    visible = unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+    index = torch.arange(unit_mask.size(1), device=unit_mask.device, dtype=unit_mask.dtype)[None, :]
+    pos = (index / visible).clamp(0.0, 0.999)
+    position_bin_tgt = torch.floor(pos * anti_pos_bins).long()
+    position_bin_tgt = torch.where(unit_mask > 0.5, position_bin_tgt, torch.zeros_like(position_bin_tgt))
+    return DurationV3LossTargets(
+        unit_duration_tgt=unit_duration_tgt.float(),
+        unit_anchor_base=unit_anchor_base.float(),
+        unit_mask=unit_mask,
+        prompt_rel_stretch_tgt=prompt_rel_stretch_tgt.float() if isinstance(prompt_rel_stretch_tgt, torch.Tensor) else None,
+        prompt_mask=prompt_mask.float() if isinstance(prompt_mask, torch.Tensor) else None,
+        position_bin_tgt=position_bin_tgt,
+        lambda_dur=float(config.lambda_dur),
+        lambda_mem=float(config.lambda_mem),
+        lambda_pref=float(config.lambda_pref),
+        lambda_anti=float(config.lambda_anti),
     )
 
 

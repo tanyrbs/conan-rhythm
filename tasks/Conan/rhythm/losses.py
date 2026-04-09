@@ -82,6 +82,20 @@ class RhythmLossTargets:
         return self.pause_budget_tgt
 
 
+@dataclass
+class DurationV3LossTargets:
+    unit_duration_tgt: torch.Tensor
+    unit_anchor_base: torch.Tensor
+    unit_mask: torch.Tensor
+    prompt_rel_stretch_tgt: Optional[torch.Tensor] = None
+    prompt_mask: Optional[torch.Tensor] = None
+    position_bin_tgt: Optional[torch.Tensor] = None
+    lambda_dur: float = 1.0
+    lambda_mem: float = 0.25
+    lambda_pref: float = 0.20
+    lambda_anti: float = 0.05
+
+
 @dataclass(frozen=True)
 class RhythmLossState:
     unit_mask: torch.Tensor
@@ -1147,7 +1161,82 @@ def _compute_distill_losses(
     return losses
 
 
+def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> dict[str, torch.Tensor]:
+    unit_mask = targets.unit_mask.float()
+    unit_anchor_base = targets.unit_anchor_base.float().clamp_min(1.0e-6)
+    pred_duration = execution.speech_duration_exec.float()
+    pred_logstretch = torch.log(pred_duration.clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
+    tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
+    l_dur = _masked_huber(
+        pred_logstretch,
+        tgt_logstretch,
+        unit_mask,
+        beta=0.25,
+        batch_weight=None,
+    )
+    zero = pred_duration.new_tensor(0.0)
+    l_mem = zero
+    if targets.prompt_rel_stretch_tgt is not None:
+        prompt_pred = getattr(execution, "prompt_reconstruction", None)
+        if prompt_pred is None and float(targets.lambda_mem) > 0.0:
+            raise ValueError("Duration V3 memory loss requires execution.prompt_reconstruction.")
+        if prompt_pred is None:
+            prompt_pred = targets.prompt_rel_stretch_tgt.new_zeros(targets.prompt_rel_stretch_tgt.shape)
+        prompt_mask = targets.prompt_mask if targets.prompt_mask is not None else torch.ones_like(targets.prompt_rel_stretch_tgt)
+        l_mem = _masked_huber(
+            prompt_pred.float(),
+            targets.prompt_rel_stretch_tgt.float(),
+            prompt_mask.float(),
+            beta=0.25,
+            batch_weight=None,
+        )
+    pred_prefix = torch.cumsum(pred_duration * unit_mask, dim=1)
+    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * unit_mask, dim=1)
+    l_pref = _masked_huber(
+        pred_prefix,
+        tgt_prefix,
+        unit_mask,
+        beta=1.0,
+        batch_weight=None,
+    )
+    l_anti = zero
+    anti_pos_logits = getattr(execution, "anti_pos_logits", None)
+    if anti_pos_logits is not None and targets.position_bin_tgt is not None:
+        flat_mask = unit_mask.reshape(-1) > 0.5
+        if bool(flat_mask.any().item()):
+            flat_logits = anti_pos_logits.reshape(-1, anti_pos_logits.size(-1))[flat_mask]
+            flat_target = targets.position_bin_tgt.reshape(-1)[flat_mask]
+            l_anti = F.cross_entropy(flat_logits, flat_target, reduction="mean")
+    scaled_dur = l_dur * float(targets.lambda_dur)
+    scaled_mem = l_mem * float(targets.lambda_mem)
+    scaled_pref = l_pref * float(targets.lambda_pref)
+    scaled_anti = l_anti * float(targets.lambda_anti)
+    total = scaled_dur + scaled_mem + scaled_pref + scaled_anti
+    return {
+        "rhythm_exec_speech": scaled_dur,
+        "rhythm_exec_stretch": scaled_mem,
+        "rhythm_exec_pause": scaled_anti,
+        "rhythm_budget": zero,
+        "rhythm_prefix_clock": scaled_pref.detach(),
+        "rhythm_prefix_backlog": scaled_pref.detach(),
+        "rhythm_prefix_state": scaled_pref,
+        "rhythm_carry": scaled_pref.detach(),
+        "rhythm_cumplan": scaled_pref.detach(),
+        "rhythm_plan": zero,
+        "rhythm_guidance": zero,
+        "rhythm_distill": zero,
+        "rhythm_distill_student": zero.detach(),
+        "rhythm_v3_dur": l_dur.detach(),
+        "rhythm_v3_mem": l_mem.detach(),
+        "rhythm_v3_pref": l_pref.detach(),
+        "rhythm_v3_anti": l_anti.detach(),
+        "rhythm_total": total,
+    }
+
+
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:
+    if isinstance(targets, DurationV3LossTargets):
+        return _build_duration_v3_loss_dict(execution, targets)
     unit_mask = targets.unit_mask.float()
     blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)
     pred_prefix_clock, pred_prefix_backlog = build_prefix_state_from_exec_torch(

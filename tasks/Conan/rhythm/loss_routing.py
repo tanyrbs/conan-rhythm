@@ -11,6 +11,7 @@ _AUX_REPORTING_KEYS = {
     "rhythm_distill": "lambda_rhythm_distill",
     "rhythm_teacher_aux_loss": "lambda_rhythm_teacher_aux",
 }
+_V3_NATIVE_DIAGNOSTIC_KEYS = ("rhythm_v3_dur", "rhythm_v3_mem", "rhythm_v3_pref", "rhythm_v3_anti")
 
 
 def _detach_loss_value(losses, key):
@@ -57,6 +58,12 @@ def _resolve_aux_optimizer_policy(hparams) -> dict[str, bool]:
     }
 
 
+def _is_duration_v3_loss_bundle(losses) -> bool:
+    return isinstance(losses.get("rhythm_total"), torch.Tensor) and any(
+        key in losses for key in _V3_NATIVE_DIAGNOSTIC_KEYS
+    )
+
+
 def _collect_reporting_total_keys(
     losses,
     *,
@@ -85,14 +92,18 @@ def _collect_reporting_total_keys(
     for key in _STYLE_LOSS_KEYS:
         _append_reporting_key(keys, seen, losses, key)
 
-    if compact_joint and isinstance(losses.get("rhythm_exec"), torch.Tensor):
+    if _is_duration_v3_loss_bundle(losses):
+        _append_reporting_key(keys, seen, losses, "rhythm_total")
+    elif compact_joint and isinstance(losses.get("rhythm_exec"), torch.Tensor):
         _append_reporting_key(keys, seen, losses, "rhythm_exec")
     else:
         _append_reporting_key(keys, seen, losses, "rhythm_exec_speech")
         _append_reporting_key(keys, seen, losses, "rhythm_exec_stretch")
         _append_reporting_key(keys, seen, losses, "rhythm_exec_pause")
 
-    if compact_joint and isinstance(losses.get("rhythm_stream_state"), torch.Tensor):
+    if _is_duration_v3_loss_bundle(losses):
+        pass
+    elif compact_joint and isinstance(losses.get("rhythm_stream_state"), torch.Tensor):
         _append_reporting_key(keys, seen, losses, "rhythm_stream_state")
     else:
         _append_reporting_key(keys, seen, losses, "rhythm_budget")
@@ -200,6 +211,24 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
     for loss_key, enabled in aux_policy.items():
         if not enabled:
             _detach_loss_value(losses, loss_key)
+    if _is_duration_v3_loss_bundle(losses):
+        for key in (
+            "rhythm_exec_speech",
+            "rhythm_exec_stretch",
+            "rhythm_exec_pause",
+            "rhythm_budget",
+            "rhythm_prefix_clock",
+            "rhythm_prefix_backlog",
+            "rhythm_prefix_state",
+            "rhythm_carry",
+            "rhythm_cumplan",
+            "rhythm_plan",
+            "rhythm_guidance",
+            "rhythm_distill",
+            "rhythm_distill_student",
+        ):
+            _detach_loss_value(losses, key)
+        return
     if schedule_only_stage or not bool(hparams.get("rhythm_compact_joint_loss", True)):
         return
     exec_terms = []

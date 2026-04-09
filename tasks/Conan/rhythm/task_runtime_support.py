@@ -7,7 +7,7 @@ from tasks.Conan.rhythm.config_contract_rules.compat import (
     resolve_duplicate_primary_distill_dedupe_flag as _resolve_duplicate_primary_distill_dedupe_flag,
 )
 from tasks.Conan.rhythm.loss_routing import route_conan_optimizer_losses, update_public_loss_aliases
-from tasks.Conan.rhythm.targets import RhythmTargetBuildConfig
+from tasks.Conan.rhythm.targets import DurationV3TargetBuildConfig, RhythmTargetBuildConfig
 from utils.commons.hparams import hparams
 
 
@@ -86,6 +86,17 @@ class RhythmTaskRuntimeSupport:
             ),
         )
 
+    def build_duration_v3_target_build_config(self) -> DurationV3TargetBuildConfig:
+        return DurationV3TargetBuildConfig(
+            lambda_dur=float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0),
+            lambda_mem=float(hparams.get("lambda_rhythm_mem", 0.25) or 0.0),
+            lambda_pref=float(hparams.get("lambda_rhythm_pref", 0.20) or 0.0),
+            lambda_anti=float(hparams.get("lambda_rhythm_anti", 0.05) or 0.0),
+            anti_pos_bins=int(hparams.get("rhythm_anti_pos_bins", 8) or 8),
+            allow_anchor_fallback=bool(hparams.get("rhythm_v3_allow_anchor_fallback", False)),
+            strict_target_alignment=bool(hparams.get("rhythm_v3_strict_target_alignment", True)),
+        )
+
     def build_offline_confidence_outputs(self, confidence) -> dict:
         outputs = {}
         for output_key, confidence_key, fallback_key in self._OFFLINE_CONFIDENCE_COMPONENTS:
@@ -108,6 +119,8 @@ class RhythmTaskRuntimeSupport:
         update_public_loss_aliases(losses, mel_loss_names=mel_loss_names)
 
     def collect_runtime_offline_source_cache(self, sample, *, infer: bool):
+        if getattr(self.owner.model, "rhythm_enable_v3", False):
+            return None
         if self.owner._use_runtime_dual_mode_teacher() and not bool(infer):
             return self.owner._collect_rhythm_source_cache(sample, prefix="rhythm_offline_")
         return None

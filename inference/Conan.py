@@ -203,8 +203,18 @@ class StreamingVoiceConversion:
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
             prepared_spk_embed = self._prepare_spk_embed(ref_mel_batch, spk_embed=spk_embed)
-            if getattr(self.model, "rhythm_enable_v2", False):
-                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(ref_mel_batch)
+            if getattr(
+                self.model,
+                "rhythm_enabled",
+                bool(
+                    getattr(self.model, "rhythm_enable_v2", False)
+                    or getattr(self.model, "rhythm_enable_v3", False)
+                ),
+            ):
+                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(
+                    ref_mel_batch,
+                    ref_lengths=torch.tensor([ref_mel_batch.size(1)], device=ref_mel_batch.device),
+                )
         require_runtime_ref = bool(self.hparams.get("style", False)) and not bool(
             getattr(self.model, "rhythm_minimal_style_only", False)
         )

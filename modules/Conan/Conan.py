@@ -10,6 +10,7 @@ from modules.Conan.acoustic_runtime import (
 from modules.Conan.pitch_mixin import ConanPitchMixin
 from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
 from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
+from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from modules.Conan.rhythm.factory import resolve_content_vocab_size
 from modules.commons.conv import ConvBlocks, CausalFM
 from modules.commons.nar_tts_modules import PitchPredictor
@@ -109,10 +110,24 @@ class Conan(ConanPitchMixin, FastSpeech):
 
     def _init_rhythm_components(self, *, hparams, hidden_size: int) -> None:
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
+        self.rhythm_enable_v3 = bool(
+            hparams.get("rhythm_enable_v3", False)
+            or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_ref_memory"
+        )
+        if self.rhythm_enable_v2 and self.rhythm_enable_v3:
+            raise ValueError("Enable only one rhythm runtime backend at a time: rhythm_enable_v2 or rhythm_enable_v3.")
+        self.rhythm_enabled = bool(self.rhythm_enable_v2 or self.rhythm_enable_v3)
         self.rhythm_minimal_style_only = bool(hparams.get("rhythm_minimal_style_only", False))
-        if not self.rhythm_enable_v2:
+        if not self.rhythm_enabled:
             return
-        self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
+        if self.rhythm_enable_v3:
+            self.rhythm_adapter = ConanDurationAdapter(
+                hparams,
+                hidden_size,
+                vocab_size=resolve_content_vocab_size(hparams),
+            )
+        else:
+            self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
         self.rhythm_unit_frontend = self.rhythm_adapter.unit_frontend
         self.rhythm_module = self.rhythm_adapter.module
         self.rhythm_pause_state = self.rhythm_adapter.pause_state
@@ -170,7 +185,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         blank_mask: torch.Tensor,
         total_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if not self.rhythm_enable_v2:
+        if not getattr(self, "rhythm_enabled", False):
             return frame_states * total_mask.unsqueeze(-1)
         return self.rhythm_adapter.render_frame_state_post(
             frame_states=frame_states,
@@ -180,7 +195,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         )
 
     def _resolve_rhythm_pause_topk_ratio(self, *, infer: bool, global_steps: int) -> float | None:
-        if not self.rhythm_enable_v2:
+        if not getattr(self, "rhythm_enabled", False):
             return None
         return self.rhythm_adapter.resolve_pause_topk_ratio(
             infer=infer,
@@ -188,7 +203,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         )
 
     def _resolve_rhythm_source_boundary_scale(self, *, infer: bool, global_steps: int, teacher: bool = False) -> float | None:
-        if not self.rhythm_enable_v2:
+        if not getattr(self, "rhythm_enabled", False):
             return None
         return self.rhythm_adapter.resolve_source_boundary_scale(
             infer=infer,
@@ -216,7 +231,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         rhythm_runtime_overrides,
         kwargs,
     ):
-        if not self.rhythm_enable_v2:
+        if not getattr(self, "rhythm_enabled", False):
             return content_embed, tgt_nonpadding, f0, uv
         return self.rhythm_adapter(
             ret=ret,
@@ -230,6 +245,7 @@ class Conan(ConanPitchMixin, FastSpeech):
             content_embed=content_embed,
             tgt_nonpadding=tgt_nonpadding,
             content_lengths=content_lengths,
+            ref_lengths=kwargs.get("ref_lengths"),
             rhythm_state=rhythm_state,
             rhythm_ref_conditioning=rhythm_ref_conditioning,
             rhythm_apply_override=rhythm_apply_override,

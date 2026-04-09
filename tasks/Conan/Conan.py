@@ -40,7 +40,7 @@ class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
     def build_tts_model(self):
         self.model = Conan(0, hparams)
         stage = detect_rhythm_stage(hparams)
-        teacher_only_stage = stage == "teacher_offline"
+        teacher_only_stage = stage == "teacher_offline" and not getattr(self.model, "rhythm_enable_v3", False)
         if teacher_only_stage:
             teacher_params = self._collect_offline_teacher_gen_params()
             self.gen_params = self._freeze_to_trainable_params(
