@@ -664,6 +664,10 @@ class UnitRedistributionHead(nn.Module):
         pause_support_split_enable: bool = False,
         pause_breath_features_enable: bool = False,
         pause_breath_reset_threshold: float = 0.55,
+        role_memory_conditioning_scale: float = 0.30,
+        local_role_query_scale: float = 0.45,
+        role_global_prior_scale: float = 0.20,
+        role_memory_temperature: float = 0.75,
         causal: bool = True,
     ) -> None:
         super().__init__()
@@ -677,6 +681,10 @@ class UnitRedistributionHead(nn.Module):
         self.pause_support_split_enable = bool(pause_support_split_enable)
         self.pause_breath_features_enable = bool(pause_breath_features_enable)
         self.pause_breath_reset_threshold = float(max(0.0, min(1.0, pause_breath_reset_threshold)))
+        self.role_memory_conditioning_scale = float(max(role_memory_conditioning_scale, 0.0))
+        self.local_role_query_scale = float(max(local_role_query_scale, 0.0))
+        self.role_global_prior_scale = float(max(role_global_prior_scale, 0.0))
+        self.role_memory_temperature = float(max(role_memory_temperature, 1.0e-3))
         self.anchor_proj = nn.Linear(1, hidden_size)
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
         self.slow_proj = nn.Linear(trace_dim, hidden_size)
@@ -690,6 +698,8 @@ class UnitRedistributionHead(nn.Module):
         self.soft_rollover_proj = nn.Linear(1, hidden_size)
         self.pause_feature_proj = nn.Linear(2, hidden_size) if self.pause_breath_features_enable else None
         self.in_proj = nn.Linear(hidden_size, hidden_size)
+        self.role_query_proj = nn.Linear(hidden_size, hidden_size)
+        self.role_gate_head = nn.Linear(hidden_size, 1)
         self.blocks = nn.ModuleList([
             ResidualTemporalBlock(hidden_size, dilation=1, causal=causal),
             ResidualTemporalBlock(hidden_size, dilation=2, causal=causal),
@@ -697,6 +707,165 @@ class UnitRedistributionHead(nn.Module):
         self.logratio_head = nn.Linear(hidden_size, 1)
         self.pause_head = nn.Linear(hidden_size, 1)
         self.pause_allocation_head = nn.Linear(hidden_size, 1) if self.pause_support_split_enable else None
+
+    @staticmethod
+    def _align_feature_dim(value: torch.Tensor, target_dim: int) -> torch.Tensor:
+        if value.size(-1) == target_dim:
+            return value
+        if value.size(-1) > target_dim:
+            return value[..., :target_dim]
+        return F.pad(value, (0, target_dim - value.size(-1)))
+
+    @staticmethod
+    def _ensure_batch_memory(
+        memory: torch.Tensor | None,
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if memory is None:
+            return None
+        memory = memory.float().to(device=device)
+        if memory.dim() == 2:
+            memory = memory.unsqueeze(1)
+        if memory.dim() != 3:
+            return None
+        if memory.size(0) == batch_size:
+            return memory
+        if memory.size(0) == 1:
+            return memory.expand(batch_size, -1, -1)
+        return None
+
+    @staticmethod
+    def _resolve_memory_mask(
+        memory_mask: torch.Tensor | None,
+        *,
+        batch_size: int,
+        memory_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if memory_mask is None:
+            return torch.ones((batch_size, memory_len), device=device)
+        mask = memory_mask.float().to(device=device)
+        if mask.dim() == 1:
+            if mask.size(0) == memory_len:
+                mask = mask.unsqueeze(0).expand(batch_size, -1)
+            elif mask.size(0) == batch_size:
+                mask = mask.unsqueeze(1).expand(-1, memory_len)
+            else:
+                return torch.ones((batch_size, memory_len), device=device)
+        elif mask.dim() == 2:
+            if mask.size(0) == 1:
+                mask = mask.expand(batch_size, -1)
+            elif mask.size(0) != batch_size:
+                return torch.ones((batch_size, memory_len), device=device)
+        else:
+            return torch.ones((batch_size, memory_len), device=device)
+        if mask.size(1) > memory_len:
+            mask = mask[:, :memory_len]
+        elif mask.size(1) < memory_len:
+            mask = F.pad(mask, (0, memory_len - mask.size(1)))
+        return mask.clamp(0.0, 1.0)
+
+    def _retrieve_static_role_conditioning(
+        self,
+        *,
+        query_states: torch.Tensor,
+        unit_mask: torch.Tensor,
+        local_role_query_unit: torch.Tensor | None,
+        static_role_memory_keys: torch.Tensor | None,
+        static_role_memory_values: torch.Tensor | None,
+        static_role_memory_mask: torch.Tensor | None,
+        role_global_prior: torch.Tensor | None,
+    ) -> dict[str, torch.Tensor | None]:
+        batch_size, _, hidden_size = query_states.shape
+        role_query = self.role_query_proj(query_states)
+        if local_role_query_unit is not None:
+            role_local = local_role_query_unit.float().to(device=query_states.device)
+            if role_local.dim() == 2:
+                role_local = role_local.unsqueeze(-1)
+            if role_local.dim() == 3:
+                if role_local.size(0) == 1 and batch_size > 1:
+                    role_local = role_local.expand(batch_size, -1, -1)
+                if role_local.size(0) == batch_size:
+                    role_local = self._align_feature_dim(role_local, hidden_size)
+                    role_query = role_query + self.local_role_query_scale * role_local
+        if role_global_prior is not None:
+            prior = role_global_prior.float().to(device=query_states.device)
+            if prior.dim() == 1:
+                prior = prior.view(1, 1, -1)
+            elif prior.dim() == 2:
+                prior = prior.unsqueeze(1)
+            elif prior.dim() == 3 and prior.size(1) != 1:
+                prior = prior.mean(dim=1, keepdim=True)
+            if prior.dim() == 3:
+                if prior.size(0) == 1 and batch_size > 1:
+                    prior = prior.expand(batch_size, -1, -1)
+                if prior.size(0) == batch_size:
+                    prior = self._align_feature_dim(prior, hidden_size)
+                    role_query = role_query + self.role_global_prior_scale * prior
+        role_query = role_query * unit_mask.unsqueeze(-1)
+        memory_keys = self._ensure_batch_memory(
+            static_role_memory_keys,
+            batch_size=batch_size,
+            device=query_states.device,
+        )
+        memory_values = self._ensure_batch_memory(
+            static_role_memory_values,
+            batch_size=batch_size,
+            device=query_states.device,
+        )
+        if memory_keys is None or memory_values is None:
+            return {
+                "local_role_query_unit": role_query,
+                "role_memory_retrieved_unit": None,
+                "role_memory_gate_unit": None,
+                "role_memory_top_index_unit": None,
+                "role_memory_top_weight_unit": None,
+                "role_memory_entropy_unit": None,
+                "conditioned_context": None,
+            }
+        memory_len = int(min(memory_keys.size(1), memory_values.size(1)))
+        if memory_len <= 0:
+            return {
+                "local_role_query_unit": role_query,
+                "role_memory_retrieved_unit": None,
+                "role_memory_gate_unit": None,
+                "role_memory_top_index_unit": None,
+                "role_memory_top_weight_unit": None,
+                "role_memory_entropy_unit": None,
+                "conditioned_context": None,
+            }
+        memory_keys = self._align_feature_dim(memory_keys[:, :memory_len], hidden_size)
+        memory_values = self._align_feature_dim(memory_values[:, :memory_len], hidden_size)
+        memory_mask = self._resolve_memory_mask(
+            static_role_memory_mask,
+            batch_size=batch_size,
+            memory_len=memory_len,
+            device=query_states.device,
+        )
+        query_norm = F.normalize(role_query, dim=-1, eps=1.0e-6)
+        key_norm = F.normalize(memory_keys, dim=-1, eps=1.0e-6)
+        logits = torch.einsum("bth,bmh->btm", query_norm, key_norm) / self.role_memory_temperature
+        logits = logits.masked_fill(memory_mask.unsqueeze(1) <= 0.0, -1.0e4)
+        role_attn = torch.softmax(logits, dim=-1)
+        role_attn = torch.where(torch.isfinite(role_attn), role_attn, torch.zeros_like(role_attn))
+        role_attn = role_attn * memory_mask.unsqueeze(1)
+        role_attn = role_attn / role_attn.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
+        retrieved = torch.einsum("btm,bmh->bth", role_attn, memory_values)
+        role_gate = torch.sigmoid(self.role_gate_head(role_query).squeeze(-1)) * unit_mask
+        conditioned = retrieved * role_gate.unsqueeze(-1)
+        top_weight, top_index = role_attn.max(dim=-1)
+        entropy = -(role_attn.clamp_min(1.0e-9) * torch.log(role_attn.clamp_min(1.0e-9))).sum(dim=-1)
+        return {
+            "local_role_query_unit": role_query,
+            "role_memory_retrieved_unit": retrieved * unit_mask.unsqueeze(-1),
+            "role_memory_gate_unit": role_gate,
+            "role_memory_top_index_unit": top_index.long(),
+            "role_memory_top_weight_unit": top_weight * unit_mask,
+            "role_memory_entropy_unit": entropy * unit_mask,
+            "conditioned_context": conditioned * unit_mask.unsqueeze(-1),
+        }
 
     def forward(
         self,
@@ -711,7 +880,12 @@ class UnitRedistributionHead(nn.Module):
         local_rho_unit: torch.Tensor | None = None,
         segment_roll_alpha_unit: torch.Tensor | None = None,
         open_tail_mask_unit: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+        local_role_query_unit: torch.Tensor | None = None,
+        static_role_memory_keys: torch.Tensor | None = None,
+        static_role_memory_values: torch.Tensor | None = None,
+        static_role_memory_mask: torch.Tensor | None = None,
+        role_global_prior: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor | None]:
         unit_mask = unit_mask.float()
         if boundary_score_unit is None:
             boundary_score_unit = unit_mask.new_zeros(unit_mask.shape)
@@ -763,6 +937,18 @@ class UnitRedistributionHead(nn.Module):
         x = self.in_proj(x)
         for block in self.blocks:
             x = block(x)
+        role_memory_bundle = self._retrieve_static_role_conditioning(
+            query_states=x,
+            unit_mask=unit_mask,
+            local_role_query_unit=local_role_query_unit,
+            static_role_memory_keys=static_role_memory_keys,
+            static_role_memory_values=static_role_memory_values,
+            static_role_memory_mask=static_role_memory_mask,
+            role_global_prior=role_global_prior,
+        )
+        conditioned_context = role_memory_bundle.get("conditioned_context")
+        if conditioned_context is not None and self.role_memory_conditioning_scale > 0.0:
+            x = x + self.role_memory_conditioning_scale * conditioned_context
 
         raw_logratio = torch.tanh(self.logratio_head(x).squeeze(-1)) * self.max_unit_logratio
         mean_logratio = masked_mean(raw_logratio.unsqueeze(-1), unit_mask, dim=1, keepdim=True).squeeze(-1)
@@ -774,6 +960,12 @@ class UnitRedistributionHead(nn.Module):
             'dur_logratio_unit': dur_logratio,
             'pause_run_length_unit': pause_feature_bundle.run_length_unit,
             'pause_breath_debt_unit': pause_feature_bundle.breath_debt_unit,
+            'local_role_query_unit': role_memory_bundle.get('local_role_query_unit'),
+            'role_memory_retrieved_unit': role_memory_bundle.get('role_memory_retrieved_unit'),
+            'role_memory_gate_unit': role_memory_bundle.get('role_memory_gate_unit'),
+            'role_memory_top_index_unit': role_memory_bundle.get('role_memory_top_index_unit'),
+            'role_memory_top_weight_unit': role_memory_bundle.get('role_memory_top_weight_unit'),
+            'role_memory_entropy_unit': role_memory_bundle.get('role_memory_entropy_unit'),
         }
         if self.pause_allocation_head is None:
             ret['pause_weight_unit'] = masked_softmax(pause_logits, unit_mask, dim=1) * unit_mask

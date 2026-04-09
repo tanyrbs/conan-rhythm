@@ -121,6 +121,34 @@ class ReferenceSidecarTests(unittest.TestCase):
         self.assertIn("planner_slow_rhythm_memory", conditioning)
         self.assertIn("planner_slow_rhythm_summary", conditioning)
         self.assertEqual(tuple(conditioning["planner_slow_rhythm_memory"].shape[-2:]), (6, 2))
+        self.assertIn("role_memory_query_keys", conditioning)
+        self.assertIn("role_memory_values", conditioning)
+        self.assertIn("role_memory_slot_mask", conditioning)
+        self.assertIn("planner_role_memory_summary", conditioning)
+
+    def test_scheduler_role_memory_bundle_uses_descriptor_sidecar_keys(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "hidden_size": 16,
+                "rhythm_hidden_size": 16,
+                "rhythm_trace_bins": 8,
+                "rhythm_emit_reference_sidecar": True,
+            }
+        )
+        stats, trace = self._dummy_inputs(trace_bins=8)
+        conditioning = module.build_reference_conditioning(
+            ref_rhythm_stats=stats,
+            ref_rhythm_trace=trace,
+        )
+        bundle = module.scheduler._resolve_static_role_memory_bundle(
+            ref_conditioning=conditioning,
+            phrase_selection=None,
+            planner_ref_stats=conditioning["planner_ref_stats"],
+            prompt_reliability=torch.ones((1, 1), dtype=torch.float32),
+        )
+        self.assertTrue(torch.equal(bundle["static_role_memory_keys"], conditioning["role_memory_query_keys"]))
+        self.assertTrue(torch.equal(bundle["static_role_memory_values"], conditioning["role_memory_values"]))
+        self.assertTrue(torch.equal(bundle["static_role_memory_mask"], conditioning["role_memory_slot_mask"]))
 
     def test_reference_sidecar_phrase_bank_shapes_are_well_formed(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(

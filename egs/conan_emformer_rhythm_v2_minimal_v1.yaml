@@ -33,6 +33,7 @@ lambda_rhythm_cumplan: 0.15
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_plan: 0.0
 lambda_rhythm_distill: 0.0
+rhythm_unit_logratio_weight: 0.0
 rhythm_budget_raw_weight: 1.0
 rhythm_budget_exec_weight: 0.25
 rhythm_distill_budget_weight: 0.0

@@ -79,6 +79,10 @@ class StreamingRhythmModule(nn.Module):
         pause_support_split_enable: bool = False,
         pause_breath_features_enable: bool = False,
         pause_breath_reset_threshold: float = 0.55,
+        role_memory_conditioning_scale: float = 0.30,
+        local_role_query_scale: float = 0.45,
+        role_global_prior_scale: float = 0.20,
+        role_memory_temperature: float = 0.75,
         min_speech_frames: float = 1.0,
         trace_reliability_enable: bool = False,
         trace_exhaustion_gap_start: float = 0.08,
@@ -179,6 +183,10 @@ class StreamingRhythmModule(nn.Module):
             pause_support_split_enable=pause_support_split_enable,
             pause_breath_features_enable=pause_breath_features_enable,
             pause_breath_reset_threshold=pause_breath_reset_threshold,
+            role_memory_conditioning_scale=role_memory_conditioning_scale,
+            local_role_query_scale=local_role_query_scale,
+            role_global_prior_scale=role_global_prior_scale,
+            role_memory_temperature=role_memory_temperature,
             min_speech_frames=min_speech_frames,
             chunk_state_enable=chunk_state_enable,
             budget_phase_feature_scale=budget_phase_feature_scale,
@@ -976,6 +984,16 @@ class StreamingRhythmModule(nn.Module):
             memory_key="planner_slow_rhythm_memory",
             fallback_trace_key="planner_ref_trace",
         )
+        self._finalize_reference_summary(
+            enriched,
+            summary_key="role_memory_summary",
+            memory_key="role_memory_values",
+        )
+        self._finalize_reference_summary(
+            enriched,
+            summary_key="planner_role_memory_summary",
+            memory_key="planner_role_memory_values",
+        )
         return enriched
 
     @staticmethod
@@ -1002,6 +1020,14 @@ class StreamingRhythmModule(nn.Module):
             "ref_phrase_ends",
             "ref_phrase_boundary_strength",
             "ref_phrase_stats",
+            "role_memory_slots",
+            "role_memory_query_keys",
+            "role_memory_values",
+            "planner_role_memory_values",
+            "role_memory_usage_prior",
+            "role_memory_slot_mask",
+            "role_memory_summary",
+            "planner_role_memory_summary",
         }
         for key in sidecar_keys:
             value = ref_conditioning.get(key)
@@ -1052,6 +1078,14 @@ class StreamingRhythmModule(nn.Module):
             "ref_phrase_ends",
             "ref_phrase_boundary_strength",
             "ref_phrase_stats",
+            "role_memory_slots",
+            "role_memory_query_keys",
+            "role_memory_values",
+            "planner_role_memory_values",
+            "role_memory_usage_prior",
+            "role_memory_slot_mask",
+            "role_memory_summary",
+            "planner_role_memory_summary",
         }
         if not any(key in ref_conditioning for key in rebuildable_sidecar_keys):
             return ref_conditioning

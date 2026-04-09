@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -12,6 +13,12 @@ class ReferenceSelection:
     slow_rhythm_scores: torch.Tensor
     slow_rhythm_starts: torch.Tensor
     slow_rhythm_ends: torch.Tensor
+    role_memory_slots: torch.Tensor
+    role_memory_query_keys: torch.Tensor
+    role_memory_values: torch.Tensor
+    planner_role_memory_values: torch.Tensor
+    role_memory_usage_prior: torch.Tensor
+    role_memory_slot_mask: torch.Tensor
 
 
 class ReferenceSelector:
@@ -22,6 +29,8 @@ class ReferenceSelector:
     - select a few prosodic cells from the explicit trace
     - expose scores / indices for debugging and future cache export
     """
+
+    ROLE_MEMORY_SLOT_COUNT = 5
 
     def __init__(
         self,
@@ -49,6 +58,139 @@ class ReferenceSelector:
         self.final_bias_weight = float(final_bias_weight)
         self.monotonic_bias = float(monotonic_bias)
         self.phrase_length_bias = float(phrase_length_bias)
+
+    @staticmethod
+    def _safe_pool1d(track: torch.Tensor, kernel_size: int) -> torch.Tensor:
+        if track.dim() != 2:
+            raise ValueError(f"track must be [B,T], got {tuple(track.shape)}")
+        if track.size(1) <= 0:
+            return track
+        kernel = max(1, min(int(kernel_size), int(track.size(1))))
+        padding = kernel // 2
+        pooled = F.avg_pool1d(track.unsqueeze(1), kernel_size=kernel, stride=1, padding=padding).squeeze(1)
+        if pooled.size(1) > track.size(1):
+            pooled = pooled[:, : track.size(1)]
+        return pooled
+
+    @staticmethod
+    def _normalize_track(track: torch.Tensor) -> torch.Tensor:
+        denom = track.float().mean(dim=1, keepdim=True).clamp_min(1.0e-6)
+        return track.float() / denom
+
+    @staticmethod
+    def _build_role_memory_components(ref_rhythm_trace: torch.Tensor) -> dict[str, torch.Tensor]:
+        if ref_rhythm_trace.dim() != 3:
+            raise ValueError(f"ref_rhythm_trace must be [B,bins,dim], got {tuple(ref_rhythm_trace.shape)}")
+        batch_size, trace_bins, trace_dim = ref_rhythm_trace.shape
+        role_count = int(ReferenceSelector.ROLE_MEMORY_SLOT_COUNT)
+        if trace_bins <= 0:
+            query_dim = 6
+            value_dim = 5
+            planner_value_dim = 2
+            return {
+                "role_memory_slots": ref_rhythm_trace.new_zeros((batch_size, role_count, query_dim + value_dim)),
+                "role_memory_query_keys": ref_rhythm_trace.new_zeros((batch_size, role_count, query_dim)),
+                "role_memory_values": ref_rhythm_trace.new_zeros((batch_size, role_count, value_dim)),
+                "planner_role_memory_values": ref_rhythm_trace.new_zeros((batch_size, role_count, planner_value_dim)),
+                "role_memory_usage_prior": ref_rhythm_trace.new_zeros((batch_size, role_count)),
+                "role_memory_slot_mask": ref_rhythm_trace.new_zeros((batch_size, role_count)),
+            }
+
+        pause = ref_rhythm_trace[:, :, 0].float().clamp(0.0, 1.0)
+        local_rate = ref_rhythm_trace[:, :, 1].float().abs()
+        boundary = ref_rhythm_trace[:, :, 2].float().clamp(0.0, 1.0)
+        duration_bias = (
+            ref_rhythm_trace[:, :, 3].float()
+            if trace_dim > 3
+            else ref_rhythm_trace.new_zeros((batch_size, trace_bins))
+        )
+        voiced = (
+            ref_rhythm_trace[:, :, 4].float().clamp(0.0, 1.0)
+            if trace_dim > 4
+            else ref_rhythm_trace.new_ones((batch_size, trace_bins))
+        )
+        local_rate_ctx = ReferenceSelector._safe_pool1d(local_rate, kernel_size=3)
+        boundary_ctx = ReferenceSelector._safe_pool1d(boundary, kernel_size=3)
+        next_boundary = torch.zeros_like(boundary)
+        if trace_bins > 1:
+            next_boundary[:, :-1] = boundary[:, 1:]
+        pre_boundary = torch.maximum(boundary_ctx, next_boundary)
+        local_rate_norm = ReferenceSelector._normalize_track(local_rate_ctx)
+
+        weak_link_logit = 1.25 * pause + 0.55 * (1.0 - voiced) + 0.25 * (1.0 - boundary)
+        content_expand_logit = (
+            0.95 * local_rate_norm + 0.35 * voiced + 0.20 * (1.0 - pause) + 0.15 * duration_bias.clamp_min(0.0)
+        )
+        pre_boundary_logit = 1.10 * pre_boundary + 0.25 * local_rate_norm + 0.20 * (1.0 - pause)
+        closure_logit = 1.20 * boundary + 0.55 * pause + 0.35 * (1.0 - voiced) + 0.15 * duration_bias.clamp_min(0.0)
+        neutral_logit = (
+            0.55 * (1.0 - pause)
+            + 0.45 * voiced
+            + 0.30 * (1.0 - boundary)
+            - 0.20 * (local_rate_norm - 1.0).abs()
+            - 0.15 * duration_bias.abs()
+        )
+        role_logits = torch.stack(
+            [
+                weak_link_logit,
+                content_expand_logit,
+                pre_boundary_logit,
+                closure_logit,
+                neutral_logit,
+            ],
+            dim=-1,
+        )
+        role_weights = torch.softmax(role_logits, dim=-1)
+
+        query_key_track = torch.stack(
+            [
+                pause,
+                local_rate_norm,
+                boundary,
+                pre_boundary,
+                voiced,
+                duration_bias.tanh(),
+            ],
+            dim=-1,
+        )
+        value_track = torch.stack(
+            [
+                pause,
+                ref_rhythm_trace[:, :, 1].float(),
+                boundary,
+                duration_bias,
+                voiced,
+            ],
+            dim=-1,
+        )
+        planner_value_track = torch.stack(
+            [
+                ref_rhythm_trace[:, :, 1].float(),
+                boundary,
+            ],
+            dim=-1,
+        )
+
+        slot_weight = role_weights.transpose(1, 2)
+        slot_mass = slot_weight.sum(dim=-1).clamp_min(1.0e-6)
+        slot_usage_prior = slot_mass / slot_mass.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+        slot_mask = (slot_usage_prior > (0.35 / float(max(trace_bins, 1)))).float()
+        query_keys = torch.matmul(slot_weight, query_key_track) / slot_mass.unsqueeze(-1)
+        values = torch.matmul(slot_weight, value_track) / slot_mass.unsqueeze(-1)
+        planner_values = torch.matmul(slot_weight, planner_value_track) / slot_mass.unsqueeze(-1)
+        slots = torch.cat([query_keys, values], dim=-1)
+        return {
+            "role_memory_slots": slots,
+            "role_memory_query_keys": query_keys,
+            "role_memory_values": values,
+            "planner_role_memory_values": planner_values,
+            "role_memory_usage_prior": slot_usage_prior,
+            "role_memory_slot_mask": slot_mask,
+        }
+
+    @staticmethod
+    def build_static_role_memory(ref_rhythm_trace: torch.Tensor) -> dict[str, torch.Tensor]:
+        return ReferenceSelector._build_role_memory_components(ref_rhythm_trace)
 
     @staticmethod
     def _gather_phrase_bank_rows(value: torch.Tensor | None, index: torch.Tensor) -> torch.Tensor | None:
@@ -216,12 +358,19 @@ class ReferenceSelector:
         values = torch.stack(score_rows, dim=0)
         starts = torch.stack(start_rows, dim=0)
         ends = torch.stack(end_rows, dim=0)
+        role_memory = self._build_role_memory_components(ref_rhythm_trace)
         return ReferenceSelection(
             slow_rhythm_memory=memory,
             slow_rhythm_indices=indices,
             slow_rhythm_scores=values,
             slow_rhythm_starts=starts,
             slow_rhythm_ends=ends,
+            role_memory_slots=role_memory["role_memory_slots"],
+            role_memory_query_keys=role_memory["role_memory_query_keys"],
+            role_memory_values=role_memory["role_memory_values"],
+            planner_role_memory_values=role_memory["planner_role_memory_values"],
+            role_memory_usage_prior=role_memory["role_memory_usage_prior"],
+            role_memory_slot_mask=role_memory["role_memory_slot_mask"],
         )
 
     @staticmethod

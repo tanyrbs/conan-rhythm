@@ -35,6 +35,8 @@ rhythm_trace_horizon: 0.30
 rhythm_phase_decoupled_timing: true
 rhythm_phase_decoupled_phrase_gate_boundary_threshold: 0.55
 rhythm_phase_decoupled_segment_shape_scale: 0.35
+rhythm_phase_decoupled_local_rho_scale: 0.20
+rhythm_phase_decoupled_soft_rollover_scale: 0.10
 rhythm_phase_decoupled_rollover_start: 0.68
 rhythm_phase_decoupled_rollover_end: 0.92
 

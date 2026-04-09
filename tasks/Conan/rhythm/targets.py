@@ -27,6 +27,9 @@ class RhythmTargetBuildConfig:
     budget_exec_weight: float
     feasible_debt_weight: float
     unit_logratio_weight: float = 0.0
+    srmdp_role_consistency_weight: float = 0.0
+    srmdp_notimeline_weight: float = 0.0
+    srmdp_memory_role_weight: float = 0.0
     plan_segment_shape_weight: float = 0.0
     plan_pause_release_weight: float = 0.0
     pause_event_weight: float = 0.0
@@ -759,6 +762,12 @@ def build_rhythm_loss_targets_from_sample(
         unit_mask=unit_batch.unit_mask,
         dur_anchor_src=unit_batch.dur_anchor_src,
         unit_logratio_weight=float(config.unit_logratio_weight),
+        srmdp_role_consistency_weight=float(config.srmdp_role_consistency_weight),
+        srmdp_notimeline_weight=float(config.srmdp_notimeline_weight),
+        srmdp_memory_role_weight=float(config.srmdp_memory_role_weight),
+        srmdp_role_id_src_tgt=_detach_optional(sample.get("rhythm_srmdp_role_id_src_tgt")),
+        srmdp_ref_memory_role_id_tgt=_detach_optional(sample.get("rhythm_srmdp_ref_memory_role_id_tgt")),
+        srmdp_ref_memory_mask_tgt=_detach_optional(sample.get("rhythm_srmdp_ref_memory_mask_tgt")),
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
         plan_segment_shape_weight=float(config.plan_segment_shape_weight),
@@ -823,6 +832,9 @@ def build_identity_rhythm_loss_targets(
         unit_mask=unit_mask,
         dur_anchor_src=unit_batch.dur_anchor_src,
         unit_logratio_weight=float(config.unit_logratio_weight),
+        srmdp_role_consistency_weight=float(config.srmdp_role_consistency_weight),
+        srmdp_notimeline_weight=float(config.srmdp_notimeline_weight),
+        srmdp_memory_role_weight=float(config.srmdp_memory_role_weight),
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
         plan_segment_shape_weight=float(config.plan_segment_shape_weight),
@@ -903,7 +915,31 @@ def scale_rhythm_loss_terms(
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
     scaled = {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
-        "rhythm_exec_stretch": rhythm_losses["rhythm_exec_stretch"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+        "rhythm_exec_stretch": _scaled_detached(
+            "rhythm_exec_stretch",
+            float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_exec_stretch_base": _scaled_detached(
+            "rhythm_exec_stretch_base",
+            float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_srmdp_role_consistency": _scaled_detached(
+            "rhythm_srmdp_role_consistency",
+            float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_srmdp_notimeline": _scaled_detached(
+            "rhythm_srmdp_notimeline",
+            float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_srmdp_memory_role": _scaled_detached(
+            "rhythm_srmdp_memory_role",
+            float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+            allow_missing=True,
+        ),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
         "rhythm_exec_pause_value": _scaled_detached(
             "rhythm_exec_pause_value",

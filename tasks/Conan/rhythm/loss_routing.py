@@ -287,6 +287,11 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         else zero
     )
     losses["L_budget"] = losses.get("rhythm_budget", zero).detach() if isinstance(losses.get("rhythm_budget"), torch.Tensor) else zero
+    losses["L_feasible_debt"] = (
+        losses.get("rhythm_feasible_debt", zero).detach()
+        if isinstance(losses.get("rhythm_feasible_debt"), torch.Tensor)
+        else zero
+    )
     prefix_state = _resolve_prefix_state_value(losses)
     losses["L_cumplan"] = prefix_state.detach() if isinstance(prefix_state, torch.Tensor) else zero
     losses["L_prefix_state"] = losses["L_cumplan"]
@@ -327,6 +332,11 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         else zero
     )
     losses["L_kd"] = losses.get("rhythm_distill", zero).detach() if isinstance(losses.get("rhythm_distill"), torch.Tensor) else zero
+    losses["L_distill_allocation"] = (
+        losses.get("rhythm_distill_allocation", zero).detach()
+        if isinstance(losses.get("rhythm_distill_allocation"), torch.Tensor)
+        else zero
+    )
     kd_student = losses.get("rhythm_distill_student", losses.get("rhythm_distill"))
     losses["L_kd_student"] = kd_student.detach() if isinstance(kd_student, torch.Tensor) else zero
     teacher_aux = losses.get("rhythm_teacher_aux")

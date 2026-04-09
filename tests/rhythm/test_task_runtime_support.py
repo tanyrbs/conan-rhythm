@@ -125,6 +125,9 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             "rhythm_pause_event_temperature": 0.15,
             "rhythm_pause_event_pos_weight": 2.75,
             "rhythm_unit_logratio_weight": 0.35,
+            "rhythm_srmdp_role_consistency_weight": 0.40,
+            "rhythm_srmdp_notimeline_weight": 0.20,
+            "rhythm_srmdp_memory_role_weight": 0.30,
             "rhythm_suppress_duplicate_primary_distill": True,
         },
         clear=True,
@@ -141,6 +144,9 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.pause_event_temperature, 0.15)
         self.assertEqual(config.pause_event_pos_weight, 2.75)
         self.assertEqual(config.unit_logratio_weight, 0.35)
+        self.assertEqual(config.srmdp_role_consistency_weight, 0.40)
+        self.assertEqual(config.srmdp_notimeline_weight, 0.20)
+        self.assertEqual(config.srmdp_memory_role_weight, 0.30)
 
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:

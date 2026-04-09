@@ -103,19 +103,23 @@ class FactoryDefaultTests(unittest.TestCase):
         self.assertTrue(module.chunk_state_enable)
         self.assertAlmostEqual(module.budget_phase_feature_scale, 0.0, places=6)
         self.assertFalse(module.phase_decoupled_timing)
-        self.assertFalse(module.phase_free_timing)
+        self.assertFalse(hasattr(module, "phase_free_timing"))
         self.assertAlmostEqual(module.phase_decoupled_segment_shape_scale, 0.0, places=6)
         self.assertAlmostEqual(module.phase_decoupled_rollover_start, 0.68, places=6)
         self.assertAlmostEqual(module.phase_decoupled_rollover_end, 0.92, places=6)
         self.assertIsNotNone(module.scheduler.chunk_state_head)
         self.assertAlmostEqual(module.scheduler.window_budget.phase_feature_scale, 0.0, places=6)
         self.assertFalse(module.scheduler.phase_decoupled_timing)
-        self.assertFalse(module.scheduler.phase_free_timing)
+        self.assertFalse(hasattr(module.scheduler, "phase_free_timing"))
         self.assertFalse(module.scheduler.window_budget.phase_decoupled_timing)
-        self.assertFalse(module.scheduler.window_budget.phase_free_timing)
+        self.assertFalse(hasattr(module.scheduler.window_budget, "phase_free_timing"))
         self.assertAlmostEqual(module.scheduler.phase_decoupled_segment_shape_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_local_rho_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_soft_rollover_scale, 0.0, places=6)
         self.assertAlmostEqual(module.scheduler.window_budget.segment_shape_scale, 0.0, places=6)
         self.assertAlmostEqual(module.scheduler.unit_redistribution.segment_shape_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.unit_redistribution.local_rho_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.unit_redistribution.soft_rollover_scale, 0.0, places=6)
 
     def test_trace_cold_start_hparams_override(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
@@ -164,18 +168,20 @@ class FactoryDefaultTests(unittest.TestCase):
         self.assertEqual(module.reference_descriptor.runtime_phrase_bank_bins, 12)
         self.assertEqual(module.reference_descriptor.runtime_phrase_select_window, 5)
         self.assertAlmostEqual(module.phase_decoupled_phrase_gate_boundary_threshold, 0.61, places=6)
-        self.assertAlmostEqual(module.phase_free_phrase_boundary_threshold, 0.61, places=6)
         self.assertTrue(module.phase_decoupled_timing)
-        self.assertTrue(module.phase_free_timing)
+        self.assertFalse(hasattr(module, "phase_free_phrase_boundary_threshold"))
+        self.assertFalse(hasattr(module, "phase_free_timing"))
         self.assertTrue(module.scheduler.phase_decoupled_timing)
-        self.assertTrue(module.scheduler.phase_free_timing)
+        self.assertFalse(hasattr(module.scheduler, "phase_free_timing"))
         self.assertTrue(module.scheduler.window_budget.phase_decoupled_timing)
-        self.assertTrue(module.scheduler.window_budget.phase_free_timing)
+        self.assertFalse(hasattr(module.scheduler.window_budget, "phase_free_timing"))
         self.assertAlmostEqual(module.scheduler.phase_decoupled_boundary_style_residual_scale, 0.27, places=6)
         self.assertAlmostEqual(module.phase_decoupled_segment_shape_scale, 0.35, places=6)
         self.assertAlmostEqual(module.phase_decoupled_rollover_start, 0.60, places=6)
         self.assertAlmostEqual(module.phase_decoupled_rollover_end, 0.90, places=6)
         self.assertAlmostEqual(module.scheduler.phase_decoupled_segment_shape_scale, 0.35, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_local_rho_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_soft_rollover_scale, 0.0, places=6)
         self.assertAlmostEqual(module.scheduler.window_budget.segment_shape_scale, 0.35, places=6)
         self.assertAlmostEqual(module.scheduler.unit_redistribution.segment_shape_scale, 0.35, places=6)
         self.assertAlmostEqual(module.scheduler.debt_control_scale, 3.5, places=6)
@@ -194,9 +200,18 @@ class FactoryDefaultTests(unittest.TestCase):
             }
         )
         self.assertTrue(module.phase_decoupled_timing)
-        self.assertTrue(module.phase_free_timing)
+        self.assertFalse(hasattr(module, "phase_free_timing"))
         self.assertAlmostEqual(module.phase_decoupled_phrase_gate_boundary_threshold, 0.58, places=6)
-        self.assertAlmostEqual(module.phase_free_phrase_boundary_threshold, 0.58, places=6)
+        self.assertFalse(hasattr(module, "phase_free_phrase_boundary_threshold"))
+
+    def test_legacy_soft_rollover_start_alias_maps_to_canonical_rollover_start(self) -> None:
+        module = build_streaming_rhythm_module_from_hparams(
+            {
+                "rhythm_phase_decoupled_soft_rollover_start": 0.57,
+            }
+        )
+        self.assertAlmostEqual(module.phase_decoupled_rollover_start, 0.57, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_rollover_start, 0.57, places=6)
 
     def test_phase_decoupled_hparams_conflict_with_legacy_alias(self) -> None:
         with self.assertRaises(ValueError):

@@ -211,6 +211,12 @@ class RhythmPlannerOutputs:
     segment_roll_alpha_unit: Optional[torch.Tensor] = None
     open_tail_mask_unit: Optional[torch.Tensor] = None
     intra_phrase_alpha: Optional[torch.Tensor] = None
+    local_role_query_unit: Optional[torch.Tensor] = None
+    role_memory_retrieved_unit: Optional[torch.Tensor] = None
+    role_memory_gate_unit: Optional[torch.Tensor] = None
+    role_memory_top_index_unit: Optional[torch.Tensor] = None
+    role_memory_top_weight_unit: Optional[torch.Tensor] = None
+    role_memory_entropy_unit: Optional[torch.Tensor] = None
 
     @property
     def phrase_idx(self) -> Optional[torch.Tensor]:

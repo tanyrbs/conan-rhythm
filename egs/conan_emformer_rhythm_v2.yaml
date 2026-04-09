@@ -19,7 +19,7 @@ rhythm_runtime_mode: v2_clean
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, ref_rhythm_stats, ref_rhythm_trace]
 rhythm_public_outputs: [speech_duration_exec, pause_after_exec, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [L_exec_speech, L_exec_pause, L_exec_pause_value, L_pause_event, L_pause_support, L_pause_allocation, L_budget, L_prefix_state, L_base, L_rhythm_exec, L_stream_state, L_pitch]
+rhythm_public_losses: [L_exec_speech, L_exec_stretch, L_exec_pause, L_exec_pause_value, L_pause_event, L_pause_support, L_pause_allocation, L_budget, L_feasible_debt, L_prefix_state, L_plan_segment_shape, L_plan_pause_release, L_base, L_rhythm_exec, L_stream_state, L_pitch]
 content_vocab_size: 102
 
 rhythm_stats_dim: 6
@@ -171,7 +171,10 @@ rhythm_plan_local_weight: 0.5
 rhythm_plan_cum_weight: 1.0
 rhythm_plan_segment_shape_weight: 0.0
 rhythm_plan_pause_release_weight: 0.0
+rhythm_unit_logratio_weight: 0.0
 rhythm_phase_decoupled_segment_shape_scale: 0.0
+rhythm_phase_decoupled_local_rho_scale: 0.0
+rhythm_phase_decoupled_soft_rollover_scale: 0.0
 rhythm_phase_decoupled_rollover_start: 0.68
 rhythm_phase_decoupled_rollover_end: 0.92
 lambda_rhythm_guidance: 0.0

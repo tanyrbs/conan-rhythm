@@ -23,6 +23,12 @@ class RhythmLossTargets:
     unit_mask: torch.Tensor
     dur_anchor_src: torch.Tensor
     unit_logratio_weight: float = 0.0
+    srmdp_role_consistency_weight: float = 0.0
+    srmdp_notimeline_weight: float = 0.0
+    srmdp_memory_role_weight: float = 0.0
+    srmdp_role_id_src_tgt: Optional[torch.Tensor] = None
+    srmdp_ref_memory_role_id_tgt: Optional[torch.Tensor] = None
+    srmdp_ref_memory_mask_tgt: Optional[torch.Tensor] = None
     plan_local_weight: float = 0.5
     plan_cum_weight: float = 1.0
     plan_segment_shape_weight: float = 0.0
@@ -621,6 +627,161 @@ def _compute_unit_logratio_loss(execution, targets: RhythmLossTargets) -> torch.
     return weight * loss
 
 
+def _resolve_srmdp_feature(execution) -> Optional[torch.Tensor]:
+    planner = getattr(execution, "planner", None)
+    if planner is None:
+        return None
+    retrieved = getattr(planner, "role_memory_retrieved_unit", None)
+    if isinstance(retrieved, torch.Tensor):
+        return retrieved.float()
+    local_query = getattr(planner, "local_role_query_unit", None)
+    if isinstance(local_query, torch.Tensor):
+        return local_query.float()
+    logratio = getattr(planner, "dur_logratio_unit", None)
+    if isinstance(logratio, torch.Tensor):
+        if logratio.dim() == 2:
+            return logratio.float().unsqueeze(-1)
+        return logratio.float()
+    return None
+
+
+def _compute_srmdp_role_consistency_loss(execution, targets: RhythmLossTargets) -> torch.Tensor:
+    weight = float(getattr(targets, "srmdp_role_consistency_weight", 0.0) or 0.0)
+    role_ids = getattr(targets, "srmdp_role_id_src_tgt", None)
+    feature = _resolve_srmdp_feature(execution)
+    if weight <= 0.0 or role_ids is None or feature is None:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    if feature.dim() == 2:
+        feature = feature.unsqueeze(-1)
+    if feature.dim() != 3:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    roles = role_ids.long()
+    if roles.dim() > 2:
+        roles = roles.squeeze(-1)
+    mask = targets.unit_mask.float()
+    if roles.shape[:2] != mask.shape[:2] or feature.shape[:2] != mask.shape[:2]:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    per_batch: list[torch.Tensor] = []
+    for batch_idx in range(mask.size(0)):
+        valid = mask[batch_idx] > 0.5
+        if int(valid.sum().item()) < 2:
+            per_batch.append(mask.new_zeros(()))
+            continue
+        batch_roles = roles[batch_idx][valid]
+        batch_feature = feature[batch_idx][valid]
+        role_losses: list[torch.Tensor] = []
+        for role_id in torch.unique(batch_roles):
+            if int(role_id.item()) < 0:
+                continue
+            role_mask = batch_roles == role_id
+            if int(role_mask.sum().item()) < 2:
+                continue
+            role_feature = batch_feature[role_mask]
+            role_mean = role_feature.mean(dim=0, keepdim=True)
+            role_losses.append(((role_feature - role_mean) ** 2).mean())
+        if role_losses:
+            per_batch.append(torch.stack(role_losses).mean())
+        else:
+            per_batch.append(mask.new_zeros(()))
+    per_batch_loss = torch.stack(per_batch)
+    return weight * _reduce_batch_loss(per_batch_loss, targets.sample_confidence)
+
+
+def _compute_srmdp_notimeline_loss(execution, targets: RhythmLossTargets) -> torch.Tensor:
+    weight = float(getattr(targets, "srmdp_notimeline_weight", 0.0) or 0.0)
+    planner = getattr(execution, "planner", None)
+    top_index = getattr(planner, "role_memory_top_index_unit", None) if planner is not None else None
+    if weight <= 0.0 or not isinstance(top_index, torch.Tensor):
+        return execution.speech_duration_exec.new_tensor(0.0)
+    if top_index.dim() == 3:
+        slot_idx = torch.arange(top_index.size(-1), device=top_index.device, dtype=top_index.dtype).view(1, 1, -1)
+        top_index = (top_index.float() * slot_idx).sum(dim=-1)
+    elif top_index.dim() == 2:
+        top_index = top_index.float()
+    else:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    mask = targets.unit_mask.float()
+    if top_index.shape != mask.shape:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    position = torch.arange(mask.size(1), device=mask.device, dtype=top_index.dtype)
+    if mask.size(1) > 1:
+        position = position / float(mask.size(1) - 1)
+    else:
+        position = torch.zeros_like(position)
+    per_batch: list[torch.Tensor] = []
+    for batch_idx in range(mask.size(0)):
+        valid = mask[batch_idx] > 0.5
+        if int(valid.sum().item()) < 2:
+            per_batch.append(mask.new_zeros(()))
+            continue
+        x = top_index[batch_idx][valid]
+        y = position[valid]
+        x_centered = x - x.mean()
+        y_centered = y - y.mean()
+        denom = torch.sqrt((x_centered.pow(2).mean() * y_centered.pow(2).mean()).clamp_min(1e-6))
+        corr = (x_centered * y_centered).mean() / denom
+        per_batch.append(corr.abs())
+    per_batch_loss = torch.stack(per_batch)
+    return weight * _reduce_batch_loss(per_batch_loss, targets.sample_confidence)
+
+
+def _compute_srmdp_memory_role_loss(execution, targets: RhythmLossTargets) -> torch.Tensor:
+    weight = float(getattr(targets, "srmdp_memory_role_weight", 0.0) or 0.0)
+    planner = getattr(execution, "planner", None)
+    top_index = getattr(planner, "role_memory_top_index_unit", None) if planner is not None else None
+    src_role = getattr(targets, "srmdp_role_id_src_tgt", None)
+    ref_role = getattr(targets, "srmdp_ref_memory_role_id_tgt", None)
+    if (
+        weight <= 0.0
+        or not isinstance(top_index, torch.Tensor)
+        or src_role is None
+        or ref_role is None
+    ):
+        return execution.speech_duration_exec.new_tensor(0.0)
+    if top_index.dim() == 3:
+        top_index = torch.argmax(top_index.float(), dim=-1)
+    elif top_index.dim() == 2:
+        top_index = torch.round(top_index.float()).long()
+    else:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    src_role = src_role.long()
+    if src_role.dim() > 2:
+        src_role = src_role.squeeze(-1)
+    ref_role = ref_role.long()
+    if ref_role.dim() > 2:
+        ref_role = ref_role.squeeze(-1)
+    if top_index.shape[:2] != src_role.shape[:2]:
+        return execution.speech_duration_exec.new_tensor(0.0)
+    if ref_role.dim() != 2 or ref_role.size(0) != top_index.size(0):
+        return execution.speech_duration_exec.new_tensor(0.0)
+    ref_mask = getattr(targets, "srmdp_ref_memory_mask_tgt", None)
+    if isinstance(ref_mask, torch.Tensor):
+        ref_mask = ref_mask.float()
+        if ref_mask.dim() > 2:
+            ref_mask = ref_mask.squeeze(-1)
+        if ref_mask.shape != ref_role.shape:
+            ref_mask = None
+    else:
+        ref_mask = None
+    unit_mask = targets.unit_mask.float()
+    per_batch: list[torch.Tensor] = []
+    for batch_idx in range(top_index.size(0)):
+        max_slot = ref_role.size(1) - 1
+        idx = top_index[batch_idx].clamp(min=0, max=max_slot)
+        pred_role = ref_role[batch_idx].gather(0, idx)
+        valid = (unit_mask[batch_idx] > 0.5) & (src_role[batch_idx] >= 0)
+        if ref_mask is not None:
+            slot_valid = ref_mask[batch_idx].gather(0, idx) > 0.5
+            valid = valid & slot_valid
+        if int(valid.sum().item()) <= 0:
+            per_batch.append(unit_mask.new_zeros(()))
+            continue
+        mismatch = (pred_role != src_role[batch_idx]).float()
+        per_batch.append(mismatch[valid].mean())
+    per_batch_loss = torch.stack(per_batch)
+    return weight * _reduce_batch_loss(per_batch_loss, targets.sample_confidence)
+
+
 def _compute_plan_segment_shape_loss(
     execution,
     targets: RhythmLossTargets,
@@ -1007,7 +1168,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         unit_mask,
         batch_weight=targets.sample_confidence,
     )
-    l_exec_stretch = _compute_unit_logratio_loss(execution, targets)
+    l_exec_stretch_base = _compute_unit_logratio_loss(execution, targets)
+    l_srmdp_role_consistency = _compute_srmdp_role_consistency_loss(execution, targets)
+    l_srmdp_notimeline = _compute_srmdp_notimeline_loss(execution, targets)
+    l_srmdp_memory_role = _compute_srmdp_memory_role_loss(execution, targets)
+    l_exec_stretch = l_exec_stretch_base + l_srmdp_role_consistency + l_srmdp_notimeline + l_srmdp_memory_role
     pause_mask = _resolve_pause_exec_mask(
         execution,
         unit_mask,
@@ -1134,6 +1299,10 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     return {
         'rhythm_exec_speech': l_exec_speech,
         'rhythm_exec_stretch': l_exec_stretch,
+        'rhythm_exec_stretch_base': l_exec_stretch_base.detach(),
+        'rhythm_srmdp_role_consistency': l_srmdp_role_consistency.detach(),
+        'rhythm_srmdp_notimeline': l_srmdp_notimeline.detach(),
+        'rhythm_srmdp_memory_role': l_srmdp_memory_role.detach(),
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_exec_pause_value': l_exec_pause_value.detach(),
         'rhythm_pause_event': l_pause_event.detach(),

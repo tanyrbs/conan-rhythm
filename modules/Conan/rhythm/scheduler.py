@@ -32,6 +32,10 @@ class MonotonicRhythmScheduler(nn.Module):
         pause_support_split_enable: bool = False,
         pause_breath_features_enable: bool = False,
         pause_breath_reset_threshold: float = 0.55,
+        role_memory_conditioning_scale: float = 0.30,
+        local_role_query_scale: float = 0.45,
+        role_global_prior_scale: float = 0.20,
+        role_memory_temperature: float = 0.75,
         chunk_state_enable: bool = True,
         budget_phase_feature_scale: float = 0.0,
         phase_decoupled_timing: bool = False,
@@ -93,6 +97,10 @@ class MonotonicRhythmScheduler(nn.Module):
             pause_support_split_enable=pause_support_split_enable,
             pause_breath_features_enable=pause_breath_features_enable,
             pause_breath_reset_threshold=pause_breath_reset_threshold,
+            role_memory_conditioning_scale=role_memory_conditioning_scale,
+            local_role_query_scale=local_role_query_scale,
+            role_global_prior_scale=role_global_prior_scale,
+            role_memory_temperature=role_memory_temperature,
         )
 
     @staticmethod
@@ -156,6 +164,182 @@ class MonotonicRhythmScheduler(nn.Module):
             if slow_full.dim() == 2 and slow_full.size(-1) == planner_trace_context.size(-1):
                 return slow_full
         return masked_mean(planner_trace_context, unit_mask.float(), dim=1)
+
+    @staticmethod
+    def _pick_tensor_by_keys(
+        source: dict[str, torch.Tensor] | None,
+        keys: tuple[str, ...],
+    ) -> torch.Tensor | None:
+        if source is None:
+            return None
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+        return None
+
+    @staticmethod
+    def _resolve_static_role_memory_bundle(
+        *,
+        ref_conditioning: dict[str, torch.Tensor],
+        phrase_selection: dict[str, torch.Tensor] | None,
+        planner_ref_stats: torch.Tensor,
+        prompt_reliability: torch.Tensor,
+    ) -> dict[str, torch.Tensor | None]:
+        key_candidates = (
+            "static_role_memory_query_keys",
+            "static_role_memory_keys",
+            "duration_role_memory_keys",
+            "role_memory_keys",
+            "role_memory_query_keys",
+            "planner_role_memory_keys",
+        )
+        value_candidates = (
+            "static_role_memory_values",
+            "duration_role_memory_values",
+            "role_memory_values",
+            "planner_role_memory_values",
+        )
+        mask_candidates = (
+            "static_role_memory_slot_mask",
+            "static_role_memory_mask",
+            "duration_role_memory_mask",
+            "role_memory_mask",
+            "role_memory_slot_mask",
+            "planner_role_memory_mask",
+        )
+        global_candidates = (
+            "duration_style_global_prior",
+            "static_role_memory_global_prior",
+            "role_memory_global_prior",
+            "planner_role_memory_summary",
+            "role_memory_summary",
+            "global_style_vec",
+            "planner_ref_stats",
+        )
+        memory_keys = MonotonicRhythmScheduler._pick_tensor_by_keys(ref_conditioning, key_candidates)
+        memory_values = MonotonicRhythmScheduler._pick_tensor_by_keys(ref_conditioning, value_candidates)
+        memory_mask = MonotonicRhythmScheduler._pick_tensor_by_keys(ref_conditioning, mask_candidates)
+        role_global_prior = MonotonicRhythmScheduler._pick_tensor_by_keys(ref_conditioning, global_candidates)
+        if role_global_prior is None:
+            role_global_prior = planner_ref_stats
+        if memory_keys is None and memory_values is None:
+            shared_memory = MonotonicRhythmScheduler._pick_tensor_by_keys(
+                ref_conditioning,
+                (
+                    "role_memory_slots",
+                    "static_role_memory_slots",
+                    "static_role_memory",
+                    "duration_role_memory",
+                    "role_memory",
+                    "planner_slow_rhythm_memory",
+                    "ref_phrase_stats",
+                ),
+            )
+            if shared_memory is not None:
+                memory_keys = shared_memory
+                memory_values = shared_memory
+        if memory_keys is None and phrase_selection is not None:
+            selected_stats = MonotonicRhythmScheduler._pick_tensor_by_keys(
+                phrase_selection,
+                (
+                    "selected_phrase_prototype_stats",
+                    "selected_phrase_prototype_summary",
+                ),
+            )
+            if selected_stats is not None:
+                if selected_stats.dim() == 2:
+                    selected_stats = selected_stats.unsqueeze(1)
+                memory_keys = selected_stats
+                memory_values = selected_stats
+        if memory_values is None:
+            memory_values = memory_keys
+        if memory_keys is None:
+            memory_values = None
+            memory_mask = None
+        elif memory_mask is None:
+            if memory_keys.dim() == 3:
+                memory_mask = torch.ones(
+                    (memory_keys.size(0), memory_keys.size(1)),
+                    device=memory_keys.device,
+                    dtype=memory_keys.dtype,
+                )
+            elif memory_keys.dim() == 2:
+                memory_mask = torch.ones(
+                    (memory_keys.size(0), 1),
+                    device=memory_keys.device,
+                    dtype=memory_keys.dtype,
+                )
+        if role_global_prior is not None:
+            gate = prompt_reliability.float().reshape(prompt_reliability.size(0), 1)
+            if role_global_prior.dim() == 2:
+                role_global_prior = role_global_prior * gate
+            elif role_global_prior.dim() == 3:
+                role_global_prior = role_global_prior * gate.unsqueeze(-1)
+        return {
+            "static_role_memory_keys": memory_keys,
+            "static_role_memory_values": memory_values,
+            "static_role_memory_mask": memory_mask,
+            "role_global_prior": role_global_prior,
+        }
+
+    @staticmethod
+    def _build_local_role_query_unit(
+        *,
+        dur_anchor_src: torch.Tensor,
+        unit_mask: torch.Tensor,
+        source_boundary_cue: torch.Tensor | None,
+        boundary_score_unit: torch.Tensor,
+        segment_shape_context_unit: torch.Tensor | None,
+        local_rho_unit: torch.Tensor | None,
+        segment_roll_alpha_unit: torch.Tensor | None,
+    ) -> torch.Tensor:
+        mask = unit_mask.float()
+        dur_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)) * mask
+        left = torch.cat([dur_log[:, :1], dur_log[:, :-1]], dim=1)
+        right = torch.cat([dur_log[:, 1:], dur_log[:, -1:]], dim=1)
+        delta_left = (dur_log - left) * mask
+        delta_right = (right - dur_log) * mask
+        boundary_primary = boundary_score_unit.float()
+        if source_boundary_cue is not None:
+            boundary_primary = torch.maximum(boundary_primary, source_boundary_cue.float())
+        boundary_primary = boundary_primary * mask
+        boundary_left = torch.cat([boundary_primary[:, :1], boundary_primary[:, :-1]], dim=1)
+        boundary_right = torch.cat([boundary_primary[:, 1:], boundary_primary[:, -1:]], dim=1)
+        boundary_peak = torch.maximum(torch.maximum(boundary_primary, boundary_left), boundary_right) * mask
+        boundary_slope = 0.5 * ((boundary_primary - boundary_left) + (boundary_right - boundary_primary)) * mask
+        local_rho = (
+            local_rho_unit.float() * mask
+            if local_rho_unit is not None
+            else torch.zeros_like(mask)
+        )
+        roll_alpha = (
+            segment_roll_alpha_unit.float() * mask
+            if segment_roll_alpha_unit is not None
+            else torch.zeros_like(mask)
+        )
+        if segment_shape_context_unit is not None:
+            segment_shape = segment_shape_context_unit.float().to(device=unit_mask.device)
+            shape_mean = segment_shape.mean(dim=-1) * mask
+            shape_var = segment_shape.var(dim=-1, unbiased=False) * mask
+        else:
+            shape_mean = torch.zeros_like(mask)
+            shape_var = torch.zeros_like(mask)
+        return torch.stack(
+            [
+                dur_log,
+                delta_left,
+                delta_right,
+                boundary_primary,
+                boundary_peak,
+                boundary_slope,
+                local_rho,
+                roll_alpha,
+                shape_mean,
+                shape_var,
+            ],
+            dim=-1,
+        ) * mask.unsqueeze(-1)
 
     def _apply_phase_decoupled_boundary_style_residual(
         self,
@@ -574,6 +758,21 @@ class MonotonicRhythmScheduler(nn.Module):
                 sealed_mask=sealed_mask,
                 boundary_confidence=boundary_confidence,
             )
+        local_role_query_unit = self._build_local_role_query_unit(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            source_boundary_cue=source_boundary_cue,
+            boundary_score_unit=boundary_score_unit,
+            segment_shape_context_unit=effective_segment_shape_context_unit,
+            local_rho_unit=source_local_rho_unit,
+            segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
+        )
+        static_role_memory_bundle = self._resolve_static_role_memory_bundle(
+            ref_conditioning=ref_conditioning,
+            phrase_selection=phrase_selection,
+            planner_ref_stats=planner_ref_stats,
+            prompt_reliability=prompt_reliability,
+        )
         budget_outputs = self.window_budget(
             unit_states=unit_states,
             dur_anchor_src=dur_anchor_src,
@@ -609,6 +808,11 @@ class MonotonicRhythmScheduler(nn.Module):
             local_rho_unit=source_local_rho_unit,
             segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
             open_tail_mask_unit=effective_open_tail_mask_unit,
+            local_role_query_unit=local_role_query_unit,
+            static_role_memory_keys=static_role_memory_bundle.get("static_role_memory_keys"),
+            static_role_memory_values=static_role_memory_bundle.get("static_role_memory_values"),
+            static_role_memory_mask=static_role_memory_bundle.get("static_role_memory_mask"),
+            role_global_prior=static_role_memory_bundle.get("role_global_prior"),
         )
         planner = RhythmPlannerOutputs(
             speech_budget_win=budget_outputs["speech_budget_win"],
@@ -666,6 +870,12 @@ class MonotonicRhythmScheduler(nn.Module):
             segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
             open_tail_mask_unit=effective_open_tail_mask_unit,
             boundary_style_residual_unit=boundary_style_residual_unit,
+            local_role_query_unit=redistribution_outputs.get("local_role_query_unit", local_role_query_unit),
+            role_memory_retrieved_unit=redistribution_outputs.get("role_memory_retrieved_unit"),
+            role_memory_gate_unit=redistribution_outputs.get("role_memory_gate_unit"),
+            role_memory_top_index_unit=redistribution_outputs.get("role_memory_top_index_unit"),
+            role_memory_top_weight_unit=redistribution_outputs.get("role_memory_top_weight_unit"),
+            role_memory_entropy_unit=redistribution_outputs.get("role_memory_entropy_unit"),
         )
         planner.raw_speech_budget_win = budget_outputs.get("raw_speech_budget_win", planner.speech_budget_win)
         planner.raw_pause_budget_win = budget_outputs.get("raw_pause_budget_win", planner.pause_budget_win)

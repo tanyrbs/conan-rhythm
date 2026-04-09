@@ -219,6 +219,7 @@ class RefRhythmDescriptor(nn.Module):
             slow_scores = boundary_trace.squeeze(-1)
             slow_starts = slow_indices
             slow_ends = slow_indices
+            role_memory = ReferenceSelector.build_static_role_memory(ref_rhythm_trace)
         else:
             selection = selector(ref_rhythm_trace)
             slow_memory = selection.slow_rhythm_memory
@@ -226,9 +227,23 @@ class RefRhythmDescriptor(nn.Module):
             slow_scores = selection.slow_rhythm_scores
             slow_starts = selection.slow_rhythm_starts
             slow_ends = selection.slow_rhythm_ends
+            role_memory = {
+                "role_memory_slots": selection.role_memory_slots,
+                "role_memory_query_keys": selection.role_memory_query_keys,
+                "role_memory_values": selection.role_memory_values,
+                "planner_role_memory_values": selection.planner_role_memory_values,
+                "role_memory_usage_prior": selection.role_memory_usage_prior,
+                "role_memory_slot_mask": selection.role_memory_slot_mask,
+            }
         slow_summary = RefRhythmDescriptor._weighted_summary(slow_memory, slow_scores)
         planner_slow_memory = RefRhythmDescriptor._compact_slow_memory(slow_memory)
         planner_slow_summary = RefRhythmDescriptor._weighted_summary(planner_slow_memory, slow_scores)
+        role_usage = role_memory["role_memory_usage_prior"].float()
+        role_values = role_memory["role_memory_values"].float()
+        planner_role_values = role_memory["planner_role_memory_values"].float()
+        role_weight = role_usage / role_usage.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        role_summary = (role_values * role_weight.unsqueeze(-1)).sum(dim=1)
+        planner_role_summary = (planner_role_values * role_weight.unsqueeze(-1)).sum(dim=1)
         out.update(
             {
                 "slow_rhythm_memory": slow_memory,
@@ -239,6 +254,14 @@ class RefRhythmDescriptor(nn.Module):
                 "selector_meta_scores": slow_scores,
                 "selector_meta_starts": slow_starts,
                 "selector_meta_ends": slow_ends,
+                "role_memory_slots": role_memory["role_memory_slots"],
+                "role_memory_query_keys": role_memory["role_memory_query_keys"],
+                "role_memory_values": role_memory["role_memory_values"],
+                "planner_role_memory_values": role_memory["planner_role_memory_values"],
+                "role_memory_usage_prior": role_memory["role_memory_usage_prior"],
+                "role_memory_slot_mask": role_memory["role_memory_slot_mask"],
+                "role_memory_summary": role_summary,
+                "planner_role_memory_summary": planner_role_summary,
             }
         )
         return out
