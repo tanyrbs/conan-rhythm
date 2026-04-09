@@ -63,6 +63,8 @@ class RhythmTaskRuntimeSupport:
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             feasible_debt_weight=float(hparams.get("rhythm_feasible_debt_weight", 0.05)),
+            plan_segment_shape_weight=_nonnegative_hparam("rhythm_plan_segment_shape_weight", 0.0),
+            plan_pause_release_weight=_nonnegative_hparam("rhythm_plan_pause_release_weight", 0.0),
             pause_event_weight=_nonnegative_hparam("rhythm_pause_event_weight", 0.0),
             pause_support_weight=_nonnegative_hparam("rhythm_pause_support_weight", 0.0),
             pause_allocation_weight=_nonnegative_hparam("rhythm_pause_allocation_weight", 0.0),

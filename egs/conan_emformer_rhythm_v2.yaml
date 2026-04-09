@@ -169,6 +169,11 @@ lambda_rhythm_cumplan: 0.15
 lambda_rhythm_plan: 0.0
 rhythm_plan_local_weight: 0.5
 rhythm_plan_cum_weight: 1.0
+rhythm_plan_segment_shape_weight: 0.0
+rhythm_plan_pause_release_weight: 0.0
+rhythm_phase_decoupled_segment_shape_scale: 0.0
+rhythm_phase_decoupled_rollover_start: 0.68
+rhythm_phase_decoupled_rollover_end: 0.92
 lambda_rhythm_guidance: 0.0
 lambda_rhythm_distill: 0.0
 rhythm_distill_budget_weight: 0.0

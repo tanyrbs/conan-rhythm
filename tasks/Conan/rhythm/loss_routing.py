@@ -298,6 +298,16 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
         if isinstance(losses.get("rhythm_plan_cum"), torch.Tensor)
         else zero
     )
+    losses["L_plan_segment_shape"] = (
+        losses.get("rhythm_plan_segment_shape", zero).detach()
+        if isinstance(losses.get("rhythm_plan_segment_shape"), torch.Tensor)
+        else zero
+    )
+    losses["L_plan_pause_release"] = (
+        losses.get("rhythm_plan_pause_release", zero).detach()
+        if isinstance(losses.get("rhythm_plan_pause_release"), torch.Tensor)
+        else zero
+    )
     losses["L_guidance"] = (
         losses.get("rhythm_guidance", zero).detach()
         if isinstance(losses.get("rhythm_guidance"), torch.Tensor)

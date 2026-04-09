@@ -22,8 +22,11 @@ class RhythmLossTargets:
     pause_budget_tgt: torch.Tensor
     unit_mask: torch.Tensor
     dur_anchor_src: torch.Tensor
+    unit_logratio_weight: float = 0.0
     plan_local_weight: float = 0.5
     plan_cum_weight: float = 1.0
+    plan_segment_shape_weight: float = 0.0
+    plan_pause_release_weight: float = 0.0
     sample_confidence: Optional[torch.Tensor] = None
     guidance_speech_tgt: Optional[torch.Tensor] = None
     guidance_pause_tgt: Optional[torch.Tensor] = None
@@ -575,14 +578,142 @@ def _scalar_flag(ref: torch.Tensor, enabled: bool) -> torch.Tensor:
     return ref.new_tensor(1.0 if enabled else 0.0)
 
 
+def _target_unit_logratio(
+    *,
+    speech_exec_tgt: torch.Tensor,
+    dur_anchor_src: torch.Tensor,
+    unit_mask: torch.Tensor,
+) -> torch.Tensor:
+    unit_mask = unit_mask.float()
+    eps = 1.0e-4
+    target = torch.log(
+        (speech_exec_tgt.float().clamp_min(0.0) + eps)
+        / (dur_anchor_src.float().clamp_min(0.0) + eps)
+    )
+    target = target * unit_mask
+    mean = (target * unit_mask).sum(dim=1, keepdim=True) / unit_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+    return (target - mean) * unit_mask
+
+
+def _compute_unit_logratio_loss(execution, targets: RhythmLossTargets) -> torch.Tensor:
+    weight = float(getattr(targets, "unit_logratio_weight", 0.0) or 0.0)
+    planner = getattr(execution, "planner", None)
+    pred = getattr(planner, "dur_logratio_unit", None) if planner is not None else None
+    if weight <= 0.0 or pred is None:
+        ref = (
+            execution.speech_duration_exec
+            if isinstance(execution.speech_duration_exec, torch.Tensor)
+            else targets.speech_exec_tgt
+        )
+        return ref.new_tensor(0.0)
+    target = _target_unit_logratio(
+        speech_exec_tgt=targets.speech_exec_tgt,
+        dur_anchor_src=targets.dur_anchor_src,
+        unit_mask=targets.unit_mask,
+    )
+    loss = _masked_huber(
+        pred.float(),
+        target,
+        targets.unit_mask.float(),
+        beta=0.15,
+        batch_weight=targets.sample_confidence,
+    )
+    return weight * loss
+
+
+def _compute_plan_segment_shape_loss(
+    execution,
+    targets: RhythmLossTargets,
+    state: RhythmLossState,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    zero = execution.speech_duration_exec.new_tensor(0.0)
+    if planner is None:
+        return zero
+    segment_shape = getattr(planner, "segment_shape_context_unit", None)
+    open_tail_mask = getattr(planner, "open_tail_mask_unit", None)
+    plan_logratio = getattr(planner, "dur_logratio_unit", None)
+    if segment_shape is None or open_tail_mask is None or plan_logratio is None:
+        return zero
+    if segment_shape.size(-1) < 3:
+        return zero
+    mask = (open_tail_mask.float() * state.unit_mask.float()).clamp_min(0.0)
+    if float(mask.sum().item()) <= 0.0:
+        return zero
+    pred_mass = targets.dur_anchor_src.float().clamp_min(0.0) * torch.exp(plan_logratio.float())
+    local_rate = segment_shape[:, :, 0].float()
+    duration_bias = segment_shape[:, :, 2].float()
+    target_mass = targets.dur_anchor_src.float().clamp_min(0.0) * F.softplus(local_rate + 0.5 * duration_bias)
+    gate = _positive_mass_gate(target_mass, mask)
+    shape_batch_weight = _merge_batch_weight(batch_weight, gate, pred_mass)
+    return _batch_kl_div(
+        pred_mass.clamp_min(0.0),
+        target_mass.clamp_min(0.0),
+        mask,
+        batch_weight=shape_batch_weight,
+    )
+
+
+def _compute_plan_pause_release_loss(
+    execution,
+    targets: RhythmLossTargets,
+    state: RhythmLossState,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    planner = getattr(execution, "planner", None)
+    zero = execution.speech_duration_exec.new_tensor(0.0)
+    if planner is None:
+        return zero
+    segment_shape = getattr(planner, "segment_shape_context_unit", None)
+    open_tail_mask = getattr(planner, "open_tail_mask_unit", None)
+    if segment_shape is None or open_tail_mask is None or segment_shape.size(-1) < 2:
+        return zero
+    pause_support = getattr(planner, "pause_support_prob_unit", None)
+    if pause_support is None:
+        pause_support = getattr(planner, "pause_weight_unit", None)
+    if pause_support is None:
+        return zero
+    segment_roll = getattr(planner, "segment_roll_alpha_unit", None)
+    if segment_roll is None:
+        segment_roll = open_tail_mask.new_zeros(open_tail_mask.shape)
+    source_boundary = getattr(planner, "source_boundary_cue", None)
+    if source_boundary is None:
+        source_boundary = open_tail_mask.new_zeros(open_tail_mask.shape)
+    boundary_strength = segment_shape[:, :, 1].float().clamp_min(0.0)
+    release_target = (
+        F.softplus(boundary_strength)
+        * (0.25 + 0.75 * segment_roll.float())
+        * (0.35 + 0.65 * source_boundary.float().clamp(0.0, 1.0))
+    )
+    mask = (open_tail_mask.float() * state.unit_mask.float()).clamp_min(0.0)
+    if float(mask.sum().item()) <= 0.0:
+        return zero
+    gate = _positive_mass_gate(release_target, mask)
+    release_batch_weight = _merge_batch_weight(batch_weight, gate, pause_support)
+    return _batch_kl_div(
+        pause_support.float().clamp_min(0.0),
+        release_target.clamp_min(0.0),
+        mask,
+        batch_weight=release_batch_weight,
+    )
+
+
 def _compute_plan_losses(
     execution,
     targets: RhythmLossTargets,
     state: RhythmLossState,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     zero = execution.speech_duration_exec.new_tensor(0.0)
-    if float(targets.plan_local_weight) <= 0.0 and float(targets.plan_cum_weight) <= 0.0:
-        return zero, zero, zero
+    if (
+        float(targets.plan_local_weight) <= 0.0
+        and float(targets.plan_cum_weight) <= 0.0
+        and float(targets.plan_segment_shape_weight) <= 0.0
+        and float(targets.plan_pause_release_weight) <= 0.0
+    ):
+        return zero, zero, zero, zero, zero
     exec_total = (execution.speech_duration_exec + state.blank_exec).float()
     target_total = (targets.speech_exec_tgt + targets.pause_exec_tgt).float()
     plan_shape_weight = _merge_batch_weight(
@@ -603,8 +734,29 @@ def _compute_plan_losses(
         beta=0.10,
         batch_weight=plan_shape_weight,
     )
-    l_plan = float(targets.plan_local_weight) * l_plan_local + float(targets.plan_cum_weight) * l_plan_cum
-    return l_plan_local, l_plan_cum, l_plan
+    l_plan_segment_shape = zero
+    if float(targets.plan_segment_shape_weight) > 0.0:
+        l_plan_segment_shape = _compute_plan_segment_shape_loss(
+            execution,
+            targets,
+            state,
+            batch_weight=targets.sample_confidence,
+        )
+    l_plan_pause_release = zero
+    if float(targets.plan_pause_release_weight) > 0.0:
+        l_plan_pause_release = _compute_plan_pause_release_loss(
+            execution,
+            targets,
+            state,
+            batch_weight=targets.sample_confidence,
+        )
+    l_plan = (
+        float(targets.plan_local_weight) * l_plan_local
+        + float(targets.plan_cum_weight) * l_plan_cum
+        + float(targets.plan_segment_shape_weight) * l_plan_segment_shape
+        + float(targets.plan_pause_release_weight) * l_plan_pause_release
+    )
+    return l_plan_local, l_plan_cum, l_plan_segment_shape, l_plan_pause_release, l_plan
 
 
 def _compute_guidance_loss(
@@ -855,6 +1007,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         unit_mask,
         batch_weight=targets.sample_confidence,
     )
+    l_exec_stretch = _compute_unit_logratio_loss(execution, targets)
     pause_mask = _resolve_pause_exec_mask(
         execution,
         unit_mask,
@@ -963,7 +1116,11 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         pred_prefix_clock_norm=pred_prefix_clock_norm,
         pred_prefix_backlog_norm=pred_prefix_backlog_norm,
     )
-    l_plan_local, l_plan_cum, l_plan = _compute_plan_losses(execution, targets, state)
+    l_plan_local, l_plan_cum, l_plan_segment_shape, l_plan_pause_release, l_plan = _compute_plan_losses(
+        execution,
+        targets,
+        state,
+    )
     l_guidance = _compute_guidance_loss(execution, targets, state)
     distill_losses = _compute_distill_losses(execution, targets, state)
     # Maintained compatibility alias: public cumplan/prefix_state supervision maps
@@ -976,6 +1133,7 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
     kd_same_source_shape = _scalar_flag(execution.speech_duration_exec, targets.distill_same_source_shape)
     return {
         'rhythm_exec_speech': l_exec_speech,
+        'rhythm_exec_stretch': l_exec_stretch,
         'rhythm_exec_pause': l_exec_pause,
         'rhythm_exec_pause_value': l_exec_pause_value.detach(),
         'rhythm_pause_event': l_pause_event.detach(),
@@ -994,6 +1152,8 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
         'rhythm_cumplan': l_carry.detach(),
         'rhythm_plan_local': l_plan_local,
         'rhythm_plan_cum': l_plan_cum,
+        'rhythm_plan_segment_shape': l_plan_segment_shape,
+        'rhythm_plan_pause_release': l_plan_pause_release,
         'rhythm_plan': l_plan,
         'rhythm_guidance': l_guidance,
         **distill_losses,
@@ -1016,5 +1176,5 @@ def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, t
             if isinstance(targets.distill_context_match, torch.Tensor)
             else {}
         ),
-        'rhythm_total': l_exec_speech + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + distill_losses['rhythm_distill'],
+        'rhythm_total': l_exec_speech + l_exec_stretch + l_exec_pause + l_budget + l_carry + l_plan + l_guidance + distill_losses['rhythm_distill'],
     }

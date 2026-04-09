@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from modules.Conan.diff.net import CausalConv1d
 from .contracts import BoundaryCommitDecision, StreamingRhythmState
@@ -398,6 +399,8 @@ class WindowBudgetController(nn.Module):
         min_speech_frames: float = 1.0,
         boundary_feature_scale: float = 0.35,
         phase_feature_scale: float = 0.0,
+        segment_shape_dim: int = 3,
+        segment_shape_scale: float = 0.0,
         phase_decoupled_timing: bool = False,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
@@ -412,7 +415,10 @@ class WindowBudgetController(nn.Module):
         self.min_speech_frames = float(min_speech_frames)
         self.boundary_feature_scale = float(boundary_feature_scale)
         self.phase_feature_scale = float(min(max(phase_feature_scale, 0.0), 1.0))
+        self.segment_shape_dim = max(0, int(segment_shape_dim))
+        self.segment_shape_scale = float(max(segment_shape_scale, 0.0))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
+        self.phase_free_timing = self.phase_decoupled_timing
         self.debt_control_scale = float(max(debt_control_scale, 1.0e-3))
         self.debt_pause_priority = float(max(debt_pause_priority, 0.0))
         self.debt_speech_priority = float(max(debt_speech_priority, 0.0))
@@ -424,6 +430,11 @@ class WindowBudgetController(nn.Module):
         self.stats_proj = nn.Linear(stats_dim, hidden_size)
         self.phase_proj = nn.Linear(1, hidden_size)
         self.backlog_proj = nn.Linear(2, hidden_size)
+        self.segment_shape_proj = (
+            nn.Linear(self.segment_shape_dim + 2, hidden_size)
+            if self.segment_shape_dim > 0
+            else None
+        )
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
             ResidualTemporalBlock(hidden_size, dilation=1, causal=causal),
@@ -431,7 +442,7 @@ class WindowBudgetController(nn.Module):
             ResidualTemporalBlock(hidden_size, dilation=4, causal=causal),
         ])
         self.pool_mlp = nn.Sequential(
-            nn.Linear(hidden_size + trace_dim + trace_dim + stats_dim + 5, hidden_size),
+            nn.Linear(hidden_size + trace_dim + trace_dim + stats_dim + 5 + self.segment_shape_dim + 2, hidden_size),
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
@@ -461,6 +472,10 @@ class WindowBudgetController(nn.Module):
         phrase_prototype_summary: torch.Tensor | None = None,
         phrase_prototype_stats: torch.Tensor | None = None,
         prompt_reliability: torch.Tensor | None = None,
+        segment_shape_context: torch.Tensor | None = None,
+        local_rho_unit: torch.Tensor | None = None,
+        segment_roll_alpha_unit: torch.Tensor | None = None,
+        open_tail_mask_unit: torch.Tensor | None = None,
         phase_decoupled_timing: bool | None = None,
         debt_control_scale: float | None = None,
         debt_pause_priority: float | None = None,
@@ -536,6 +551,40 @@ class WindowBudgetController(nn.Module):
         clock_neg = (-clock_ctrl).clamp_min(0.0)
         clock_pair = torch.stack([clock_pos, clock_neg], dim=-1)
         clock_pair = clock_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
+        if self.segment_shape_proj is not None and segment_shape_context is not None:
+            if open_tail_mask_unit is None:
+                segment_mask = unit_mask
+            else:
+                segment_mask = open_tail_mask_unit.float().to(device=unit_mask.device)
+            segment_shape_context = segment_shape_context.float().to(device=unit_states.device)
+            segment_rho = (
+                local_rho_unit.float().to(device=unit_states.device)
+                if local_rho_unit is not None
+                else unit_mask.new_zeros(unit_mask.shape)
+            )
+            segment_roll = (
+                segment_roll_alpha_unit.float().to(device=unit_states.device)
+                if segment_roll_alpha_unit is not None
+                else unit_mask.new_zeros(unit_mask.shape)
+            )
+            segment_feature = torch.cat(
+                [
+                    segment_shape_context,
+                    segment_rho.unsqueeze(-1),
+                    segment_roll.unsqueeze(-1),
+                ],
+                dim=-1,
+            ) * segment_mask.unsqueeze(-1)
+            segment_feature = segment_feature * float(self.segment_shape_scale)
+            segment_summary = masked_mean(segment_feature, segment_mask, dim=1)
+            segment_bias = self.segment_shape_proj(segment_feature)
+        else:
+            segment_mask = unit_mask
+            segment_feature = unit_states.new_zeros(
+                (unit_states.size(0), unit_states.size(1), self.segment_shape_dim + 2)
+            )
+            segment_summary = unit_states.new_zeros((unit_states.size(0), self.segment_shape_dim + 2))
+            segment_bias = unit_states.new_zeros(unit_states.shape)
 
         x = (
             unit_states
@@ -546,6 +595,7 @@ class WindowBudgetController(nn.Module):
             + self.stats_proj(planner_ref_stats).unsqueeze(1)
             + self.phase_proj(phase_like)
             + self.backlog_proj(clock_pair)
+            + segment_bias
         )
         x = self.in_proj(x)
         for block in self.blocks:
@@ -566,6 +616,7 @@ class WindowBudgetController(nn.Module):
                 structure_progress.unsqueeze(-1),
                 clock_pos.unsqueeze(-1),
                 clock_neg.unsqueeze(-1),
+                segment_summary,
             ],
             dim=-1,
         )
@@ -606,6 +657,10 @@ class UnitRedistributionHead(nn.Module):
         *,
         max_unit_logratio: float = 0.6,
         boundary_feature_scale: float = 0.35,
+        segment_shape_dim: int = 3,
+        segment_shape_scale: float = 0.35,
+        local_rho_scale: float = 0.20,
+        soft_rollover_scale: float = 0.10,
         pause_source_boundary_weight: float = 0.20,
         pause_support_split_enable: bool = False,
         pause_breath_features_enable: bool = False,
@@ -615,6 +670,10 @@ class UnitRedistributionHead(nn.Module):
         super().__init__()
         self.max_unit_logratio = float(max_unit_logratio)
         self.boundary_feature_scale = float(boundary_feature_scale)
+        self.segment_shape_dim = max(0, int(segment_shape_dim))
+        self.segment_shape_scale = float(max(segment_shape_scale, 0.0))
+        self.local_rho_scale = float(max(local_rho_scale, 0.0))
+        self.soft_rollover_scale = float(max(soft_rollover_scale, 0.0))
         self.pause_source_boundary_weight = float(pause_source_boundary_weight)
         self.pause_support_split_enable = bool(pause_support_split_enable)
         self.pause_breath_features_enable = bool(pause_breath_features_enable)
@@ -623,6 +682,13 @@ class UnitRedistributionHead(nn.Module):
         self.trace_proj = nn.Linear(trace_dim, hidden_size)
         self.slow_proj = nn.Linear(trace_dim, hidden_size)
         self.boundary_proj = nn.Linear(1, hidden_size)
+        self.segment_shape_proj = (
+            nn.Linear(self.segment_shape_dim, hidden_size)
+            if self.segment_shape_dim > 0
+            else None
+        )
+        self.local_rho_proj = nn.Linear(1, hidden_size)
+        self.soft_rollover_proj = nn.Linear(1, hidden_size)
         self.pause_feature_proj = nn.Linear(2, hidden_size) if self.pause_breath_features_enable else None
         self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.blocks = nn.ModuleList([
@@ -642,6 +708,12 @@ class UnitRedistributionHead(nn.Module):
         unit_mask: torch.Tensor,
         slow_rhythm_summary: torch.Tensor | None = None,
         boundary_score_unit: torch.Tensor | None = None,
+        segment_shape_context_unit: torch.Tensor | None = None,
+        segment_shape_context: torch.Tensor | None = None,
+        local_rho_unit: torch.Tensor | None = None,
+        segment_roll_alpha_unit: torch.Tensor | None = None,
+        soft_rollover_alpha: torch.Tensor | None = None,
+        open_tail_mask_unit: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
         if boundary_score_unit is None:
@@ -650,6 +722,23 @@ class UnitRedistributionHead(nn.Module):
             slow_rhythm_summary = masked_mean(planner_trace_context, unit_mask, dim=1)
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
         boundary_feat = (boundary_score_unit.float() * self.boundary_feature_scale).unsqueeze(-1)
+        effective_segment_shape_context = (
+            segment_shape_context_unit if segment_shape_context_unit is not None else segment_shape_context
+        )
+        segment_bias = unit_states.new_zeros(unit_states.shape)
+        if self.segment_shape_proj is not None and effective_segment_shape_context is not None:
+            shape_ctx = effective_segment_shape_context.float().to(device=unit_states.device)
+            if shape_ctx.size(-1) != self.segment_shape_dim:
+                if shape_ctx.size(-1) > self.segment_shape_dim:
+                    shape_ctx = shape_ctx[..., : self.segment_shape_dim]
+                else:
+                    shape_ctx = torch.nn.functional.pad(
+                        shape_ctx,
+                        (0, self.segment_shape_dim - shape_ctx.size(-1)),
+                    )
+            if open_tail_mask_unit is not None:
+                shape_ctx = shape_ctx * open_tail_mask_unit.float().to(device=unit_states.device).unsqueeze(-1)
+            segment_bias = segment_bias + self.segment_shape_scale * self.segment_shape_proj(shape_ctx)
         pause_feature_bundle = build_pause_support_feature_bundle(
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
@@ -663,7 +752,26 @@ class UnitRedistributionHead(nn.Module):
             + self.trace_proj(planner_trace_context)
             + self.slow_proj(slow_rhythm_summary).unsqueeze(1)
             + self.boundary_proj(boundary_feat)
+            + segment_bias
         )
+        if local_rho_unit is not None:
+            local_rho_feature = local_rho_unit.float().to(device=unit_states.device).unsqueeze(-1)
+            x = x + self.local_rho_scale * self.local_rho_proj(local_rho_feature)
+        effective_soft_rollover_alpha = soft_rollover_alpha
+        if effective_soft_rollover_alpha is None and segment_roll_alpha_unit is not None:
+            roll_mask = (
+                open_tail_mask_unit.float()
+                if open_tail_mask_unit is not None
+                else unit_mask.float()
+            ).to(device=unit_states.device)
+            roll_value = segment_roll_alpha_unit.float().to(device=unit_states.device) * roll_mask
+            effective_soft_rollover_alpha = (
+                roll_value.sum(dim=1, keepdim=True)
+                / roll_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            )
+        if effective_soft_rollover_alpha is not None:
+            rollover = effective_soft_rollover_alpha.float().to(device=unit_states.device).reshape(unit_mask.size(0), 1, 1)
+            x = x + self.soft_rollover_scale * self.soft_rollover_proj(rollover)
         if self.pause_feature_proj is not None:
             x = x + self.pause_feature_proj(pause_feature_bundle.feature_tensor)
         x = self.in_proj(x)

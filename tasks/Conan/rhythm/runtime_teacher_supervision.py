@@ -315,6 +315,8 @@ def build_runtime_teacher_supervision_targets(
         dur_anchor_src=batch_for_targets.dur_anchor_src[:, :teacher_units],
         plan_local_weight=float(plan_local_weight),
         plan_cum_weight=float(plan_cum_weight),
+        plan_segment_shape_weight=0.0,
+        plan_pause_release_weight=0.0,
         sample_confidence=sample_confidence,
         pause_boundary_weight=float(pause_boundary_weight),
         budget_raw_weight=float(budget_raw_weight),

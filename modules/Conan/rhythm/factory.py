@@ -293,6 +293,30 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
         phase_decoupled_boundary_style_residual_scale=float(
             hparams.get('rhythm_phase_decoupled_boundary_style_residual_scale', 0.18)
         ),
+        phase_decoupled_segment_shape_scale=float(
+            hparams.get('rhythm_phase_decoupled_segment_shape_scale', 0.35)
+        ),
+        phase_decoupled_local_rho_scale=float(
+            hparams.get('rhythm_phase_decoupled_local_rho_scale', 0.20)
+        ),
+        phase_decoupled_soft_rollover_scale=float(
+            hparams.get('rhythm_phase_decoupled_soft_rollover_scale', 0.10)
+        ),
+        phase_decoupled_soft_rollover_start=float(
+            hparams.get(
+                'rhythm_phase_decoupled_soft_rollover_start',
+                hparams.get('rhythm_phase_decoupled_rollover_start', 0.35),
+            )
+        ),
+        phase_decoupled_rollover_start=float(
+            hparams.get(
+                'rhythm_phase_decoupled_rollover_start',
+                hparams.get('rhythm_phase_decoupled_soft_rollover_start', 0.68),
+            )
+        ),
+        phase_decoupled_rollover_end=float(
+            hparams.get('rhythm_phase_decoupled_rollover_end', 0.92)
+        ),
         debt_control_scale=float(hparams.get('rhythm_debt_control_scale', 4.0)),
         debt_pause_priority=float(hparams.get('rhythm_debt_pause_priority', 0.15)),
         debt_speech_priority=float(hparams.get('rhythm_debt_speech_priority', 0.25)),

@@ -26,6 +26,9 @@ class RhythmTargetBuildConfig:
     budget_raw_weight: float
     budget_exec_weight: float
     feasible_debt_weight: float
+    unit_logratio_weight: float = 0.0
+    plan_segment_shape_weight: float = 0.0
+    plan_pause_release_weight: float = 0.0
     pause_event_weight: float = 0.0
     pause_support_weight: float = 0.0
     pause_allocation_weight: float = 0.0
@@ -755,8 +758,11 @@ def build_rhythm_loss_targets_from_sample(
         pause_budget_tgt=sample[keys.target_pause_budget_key],
         unit_mask=unit_batch.unit_mask,
         dur_anchor_src=unit_batch.dur_anchor_src,
+        unit_logratio_weight=float(config.unit_logratio_weight),
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
+        plan_segment_shape_weight=float(config.plan_segment_shape_weight),
+        plan_pause_release_weight=float(config.plan_pause_release_weight),
         sample_confidence=sample_confidence,
         guidance_speech_tgt=guidance_speech,
         guidance_pause_tgt=guidance_pause,
@@ -792,6 +798,7 @@ def build_rhythm_loss_targets_from_sample(
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),
+        pause_allocation_weight=float(config.pause_allocation_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -815,8 +822,11 @@ def build_identity_rhythm_loss_targets(
         pause_budget_tgt=pause_budget_tgt,
         unit_mask=unit_mask,
         dur_anchor_src=unit_batch.dur_anchor_src,
+        unit_logratio_weight=float(config.unit_logratio_weight),
         plan_local_weight=float(config.plan_local_weight),
         plan_cum_weight=float(config.plan_cum_weight),
+        plan_segment_shape_weight=float(config.plan_segment_shape_weight),
+        plan_pause_release_weight=float(config.plan_pause_release_weight),
         sample_confidence=torch.ones((unit_mask.size(0), 1), device=unit_mask.device),
         distill_exec_weight=float(config.distill_exec_weight),
         distill_budget_weight=float(config.distill_budget_weight),
@@ -830,6 +840,7 @@ def build_identity_rhythm_loss_targets(
         feasible_debt_weight=float(config.feasible_debt_weight),
         pause_event_weight=float(config.pause_event_weight),
         pause_support_weight=float(config.pause_support_weight),
+        pause_allocation_weight=float(config.pause_allocation_weight),
         pause_event_threshold=float(config.pause_event_threshold),
         pause_event_temperature=float(config.pause_event_temperature),
         pause_event_pos_weight=float(config.pause_event_pos_weight),
@@ -884,12 +895,16 @@ def scale_rhythm_loss_terms(
     lambda_guidance = float(hparams.get("lambda_rhythm_guidance", 0.0) or 0.0)
     plan_local_weight = float(hparams.get("rhythm_plan_local_weight", 0.5))
     plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
+    plan_segment_shape_weight = float(hparams.get("rhythm_plan_segment_shape_weight", 0.0))
+    plan_pause_release_weight = float(hparams.get("rhythm_plan_pause_release_weight", 0.0))
+    unit_logratio_weight = float(hparams.get("rhythm_unit_logratio_weight", 0.0))
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
     prefix_state = _resolve_prefix_state_loss()
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
     scaled_distill = rhythm_losses["rhythm_distill"] * lambda_distill
     scaled = {
         "rhythm_exec_speech": rhythm_losses["rhythm_exec_speech"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
+        "rhythm_exec_stretch": rhythm_losses["rhythm_exec_stretch"] * float(hparams.get("lambda_rhythm_exec_speech", 1.0)),
         "rhythm_exec_pause": rhythm_losses["rhythm_exec_pause"] * float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
         "rhythm_exec_pause_value": _scaled_detached(
             "rhythm_exec_pause_value",
@@ -906,6 +921,12 @@ def scale_rhythm_loss_terms(
             float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
             allow_missing=True,
         ),
+        "rhythm_pause_allocation": _scaled_detached(
+            "rhythm_pause_allocation",
+            float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
+            allow_missing=True,
+        ),
+        "rhythm_unit_logratio_weight": torch.tensor(unit_logratio_weight).detach(),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * lambda_budget,
         "rhythm_budget_raw_surface": _scaled_detached(
             "rhythm_budget_raw_surface",
@@ -948,6 +969,16 @@ def scale_rhythm_loss_terms(
         "rhythm_plan": rhythm_losses["rhythm_plan"] * lambda_plan,
         "rhythm_plan_local": (rhythm_losses["rhythm_plan_local"] * lambda_plan * plan_local_weight).detach(),
         "rhythm_plan_cum": (rhythm_losses["rhythm_plan_cum"] * lambda_plan * plan_cum_weight).detach(),
+        "rhythm_plan_segment_shape": _scaled_detached(
+            "rhythm_plan_segment_shape",
+            lambda_plan * plan_segment_shape_weight,
+            allow_missing=True,
+        ),
+        "rhythm_plan_pause_release": _scaled_detached(
+            "rhythm_plan_pause_release",
+            lambda_plan * plan_pause_release_weight,
+            allow_missing=True,
+        ),
         "rhythm_guidance": rhythm_losses["rhythm_guidance"] * lambda_guidance,
         "rhythm_distill": scaled_distill,
         "rhythm_distill_student": scaled_distill.detach(),

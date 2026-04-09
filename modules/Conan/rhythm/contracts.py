@@ -205,7 +205,11 @@ class RhythmPlannerOutputs:
     active_phrase_start: Optional[torch.Tensor] = None
     active_phrase_end: Optional[torch.Tensor] = None
     local_rho_unit: Optional[torch.Tensor] = None
+    local_rho_prior_unit: Optional[torch.Tensor] = None
     local_trace_ctx_unit: Optional[torch.Tensor] = None
+    segment_shape_context_unit: Optional[torch.Tensor] = None
+    segment_roll_alpha_unit: Optional[torch.Tensor] = None
+    open_tail_mask_unit: Optional[torch.Tensor] = None
     intra_phrase_alpha: Optional[torch.Tensor] = None
 
     @property

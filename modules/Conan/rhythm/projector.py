@@ -1025,6 +1025,10 @@ class StreamingRhythmProjector(nn.Module):
         execution_planner.active_phrase_end = getattr(planner, "active_phrase_end", None)
         execution_planner.local_trace_ctx_unit = getattr(planner, "local_trace_ctx_unit", None)
         execution_planner.local_rho_unit = getattr(planner, "local_rho_unit", None)
+        execution_planner.local_rho_prior_unit = getattr(planner, "local_rho_prior_unit", None)
+        execution_planner.segment_shape_context_unit = getattr(planner, "segment_shape_context_unit", None)
+        execution_planner.segment_roll_alpha_unit = getattr(planner, "segment_roll_alpha_unit", None)
+        execution_planner.open_tail_mask_unit = getattr(planner, "open_tail_mask_unit", None)
         sanitized_segment_mask = _sanitize_tail_allocation_mask(
             unit_mask=unit_mask,
             commit_frontier=state.commit_frontier,

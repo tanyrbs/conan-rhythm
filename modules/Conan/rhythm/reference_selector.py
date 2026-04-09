@@ -396,6 +396,19 @@ class ReferenceSelector:
             valid_mask=ref_phrase_valid,
             mix_alpha=neighbor_mix_alpha,
         )
+        next_index = torch.minimum(selected_index.long() + 1, valid_counts - 1)
+        next_ref_phrase_trace = ReferenceSelector._gather_phrase_bank_rows(
+            ref_phrase_trace,
+            next_index,
+        )
+        next_planner_ref_phrase_trace = ReferenceSelector._gather_phrase_bank_rows(
+            planner_ref_phrase_trace,
+            next_index,
+        )
+        next_ref_phrase_stats = ReferenceSelector._gather_phrase_bank_rows(
+            ref_phrase_stats,
+            next_index,
+        )
         selection = {
             "selected_ref_phrase_index": selected_index,
             "selected_ref_phrase_trace": selected_ref_phrase_trace,
@@ -406,6 +419,10 @@ class ReferenceSelector:
             "selected_ref_phrase_end": selected_ref_phrase_end,
             "selected_ref_phrase_boundary_strength": selected_ref_phrase_boundary_strength,
             "selected_ref_phrase_stats": selected_ref_phrase_stats,
+            "next_ref_phrase_index": next_index,
+            "next_ref_phrase_trace": next_ref_phrase_trace,
+            "next_planner_ref_phrase_trace": next_planner_ref_phrase_trace,
+            "next_ref_phrase_stats": next_ref_phrase_stats,
         }
         selection.update(ReferenceSelector.build_phrase_prototype(selection))
         return selection

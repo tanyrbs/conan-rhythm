@@ -34,3 +34,14 @@ rhythm_trace_horizon: 0.30
 # phase-trace control.
 rhythm_phase_decoupled_timing: true
 rhythm_phase_decoupled_phrase_gate_boundary_threshold: 0.55
+rhythm_phase_decoupled_segment_shape_scale: 0.35
+rhythm_phase_decoupled_rollover_start: 0.68
+rhythm_phase_decoupled_rollover_end: 0.92
+
+# Light planner-side proxy losses help the open-segment shape/rollover path stay
+# audible in the short-ref regime without overtaking executed speech/pause.
+lambda_rhythm_plan: 0.10
+rhythm_plan_local_weight: 0.50
+rhythm_plan_cum_weight: 1.00
+rhythm_plan_segment_shape_weight: 0.20
+rhythm_plan_pause_release_weight: 0.10

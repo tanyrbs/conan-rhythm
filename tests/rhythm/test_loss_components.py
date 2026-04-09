@@ -26,6 +26,9 @@ class RhythmLossComponentTests(unittest.TestCase):
         pause_support_prob: torch.Tensor | None = None,
         pause_allocation_weight: torch.Tensor | None = None,
         pause_support_logit: torch.Tensor | None = None,
+        segment_shape_context: torch.Tensor | None = None,
+        open_tail_mask: torch.Tensor | None = None,
+        segment_roll_alpha: torch.Tensor | None = None,
     ):
         speech_budget = speech.sum(dim=1, keepdim=True)
         pause_budget = pause.sum(dim=1, keepdim=True)
@@ -43,6 +46,9 @@ class RhythmLossComponentTests(unittest.TestCase):
             pause_allocation_weight_unit=pause_allocation_weight,
             pause_support_logit_unit=pause_support_logit,
             source_boundary_cue=source_boundary_cue,
+            segment_shape_context_unit=segment_shape_context,
+            open_tail_mask_unit=open_tail_mask,
+            segment_roll_alpha_unit=segment_roll_alpha,
             feasible_total_budget_delta=torch.zeros_like(speech_budget),
         )
         return SimpleNamespace(
@@ -138,6 +144,91 @@ class RhythmLossComponentTests(unittest.TestCase):
         self.assertTrue(torch.allclose(losses["rhythm_plan_local"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_plan_cum"], torch.tensor(0.0)))
         self.assertTrue(torch.allclose(losses["rhythm_plan"], torch.tensor(0.0)))
+
+    def test_plan_segment_shape_prefers_shape_aligned_planner(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause = torch.zeros_like(speech)
+        open_tail = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        shape_ctx = torch.tensor(
+            [[[0.1, 0.0, -1.0], [1.8, 0.0, 1.2], [0.1, 0.0, -1.0]]],
+            dtype=torch.float32,
+        )
+        good_execution = self._execution(
+            speech,
+            pause,
+            segment_shape_context=shape_ctx,
+            open_tail_mask=open_tail,
+        )
+        bad_execution = self._execution(
+            speech,
+            pause,
+            segment_shape_context=shape_ctx,
+            open_tail_mask=open_tail,
+        )
+        good_execution.planner.dur_logratio_unit = torch.tensor([[-0.9, 1.4, -0.9]], dtype=torch.float32)
+        bad_execution.planner.dur_logratio_unit = torch.tensor([[1.4, -0.9, -0.9]], dtype=torch.float32)
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            plan_segment_shape_weight=1.0,
+        )
+        good_losses = build_rhythm_loss_dict(good_execution, targets)
+        bad_losses = build_rhythm_loss_dict(bad_execution, targets)
+        self.assertLess(
+            float(good_losses["rhythm_plan_segment_shape"].item()),
+            float(bad_losses["rhythm_plan_segment_shape"].item()),
+        )
+
+    def test_plan_pause_release_prefers_release_aligned_planner(self) -> None:
+        speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        pause = torch.zeros_like(speech)
+        open_tail = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+        shape_ctx = torch.tensor(
+            [[[0.1, 0.0, 0.0], [0.1, 2.0, 0.0], [0.1, 0.2, 0.0]]],
+            dtype=torch.float32,
+        )
+        common_kwargs = dict(
+            segment_shape_context=shape_ctx,
+            open_tail_mask=open_tail,
+            segment_roll_alpha=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+            source_boundary_cue=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+            pause_allocation_weight=torch.tensor([[0.1, 0.8, 0.1]], dtype=torch.float32),
+        )
+        good_execution = self._execution(
+            speech,
+            pause,
+            pause_support_prob=torch.tensor([[0.1, 0.9, 0.1]], dtype=torch.float32),
+            **common_kwargs,
+        )
+        bad_execution = self._execution(
+            speech,
+            pause,
+            pause_support_prob=torch.tensor([[0.9, 0.1, 0.1]], dtype=torch.float32),
+            **common_kwargs,
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=speech,
+            pause_exec_tgt=pause,
+            speech_budget_tgt=speech.sum(dim=1, keepdim=True),
+            pause_budget_tgt=pause.sum(dim=1, keepdim=True),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+            plan_pause_release_weight=1.0,
+        )
+        good_losses = build_rhythm_loss_dict(good_execution, targets)
+        bad_losses = build_rhythm_loss_dict(bad_execution, targets)
+        self.assertLess(
+            float(good_losses["rhythm_plan_pause_release"].item()),
+            float(bad_losses["rhythm_plan_pause_release"].item()),
+        )
 
     def test_pause_event_aux_penalizes_missed_pause_support(self) -> None:
         speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)

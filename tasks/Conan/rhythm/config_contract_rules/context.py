@@ -67,6 +67,8 @@ class RhythmStageKnobs:
     dedupe_teacher_primary_cache_distill: bool
     plan_local_weight: float
     plan_cum_weight: float
+    plan_segment_shape_weight: float
+    plan_pause_release_weight: float
     budget_raw_weight: float
     budget_exec_weight: float
     pause_topk_ratio: float
@@ -120,7 +122,12 @@ class RhythmStageKnobs:
 
     @property
     def total_plan_component_weight(self) -> float:
-        return self.plan_local_weight + self.plan_cum_weight
+        return (
+            self.plan_local_weight
+            + self.plan_cum_weight
+            + self.plan_segment_shape_weight
+            + self.plan_pause_release_weight
+        )
 
 
 @dataclass(frozen=True)
@@ -218,6 +225,8 @@ def build_stage_validation_context(
             ),
             plan_local_weight=float(hparams.get("rhythm_plan_local_weight", 0.5)),
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
+            plan_segment_shape_weight=float(hparams.get("rhythm_plan_segment_shape_weight", 0.0)),
+            plan_pause_release_weight=float(hparams.get("rhythm_plan_pause_release_weight", 0.0)),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             pause_topk_ratio=pause_topk_ratio,

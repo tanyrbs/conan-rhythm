@@ -104,12 +104,18 @@ class FactoryDefaultTests(unittest.TestCase):
         self.assertAlmostEqual(module.budget_phase_feature_scale, 0.0, places=6)
         self.assertFalse(module.phase_decoupled_timing)
         self.assertFalse(module.phase_free_timing)
+        self.assertAlmostEqual(module.phase_decoupled_segment_shape_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.phase_decoupled_rollover_start, 0.68, places=6)
+        self.assertAlmostEqual(module.phase_decoupled_rollover_end, 0.92, places=6)
         self.assertIsNotNone(module.scheduler.chunk_state_head)
         self.assertAlmostEqual(module.scheduler.window_budget.phase_feature_scale, 0.0, places=6)
         self.assertFalse(module.scheduler.phase_decoupled_timing)
         self.assertFalse(module.scheduler.phase_free_timing)
         self.assertFalse(module.scheduler.window_budget.phase_decoupled_timing)
         self.assertFalse(module.scheduler.window_budget.phase_free_timing)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_segment_shape_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.window_budget.segment_shape_scale, 0.0, places=6)
+        self.assertAlmostEqual(module.scheduler.unit_redistribution.segment_shape_scale, 0.0, places=6)
 
     def test_trace_cold_start_hparams_override(self) -> None:
         module = build_streaming_rhythm_module_from_hparams(
@@ -125,6 +131,9 @@ class FactoryDefaultTests(unittest.TestCase):
                 "rhythm_phase_decoupled_timing": True,
                 "rhythm_phase_decoupled_phrase_gate_boundary_threshold": 0.61,
                 "rhythm_phase_decoupled_boundary_style_residual_scale": 0.27,
+                "rhythm_phase_decoupled_segment_shape_scale": 0.35,
+                "rhythm_phase_decoupled_rollover_start": 0.60,
+                "rhythm_phase_decoupled_rollover_end": 0.90,
                 "rhythm_debt_control_scale": 3.5,
                 "rhythm_debt_pause_priority": 0.22,
                 "rhythm_debt_speech_priority": 0.31,
@@ -163,6 +172,12 @@ class FactoryDefaultTests(unittest.TestCase):
         self.assertTrue(module.scheduler.window_budget.phase_decoupled_timing)
         self.assertTrue(module.scheduler.window_budget.phase_free_timing)
         self.assertAlmostEqual(module.scheduler.phase_decoupled_boundary_style_residual_scale, 0.27, places=6)
+        self.assertAlmostEqual(module.phase_decoupled_segment_shape_scale, 0.35, places=6)
+        self.assertAlmostEqual(module.phase_decoupled_rollover_start, 0.60, places=6)
+        self.assertAlmostEqual(module.phase_decoupled_rollover_end, 0.90, places=6)
+        self.assertAlmostEqual(module.scheduler.phase_decoupled_segment_shape_scale, 0.35, places=6)
+        self.assertAlmostEqual(module.scheduler.window_budget.segment_shape_scale, 0.35, places=6)
+        self.assertAlmostEqual(module.scheduler.unit_redistribution.segment_shape_scale, 0.35, places=6)
         self.assertAlmostEqual(module.scheduler.debt_control_scale, 3.5, places=6)
         self.assertAlmostEqual(module.scheduler.debt_pause_priority, 0.22, places=6)
         self.assertAlmostEqual(module.scheduler.debt_speech_priority, 0.31, places=6)

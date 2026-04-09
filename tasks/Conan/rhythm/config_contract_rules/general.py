@@ -33,6 +33,8 @@ def _validate_nonnegative_weights(ctx: RhythmStageValidationContext, errors: lis
         "rhythm_budget_exec_weight": knobs.budget_exec_weight,
         "rhythm_plan_local_weight": knobs.plan_local_weight,
         "rhythm_plan_cum_weight": knobs.plan_cum_weight,
+        "rhythm_plan_segment_shape_weight": knobs.plan_segment_shape_weight,
+        "rhythm_plan_pause_release_weight": knobs.plan_pause_release_weight,
         "rhythm_pause_boundary_weight": knobs.pause_boundary_weight,
         "rhythm_distill_exec_weight": knobs.distill_exec_weight,
         "rhythm_distill_budget_weight": knobs.distill_budget_weight,
@@ -53,7 +55,9 @@ def _validate_objective_activation(ctx: RhythmStageValidationContext, errors: li
         )
     if knobs.lambda_plan > 0.0 and knobs.total_plan_component_weight <= 0.0:
         errors.append(
-            "lambda_rhythm_plan > 0 requires rhythm_plan_local_weight + rhythm_plan_cum_weight > 0."
+            "lambda_rhythm_plan > 0 requires at least one active planner proxy weight "
+            "(rhythm_plan_local_weight / rhythm_plan_cum_weight / "
+            "rhythm_plan_segment_shape_weight / rhythm_plan_pause_release_weight)."
         )
     if knobs.lambda_distill > 0.0 and knobs.total_distill_component_weight <= 0.0:
         errors.append(

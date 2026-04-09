@@ -36,6 +36,10 @@ class MonotonicRhythmScheduler(nn.Module):
         budget_phase_feature_scale: float = 0.0,
         phase_decoupled_timing: bool = False,
         phase_decoupled_boundary_style_residual_scale: float = 0.18,
+        phase_decoupled_segment_shape_scale: float = 0.35,
+        phase_decoupled_local_rho_scale: float = 0.20,
+        phase_decoupled_soft_rollover_scale: float = 0.10,
+        phase_decoupled_soft_rollover_start: float = 0.35,
         debt_control_scale: float = 4.0,
         debt_pause_priority: float = 0.15,
         debt_speech_priority: float = 0.25,
@@ -44,8 +48,15 @@ class MonotonicRhythmScheduler(nn.Module):
         self.boundary_source_cue_weight = float(boundary_source_cue_weight)
         self.chunk_state_enable = bool(chunk_state_enable)
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
+        self.phase_free_timing = self.phase_decoupled_timing
         self.phase_decoupled_boundary_style_residual_scale = float(
             max(0.0, phase_decoupled_boundary_style_residual_scale)
+        )
+        self.phase_decoupled_segment_shape_scale = float(max(phase_decoupled_segment_shape_scale, 0.0))
+        self.phase_decoupled_local_rho_scale = float(max(phase_decoupled_local_rho_scale, 0.0))
+        self.phase_decoupled_soft_rollover_scale = float(max(phase_decoupled_soft_rollover_scale, 0.0))
+        self.phase_decoupled_soft_rollover_start = float(
+            min(max(phase_decoupled_soft_rollover_start, 0.0), 0.95)
         )
         self.debt_control_scale = float(max(debt_control_scale, 1.0e-3))
         self.debt_pause_priority = float(max(debt_pause_priority, 0.0))
@@ -61,6 +72,7 @@ class MonotonicRhythmScheduler(nn.Module):
             min_speech_frames=min_speech_frames,
             boundary_feature_scale=boundary_feature_scale,
             phase_feature_scale=budget_phase_feature_scale,
+            segment_shape_scale=self.phase_decoupled_segment_shape_scale,
             phase_decoupled_timing=self.phase_decoupled_timing,
             debt_control_scale=self.debt_control_scale,
             debt_pause_priority=self.debt_pause_priority,
@@ -71,6 +83,9 @@ class MonotonicRhythmScheduler(nn.Module):
             trace_dim=trace_dim,
             max_unit_logratio=max_unit_logratio,
             boundary_feature_scale=boundary_feature_scale,
+            segment_shape_scale=self.phase_decoupled_segment_shape_scale,
+            local_rho_scale=self.phase_decoupled_local_rho_scale,
+            soft_rollover_scale=self.phase_decoupled_soft_rollover_scale,
             pause_source_boundary_weight=pause_source_boundary_weight,
             pause_support_split_enable=pause_support_split_enable,
             pause_breath_features_enable=pause_breath_features_enable,
@@ -176,6 +191,113 @@ class MonotonicRhythmScheduler(nn.Module):
         boundary_score = (base * gain).clamp(0.0, 1.0) * unit_mask.float()
         return boundary_score, residual_unit
 
+    @staticmethod
+    def _compute_source_local_rho(
+        *,
+        dur_anchor_src: torch.Tensor,
+        unit_mask: torch.Tensor,
+        commit_frontier: torch.Tensor,
+    ) -> torch.Tensor:
+        unit_mask_f = unit_mask.float()
+        steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
+        frontier = commit_frontier.long().to(device=unit_mask.device).reshape(unit_mask.size(0), -1)[:, 0]
+        frontier = frontier.clamp(min=0, max=unit_mask.size(1))
+        open_tail_mask = ((steps >= frontier[:, None]) & (unit_mask_f > 0.5)).float()
+        if float(open_tail_mask.sum().item()) <= 0.0:
+            return unit_mask.new_zeros(unit_mask.shape)
+        anchor_mass = dur_anchor_src.float().clamp_min(0.0) * open_tail_mask
+        mass_total = anchor_mass.sum(dim=1, keepdim=True)
+        mass_cum = torch.cumsum(anchor_mass, dim=1)
+        unit_cum = torch.cumsum(open_tail_mask, dim=1)
+        unit_total = open_tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        rho = torch.where(
+            mass_total > 1.0e-6,
+            mass_cum / mass_total.clamp_min(1.0e-6),
+            unit_cum / unit_total,
+        )
+        return rho.clamp(0.0, 1.0) * open_tail_mask
+
+    @staticmethod
+    def _sample_phrase_segment_shape(
+        ref_phrase_trace: torch.Tensor | None,
+        local_rho_unit: torch.Tensor | None,
+        unit_mask: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if ref_phrase_trace is None or local_rho_unit is None:
+            return None
+        trace = ref_phrase_trace
+        if trace.dim() == 4:
+            if trace.size(1) != 1:
+                return None
+            trace = trace[:, 0]
+        if trace.dim() != 3 or trace.size(-1) < 4:
+            return None
+        batch_size, bins, _ = trace.shape
+        if local_rho_unit.size(0) != batch_size:
+            return None
+        active_mask = ((local_rho_unit.float() > 0.0).float() * unit_mask.float()).clamp(0.0, 1.0)
+        if float(active_mask.sum().item()) <= 0.0:
+            return torch.zeros(
+                (unit_mask.size(0), unit_mask.size(1), 3),
+                device=unit_mask.device,
+                dtype=trace.dtype,
+            )
+        trace = trace.to(device=unit_mask.device, dtype=torch.float32)
+        rho = local_rho_unit.float().to(device=unit_mask.device).clamp(0.0, 1.0)
+        if bins <= 1:
+            context = trace[:, :1, 1:4].expand(-1, unit_mask.size(1), -1)
+            return context * active_mask.unsqueeze(-1)
+        pos = rho * float(bins - 1)
+        low = pos.floor().long().clamp(min=0, max=bins - 1)
+        high = pos.ceil().long().clamp(min=0, max=bins - 1)
+        batch_index = torch.arange(batch_size, device=unit_mask.device)[:, None]
+        low_ctx = trace[batch_index, low, 1:4]
+        high_ctx = trace[batch_index, high, 1:4]
+        frac = (pos - low.float()).unsqueeze(-1)
+        context = low_ctx * (1.0 - frac) + high_ctx * frac
+        return context * active_mask.unsqueeze(-1)
+
+    @staticmethod
+    def _blend_segment_shape_context(
+        *,
+        current_ctx: torch.Tensor | None,
+        next_ctx: torch.Tensor | None,
+        local_rho_unit: torch.Tensor | None,
+        unit_mask: torch.Tensor,
+        rollover_start: float,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        if current_ctx is None:
+            return next_ctx, None, None
+        if local_rho_unit is None:
+            return current_ctx, None, None
+        active_mask = ((local_rho_unit.float() > 0.0).float() * unit_mask.float()).clamp(0.0, 1.0)
+        if float(active_mask.sum().item()) <= 0.0:
+            return current_ctx, unit_mask.new_zeros(unit_mask.shape), unit_mask.new_zeros((unit_mask.size(0), 1))
+        denom = max(1.0 - float(rollover_start), 1.0e-6)
+        alpha_unit = ((local_rho_unit.float() - float(rollover_start)) / denom).clamp(0.0, 1.0) * active_mask
+        if next_ctx is not None:
+            blended_ctx = current_ctx.float() * (1.0 - alpha_unit.unsqueeze(-1)) + next_ctx.float() * alpha_unit.unsqueeze(-1)
+        else:
+            blended_ctx = current_ctx.float()
+        alpha_scalar = (
+            alpha_unit.sum(dim=1, keepdim=True)
+            / active_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        ).clamp(0.0, 1.0)
+        return blended_ctx * active_mask.unsqueeze(-1), alpha_unit, alpha_scalar
+
+    @staticmethod
+    def _blend_phrase_trace(
+        current_trace: torch.Tensor | None,
+        next_trace: torch.Tensor | None,
+        soft_rollover_alpha: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if current_trace is None:
+            return next_trace
+        if next_trace is None or soft_rollover_alpha is None:
+            return current_trace
+        alpha = soft_rollover_alpha.float().reshape(current_trace.size(0), *([1] * (current_trace.dim() - 1)))
+        return current_trace.float() * (1.0 - alpha) + next_trace.float() * alpha
+
     def forward(
         self,
         *,
@@ -197,6 +319,10 @@ class MonotonicRhythmScheduler(nn.Module):
         chunk_state: ChunkStateBundle | None = None,
         phase_decoupled_timing: bool | None = None,
         phase_decoupled_boundary_style_residual_scale: float | None = None,
+        segment_shape_context_unit: torch.Tensor | None = None,
+        local_rho_prior_unit: torch.Tensor | None = None,
+        segment_roll_alpha_unit: torch.Tensor | None = None,
+        open_tail_mask_unit: torch.Tensor | None = None,
         debt_control_scale: float | None = None,
         debt_pause_priority: float | None = None,
         debt_speech_priority: float | None = None,
@@ -248,6 +374,12 @@ class MonotonicRhythmScheduler(nn.Module):
         selected_valid = None
         phrase_prototype_summary = None
         phrase_prototype_stats = None
+        source_local_rho_unit = local_rho_prior_unit
+        effective_segment_shape_context_unit = segment_shape_context_unit
+        effective_segment_roll_alpha_unit = segment_roll_alpha_unit
+        effective_open_tail_mask_unit = open_tail_mask_unit
+        soft_rollover_alpha = None
+        blended_ref_phrase_trace = None
         if phrase_selection is not None:
             phrase_prototype_summary = phrase_selection.get("selected_phrase_prototype_summary")
             phrase_prototype_stats = phrase_selection.get("selected_phrase_prototype_stats")
@@ -260,6 +392,66 @@ class MonotonicRhythmScheduler(nn.Module):
             if selected_valid is not None:
                 selected_valid = selected_valid.float().reshape(unit_mask.size(0), 1).clamp(0.0, 1.0)
                 prompt_reliability = prompt_reliability * selected_valid
+        if effective_phase_decoupled_timing:
+            source_local_rho_unit = self._compute_source_local_rho(
+                dur_anchor_src=dur_anchor_src,
+                unit_mask=unit_mask,
+                commit_frontier=state.commit_frontier,
+            )
+            current_segment_shape_context_unit = self._sample_phrase_segment_shape(
+                phrase_selection.get("selected_ref_phrase_trace") if phrase_selection is not None else None,
+                source_local_rho_unit,
+                unit_mask,
+            )
+            next_segment_shape_context_unit = self._sample_phrase_segment_shape(
+                phrase_selection.get("next_ref_phrase_trace") if phrase_selection is not None else None,
+                source_local_rho_unit,
+                unit_mask,
+            )
+            (
+                blended_segment_shape_context_unit,
+                computed_segment_roll_alpha_unit,
+                soft_rollover_alpha,
+            ) = self._blend_segment_shape_context(
+                current_ctx=current_segment_shape_context_unit,
+                next_ctx=next_segment_shape_context_unit,
+                local_rho_unit=source_local_rho_unit,
+                unit_mask=unit_mask,
+                rollover_start=self.phase_decoupled_soft_rollover_start,
+            )
+            effective_segment_shape_context_unit = (
+                blended_segment_shape_context_unit
+                if blended_segment_shape_context_unit is not None
+                else effective_segment_shape_context_unit
+            )
+            effective_segment_roll_alpha_unit = (
+                computed_segment_roll_alpha_unit
+                if computed_segment_roll_alpha_unit is not None
+                else effective_segment_roll_alpha_unit
+            )
+            effective_open_tail_mask_unit = (
+                (source_local_rho_unit > 0.0).float() * unit_mask.float()
+                if source_local_rho_unit is not None
+                else effective_open_tail_mask_unit
+            )
+            if effective_segment_shape_context_unit is not None:
+                style_gate = prompt_reliability.float().reshape(unit_mask.size(0), 1, 1).clamp(0.0, 1.0)
+                effective_segment_shape_context_unit = effective_segment_shape_context_unit * style_gate
+            if effective_segment_roll_alpha_unit is not None:
+                effective_segment_roll_alpha_unit = (
+                    effective_segment_roll_alpha_unit
+                    * prompt_reliability.float().reshape(unit_mask.size(0), 1).clamp(0.0, 1.0)
+                )
+            if soft_rollover_alpha is not None:
+                soft_rollover_alpha = (
+                    soft_rollover_alpha
+                    * prompt_reliability.float().reshape(unit_mask.size(0), 1).clamp(0.0, 1.0)
+                )
+            blended_ref_phrase_trace = self._blend_phrase_trace(
+                phrase_selection.get("selected_ref_phrase_trace") if phrase_selection is not None else None,
+                phrase_selection.get("next_ref_phrase_trace") if phrase_selection is not None else None,
+                soft_rollover_alpha,
+            )
         if effective_phase_decoupled_timing:
             boundary_score_unit, boundary_style_residual_unit = self._apply_phase_decoupled_boundary_style_residual(
                 source_boundary_cue=source_boundary_cue,
@@ -308,6 +500,10 @@ class MonotonicRhythmScheduler(nn.Module):
             phrase_prototype_summary=phrase_prototype_summary,
             phrase_prototype_stats=phrase_prototype_stats,
             prompt_reliability=prompt_reliability,
+            segment_shape_context=effective_segment_shape_context_unit,
+            local_rho_unit=source_local_rho_unit,
+            segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
+            open_tail_mask_unit=effective_open_tail_mask_unit,
             phase_decoupled_timing=effective_phase_decoupled_timing,
             debt_control_scale=debt_control_scale,
             debt_pause_priority=debt_pause_priority,
@@ -320,6 +516,11 @@ class MonotonicRhythmScheduler(nn.Module):
             unit_mask=unit_mask,
             slow_rhythm_summary=slow_rhythm_summary,
             boundary_score_unit=boundary_score_unit,
+            segment_shape_context_unit=effective_segment_shape_context_unit,
+            local_rho_unit=source_local_rho_unit,
+            segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
+            soft_rollover_alpha=soft_rollover_alpha,
+            open_tail_mask_unit=effective_open_tail_mask_unit,
         )
         planner = RhythmPlannerOutputs(
             speech_budget_win=budget_outputs["speech_budget_win"],
@@ -371,8 +572,19 @@ class MonotonicRhythmScheduler(nn.Module):
             phrase_prototype_summary=phrase_prototype_summary,
             phrase_prototype_stats=phrase_prototype_stats,
             prompt_reliability=prompt_reliability,
+            ref_phrase_trace=blended_ref_phrase_trace,
+            local_rho_unit=source_local_rho_unit,
+            local_rho_prior_unit=source_local_rho_unit,
+            local_trace_ctx_unit=effective_segment_shape_context_unit,
+            segment_shape_context_unit=effective_segment_shape_context_unit,
+            segment_roll_alpha_unit=effective_segment_roll_alpha_unit,
+            open_tail_mask_unit=effective_open_tail_mask_unit,
             boundary_style_residual_unit=boundary_style_residual_unit,
-            intra_phrase_alpha=(chunk_state.structure_progress if chunk_state is not None else None),
+            intra_phrase_alpha=(
+                soft_rollover_alpha
+                if soft_rollover_alpha is not None
+                else (chunk_state.structure_progress if chunk_state is not None else None)
+            ),
         )
         planner.raw_speech_budget_win = budget_outputs.get("raw_speech_budget_win", planner.speech_budget_win)
         planner.raw_pause_budget_win = budget_outputs.get("raw_pause_budget_win", planner.pause_budget_win)
