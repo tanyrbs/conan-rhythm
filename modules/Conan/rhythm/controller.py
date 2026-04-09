@@ -418,7 +418,6 @@ class WindowBudgetController(nn.Module):
         self.segment_shape_dim = max(0, int(segment_shape_dim))
         self.segment_shape_scale = float(max(segment_shape_scale, 0.0))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
-        self.phase_free_timing = self.phase_decoupled_timing
         self.debt_control_scale = float(max(debt_control_scale, 1.0e-3))
         self.debt_pause_priority = float(max(debt_pause_priority, 0.0))
         self.debt_speech_priority = float(max(debt_speech_priority, 0.0))
@@ -472,7 +471,7 @@ class WindowBudgetController(nn.Module):
         phrase_prototype_summary: torch.Tensor | None = None,
         phrase_prototype_stats: torch.Tensor | None = None,
         prompt_reliability: torch.Tensor | None = None,
-        segment_shape_context: torch.Tensor | None = None,
+        segment_shape_context_unit: torch.Tensor | None = None,
         local_rho_unit: torch.Tensor | None = None,
         segment_roll_alpha_unit: torch.Tensor | None = None,
         open_tail_mask_unit: torch.Tensor | None = None,
@@ -551,12 +550,12 @@ class WindowBudgetController(nn.Module):
         clock_neg = (-clock_ctrl).clamp_min(0.0)
         clock_pair = torch.stack([clock_pos, clock_neg], dim=-1)
         clock_pair = clock_pair.unsqueeze(1).expand(-1, unit_states.size(1), -1)
-        if self.segment_shape_proj is not None and segment_shape_context is not None:
+        if self.segment_shape_proj is not None and segment_shape_context_unit is not None:
             if open_tail_mask_unit is None:
                 segment_mask = unit_mask
             else:
                 segment_mask = open_tail_mask_unit.float().to(device=unit_mask.device)
-            segment_shape_context = segment_shape_context.float().to(device=unit_states.device)
+            segment_shape_context = segment_shape_context_unit.float().to(device=unit_states.device)
             segment_rho = (
                 local_rho_unit.float().to(device=unit_states.device)
                 if local_rho_unit is not None
@@ -658,9 +657,9 @@ class UnitRedistributionHead(nn.Module):
         max_unit_logratio: float = 0.6,
         boundary_feature_scale: float = 0.35,
         segment_shape_dim: int = 3,
-        segment_shape_scale: float = 0.35,
-        local_rho_scale: float = 0.20,
-        soft_rollover_scale: float = 0.10,
+        segment_shape_scale: float = 0.0,
+        local_rho_scale: float = 0.0,
+        soft_rollover_scale: float = 0.0,
         pause_source_boundary_weight: float = 0.20,
         pause_support_split_enable: bool = False,
         pause_breath_features_enable: bool = False,
@@ -709,10 +708,8 @@ class UnitRedistributionHead(nn.Module):
         slow_rhythm_summary: torch.Tensor | None = None,
         boundary_score_unit: torch.Tensor | None = None,
         segment_shape_context_unit: torch.Tensor | None = None,
-        segment_shape_context: torch.Tensor | None = None,
         local_rho_unit: torch.Tensor | None = None,
         segment_roll_alpha_unit: torch.Tensor | None = None,
-        soft_rollover_alpha: torch.Tensor | None = None,
         open_tail_mask_unit: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         unit_mask = unit_mask.float()
@@ -722,12 +719,9 @@ class UnitRedistributionHead(nn.Module):
             slow_rhythm_summary = masked_mean(planner_trace_context, unit_mask, dim=1)
         src_log = torch.log1p(dur_anchor_src.float().clamp_min(0.0)).unsqueeze(-1)
         boundary_feat = (boundary_score_unit.float() * self.boundary_feature_scale).unsqueeze(-1)
-        effective_segment_shape_context = (
-            segment_shape_context_unit if segment_shape_context_unit is not None else segment_shape_context
-        )
         segment_bias = unit_states.new_zeros(unit_states.shape)
-        if self.segment_shape_proj is not None and effective_segment_shape_context is not None:
-            shape_ctx = effective_segment_shape_context.float().to(device=unit_states.device)
+        if self.segment_shape_proj is not None and segment_shape_context_unit is not None:
+            shape_ctx = segment_shape_context_unit.float().to(device=unit_states.device)
             if shape_ctx.size(-1) != self.segment_shape_dim:
                 if shape_ctx.size(-1) > self.segment_shape_dim:
                     shape_ctx = shape_ctx[..., : self.segment_shape_dim]
@@ -755,23 +749,15 @@ class UnitRedistributionHead(nn.Module):
             + segment_bias
         )
         if local_rho_unit is not None:
-            local_rho_feature = local_rho_unit.float().to(device=unit_states.device).unsqueeze(-1)
-            x = x + self.local_rho_scale * self.local_rho_proj(local_rho_feature)
-        effective_soft_rollover_alpha = soft_rollover_alpha
-        if effective_soft_rollover_alpha is None and segment_roll_alpha_unit is not None:
-            roll_mask = (
-                open_tail_mask_unit.float()
-                if open_tail_mask_unit is not None
-                else unit_mask.float()
-            ).to(device=unit_states.device)
-            roll_value = segment_roll_alpha_unit.float().to(device=unit_states.device) * roll_mask
-            effective_soft_rollover_alpha = (
-                roll_value.sum(dim=1, keepdim=True)
-                / roll_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            )
-        if effective_soft_rollover_alpha is not None:
-            rollover = effective_soft_rollover_alpha.float().to(device=unit_states.device).reshape(unit_mask.size(0), 1, 1)
-            x = x + self.soft_rollover_scale * self.soft_rollover_proj(rollover)
+            local_rho_feature = local_rho_unit.float().to(device=unit_states.device)
+            if open_tail_mask_unit is not None:
+                local_rho_feature = local_rho_feature * open_tail_mask_unit.float().to(device=unit_states.device)
+            x = x + self.local_rho_scale * self.local_rho_proj(local_rho_feature.unsqueeze(-1))
+        if segment_roll_alpha_unit is not None:
+            rollover = segment_roll_alpha_unit.float().to(device=unit_states.device)
+            if open_tail_mask_unit is not None:
+                rollover = rollover * open_tail_mask_unit.float().to(device=unit_states.device)
+            x = x + self.soft_rollover_scale * self.soft_rollover_proj(rollover.unsqueeze(-1))
         if self.pause_feature_proj is not None:
             x = x + self.pause_feature_proj(pause_feature_bundle.feature_tensor)
         x = self.in_proj(x)

@@ -12,9 +12,11 @@ def build_runtime_teacher_aux_loss_dict(
 ) -> dict[str, torch.Tensor]:
     if float(lambda_teacher_aux) <= 0.0:
         return {}
+    zero = next(iter(teacher_losses.values())).new_tensor(0.0)
     teacher_exec = (
-        teacher_losses["rhythm_exec_speech"] * hparams.get("lambda_rhythm_exec_speech", 1.0)
-        + teacher_losses["rhythm_exec_pause"] * hparams.get("lambda_rhythm_exec_pause", 1.0)
+        teacher_losses.get("rhythm_exec_speech", zero) * hparams.get("lambda_rhythm_exec_speech", 1.0)
+        + teacher_losses.get("rhythm_exec_stretch", zero) * hparams.get("lambda_rhythm_exec_speech", 1.0)
+        + teacher_losses.get("rhythm_exec_pause", zero) * hparams.get("lambda_rhythm_exec_pause", 1.0)
     )
     teacher_state = (
         teacher_losses["rhythm_budget"] * hparams.get("lambda_rhythm_budget", 0.25)

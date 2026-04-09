@@ -1006,7 +1006,7 @@ class StreamingRhythmProjector(nn.Module):
         execution_planner.phrase_prototype_stats = getattr(planner, "phrase_prototype_stats", None)
         execution_planner.prompt_reliability = getattr(planner, "prompt_reliability", None)
         execution_planner.boundary_style_residual_unit = getattr(planner, "boundary_style_residual_unit", None)
-        execution_planner.intra_phrase_alpha = getattr(planner, "intra_phrase_alpha", None)
+        execution_planner.intra_phrase_alpha = None
         execution_planner.boundary_type_unit = getattr(planner, "boundary_type_unit", None)
         execution_planner.boundary_lengthening_unit = getattr(planner, "boundary_lengthening_unit", None)
         execution_planner.commit_boundary_logit_unit = getattr(planner, "commit_boundary_logit_unit", None)
@@ -1023,8 +1023,8 @@ class StreamingRhythmProjector(nn.Module):
         execution_planner.ref_phrase_stats = getattr(planner, "ref_phrase_stats", None)
         execution_planner.active_phrase_start = getattr(planner, "active_phrase_start", None)
         execution_planner.active_phrase_end = getattr(planner, "active_phrase_end", None)
-        execution_planner.local_trace_ctx_unit = getattr(planner, "local_trace_ctx_unit", None)
-        execution_planner.local_rho_unit = getattr(planner, "local_rho_unit", None)
+        execution_planner.local_trace_ctx_unit = None
+        execution_planner.local_rho_unit = None
         execution_planner.local_rho_prior_unit = getattr(planner, "local_rho_prior_unit", None)
         execution_planner.segment_shape_context_unit = getattr(planner, "segment_shape_context_unit", None)
         execution_planner.segment_roll_alpha_unit = getattr(planner, "segment_roll_alpha_unit", None)

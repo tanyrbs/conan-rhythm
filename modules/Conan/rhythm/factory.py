@@ -54,6 +54,16 @@ def resolve_phase_decoupled_phrase_gate_boundary_threshold_from_hparams(hparams)
     )
 
 
+def resolve_phase_decoupled_rollover_start_from_hparams(hparams) -> float:
+    return _resolve_alias_value(
+        hparams,
+        canonical_key='rhythm_phase_decoupled_rollover_start',
+        legacy_key='rhythm_phase_decoupled_soft_rollover_start',
+        default=0.68,
+        cast=float,
+    )
+
+
 def resolve_content_vocab_size(hparams) -> int:
     for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "content_embedding_dim"):
         value = hparams.get(key, None)
@@ -211,6 +221,7 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
     phase_decoupled_phrase_gate_boundary_threshold = (
         resolve_phase_decoupled_phrase_gate_boundary_threshold_from_hparams(hparams)
     )
+    phase_decoupled_rollover_start = resolve_phase_decoupled_rollover_start_from_hparams(hparams)
     return StreamingRhythmModule(
         num_units=num_units,
         hidden_size=int(hparams.get('rhythm_hidden_size', hparams.get('hidden_size', 256))),
@@ -294,26 +305,15 @@ def build_streaming_rhythm_module_from_hparams(hparams) -> StreamingRhythmModule
             hparams.get('rhythm_phase_decoupled_boundary_style_residual_scale', 0.18)
         ),
         phase_decoupled_segment_shape_scale=float(
-            hparams.get('rhythm_phase_decoupled_segment_shape_scale', 0.35)
+            hparams.get('rhythm_phase_decoupled_segment_shape_scale', 0.0)
         ),
         phase_decoupled_local_rho_scale=float(
-            hparams.get('rhythm_phase_decoupled_local_rho_scale', 0.20)
+            hparams.get('rhythm_phase_decoupled_local_rho_scale', 0.0)
         ),
         phase_decoupled_soft_rollover_scale=float(
-            hparams.get('rhythm_phase_decoupled_soft_rollover_scale', 0.10)
+            hparams.get('rhythm_phase_decoupled_soft_rollover_scale', 0.0)
         ),
-        phase_decoupled_soft_rollover_start=float(
-            hparams.get(
-                'rhythm_phase_decoupled_soft_rollover_start',
-                hparams.get('rhythm_phase_decoupled_rollover_start', 0.35),
-            )
-        ),
-        phase_decoupled_rollover_start=float(
-            hparams.get(
-                'rhythm_phase_decoupled_rollover_start',
-                hparams.get('rhythm_phase_decoupled_soft_rollover_start', 0.68),
-            )
-        ),
+        phase_decoupled_rollover_start=phase_decoupled_rollover_start,
         phase_decoupled_rollover_end=float(
             hparams.get('rhythm_phase_decoupled_rollover_end', 0.92)
         ),

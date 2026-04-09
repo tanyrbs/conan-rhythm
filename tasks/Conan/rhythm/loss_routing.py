@@ -89,6 +89,7 @@ def _collect_reporting_total_keys(
         _append_reporting_key(keys, seen, losses, "rhythm_exec")
     else:
         _append_reporting_key(keys, seen, losses, "rhythm_exec_speech")
+        _append_reporting_key(keys, seen, losses, "rhythm_exec_stretch")
         _append_reporting_key(keys, seen, losses, "rhythm_exec_pause")
 
     if compact_joint and isinstance(losses.get("rhythm_stream_state"), torch.Tensor):
@@ -203,7 +204,7 @@ def _compact_rhythm_optimizer_losses(losses, *, hparams, schedule_only_stage: bo
         return
     exec_terms = []
     exec_keys = []
-    for key in ("rhythm_exec_speech", "rhythm_exec_pause"):
+    for key in ("rhythm_exec_speech", "rhythm_exec_stretch", "rhythm_exec_pause"):
         value = losses.get(key)
         if isinstance(value, torch.Tensor):
             exec_keys.append(key)
@@ -261,6 +262,8 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     zero = torch.tensor(0.0, device=device or "cpu")
     if "rhythm_exec_speech" in losses:
         losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
+    if "rhythm_exec_stretch" in losses:
+        losses["L_exec_stretch"] = losses["rhythm_exec_stretch"].detach()
     if "rhythm_exec_pause" in losses:
         losses["L_exec_pause"] = losses["rhythm_exec_pause"].detach()
     losses["L_exec_pause_value"] = (
@@ -333,7 +336,7 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
     rhythm_exec = losses.get("rhythm_exec")
     if not isinstance(rhythm_exec, torch.Tensor):
         rhythm_exec = zero
-        for key in ("rhythm_exec_speech", "rhythm_exec_pause"):
+        for key in ("rhythm_exec_speech", "rhythm_exec_stretch", "rhythm_exec_pause"):
             value = losses.get(key)
             if isinstance(value, torch.Tensor):
                 rhythm_exec = rhythm_exec + value.detach()

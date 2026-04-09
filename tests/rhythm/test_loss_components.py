@@ -29,6 +29,7 @@ class RhythmLossComponentTests(unittest.TestCase):
         segment_shape_context: torch.Tensor | None = None,
         open_tail_mask: torch.Tensor | None = None,
         segment_roll_alpha: torch.Tensor | None = None,
+        dur_logratio_unit: torch.Tensor | None = None,
     ):
         speech_budget = speech.sum(dim=1, keepdim=True)
         pause_budget = pause.sum(dim=1, keepdim=True)
@@ -50,6 +51,7 @@ class RhythmLossComponentTests(unittest.TestCase):
             open_tail_mask_unit=open_tail_mask,
             segment_roll_alpha_unit=segment_roll_alpha,
             feasible_total_budget_delta=torch.zeros_like(speech_budget),
+            dur_logratio_unit=dur_logratio_unit if dur_logratio_unit is not None else torch.zeros_like(speech),
         )
         return SimpleNamespace(
             speech_duration_exec=speech,
@@ -276,6 +278,30 @@ class RhythmLossComponentTests(unittest.TestCase):
             )
         )
         self.assertTrue(torch.allclose(event_losses["L_pause_event"], event_losses["rhythm_pause_event"]))
+
+    def test_unit_logratio_loss_alias_maps_to_public(self) -> None:
+        speech = torch.tensor([[1.0, 1.0]], dtype=torch.float32)
+        pause = torch.zeros_like(speech)
+        execution = self._execution(
+            speech,
+            pause,
+            dur_logratio_unit=torch.zeros_like(speech),
+        )
+        targets = RhythmLossTargets(
+            speech_exec_tgt=torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            pause_exec_tgt=pause,
+            speech_budget_tgt=torch.tensor([[3.0]], dtype=torch.float32),
+            pause_budget_tgt=torch.zeros((1, 1), dtype=torch.float32),
+            unit_mask=torch.ones_like(speech),
+            dur_anchor_src=torch.ones_like(speech),
+            unit_logratio_weight=1.0,
+            plan_local_weight=0.0,
+            plan_cum_weight=0.0,
+        )
+        losses = build_rhythm_loss_dict(execution, targets)
+        self.assertGreater(float(losses["rhythm_exec_stretch"].item()), 0.0)
+        update_public_loss_aliases(losses, mel_loss_names=())
+        self.assertTrue(torch.allclose(losses["L_exec_stretch"], losses["rhythm_exec_stretch"]))
 
     def test_pause_event_aux_ignores_boundary_weighted_pause_mask(self) -> None:
         speech = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)

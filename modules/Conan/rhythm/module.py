@@ -100,10 +100,9 @@ class StreamingRhythmModule(nn.Module):
         phase_decoupled_timing: bool | None = None,
         phase_decoupled_phrase_gate_boundary_threshold: float | None = None,
         phase_decoupled_boundary_style_residual_scale: float = 0.18,
-        phase_decoupled_segment_shape_scale: float = 0.35,
-        phase_decoupled_local_rho_scale: float = 0.20,
-        phase_decoupled_soft_rollover_scale: float = 0.10,
-        phase_decoupled_soft_rollover_start: float = 0.35,
+        phase_decoupled_segment_shape_scale: float = 0.0,
+        phase_decoupled_local_rho_scale: float = 0.0,
+        phase_decoupled_soft_rollover_scale: float = 0.0,
         phase_decoupled_rollover_start: float = 0.68,
         phase_decoupled_rollover_end: float = 0.92,
         debt_control_scale: float = 4.0,
@@ -188,7 +187,8 @@ class StreamingRhythmModule(nn.Module):
             phase_decoupled_segment_shape_scale=phase_decoupled_segment_shape_scale,
             phase_decoupled_local_rho_scale=phase_decoupled_local_rho_scale,
             phase_decoupled_soft_rollover_scale=phase_decoupled_soft_rollover_scale,
-            phase_decoupled_soft_rollover_start=phase_decoupled_soft_rollover_start,
+            phase_decoupled_rollover_start=phase_decoupled_rollover_start,
+            phase_decoupled_rollover_end=phase_decoupled_rollover_end,
             debt_control_scale=debt_control_scale,
             debt_pause_priority=debt_pause_priority,
             debt_speech_priority=debt_speech_priority,
@@ -245,17 +245,12 @@ class StreamingRhythmModule(nn.Module):
         )
         self.boundary_lengthening_max = float(max(0.0, boundary_lengthening_max))
         self.phase_decoupled_timing = bool(phase_decoupled_timing)
-        self.phase_free_timing = self.phase_decoupled_timing
         self.phase_decoupled_phrase_gate_boundary_threshold = float(
             min(max(phase_decoupled_phrase_gate_boundary_threshold, 0.0), 1.0)
         )
-        self.phase_free_phrase_boundary_threshold = self.phase_decoupled_phrase_gate_boundary_threshold
         self.phase_decoupled_segment_shape_scale = float(max(phase_decoupled_segment_shape_scale, 0.0))
         self.phase_decoupled_local_rho_scale = float(max(phase_decoupled_local_rho_scale, 0.0))
         self.phase_decoupled_soft_rollover_scale = float(max(phase_decoupled_soft_rollover_scale, 0.0))
-        self.phase_decoupled_soft_rollover_start = float(
-            min(max(phase_decoupled_soft_rollover_start, 0.0), 0.95)
-        )
         self.phase_decoupled_rollover_start = float(min(max(phase_decoupled_rollover_start, 0.0), 1.0))
         self.phase_decoupled_rollover_end = float(
             min(max(phase_decoupled_rollover_end, self.phase_decoupled_rollover_start + 1.0e-6), 1.0)
@@ -416,14 +411,10 @@ class StreamingRhythmModule(nn.Module):
         unit_mask: torch.Tensor,
         commit_frontier: torch.Tensor,
     ) -> torch.Tensor:
-        steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
-        visible_len = unit_mask.float().sum(dim=1).long().clamp(min=0, max=unit_mask.size(1))
-        frontier = commit_frontier.long().to(device=unit_mask.device).clamp(min=0, max=unit_mask.size(1))
-        return (
-            (steps >= frontier[:, None])
-            & (steps < visible_len[:, None])
-            & (unit_mask > 0.5)
-        ).float()
+        return MonotonicRhythmScheduler._build_open_tail_mask(
+            unit_mask=unit_mask,
+            commit_frontier=commit_frontier,
+        )
 
     @staticmethod
     def _compute_anchor_local_rho(
@@ -432,81 +423,11 @@ class StreamingRhythmModule(nn.Module):
         unit_mask: torch.Tensor,
         open_tail_mask: torch.Tensor,
     ) -> torch.Tensor:
-        open_tail_mask = open_tail_mask.float() * unit_mask.float()
-        if float(open_tail_mask.sum().item()) <= 0.0:
-            return torch.zeros_like(open_tail_mask)
-        anchor_mass = dur_anchor_src.float().clamp_min(0.0) * open_tail_mask
-        mass_total = anchor_mass.sum(dim=1, keepdim=True)
-        mass_cum = torch.cumsum(anchor_mass, dim=1)
-        unit_cum = torch.cumsum(open_tail_mask, dim=1)
-        unit_total = open_tail_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        uniform_rho = unit_cum / unit_total
-        rho = torch.where(
-            mass_total > 1.0e-6,
-            mass_cum / mass_total.clamp_min(1.0e-6),
-            uniform_rho,
+        return MonotonicRhythmScheduler._compute_source_local_rho_from_mask(
+            dur_anchor_src=dur_anchor_src,
+            unit_mask=unit_mask,
+            open_tail_mask=open_tail_mask,
         )
-        return rho.clamp(0.0, 1.0) * open_tail_mask
-
-    @staticmethod
-    def _sample_rho_trace_context(
-        *,
-        ref_phrase_trace: torch.Tensor | None,
-        local_rho_unit: torch.Tensor | None,
-        segment_mask: torch.Tensor | None,
-        unit_mask: torch.Tensor,
-    ) -> torch.Tensor | None:
-        if ref_phrase_trace is None or local_rho_unit is None or segment_mask is None:
-            return None
-        trace = ref_phrase_trace
-        if trace.dim() == 4:
-            if trace.size(1) != 1:
-                return None
-            trace = trace[:, 0]
-        if trace.dim() != 3:
-            return None
-        batch_size, bins, trace_dim = trace.shape
-        if local_rho_unit.size(0) != batch_size:
-            return None
-        segment_mask_f = (segment_mask.float() * unit_mask.float()).clamp(0.0, 1.0)
-        if float(segment_mask_f.sum().item()) <= 0.0:
-            return torch.zeros(
-                (unit_mask.size(0), unit_mask.size(1), trace_dim),
-                device=unit_mask.device,
-                dtype=trace.dtype,
-            )
-        trace = trace.to(device=unit_mask.device, dtype=torch.float32)
-        rho = local_rho_unit.float().to(device=unit_mask.device).clamp(0.0, 1.0)
-        if bins <= 1:
-            context = trace[:, :1, :].expand(-1, unit_mask.size(1), -1)
-            return context * segment_mask_f.unsqueeze(-1)
-        pos = rho * float(bins - 1)
-        low = pos.floor().long().clamp(min=0, max=bins - 1)
-        high = pos.ceil().long().clamp(min=0, max=bins - 1)
-        batch_index = torch.arange(batch_size, device=unit_mask.device)[:, None]
-        low_ctx = trace[batch_index, low]
-        high_ctx = trace[batch_index, high]
-        frac = (pos - low.float()).unsqueeze(-1)
-        context = low_ctx * (1.0 - frac) + high_ctx * frac
-        return context * segment_mask_f.unsqueeze(-1)
-
-    @staticmethod
-    def _gather_phrase_bank_row(value: torch.Tensor | None, index: torch.Tensor) -> torch.Tensor | None:
-        if value is None:
-            return None
-        if value.dim() < 2:
-            raise ValueError(f"phrase-bank value must have rank >= 2, got {tuple(value.shape)}")
-        gather_index = index.long().clamp_min(0).view(value.size(0), 1, *([1] * (value.dim() - 2)))
-        expand_shape = [value.size(0), 1, *list(value.shape[2:])]
-        gather_index = gather_index.expand(*expand_shape)
-        gathered = value.gather(1, gather_index)
-        return gathered.squeeze(1)
-
-    @staticmethod
-    def _smoothstep(value: torch.Tensor, *, start: float, end: float) -> torch.Tensor:
-        denom = max(float(end) - float(start), 1.0e-6)
-        alpha = ((value.float() - float(start)) / denom).clamp(0.0, 1.0)
-        return alpha * alpha * (3.0 - 2.0 * alpha)
 
     def _build_phase_decoupled_segment_shape_context(
         self,
@@ -517,63 +438,14 @@ class StreamingRhythmModule(nn.Module):
         unit_mask: torch.Tensor,
         state: StreamingRhythmState,
     ) -> dict[str, torch.Tensor]:
-        if phrase_selection is None:
-            return {}
-        current_phrase_trace = phrase_selection.get("selected_ref_phrase_trace")
-        if current_phrase_trace is None:
-            return {}
-        open_tail_mask = self._build_open_tail_mask(
+        bundle, _ = self.scheduler._build_phase_decoupled_segment_shape_bundle(
+            ref_conditioning=ref_conditioning,
+            phrase_selection=phrase_selection,
+            dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
             commit_frontier=state.commit_frontier,
         )
-        local_rho = self._compute_anchor_local_rho(
-            dur_anchor_src=dur_anchor_src,
-            unit_mask=unit_mask,
-            open_tail_mask=open_tail_mask,
-        )
-        current_ctx = self._sample_rho_trace_context(
-            ref_phrase_trace=current_phrase_trace,
-            local_rho_unit=local_rho,
-            segment_mask=open_tail_mask,
-            unit_mask=unit_mask,
-        )
-        if current_ctx is None or current_ctx.size(-1) < 4:
-            return {
-                "open_tail_mask_unit": open_tail_mask,
-                "local_rho_prior_unit": local_rho,
-            }
-        current_shape = current_ctx[:, :, 1:4]
-        next_phrase_trace = phrase_selection.get("next_ref_phrase_trace")
-        if next_phrase_trace is None:
-            phrase_bank = ref_conditioning.get("ref_phrase_trace")
-            phrase_valid = ref_conditioning.get("ref_phrase_valid")
-            selected_index = phrase_selection.get("selected_ref_phrase_index")
-            if phrase_bank is not None and phrase_valid is not None and selected_index is not None:
-                selected_index = selected_index.long().reshape(phrase_bank.size(0), -1)[:, 0]
-                valid_count = phrase_valid.long().sum(dim=1).clamp_min(1)
-                next_index = torch.minimum(selected_index + 1, valid_count - 1)
-                next_phrase_trace = self._gather_phrase_bank_row(phrase_bank, next_index)
-        roll_alpha = self._smoothstep(
-            local_rho,
-            start=self.phase_decoupled_rollover_start,
-            end=self.phase_decoupled_rollover_end,
-        ) * open_tail_mask
-        if next_phrase_trace is not None and next_phrase_trace.dim() == 3 and next_phrase_trace.size(-1) >= 4:
-            next_entry = next_phrase_trace[:, :1, 1:4].to(device=unit_mask.device, dtype=current_shape.dtype)
-            next_entry = next_entry.expand(-1, unit_mask.size(1), -1)
-            segment_shape_context = (
-                current_shape * (1.0 - roll_alpha.unsqueeze(-1))
-                + next_entry * roll_alpha.unsqueeze(-1)
-            )
-        else:
-            segment_shape_context = current_shape
-        segment_shape_context = segment_shape_context * open_tail_mask.unsqueeze(-1)
-        return {
-            "open_tail_mask_unit": open_tail_mask,
-            "local_rho_prior_unit": local_rho,
-            "segment_roll_alpha_unit": roll_alpha,
-            "segment_shape_context_unit": segment_shape_context,
-        }
+        return bundle
 
     @staticmethod
     def _resolve_phase_decoupled_phrase_gate(
@@ -1443,6 +1315,18 @@ class StreamingRhythmModule(nn.Module):
         )
         return phrase_speech_budget, phrase_pause_budget
 
+    @staticmethod
+    def _attach_phrase_selection_to_planner(planner, phrase_selection: dict[str, torch.Tensor] | None):
+        if phrase_selection is None:
+            return planner
+        if getattr(planner, "ref_phrase_index", None) is None:
+            planner.ref_phrase_index = phrase_selection.get("selected_ref_phrase_index")
+        if getattr(planner, "ref_phrase_trace", None) is None:
+            planner.ref_phrase_trace = phrase_selection.get("selected_ref_phrase_trace")
+        if getattr(planner, "ref_phrase_stats", None) is None:
+            planner.ref_phrase_stats = phrase_selection.get("selected_ref_phrase_stats")
+        return planner
+
     def _attach_commit_phrase_plan_to_planner(
         self,
         *,
@@ -1471,12 +1355,7 @@ class StreamingRhythmModule(nn.Module):
         planner.boundary_lengthening_unit = boundary_lengthening_unit
         planner.phrase_speech_budget_win = phrase_speech_budget
         planner.phrase_pause_budget_win = phrase_pause_budget
-        if phrase_selection is not None:
-            planner.ref_phrase_index = phrase_selection.get("selected_ref_phrase_index")
-            if getattr(planner, "ref_phrase_trace", None) is None:
-                planner.ref_phrase_trace = phrase_selection.get("selected_ref_phrase_trace")
-            planner.ref_phrase_stats = phrase_selection.get("selected_ref_phrase_stats")
-        return planner
+        return self._attach_phrase_selection_to_planner(planner, phrase_selection)
 
     def _enrich_planner_with_runtime_commit(
         self,
@@ -1837,11 +1716,7 @@ class StreamingRhythmModule(nn.Module):
             debt_pause_priority=debt_pause_priority,
             debt_speech_priority=debt_speech_priority,
         )
-        if phrase_selection is not None:
-            planner.ref_phrase_index = phrase_selection.get("selected_ref_phrase_index")
-            if getattr(planner, "ref_phrase_trace", None) is None:
-                planner.ref_phrase_trace = phrase_selection.get("selected_ref_phrase_trace")
-            planner.ref_phrase_stats = phrase_selection.get("selected_ref_phrase_stats")
+        planner = self._attach_phrase_selection_to_planner(planner, phrase_selection)
         planner, commit_decision = self._enrich_planner_with_runtime_commit(
             planner=planner,
             ref_conditioning=ref_conditioning,

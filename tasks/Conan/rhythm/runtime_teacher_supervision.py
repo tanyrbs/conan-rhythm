@@ -313,6 +313,7 @@ def build_runtime_teacher_supervision_targets(
         pause_budget_tgt=pause_budget_tgt,
         unit_mask=unit_mask[:, :teacher_units],
         dur_anchor_src=batch_for_targets.dur_anchor_src[:, :teacher_units],
+        unit_logratio_weight=0.0,
         plan_local_weight=float(plan_local_weight),
         plan_cum_weight=float(plan_cum_weight),
         plan_segment_shape_weight=0.0,

@@ -23,12 +23,14 @@ class RhythmLossBalanceTests(unittest.TestCase):
         )
         losses = {
             "rhythm_exec_speech": torch.tensor(2.0, requires_grad=True),
+            "rhythm_exec_stretch": torch.tensor(1.0, requires_grad=True),
             "rhythm_exec_pause": torch.tensor(2.0, requires_grad=True),
             "rhythm_budget": torch.tensor(1.0, requires_grad=True),
             "rhythm_prefix_state": torch.tensor(1.0, requires_grad=True),
         }
         balanced = balancer.apply(losses, global_step=0, training=True)
         self.assertTrue(torch.allclose(balanced["rhythm_exec_speech"], losses["rhythm_exec_speech"]))
+        self.assertTrue(torch.allclose(balanced["rhythm_exec_stretch"], losses["rhythm_exec_stretch"]))
         self.assertNotIn("rhythm_loss_balance_exec_scale", balanced)
 
     def test_balancer_downweights_large_group_and_recenters_scales(self) -> None:
@@ -44,6 +46,7 @@ class RhythmLossBalanceTests(unittest.TestCase):
         )
         losses = {
             "rhythm_exec_speech": torch.tensor(4.0, requires_grad=True),
+            "rhythm_exec_stretch": torch.tensor(0.5, requires_grad=True),
             "rhythm_exec_pause": torch.tensor(0.0, requires_grad=True),
             "rhythm_budget": torch.tensor(1.0, requires_grad=True),
             "rhythm_prefix_state": torch.tensor(0.0, requires_grad=True),
@@ -55,6 +58,7 @@ class RhythmLossBalanceTests(unittest.TestCase):
         self.assertGreater(state_scale, 1.0)
         self.assertAlmostEqual((exec_scale + state_scale) / 2.0, 1.0, places=5)
         self.assertTrue(torch.allclose(balanced["rhythm_exec_speech"], losses["rhythm_exec_speech"] * exec_scale))
+        self.assertTrue(torch.allclose(balanced["rhythm_exec_stretch"], losses["rhythm_exec_stretch"] * exec_scale))
         self.assertTrue(torch.allclose(balanced["rhythm_budget"], losses["rhythm_budget"] * state_scale))
 
 

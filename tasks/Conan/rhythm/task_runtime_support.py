@@ -59,6 +59,7 @@ class RhythmTaskRuntimeSupport:
             distill_pause_shape_weight=float(hparams.get("rhythm_distill_pause_shape_weight", 0.0)),
             plan_local_weight=plan_local_weight,
             plan_cum_weight=plan_cum_weight,
+            unit_logratio_weight=_nonnegative_hparam("rhythm_unit_logratio_weight", 0.0),
             pause_boundary_weight=self.owner._resolve_rhythm_pause_boundary_weight(),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),

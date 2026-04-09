@@ -897,7 +897,6 @@ def scale_rhythm_loss_terms(
     plan_cum_weight = float(hparams.get("rhythm_plan_cum_weight", 1.0))
     plan_segment_shape_weight = float(hparams.get("rhythm_plan_segment_shape_weight", 0.0))
     plan_pause_release_weight = float(hparams.get("rhythm_plan_pause_release_weight", 0.0))
-    unit_logratio_weight = float(hparams.get("rhythm_unit_logratio_weight", 0.0))
     distill_budget_weight = float(hparams.get("rhythm_distill_budget_weight", 0.5))
     prefix_state = _resolve_prefix_state_loss()
     scaled_prefix_state = prefix_state * float(cumplan_lambda)
@@ -926,7 +925,6 @@ def scale_rhythm_loss_terms(
             float(hparams.get("lambda_rhythm_exec_pause", 1.0)),
             allow_missing=True,
         ),
-        "rhythm_unit_logratio_weight": torch.tensor(unit_logratio_weight).detach(),
         "rhythm_budget": rhythm_losses["rhythm_budget"] * lambda_budget,
         "rhythm_budget_raw_surface": _scaled_detached(
             "rhythm_budget_raw_surface",

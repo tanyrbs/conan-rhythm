@@ -10,10 +10,14 @@ from .context import RhythmStageValidationContext
 
 _REQUIRED_PUBLIC_LOSSES = {
     "L_exec_speech",
+    "L_exec_stretch",
     "L_exec_pause",
+    "L_exec_pause_value",
     "L_budget",
     "L_prefix_state",
     "L_base",
+    "L_rhythm_exec",
+    "L_stream_state",
 }
 _MAINLINE_STAGES = {"teacher_offline", "student_kd", "student_retimed"}
 
@@ -35,6 +39,7 @@ def _validate_nonnegative_weights(ctx: RhythmStageValidationContext, errors: lis
         "rhythm_plan_cum_weight": knobs.plan_cum_weight,
         "rhythm_plan_segment_shape_weight": knobs.plan_segment_shape_weight,
         "rhythm_plan_pause_release_weight": knobs.plan_pause_release_weight,
+        "rhythm_unit_logratio_weight": knobs.unit_logratio_weight,
         "rhythm_pause_boundary_weight": knobs.pause_boundary_weight,
         "rhythm_distill_exec_weight": knobs.distill_exec_weight,
         "rhythm_distill_budget_weight": knobs.distill_budget_weight,
@@ -274,15 +279,31 @@ def _validate_reporting_and_export_hints(
             "rhythm_export_cache_audit_to_sample=true adds cache appendix fields to runtime batch; keep it off outside audits."
         )
     if knobs.public_losses:
-        missing_public = sorted(_REQUIRED_PUBLIC_LOSSES.difference(set(knobs.public_losses)))
+        public_losses = set(knobs.public_losses)
+        missing_public = sorted(_REQUIRED_PUBLIC_LOSSES.difference(public_losses))
         if missing_public:
             warnings.append(
                 f"rhythm_public_losses is missing maintained mainline aliases: {missing_public}."
             )
-        if knobs.pause_allocation_weight > 0.0 and "L_pause_allocation" not in set(knobs.public_losses):
+        if knobs.unit_logratio_weight > 0.0 and "L_exec_stretch" not in public_losses:
+            warnings.append(
+                "rhythm_unit_logratio_weight > 0 but rhythm_public_losses omits L_exec_stretch; "
+                "the planner stretch objective will be active without a direct public diagnostic alias."
+            )
+        if knobs.pause_allocation_weight > 0.0 and "L_pause_allocation" not in public_losses:
             warnings.append(
                 "rhythm_pause_allocation_weight > 0 but rhythm_public_losses omits L_pause_allocation; "
                 "the structural pause-allocation diagnostic term will be harder to monitor in logs."
+            )
+        if knobs.lambda_plan > 0.0 and knobs.plan_segment_shape_weight > 0.0 and "L_plan_segment_shape" not in public_losses:
+            warnings.append(
+                "lambda_rhythm_plan > 0 with rhythm_plan_segment_shape_weight > 0 but rhythm_public_losses omits L_plan_segment_shape; "
+                "the open-tail segment-shape proxy will be harder to monitor in logs."
+            )
+        if knobs.lambda_plan > 0.0 and knobs.plan_pause_release_weight > 0.0 and "L_plan_pause_release" not in public_losses:
+            warnings.append(
+                "lambda_rhythm_plan > 0 with rhythm_plan_pause_release_weight > 0 but rhythm_public_losses omits L_plan_pause_release; "
+                "the pause-release proxy will be harder to monitor in logs."
             )
 
 

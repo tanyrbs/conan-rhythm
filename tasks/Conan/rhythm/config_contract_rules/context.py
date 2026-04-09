@@ -69,6 +69,7 @@ class RhythmStageKnobs:
     plan_cum_weight: float
     plan_segment_shape_weight: float
     plan_pause_release_weight: float
+    unit_logratio_weight: float
     budget_raw_weight: float
     budget_exec_weight: float
     pause_topk_ratio: float
@@ -227,6 +228,7 @@ def build_stage_validation_context(
             plan_cum_weight=float(hparams.get("rhythm_plan_cum_weight", 1.0)),
             plan_segment_shape_weight=float(hparams.get("rhythm_plan_segment_shape_weight", 0.0)),
             plan_pause_release_weight=float(hparams.get("rhythm_plan_pause_release_weight", 0.0)),
+            unit_logratio_weight=float(hparams.get("rhythm_unit_logratio_weight", 0.0)),
             budget_raw_weight=float(hparams.get("rhythm_budget_raw_weight", 1.0)),
             budget_exec_weight=float(hparams.get("rhythm_budget_exec_weight", 0.25)),
             pause_topk_ratio=pause_topk_ratio,

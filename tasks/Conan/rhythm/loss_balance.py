@@ -6,7 +6,7 @@ import torch
 
 
 _GROUP_LOSS_KEYS = {
-    "exec": ("rhythm_exec_speech", "rhythm_exec_pause"),
+    "exec": ("rhythm_exec_speech", "rhythm_exec_stretch", "rhythm_exec_pause"),
     "state": ("rhythm_budget", "rhythm_prefix_state"),
     "plan": ("rhythm_plan",),
     "guidance": ("rhythm_guidance",),
@@ -14,7 +14,7 @@ _GROUP_LOSS_KEYS = {
 }
 
 _GROUP_APPLY_KEYS = {
-    "exec": ("rhythm_exec_speech", "rhythm_exec_pause"),
+    "exec": ("rhythm_exec_speech", "rhythm_exec_stretch", "rhythm_exec_pause"),
     "state": (
         "rhythm_budget",
         "rhythm_budget_raw_surface",
@@ -28,7 +28,13 @@ _GROUP_APPLY_KEYS = {
         "rhythm_cumplan",
         "rhythm_carry",
     ),
-    "plan": ("rhythm_plan", "rhythm_plan_local", "rhythm_plan_cum"),
+    "plan": (
+        "rhythm_plan",
+        "rhythm_plan_local",
+        "rhythm_plan_cum",
+        "rhythm_plan_segment_shape",
+        "rhythm_plan_pause_release",
+    ),
     "guidance": ("rhythm_guidance",),
     "distill": (
         "rhythm_distill",

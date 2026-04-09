@@ -111,23 +111,24 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
                 "rhythm_distill_budget_weight": 0.0,
                 "rhythm_distill_allocation_weight": 0.0,
                 "rhythm_distill_prefix_weight": 0.0,
-                "rhythm_distill_speech_shape_weight": 0.25,
-                "rhythm_distill_pause_shape_weight": 0.25,
-                "rhythm_budget_raw_weight": 1.0,
-                "rhythm_budget_exec_weight": 0.25,
-                "rhythm_feasible_debt_weight": 0.05,
-                "rhythm_pause_event_weight": 0.20,
-                "rhythm_pause_support_weight": 0.08,
-                "rhythm_pause_allocation_weight": 0.04,
-                "rhythm_plan_segment_shape_weight": 0.20,
-                "rhythm_plan_pause_release_weight": 0.10,
-                "rhythm_pause_event_threshold": 0.60,
-                "rhythm_pause_event_temperature": 0.15,
-                "rhythm_pause_event_pos_weight": 2.75,
-                "rhythm_suppress_duplicate_primary_distill": True,
-            },
-            clear=True,
-        ):
+            "rhythm_distill_speech_shape_weight": 0.25,
+            "rhythm_distill_pause_shape_weight": 0.25,
+            "rhythm_budget_raw_weight": 1.0,
+            "rhythm_budget_exec_weight": 0.25,
+            "rhythm_feasible_debt_weight": 0.05,
+            "rhythm_pause_event_weight": 0.20,
+            "rhythm_pause_support_weight": 0.08,
+            "rhythm_pause_allocation_weight": 0.04,
+            "rhythm_plan_segment_shape_weight": 0.20,
+            "rhythm_plan_pause_release_weight": 0.10,
+            "rhythm_pause_event_threshold": 0.60,
+            "rhythm_pause_event_temperature": 0.15,
+            "rhythm_pause_event_pos_weight": 2.75,
+            "rhythm_unit_logratio_weight": 0.35,
+            "rhythm_suppress_duplicate_primary_distill": True,
+        },
+        clear=True,
+    ):
             config = support.build_rhythm_target_build_config()
         self.assertTrue(config.dedupe_primary_teacher_cache_distill)
         self.assertEqual(config.distill_exec_weight, 0.0)
@@ -139,6 +140,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.pause_event_threshold, 0.60)
         self.assertEqual(config.pause_event_temperature, 0.15)
         self.assertEqual(config.pause_event_pos_weight, 2.75)
+        self.assertEqual(config.unit_logratio_weight, 0.35)
 
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:
