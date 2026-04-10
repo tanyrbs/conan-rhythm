@@ -31,7 +31,6 @@ def _build_hparams():
         "rhythm_response_rank": 4,
         "rhythm_response_window_left": 2,
         "rhythm_response_window_right": 0,
-        "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_prefix_drift_gain": 0.25,
         "rhythm_prefix_drift_clip": 0.05,
@@ -43,6 +42,23 @@ def _build_hparams():
         "rhythm_v3_allow_hybrid": True,
         "rhythm_apply_mode": "always",
     }
+
+
+def _build_role_memory_hparams():
+    hparams = _build_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "rhythm_role_dim": 32,
+            "rhythm_num_role_slots": 8,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+        }
+    )
+    return hparams
 
 
 def _build_prompt_conditioning():
@@ -121,6 +137,66 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
     for legacy_key in ("rhythm_v3_break", "rhythm_exec_pause", "rhythm_budget", "rhythm_prefix_clock", "rhythm_prefix_backlog"):
         assert legacy_key not in losses
     assert torch.equal(losses["rhythm_is_v3_bundle"], torch.tensor(1.0, device=losses["rhythm_is_v3_bundle"].device))
+
+
+def test_rhythm_v3_role_memory_targets_use_source_anchor_and_prompt_memory_loss():
+    adapter = ConanDurationAdapter(_build_role_memory_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    sample = {
+        "unit_duration_tgt": ret["speech_duration_exec"].detach() + 0.2,
+    }
+    targets = build_duration_v3_loss_targets(
+        sample=sample,
+        output=ret,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.25,
+            lambda_pref=0.20,
+            lambda_cons=0.0,
+            lambda_zero=0.0,
+            lambda_ortho=0.0,
+            anchor_mode="source_observed",
+        ),
+    )
+    assert targets is not None
+    unit_batch = ret["rhythm_unit_batch"]
+    speech_mask = unit_batch.unit_mask.float() * (1.0 - unit_batch.sep_mask.float())
+    assert torch.allclose(
+        targets.prediction_anchor,
+        torch.where(
+            unit_batch.source_duration_obs.float() * speech_mask > 0.0,
+            unit_batch.source_duration_obs.float() * speech_mask,
+            unit_batch.unit_anchor_base.float() * speech_mask,
+        ),
+    )
+    assert targets.prompt_role_attn is not None
+    assert targets.prompt_role_value is not None
+    assert targets.prompt_role_var is not None
+    losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
+    assert "rhythm_v3_mem" in losses
+    assert torch.allclose(losses["rhythm_v3_mem"], losses["rhythm_v3_op"])
+    assert torch.isfinite(losses["rhythm_v3_op"]).all()
 
 
 def test_rhythm_v3_loss_routing_keeps_single_trainable_total():

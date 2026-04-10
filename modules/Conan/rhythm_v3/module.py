@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +17,7 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
+from .role_memory import PromptDurationMemoryEncoder, SharedRoleCodebook, StreamingDurationHead
 
 
 class SharedCausalBasisEncoder(nn.Module):
@@ -85,10 +88,18 @@ def _resolve_duration_runtime_surface(
     resolved_backbone = str(backbone_mode or "global_only").strip().lower()
     resolved_warp = str(warp_mode or "none").strip().lower()
     resolved_allow_hybrid = bool(allow_hybrid) if allow_hybrid is not None else False
-    if resolved_backbone not in {"global_only", "operator"}:
+    if resolved_backbone not in {"global_only", "operator", "role_memory"}:
         raise ValueError(f"Unsupported rhythm_v3 backbone mode: {backbone_mode!r}")
     if resolved_warp not in {"none", "progress", "detector"}:
         raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
+    if resolved_backbone == "role_memory":
+        if resolved_warp != "none":
+            raise ValueError("rhythm_v3_backbone='role_memory' only supports rhythm_v3_warp_mode='none'.")
+        if resolved_allow_hybrid:
+            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='role_memory'.")
+        if float(source_residual_gain) > 0.0:
+            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='role_memory'.")
+        return resolved_backbone, resolved_warp, False, "role_memory"
     if resolved_backbone == "global_only":
         if resolved_allow_hybrid:
             raise ValueError("rhythm_v3_allow_hybrid is only valid when rhythm_v3_backbone='operator'.")
@@ -306,6 +317,10 @@ class MixedEffectsDurationModule(nn.Module):
         **unused_kwargs,
     ) -> None:
         super().__init__()
+        role_dim = int(unused_kwargs.pop("role_dim", hidden_size))
+        role_slots = int(unused_kwargs.pop("num_role_slots", max(4, basis_rank)))
+        role_cov_floor = float(unused_kwargs.pop("role_cov_floor", 0.05))
+        max_logstretch = float(unused_kwargs.pop("max_logstretch", 1.2))
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
@@ -349,6 +364,26 @@ class MixedEffectsDurationModule(nn.Module):
             holdout_ratio=operator_holdout_ratio,
         )
         self.projector = StreamingDurationProjector()
+        self.role_codebook = None
+        self.prompt_memory_encoder = None
+        self.duration_head = None
+        if self.backbone_mode == "role_memory":
+            self.role_codebook = SharedRoleCodebook(num_slots=role_slots, dim=role_dim)
+            self.prompt_memory_encoder = PromptDurationMemoryEncoder(
+                vocab_size=vocab_size,
+                dim=role_dim,
+                num_slots=role_slots,
+                operator_rank=basis_rank,
+                coverage_floor=role_cov_floor,
+                codebook=self.role_codebook,
+            )
+            self.duration_head = StreamingDurationHead(
+                vocab_size=vocab_size,
+                dim=role_dim,
+                num_slots=role_slots,
+                max_logstretch=max_logstretch,
+                codebook=self.role_codebook,
+            )
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
         elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
@@ -378,6 +413,29 @@ class MixedEffectsDurationModule(nn.Module):
         *,
         ref_conditioning=None,
     ) -> ReferenceDurationMemory:
+        if self.backbone_mode == "role_memory":
+            if isinstance(ref_conditioning, ReferenceDurationMemory):
+                return ref_conditioning
+            if not isinstance(ref_conditioning, dict):
+                raise ValueError("rhythm_v3 role_memory backbone requires explicit prompt-unit conditioning.")
+            prompt_content_units = ref_conditioning.get("prompt_content_units")
+            prompt_duration_obs = ref_conditioning.get("prompt_duration_obs")
+            prompt_mask = ref_conditioning.get("prompt_unit_mask")
+            if not (
+                isinstance(prompt_content_units, torch.Tensor)
+                and isinstance(prompt_duration_obs, torch.Tensor)
+                and isinstance(prompt_mask, torch.Tensor)
+            ):
+                raise ValueError(
+                    "rhythm_v3 role_memory backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
+                )
+            prompt_edge_cue = ref_conditioning.get("prompt_source_boundary_cue")
+            return self.prompt_memory_encoder(
+                prompt_content_units=prompt_content_units,
+                prompt_duration_obs=prompt_duration_obs,
+                prompt_mask=prompt_mask,
+                prompt_edge_cue=prompt_edge_cue if isinstance(prompt_edge_cue, torch.Tensor) else None,
+            )
         need_progress = self._use_progress_response()
         need_detector = self._use_detector_bank()
         need_operator = self._use_local_operator()
@@ -583,12 +641,78 @@ class MixedEffectsDurationModule(nn.Module):
         return unit_mask, sealed_mask, commit_mask
 
     @staticmethod
-    def _predict_unit_duration(
+    def _build_role_memory_edge_cue(
         *,
         source_batch: SourceUnitBatch,
+        sealed_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        edge = (
+            source_batch.source_boundary_cue.float()
+            if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+            else sealed_mask.new_zeros(sealed_mask.shape)
+        )
+        sep = (
+            source_batch.sep_mask.float()
+            if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor)
+            else sealed_mask.new_zeros(sealed_mask.shape)
+        )
+        edge = edge.clamp(0.0, 1.0) * sealed_mask.float()
+        return torch.where(sep > 0.5, torch.ones_like(edge), edge)
+
+    def _resolve_prediction_anchor(
+        self,
+        *,
+        source_batch: SourceUnitBatch,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.backbone_mode == "role_memory":
+            observed = source_batch.source_duration_obs.float().clamp_min(1.0e-4)
+            baseline = source_batch.unit_anchor_base.float().clamp_min(1.0e-4)
+            speech_mask = speech_commit_mask.float()
+            anchor = torch.where(speech_mask > 0.5, observed, torch.zeros_like(observed))
+            return torch.where(anchor > 0.0, anchor, baseline * speech_mask)
+        return source_batch.unit_anchor_base.float()
+
+    @staticmethod
+    def _update_role_memory_state(
+        *,
+        state: DurationRuntimeState,
+        source_batch: SourceUnitBatch,
+        speech_commit_mask: torch.Tensor,
+        edge_cue: torch.Tensor,
+        next_state: DurationRuntimeState,
+    ) -> DurationRuntimeState:
+        if state.local_rate_ema is None:
+            local_rate_prev = speech_commit_mask.new_zeros((speech_commit_mask.size(0), 1))
+        else:
+            local_rate_prev = state.local_rate_ema.float()
+        if state.since_last_boundary is None:
+            since_prev = speech_commit_mask.new_zeros((speech_commit_mask.size(0), 1))
+        else:
+            since_prev = state.since_last_boundary.float()
+        support = speech_commit_mask.float().sum(dim=1, keepdim=True)
+        observed_log = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4)) * speech_commit_mask.float()
+        mean_log = observed_log.sum(dim=1, keepdim=True) / support.clamp_min(1.0)
+        local_rate_ema = torch.where(
+            support > 0.0,
+            0.95 * local_rate_prev + 0.05 * mean_log,
+            local_rate_prev,
+        )
+        boundary_hit = (edge_cue.float() * speech_commit_mask.float()).amax(dim=1, keepdim=True) > 0.5
+        since_last_boundary = torch.where(boundary_hit, torch.zeros_like(since_prev), since_prev + support)
+        return replace(
+            next_state,
+            local_rate_ema=local_rate_ema.detach(),
+            since_last_boundary=since_last_boundary.detach(),
+        )
+
+    @staticmethod
+    def _predict_unit_duration(
+        *,
+        prediction_anchor: torch.Tensor,
         unit_logstretch: torch.Tensor,
     ) -> torch.Tensor:
-        return source_batch.unit_anchor_base.float() * torch.exp(unit_logstretch)
+        return prediction_anchor.float() * torch.exp(unit_logstretch)
 
     def forward(
         self,
@@ -617,6 +741,81 @@ class MixedEffectsDurationModule(nn.Module):
             source_batch=source_batch,
             commit_mask=commit_mask,
         )
+        prediction_anchor = self._resolve_prediction_anchor(
+            source_batch=source_batch,
+            speech_commit_mask=speech_commit_mask,
+        )
+        if self.backbone_mode == "role_memory":
+            if self.duration_head is None:
+                raise RuntimeError("role_memory backbone is missing StreamingDurationHead.")
+            if ref_memory.role is None:
+                raise ValueError("rhythm_v3 role_memory backbone requires role prompt statistics.")
+            local_rate_ema = (
+                state.local_rate_ema.float()
+                if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
+                else unit_mask.new_zeros((batch_size, 1))
+            )
+            edge_cue = self._build_role_memory_edge_cue(
+                source_batch=source_batch,
+                sealed_mask=sealed_mask,
+            )
+            role_plan = self.duration_head(
+                content_units=source_batch.content_units,
+                log_anchor=torch.log(prediction_anchor.clamp_min(1.0e-4)),
+                unit_mask=unit_mask,
+                sealed_mask=sealed_mask,
+                sep_hint=(
+                    source_batch.sep_mask.float()
+                    if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor)
+                    else unit_mask.new_zeros(unit_mask.shape)
+                ),
+                edge_cue=edge_cue,
+                global_rate=ref_memory.global_rate,
+                role_value=ref_memory.role_value,
+                role_var=ref_memory.role_var,
+                role_coverage=ref_memory.role_coverage,
+                local_rate_ema=local_rate_ema,
+            )
+            unit_logstretch = role_plan["unit_logstretch"] * speech_commit_mask.float()
+            unit_duration_exec = self._predict_unit_duration(
+                prediction_anchor=prediction_anchor,
+                unit_logstretch=unit_logstretch,
+            )
+            unit_logstretch_raw = unit_logstretch.clone()
+            unit_duration_raw = unit_duration_exec.clone()
+            unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
+                unit_duration_exec=unit_duration_exec,
+                unit_logstretch=unit_logstretch,
+                unit_anchor_base=prediction_anchor,
+                state=state,
+            )
+            execution = self.projector.finalize_execution(
+                unit_logstretch=unit_logstretch,
+                unit_duration_exec=unit_duration_exec,
+                basis_activation=basis_activation * 0.0,
+                source_duration_obs=prediction_anchor,
+                unit_mask=unit_mask,
+                sealed_mask=sealed_mask,
+                speech_commit_mask=speech_commit_mask,
+                state=state,
+                progress_response=None,
+                detector_response=None,
+                local_response=role_plan["local_response"] * speech_commit_mask.float(),
+                role_attn_unit=role_plan["role_attn_unit"] * unit_mask.unsqueeze(-1),
+                role_value_unit=role_plan["role_value_unit"] * unit_mask,
+                role_var_unit=role_plan["role_var_unit"] * unit_mask,
+                role_conf_unit=role_plan["role_conf_unit"] * unit_mask,
+                unit_logstretch_raw=unit_logstretch_raw,
+                unit_duration_raw=unit_duration_raw,
+            )
+            execution.next_state = self._update_role_memory_state(
+                state=state,
+                source_batch=source_batch,
+                speech_commit_mask=speech_commit_mask,
+                edge_cue=edge_cue,
+                next_state=execution.next_state,
+            )
+            return execution
         global_response, structure_response, local_response, source_residual_response = self.backbone(
             module=self,
             ref_memory=ref_memory,
@@ -642,7 +841,7 @@ class MixedEffectsDurationModule(nn.Module):
         )
         unit_logstretch = global_response + progress_response + detector_term + local_response + source_residual_response
         unit_duration_exec = self._predict_unit_duration(
-            source_batch=source_batch,
+            prediction_anchor=prediction_anchor,
             unit_logstretch=unit_logstretch,
         )
         unit_logstretch_raw = unit_logstretch.clone()
@@ -650,14 +849,14 @@ class MixedEffectsDurationModule(nn.Module):
         unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
             unit_duration_exec=unit_duration_exec,
             unit_logstretch=unit_logstretch,
-            unit_anchor_base=source_batch.unit_anchor_base,
+            unit_anchor_base=prediction_anchor,
             state=state,
         )
         return self.projector.finalize_execution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=unit_duration_exec,
             basis_activation=basis_activation * speech_commit_mask.unsqueeze(-1),
-            source_duration_obs=source_batch.source_duration_obs,
+            source_duration_obs=prediction_anchor,
             unit_mask=unit_mask,
             sealed_mask=sealed_mask,
             speech_commit_mask=speech_commit_mask,

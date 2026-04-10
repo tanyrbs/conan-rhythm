@@ -18,7 +18,6 @@ def _build_hparams():
         "rhythm_response_rank": 4,
         "rhythm_response_window_left": 2,
         "rhythm_response_window_right": 0,
-        "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_max_logstretch": 0.8,
         "rhythm_streaming_mode": "strict",
@@ -92,9 +91,7 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_global_rate_mean",
         "rhythm_metric_global_stretch_mean",
         "rhythm_metric_progress_response_abs_mean",
-        "rhythm_metric_coarse_response_abs_mean",
         "rhythm_metric_progress_profile_abs_mean",
-        "rhythm_metric_coarse_profile_abs_mean",
         "rhythm_metric_local_response_abs_mean",
         "rhythm_metric_operator_coeff_abs_mean",
         "rhythm_metric_operator_support_mean",
@@ -166,7 +163,7 @@ def test_rhythm_v3_global_only_metrics_report_zero_local_response():
         output["rhythm_execution"].unit_logstretch
     ) * output["rhythm_execution"].commit_mask
     output["rhythm_execution"].local_response = torch.zeros_like(output["rhythm_execution"].unit_logstretch)
-    output["rhythm_execution"].coarse_response = torch.zeros_like(output["rhythm_execution"].unit_logstretch)
+    output["rhythm_execution"].progress_response = torch.zeros_like(output["rhythm_execution"].unit_logstretch)
     output["rhythm_v3_source_residual_gain"] = 0.0
     metrics = build_rhythm_metric_dict(
         output,
@@ -174,7 +171,6 @@ def test_rhythm_v3_global_only_metrics_report_zero_local_response():
     )
     assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
     assert torch.allclose(metrics["rhythm_metric_progress_response_abs_mean"], torch.tensor(0.0))
-    assert torch.allclose(metrics["rhythm_metric_coarse_response_abs_mean"], torch.tensor(0.0))
 
 
 def test_rhythm_v3_progress_only_metrics_keep_local_response_zero():
@@ -220,7 +216,6 @@ def test_rhythm_v3_progress_only_metrics_keep_local_response_zero():
     metrics = build_rhythm_metric_dict(ret, sample={"unit_duration_tgt": ret["speech_duration_exec"].detach()})
     assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
     assert float(metrics["rhythm_metric_progress_response_abs_mean"].item()) > 0.0
-    assert float(metrics["rhythm_metric_coarse_response_abs_mean"].item()) > 0.0
     assert float(metrics["rhythm_metric_progress_profile_abs_mean"].item()) > 0.0
 
 

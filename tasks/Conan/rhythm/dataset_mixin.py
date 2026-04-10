@@ -12,6 +12,7 @@ import numpy as np
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
+from tasks.Conan.rhythm.targets import build_pseudo_source_duration_context
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     build_reference_rhythm_conditioning,
@@ -378,7 +379,7 @@ class RhythmConanDatasetMixin:
     def _build_optional_collate_spec() -> dict[str, tuple[str, float | int]]:
         return {
             "content_units": ("long", 0),
-            "dur_anchor_src": ("long", 0),
+            "dur_anchor_src": ("float", 0.0),
             "open_run_mask": ("long", 0),
             "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
@@ -534,6 +535,129 @@ class RhythmConanDatasetMixin:
         if target_len >= full_len:
             return full_tokens
         return full_tokens[:target_len]
+
+    @staticmethod
+    def _is_enabled_flag(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, (int, float, np.floating, np.integer)):
+            return float(value) > 0.0
+        return bool(value)
+
+    def _make_item_generator(self, *, item_name: str, salt: str) -> torch.Generator | None:
+        deterministic = bool(
+            self.hparams.get(
+                "rhythm_augmentation_deterministic",
+                self.hparams.get("rhythm_streaming_prefix_deterministic", True),
+            )
+        )
+        if not deterministic:
+            return None
+        seed = int(self.hparams.get("seed", 0) or 0)
+        digest = hashlib.md5(f"{item_name}|{self.prefix}|{salt}|{seed}".encode("utf-8")).hexdigest()
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(digest[:8], 16))
+        return generator
+
+    @staticmethod
+    def _copy_numpy_fields(payload: dict) -> dict:
+        copied = {}
+        for key, value in payload.items():
+            array = np.asarray(value)
+            copied[key] = array.copy() if isinstance(array, np.ndarray) else value
+        return copied
+
+    def _should_perturb_duration_v3_source_context(self) -> bool:
+        if not self._use_duration_v3_dataset_contract():
+            return False
+        if str(self.prefix).lower() != "train":
+            return False
+        if str(self.hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() != "role_memory":
+            return False
+        if str(self.hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower() != "source_observed":
+            return False
+        return self._is_enabled_flag(
+            self.hparams.get(
+                "pseudo_source_duration_perturbation",
+                self.hparams.get("rhythm_pseudo_source_duration_perturbation", False),
+            )
+        )
+
+    def _maybe_build_duration_v3_training_source_cache(self, source_cache: dict, *, item_name: str) -> dict:
+        if not self._should_perturb_duration_v3_source_context():
+            return source_cache
+        source_duration = np.asarray(source_cache["dur_anchor_src"], dtype=np.float32).reshape(1, -1)
+        unit_mask = (source_duration > 0.0).astype(np.float32)
+        sep_hint = np.asarray(
+            source_cache.get("sep_hint", np.zeros_like(source_duration, dtype=np.float32)),
+            dtype=np.float32,
+        ).reshape(1, -1)
+        generator = self._make_item_generator(item_name=item_name, salt="pseudo_source_duration")
+        perturbed = build_pseudo_source_duration_context(
+            torch.from_numpy(source_duration),
+            torch.from_numpy(unit_mask),
+            torch.from_numpy(sep_hint),
+            global_scale_range=(
+                float(self.hparams.get("rhythm_pseudo_source_global_scale_min", 0.85)),
+                float(self.hparams.get("rhythm_pseudo_source_global_scale_max", 1.15)),
+            ),
+            local_span_prob=float(self.hparams.get("rhythm_pseudo_source_local_span_prob", 0.20)),
+            local_span_scale=(
+                float(self.hparams.get("rhythm_pseudo_source_local_scale_min", 0.70)),
+                float(self.hparams.get("rhythm_pseudo_source_local_scale_max", 1.30)),
+            ),
+            mask_prob=float(self.hparams.get("rhythm_pseudo_source_mask_prob", 0.10)),
+            flatten_boundary_prob=float(self.hparams.get("rhythm_pseudo_source_flatten_boundary_prob", 0.15)),
+            generator=generator,
+        ).squeeze(0).cpu().numpy().astype(np.float32)
+        runtime_cache = self._copy_numpy_fields(source_cache)
+        runtime_cache["dur_anchor_src"] = perturbed
+        return runtime_cache
+
+    def _maybe_augment_prompt_unit_conditioning(self, conditioning: dict, *, item_name: str) -> dict:
+        if str(self.prefix).lower() != "train":
+            return conditioning
+        dropout = float(self.hparams.get("rhythm_prompt_dropout", 0.0) or 0.0)
+        truncation = float(self.hparams.get("rhythm_prompt_truncation", 0.0) or 0.0)
+        if dropout <= 0.0 and truncation <= 0.0:
+            return conditioning
+        prompt_mask = np.asarray(conditioning.get("prompt_unit_mask"), dtype=np.float32).copy()
+        if prompt_mask.size <= 0:
+            return conditioning
+        valid = torch.from_numpy(prompt_mask).reshape(1, -1) > 0.5
+        if not bool(valid.any().item()):
+            return conditioning
+        keep = valid.clone()
+        generator = self._make_item_generator(item_name=item_name, salt="prompt_duration_memory")
+        if truncation > 0.0:
+            valid_indices = torch.nonzero(valid[0], as_tuple=False).reshape(-1)
+            valid_count = int(valid_indices.numel())
+            if valid_count > 0:
+                if truncation < 1.0:
+                    min_keep = max(1, int(np.ceil(valid_count * truncation)))
+                    max_keep = valid_count
+                    if min_keep >= max_keep:
+                        keep_units = max_keep
+                    else:
+                        sampled = torch.randint(min_keep, max_keep + 1, (1,), generator=generator, device=valid.device)
+                        keep_units = int(sampled.item())
+                else:
+                    keep_units = max(1, min(valid_count, int(round(truncation))))
+                cutoff_index = int(valid_indices[keep_units - 1].item())
+                keep[:, cutoff_index + 1 :] = False
+        if dropout > 0.0:
+            drop = torch.rand(keep.shape, generator=generator, device=keep.device) < float(max(0.0, min(1.0, dropout)))
+            keep = keep & ~drop
+        if not bool(keep.any().item()):
+            first_valid = int(torch.nonzero(valid[0], as_tuple=False)[0].item())
+            keep[:, first_valid] = True
+        keep_np = keep.float().reshape(-1).cpu().numpy().astype(np.float32)
+        augmented = self._copy_numpy_fields(conditioning)
+        augmented["prompt_unit_mask"] = keep_np
+        for key in ("prompt_duration_obs", "prompt_source_boundary_cue", "prompt_phrase_group_pos", "prompt_phrase_final_mask"):
+            if key in augmented:
+                augmented[key] = np.asarray(augmented[key], dtype=np.float32) * keep_np
+        return augmented
 
     @staticmethod
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
@@ -737,6 +861,7 @@ class RhythmConanDatasetMixin:
         if prompt_item is None:
             return {}
         source_cache = None
+        item_name = str(prompt_item.get("item_name", "<prompt-item>")) if isinstance(prompt_item, dict) else "<prompt-item>"
         if all(key in prompt_item for key in self._RHYTHM_REF_PROMPT_SOURCE_KEYS):
             source_cache = {key: prompt_item[key] for key in self._RHYTHM_REF_PROMPT_SOURCE_KEYS}
             if "sep_hint" in prompt_item:
@@ -760,7 +885,7 @@ class RhythmConanDatasetMixin:
         prompt_unit_mask = (prompt_duration_obs > 0).astype(np.float32)
         if sep_hint.shape == prompt_unit_mask.shape:
             prompt_unit_mask = prompt_unit_mask * (1.0 - sep_hint.clip(0.0, 1.0))
-        return {
+        return self._maybe_augment_prompt_unit_conditioning({
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
             "prompt_unit_mask": prompt_unit_mask,
@@ -776,7 +901,7 @@ class RhythmConanDatasetMixin:
                 source_cache.get("phrase_final_mask", np.zeros_like(prompt_duration_obs)),
                 dtype=np.float32,
             ),
-        }
+        }, item_name=item_name)
 
     def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str, item=None):
         cache_keys = self._RHYTHM_REF_CACHE_KEYS

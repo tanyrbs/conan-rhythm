@@ -133,7 +133,6 @@ def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_target_mod
 @pytest.mark.parametrize(
     "deprecated_key,new_key",
     [
-        ("lambda_rhythm_mem", "lambda_rhythm_op"),
         ("lambda_rhythm_anti", "lambda_rhythm_zero"),
     ],
 )
@@ -149,7 +148,6 @@ def test_validate_rhythm_training_hparams_rejects_removed_v3_hparam_aliases(depr
     [
         "rhythm_v3_mem",
         "rhythm_v3_anti",
-        "rhythm_role_dim",
         "rhythm_role_codebook_size",
         "rhythm_anti_pos_bins",
         "rhythm_anti_pos_grl_scale",
@@ -162,6 +160,60 @@ def test_validate_rhythm_training_hparams_rejects_removed_v3_surface_keys(remove
     hparams[removed_key] = 1
     with pytest.raises(ValueError, match=removed_key):
         validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_role_memory_backbone_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "rhythm_role_dim": 48,
+            "rhythm_num_role_slots": 12,
+            "lambda_rhythm_op": 0.25,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_accepts_role_memory_mem_public_surface_without_zero():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_mem": 0.25,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_dur",
+                "rhythm_v3_mem",
+                "rhythm_v3_pref",
+            ],
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_rejects_role_memory_without_source_anchor():
+    with pytest.raises(ValueError, match="requires rhythm_v3_anchor_mode='source_observed'"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_warp_mode": "none",
+                "rhythm_v3_allow_hybrid": False,
+                "rhythm_v3_anchor_mode": "baseline",
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+            }
+        )
 
 
 def test_validate_rhythm_training_hparams_valid_v3_skips_legacy_contract_evaluation():
@@ -216,6 +268,27 @@ def test_validate_rhythm_training_hparams_requires_consistency_loss_surface_when
         "rhythm_v3_zero",
     ]
     with pytest.raises(ValueError, match="rhythm_v3_cons"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_requires_mem_surface_for_role_memory_public_losses():
+    hparams = {
+        **_minimal_v3_hparams(),
+        "rhythm_v3_backbone": "role_memory",
+        "rhythm_v3_warp_mode": "none",
+        "rhythm_v3_allow_hybrid": False,
+        "rhythm_v3_anchor_mode": "source_observed",
+        "lambda_rhythm_op": 0.0,
+        "lambda_rhythm_mem": 0.25,
+        "lambda_rhythm_zero": 0.0,
+        "lambda_rhythm_ortho": 0.0,
+        "rhythm_public_losses": [
+            "rhythm_total",
+            "rhythm_v3_dur",
+            "rhythm_v3_pref",
+        ],
+    }
+    with pytest.raises(ValueError, match="rhythm_v3_mem"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -338,19 +411,12 @@ def test_validate_rhythm_training_hparams_accepts_progress_alias_hparams():
     )
 
 
-def test_validate_rhythm_training_hparams_rejects_conflicting_progress_and_coarse_alias_values():
-    with pytest.raises(ValueError, match="Do not set both rhythm_progress_bins and legacy rhythm_coarse_bins"):
+def test_validate_rhythm_training_hparams_rejects_removed_coarse_progress_key():
+    with pytest.raises(ValueError, match="rhythm_coarse_bins"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_v3_backbone": "global_only",
-                "rhythm_v3_warp_mode": "progress",
-                "rhythm_v3_allow_hybrid": False,
-                "rhythm_progress_bins": 8,
                 "rhythm_coarse_bins": 4,
-                "lambda_rhythm_op": 0.0,
-                "lambda_rhythm_zero": 0.0,
-                "lambda_rhythm_ortho": 0.0,
             }
         )
 
@@ -512,11 +578,11 @@ def test_validate_rhythm_training_hparams_micro_lookahead_requires_positive_look
         )
 
 
-def test_validate_rhythm_training_hparams_rejects_non_positive_coarse_bins():
-    with pytest.raises(ValueError, match="rhythm_progress_bins / rhythm_coarse_bins must be > 0"):
+def test_validate_rhythm_training_hparams_rejects_non_positive_progress_bins():
+    with pytest.raises(ValueError, match="rhythm_progress_bins must be > 0"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_coarse_bins": 0,
+                "rhythm_progress_bins": 0,
             }
         )

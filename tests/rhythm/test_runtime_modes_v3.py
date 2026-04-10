@@ -15,7 +15,7 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
     rhythm_ref_conditioning = {
         "global_rate": torch.tensor([[0.25]], dtype=torch.float32),
         "operator_coeff": torch.randn(1, 4),
-        "coarse_profile": torch.tensor([[0.0, 0.1, -0.1, 0.05]], dtype=torch.float32),
+        "progress_profile": torch.tensor([[0.0, 0.1, -0.1, 0.05]], dtype=torch.float32),
         "prompt_basis_activation": torch.randn(1, 6, 4),
         "prompt_random_target": torch.randn(1, 6),
         "prompt_mask": torch.ones(1, 6),
@@ -34,7 +34,7 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
         explicit=sample["rhythm_ref_conditioning"],
     )
     assert set(("global_rate", "operator_coeff")).issubset(conditioning.keys())
-    assert "coarse_profile" in conditioning
+    assert "progress_profile" in conditioning
     assert "prompt_random_target" in conditioning
     assert "prompt_mask" in conditioning
     assert "prompt_operator_fit" in conditioning
@@ -43,29 +43,20 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
     assert "ref_phrase_valid" not in conditioning
 
 
-def test_build_duration_v3_ref_conditioning_accepts_progress_aliases():
+def test_build_duration_v3_ref_conditioning_rejects_removed_coarse_aliases():
     sample = {
         "rhythm_ref_conditioning": {
             "global_rate": torch.tensor([[0.25]], dtype=torch.float32),
             "operator_coeff": torch.randn(1, 4),
-            "progress_profile": torch.tensor([[0.0, 0.1, -0.1, 0.05]], dtype=torch.float32),
-            "prompt_progress_fit": torch.randn(1, 6),
+            "coarse_profile": torch.tensor([[0.0, 0.1, -0.1, 0.05]], dtype=torch.float32),
+            "prompt_coarse_fit": torch.randn(1, 6),
         }
     }
-    conditioning = build_duration_v3_ref_conditioning(
-        sample,
-        explicit=sample["rhythm_ref_conditioning"],
-    )
-    assert "coarse_profile" in conditioning
-    assert "prompt_coarse_fit" in conditioning
-    assert torch.allclose(
-        conditioning["coarse_profile"],
-        sample["rhythm_ref_conditioning"]["progress_profile"],
-    )
-    assert torch.allclose(
-        conditioning["prompt_coarse_fit"],
-        sample["rhythm_ref_conditioning"]["prompt_progress_fit"],
-    )
+    with pytest.raises(ValueError, match="coarse_profile has been removed"):
+        build_duration_v3_ref_conditioning(
+            sample,
+            explicit=sample["rhythm_ref_conditioning"],
+        )
 
 
 def test_build_duration_v3_ref_conditioning_accepts_explicit_prompt_units_without_anchor_base():

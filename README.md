@@ -10,8 +10,8 @@ This checkout now has **one maintained rhythm code mainline**:
 The honest reading of the current repository is:
 
 - **task scope**: speech-unit duration transfer
-- **research shape**: layered duration decomposition / decision platform
-- **current default config**: `baseline + global + deterministic projector`
+- **research shape**: maintained `rhythm_v3` mainline with backward-compatible ablations
+- **recommended config**: `role_memory + source_observed + deterministic projector`
 - **legacy v2**: compatibility, teacher/export history, old checkpoints only
 
 ## Current code-level prediction form
@@ -122,18 +122,28 @@ instead of supervising through the live execution-side baseline path.
 4. **progress warp candidate**
 5. **detector-bank candidate**
 6. **shared causal local basis + prompt-conditioned operator**
-7. **optional centered source residual ablation**
+7. **static prompt role-memory + single duration writer**
+8. **optional centered source residual ablation**
 
 Only the first three are unconditional. The rest are controlled by
 `rhythm_v3_backbone` / `rhythm_v3_warp_mode` / `rhythm_v3_allow_hybrid`.
+
+Recommended simplified VC path:
+
+- `rhythm_v3_backbone: role_memory`
+- `rhythm_v3_warp_mode: none`
+- `rhythm_v3_anchor_mode: source_observed`
+- `rhythm_role_dim`
+- `rhythm_num_role_slots`
+- `rhythm_prompt_cov_floor`
+- `lambda_rhythm_mem` or `lambda_rhythm_op`
 
 For the progress-warp candidate, the preferred config keys are now:
 
 - `rhythm_progress_bins`
 - `rhythm_progress_support_tau`
 
-Legacy `rhythm_coarse_bins` / `rhythm_coarse_support_tau` remain accepted as
-compatibility aliases.
+Old `rhythm_coarse_*` aliases are removed from `rhythm_v3`.
 
 ## What is explicitly not the mainline anymore
 
@@ -148,6 +158,11 @@ The current v3 story is **not**:
 
 Separator / pause duration is **not** the core mechanism claim. The branch
 scope is speech-unit duration transfer.
+
+The new `role_memory` candidate keeps the same speech-unit scope but changes
+the writer semantics: prompt is distilled once into static role statistics
+(`mu`, `sigma^2`, coverage), source observed duration is the anchor, and only
+sealed units are committed through the integer projector.
 
 ## Current training contract
 

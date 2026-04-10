@@ -75,6 +75,7 @@ class RhythmDatasetSampleAssembler:
             "rhythm_teacher_confidence_allocation",
             "rhythm_teacher_confidence_shape",
             "rhythm_offline_teacher_confidence",
+            "dur_anchor_src",
             "prompt_duration_obs",
             "prompt_unit_mask",
             "unit_duration_tgt",
@@ -151,7 +152,11 @@ class RhythmDatasetSampleAssembler:
 
         optional_rhythm_keys = self.owner._resolve_optional_sample_keys()
         rhythm_runtime_fields = {}
-        source_cache = self.owner._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
+        target_source_cache = self.owner._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
+        source_cache = self.owner._maybe_build_duration_v3_training_source_cache(
+            target_source_cache,
+            item_name=item_name,
+        )
         stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
         offline_units = stream_units
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):
@@ -234,7 +239,7 @@ class RhythmDatasetSampleAssembler:
         rhythm_runtime_fields.update(
             self.owner._merge_rhythm_targets(
                 item,
-                source_cache,
+                target_source_cache,
                 ref_conditioning,
                 sample,
             )

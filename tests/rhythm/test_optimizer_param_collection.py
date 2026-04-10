@@ -170,6 +170,24 @@ class OptimizerParamCollectionTests(unittest.TestCase):
         ids = {id(param) for param in params}
         self.assertTrue(ids.isdisjoint(baseline_ids))
 
+    def test_collect_rhythm_gen_params_skips_v3_baseline_for_role_memory_mainline(self) -> None:
+        task = _DummyV3Task()
+        baseline_ids = {id(param) for param in task.model.rhythm_unit_frontend.baseline.parameters()}
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_mixin.hparams",
+            {
+                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_baseline_train_mode": "joint",
+                "rhythm_v3_freeze_baseline": False,
+                "rhythm_train_offline_confidence_heads": False,
+            },
+            clear=True,
+        ):
+            params = task._collect_rhythm_gen_params()
+            ids = {id(param) for param in params}
+            self.assertTrue(ids.isdisjoint(baseline_ids))
+            self.assertEqual(task._collect_rhythm_v3_baseline_only_params(), [])
+
     def test_collect_rhythm_v3_baseline_only_params_is_baseline_scoped(self) -> None:
         task = _DummyV3Task()
         baseline_ids = {id(param) for param in task.model.rhythm_unit_frontend.baseline.parameters()}

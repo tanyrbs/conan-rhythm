@@ -13,6 +13,7 @@ from .contracts import (
     StructuredProgressDurationMemory,
     StructuredDetectorDurationMemory,
     StructuredDurationOperatorMemory,
+    StructuredRoleDurationMemory,
     validate_reference_duration_memory,
 )
 
@@ -21,6 +22,9 @@ _V3_MEMORY_OPTIONAL_FIELDS = (
     "operator_coeff",
     "progress_profile",
     "detector_coeff",
+    "role_value",
+    "role_var",
+    "role_coverage",
     "prompt_basis_activation",
     "prompt_operator_fit",
     "prompt_operator_cv_fit",
@@ -40,6 +44,8 @@ _V3_MEMORY_OPTIONAL_FIELDS = (
     "prompt_detector_support",
     "prompt_detector_condition_number",
     "prompt_detector_coeff_norm",
+    "prompt_role_attn",
+    "prompt_role_fit",
 )
 _V3_PROMPT_UNIT_REQUIRED_FIELDS = (
     "prompt_content_units",
@@ -73,6 +79,8 @@ _V3_NESTED_PROMPT_FIELDS = (
     "prompt_detector_support",
     "prompt_detector_condition_number",
     "prompt_detector_coeff_norm",
+    "prompt_role_attn",
+    "prompt_role_fit",
 )
 
 _DETECTOR_BANK_DIM = 4
@@ -221,19 +229,19 @@ class PromptConditionedOperatorEstimator(nn.Module):
     def __init__(
         self,
         *,
-        coarse_bins: int = 4,
+        progress_bins: int = 4,
         ridge_lambda: float = 1.0,
         global_shrink_tau: float = 8.0,
-        coarse_support_tau: float = 8.0,
+        progress_support_tau: float = 8.0,
         ridge_support_tau: float = 8.0,
         holdout_ratio: float = 0.30,
         min_operator_support_factor: float = 1.0,
     ) -> None:
         super().__init__()
-        self.coarse_bins = int(max(1, coarse_bins))
+        self.progress_bins = int(max(1, progress_bins))
         self.ridge_lambda = float(max(1.0e-4, ridge_lambda))
         self.global_shrink_tau = float(max(0.0, global_shrink_tau))
-        self.coarse_support_tau = float(max(0.0, coarse_support_tau))
+        self.progress_support_tau = float(max(0.0, progress_support_tau))
         self.ridge_support_tau = float(max(0.0, ridge_support_tau))
         self.holdout_ratio = float(max(0.0, min(0.95, holdout_ratio)))
         self.min_operator_support_factor = float(max(0.0, min_operator_support_factor))
@@ -326,21 +334,21 @@ class PromptConditionedOperatorEstimator(nn.Module):
         )
         return features * mask.unsqueeze(-1)
 
-    def _build_prompt_coarse_components(
+    def _build_prompt_progress_components(
         self,
         *,
         prompt_random_target: torch.Tensor,
         prompt_log_base: torch.Tensor,
         prompt_mask: torch.Tensor,
-        need_coarse: bool,
+        need_progress: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         prompt_mask = prompt_mask.float().clamp(0.0, 1.0)
         zero_fit = torch.zeros_like(prompt_random_target.float()) * prompt_mask
-        if not need_coarse or prompt_random_target.size(1) <= 0:
+        if not need_progress or prompt_random_target.size(1) <= 0:
             return None, zero_fit
         batch_size, num_units = prompt_random_target.shape
-        coarse_profile = prompt_random_target.new_zeros((batch_size, self.coarse_bins))
-        coarse_fit = prompt_random_target.new_zeros((batch_size, num_units))
+        progress_profile = prompt_random_target.new_zeros((batch_size, self.progress_bins))
+        progress_fit = prompt_random_target.new_zeros((batch_size, num_units))
         progress = self._build_progress_from_log_base(
             prompt_log_base=prompt_log_base,
             prompt_mask=prompt_mask,
@@ -351,11 +359,11 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 continue
             progress_b = progress[batch_idx]
             target_b = prompt_random_target[batch_idx].float()
-            for bin_idx in range(self.coarse_bins):
-                lo = float(bin_idx) / float(self.coarse_bins)
-                hi = float(bin_idx + 1) / float(self.coarse_bins)
+            for bin_idx in range(self.progress_bins):
+                lo = float(bin_idx) / float(self.progress_bins)
+                hi = float(bin_idx + 1) / float(self.progress_bins)
                 in_bin = visible & (progress_b >= lo)
-                if bin_idx + 1 < self.coarse_bins:
+                if bin_idx + 1 < self.progress_bins:
                     in_bin = in_bin & (progress_b < hi)
                 if not bool(in_bin.any().item()):
                     continue
@@ -364,11 +372,11 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 shrunk = self._support_shrink(
                     stat.reshape(1, 1),
                     support,
-                    self.coarse_support_tau,
+                    self.progress_support_tau,
                 )[0, 0]
-                coarse_profile[batch_idx, bin_idx] = shrunk
-                coarse_fit[batch_idx, in_bin] = shrunk
-        return coarse_profile, coarse_fit * prompt_mask
+                progress_profile[batch_idx, bin_idx] = shrunk
+                progress_fit[batch_idx, in_bin] = shrunk
+        return progress_profile, progress_fit * prompt_mask
 
     @staticmethod
     def _zero_operator_coeff(
@@ -700,7 +708,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_phrase_group_pos: torch.Tensor | None,
         prompt_phrase_final_mask: torch.Tensor | None,
         response_encoder,
-        need_coarse: bool = True,
+        need_progress: bool = True,
         need_detector: bool = False,
         need_operator: bool = True,
     ) -> ReferenceDurationMemory:
@@ -710,13 +718,13 @@ class PromptConditionedOperatorEstimator(nn.Module):
             prompt_log_base=prompt_log_base,
             prompt_unit_mask=prompt_unit_mask,
         )
-        coarse_profile, prompt_coarse_fit = self._build_prompt_coarse_components(
+        progress_profile, prompt_progress_fit = self._build_prompt_progress_components(
             prompt_random_target=summary.prompt_random_target,
             prompt_log_base=summary.prompt_log_base,
             prompt_mask=summary.prompt_mask,
-            need_coarse=need_coarse,
+            need_progress=need_progress,
         )
-        prompt_local_target = (summary.prompt_random_target - prompt_coarse_fit) * summary.prompt_mask
+        prompt_local_target = (summary.prompt_random_target - prompt_progress_fit) * summary.prompt_mask
         prompt_basis_activation = None
         operator_coeff = self._zero_operator_coeff(
             batch_size=summary.prompt_mask.size(0),
@@ -788,10 +796,10 @@ class PromptConditionedOperatorEstimator(nn.Module):
             ReferenceDurationMemory(
                 global_rate=summary.global_rate,
                 operator=StructuredDurationOperatorMemory(operator_coeff=operator_coeff),
-                coarse=(
+                progress=(
                     None
-                    if coarse_profile is None
-                    else StructuredCoarseDurationMemory(coarse_profile=coarse_profile)
+                    if progress_profile is None
+                    else StructuredProgressDurationMemory(progress_profile=progress_profile)
                 ),
                 detector=(
                     None
@@ -809,7 +817,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
                     prompt_log_base=summary.prompt_log_base,
                     prompt_log_duration=summary.prompt_log_duration,
                     prompt_log_residual=summary.prompt_log_residual,
-                    prompt_coarse_fit=prompt_coarse_fit,
+                    prompt_progress_fit=prompt_progress_fit,
                     prompt_operator_support=None if diagnostics is None else diagnostics.operator_support,
                     prompt_operator_condition_number=(
                         None if diagnostics is None else diagnostics.operator_condition_number
@@ -852,7 +860,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
             "prompt_log_base": _detach_float(ref_conditioning.get("prompt_log_base")),
             "prompt_log_duration": _detach_float(ref_conditioning.get("prompt_log_duration")),
             "prompt_log_residual": _detach_float(ref_conditioning.get("prompt_log_residual")),
-            "prompt_coarse_fit": _detach_float(ref_conditioning.get("prompt_coarse_fit")),
+            "prompt_progress_fit": _detach_float(ref_conditioning.get("prompt_progress_fit")),
             "prompt_operator_support": _detach_float(ref_conditioning.get("prompt_operator_support")),
             "prompt_operator_condition_number": _detach_float(ref_conditioning.get("prompt_operator_condition_number")),
             "prompt_short_fallback": _detach_float(ref_conditioning.get("prompt_short_fallback")),
@@ -861,6 +869,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
             "prompt_detector_support": _detach_float(ref_conditioning.get("prompt_detector_support")),
             "prompt_detector_condition_number": _detach_float(ref_conditioning.get("prompt_detector_condition_number")),
             "prompt_detector_coeff_norm": _detach_float(ref_conditioning.get("prompt_detector_coeff_norm")),
+            "prompt_role_attn": _detach_float(ref_conditioning.get("prompt_role_attn")),
+            "prompt_role_fit": _detach_float(ref_conditioning.get("prompt_role_fit")),
         }
         prompt = (
             None
@@ -882,11 +892,11 @@ class PromptConditionedOperatorEstimator(nn.Module):
                         )
                     ),
                 ),
-                coarse=(
+                progress=(
                     None
-                    if ref_conditioning.get("coarse_profile") is None
-                    else StructuredCoarseDurationMemory(
-                        coarse_profile=ref_conditioning["coarse_profile"].float().detach(),
+                    if ref_conditioning.get("progress_profile") is None
+                    else StructuredProgressDurationMemory(
+                        progress_profile=ref_conditioning["progress_profile"].float().detach(),
                     )
                 ),
                 detector=(
@@ -894,6 +904,15 @@ class PromptConditionedOperatorEstimator(nn.Module):
                     if ref_conditioning.get("detector_coeff") is None
                     else StructuredDetectorDurationMemory(
                         detector_coeff=ref_conditioning["detector_coeff"].float().detach(),
+                    )
+                ),
+                role=(
+                    None
+                    if any(ref_conditioning.get(key) is None for key in ("role_value", "role_var", "role_coverage"))
+                    else StructuredRoleDurationMemory(
+                        role_value=ref_conditioning["role_value"].float().detach(),
+                        role_var=ref_conditioning["role_var"].float().detach(),
+                        role_coverage=ref_conditioning["role_coverage"].float().detach(),
                     )
                 ),
                 prompt=prompt,
@@ -905,7 +924,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         ref_conditioning,
         *,
         response_encoder,
-        need_coarse: bool = True,
+        need_progress: bool = True,
         need_detector: bool = False,
         need_operator: bool = True,
     ) -> ReferenceDurationMemory:
@@ -930,7 +949,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 prompt_phrase_group_pos=normalized.get("prompt_phrase_group_pos"),
                 prompt_phrase_final_mask=normalized.get("prompt_phrase_final_mask"),
                 response_encoder=response_encoder,
-                need_coarse=need_coarse,
+                need_progress=need_progress,
                 need_detector=need_detector,
                 need_operator=need_operator,
             )
@@ -943,7 +962,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         *,
         response_encoder,
         ref_conditioning=None,
-        need_coarse: bool = True,
+        need_progress: bool = True,
         need_detector: bool = False,
         need_operator: bool = True,
     ) -> ReferenceDurationMemory:
@@ -952,7 +971,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         return self.from_conditioning(
             ref_conditioning,
             response_encoder=response_encoder,
-            need_coarse=need_coarse,
+            need_progress=need_progress,
             need_detector=need_detector,
             need_operator=need_operator,
         )

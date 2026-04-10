@@ -15,7 +15,6 @@ from .contracts import (
     move_reference_duration_memory,
     move_source_unit_batch,
 )
-from .hparam_aliases import resolve_progress_bins, resolve_progress_support_tau
 from .module import MixedEffectsDurationModule
 from .unit_frontend import DurationUnitFrontend
 
@@ -30,6 +29,12 @@ class ConanDurationAdapter(nn.Module):
         super().__init__()
         self.hparams = hparams
         self.baseline_train_mode = str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
+        for removed_key, replacement in (
+            ("rhythm_coarse_bins", "rhythm_progress_bins"),
+            ("rhythm_coarse_support_tau", "rhythm_progress_support_tau"),
+        ):
+            if removed_key in hparams:
+                raise ValueError(f"{removed_key} has been removed from rhythm_v3. Use {replacement} instead.")
         self.unit_frontend = DurationUnitFrontend(
             vocab_size=vocab_size,
             silent_token=hparams.get("silent_token", 57),
@@ -46,14 +51,18 @@ class ConanDurationAdapter(nn.Module):
             vocab_size=vocab_size,
             hidden_size=int(hparams.get("rhythm_hidden_size", hidden_size)),
             basis_rank=int(hparams.get("rhythm_response_rank", 12)),
+            role_dim=int(hparams.get("rhythm_role_dim", hparams.get("rhythm_hidden_size", hidden_size))),
+            num_role_slots=int(hparams.get("rhythm_num_role_slots", 12)),
+            role_cov_floor=float(hparams.get("rhythm_prompt_cov_floor", 0.05)),
+            max_logstretch=float(hparams.get("rhythm_max_logstretch", 1.2)),
             response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
             response_window_right=int(hparams.get("rhythm_response_window_right", 0)),
             streaming_mode=streaming_mode,
             micro_lookahead_units=(None if micro_lookahead_units is None else int(micro_lookahead_units)),
             ridge_lambda=float(hparams.get("rhythm_operator_ridge_lambda", 1.0)),
             global_shrink_tau=float(hparams.get("rhythm_global_shrink_tau", 8.0)),
-            coarse_support_tau=resolve_progress_support_tau(hparams, default=8.0),
-            coarse_bins=resolve_progress_bins(hparams, default=4),
+            progress_support_tau=float(hparams.get("rhythm_progress_support_tau", 8.0)),
+            progress_bins=int(hparams.get("rhythm_progress_bins", 4)),
             ridge_support_tau=float(hparams.get("rhythm_operator_support_tau", 8.0)),
             operator_holdout_ratio=float(hparams.get("rhythm_operator_holdout_ratio", 0.30)),
             min_operator_support_factor=float(hparams.get("rhythm_operator_min_support_factor", 1.0)),
@@ -224,6 +233,8 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
+        if ref_memory is not None and isinstance(getattr(ref_memory, "role_value", None), torch.Tensor):
+            ret["rhythm_v3_role_slots"] = float(ref_memory.role_value.size(1))
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
 

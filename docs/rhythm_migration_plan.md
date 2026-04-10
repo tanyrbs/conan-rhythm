@@ -66,9 +66,24 @@ So the repository should no longer be described as
 
 The preferred runtime control surface is now:
 
-- `rhythm_v3_backbone: global_only | operator`
+- `rhythm_v3_backbone: global_only | operator | role_memory`
 - `rhythm_v3_warp_mode: none | progress | detector`
 - `rhythm_v3_allow_hybrid: false | true`
+- `rhythm_v3_anchor_mode: baseline | source_observed`
+
+For the new simplified streaming VC path, the preferred setting is:
+
+- `rhythm_v3_backbone: role_memory`
+- `rhythm_v3_warp_mode: none`
+- `rhythm_v3_anchor_mode: source_observed`
+- `rhythm_role_dim`
+- `rhythm_num_role_slots`
+- `rhythm_prompt_cov_floor`
+
+This path keeps `RhythmUnitFrontend`, removes timeline-consuming reference use
+from the duration writer, and replaces prompt solving with static role-memory
+statistics (`role_value`, `role_var`, `role_coverage`) plus a single learned
+duration head.
 
 ## 4. Current baseline protocol
 
@@ -94,8 +109,7 @@ Preferred progress-warp config names:
 - `rhythm_progress_bins`
 - `rhythm_progress_support_tau`
 
-Legacy `rhythm_coarse_bins` / `rhythm_coarse_support_tau` remain as
-compatibility aliases only.
+Old `rhythm_coarse_*` aliases are removed from `rhythm_v3`.
 
 Current lifecycle/config surface:
 

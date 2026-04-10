@@ -87,8 +87,13 @@ class DurationV3TargetBuildConfig:
     lambda_zero: float = 0.0
     lambda_ortho: float = 0.0
     strict_target_alignment: bool = True
+    anchor_mode: str = "baseline"
     baseline_target_mode: str = "deglobalized"
     baseline_train_mode: str = "joint"
+
+    @property
+    def lambda_mem(self) -> float:
+        return float(self.lambda_op)
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,65 @@ class DistillConfidenceBundle:
     prefix: Optional[torch.Tensor] = None
     allocation: Optional[torch.Tensor] = None
     shape: Optional[torch.Tensor] = None
+
+
+def build_pseudo_source_duration_context(
+    gt_dur: torch.Tensor,
+    unit_mask: torch.Tensor,
+    sep_hint: torch.Tensor,
+    *,
+    global_scale_range: tuple[float, float] = (0.85, 1.15),
+    local_span_prob: float = 0.20,
+    local_span_scale: tuple[float, float] = (0.7, 1.3),
+    mask_prob: float = 0.10,
+    flatten_boundary_prob: float = 0.15,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    dur = gt_dur.float().clone()
+    mask = unit_mask.float().clamp(0.0, 1.0)
+    sep = sep_hint.float().clamp(0.0, 1.0)
+    if dur.numel() <= 0:
+        return dur
+
+    scale_lo, scale_hi = float(global_scale_range[0]), float(global_scale_range[1])
+    if scale_hi < scale_lo:
+        scale_lo, scale_hi = scale_hi, scale_lo
+    global_scale = torch.empty((dur.size(0), 1), device=dur.device, dtype=dur.dtype)
+    global_scale.uniform_(scale_lo, scale_hi, generator=generator)
+    dur = dur * global_scale
+
+    local_prob = float(max(0.0, min(1.0, local_span_prob)))
+    span_lo, span_hi = float(local_span_scale[0]), float(local_span_scale[1])
+    if span_hi < span_lo:
+        span_lo, span_hi = span_hi, span_lo
+    for batch_idx in range(int(dur.size(0))):
+        if float(torch.rand((1,), generator=generator, device=dur.device).item()) >= local_prob:
+            continue
+        valid_units = int(mask[batch_idx].sum().item())
+        if valid_units <= 1:
+            continue
+        span_start_max = max(valid_units - 1, 1)
+        span_start = int(torch.randint(0, span_start_max, (1,), generator=generator, device=dur.device).item())
+        span_len = int(torch.randint(2, min(8, valid_units - span_start) + 1, (1,), generator=generator, device=dur.device).item())
+        span_end = min(valid_units, span_start + span_len)
+        local_scale = float(torch.empty((1,), device=dur.device, dtype=dur.dtype).uniform_(span_lo, span_hi, generator=generator).item())
+        dur[batch_idx, span_start:span_end] = dur[batch_idx, span_start:span_end] * local_scale
+
+    mask_prob = float(max(0.0, min(1.0, mask_prob)))
+    if mask_prob > 0.0:
+        sample_mask = torch.rand(dur.shape, generator=generator, device=dur.device) < mask_prob
+        sample_mask = sample_mask & (mask > 0.5)
+        mean_dur = (dur * mask).sum(dim=1, keepdim=True) / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        dur = torch.where(sample_mask, mean_dur.expand_as(dur), dur)
+
+    flatten_prob = float(max(0.0, min(1.0, flatten_boundary_prob)))
+    if flatten_prob > 0.0:
+        boundary_gate = (
+            torch.rand((dur.size(0), 1), generator=generator, device=dur.device) < flatten_prob
+        ).float()
+        dur = torch.where(sep > 0.5, dur * (1.0 - 0.10 * boundary_gate), dur)
+
+    return dur.clamp_min(1.0e-4) * mask
 
 
 NormalizeConfidenceFn = Callable[..., torch.Tensor]
@@ -852,6 +916,12 @@ def build_duration_v3_loss_targets(
     unit_anchor_base = getattr(unit_batch, "unit_anchor_base", None)
     if unit_anchor_base is None:
         return None
+    prediction_anchor = _resolve_duration_v3_prediction_anchor(
+        unit_batch=unit_batch,
+        unit_mask=unit_mask,
+        speech_mask=speech_mask,
+        anchor_mode=str(config.anchor_mode or "baseline").strip().lower(),
+    )
     baseline_pretrain_only = (str(config.baseline_train_mode or "joint").strip().lower() == "pretrain")
     baseline_duration_tgt, baseline_mask, baseline_global_tgt = _build_duration_v3_baseline_targets(
         unit_duration_tgt=unit_duration_tgt,
@@ -876,6 +946,7 @@ def build_duration_v3_loss_targets(
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
         unit_anchor_base=unit_anchor_base.float().detach(),
+        prediction_anchor=prediction_anchor.float().detach(),
         unit_mask=unit_mask,
         committed_mask=committed_mask.float(),
         baseline_duration_tgt=baseline_duration_tgt,
@@ -889,6 +960,11 @@ def build_duration_v3_loss_targets(
         prompt_eval_mask=prompt_targets["prompt_eval_mask"],
         prompt_operator_fit_pred=prompt_targets["prompt_operator_fit_pred"],
         prompt_operator_cv_fit_pred=prompt_targets["prompt_operator_cv_fit_pred"],
+        prompt_role_attn=prompt_targets["prompt_role_attn"],
+        prompt_role_fit_pred=prompt_targets["prompt_role_fit_pred"],
+        prompt_role_value=prompt_targets["prompt_role_value"],
+        prompt_role_var=prompt_targets["prompt_role_var"],
+        prompt_log_duration=prompt_targets["prompt_log_duration"],
         consistency_duration_tgt=consistency_duration_tgt,
         consistency_mask=consistency_mask,
         lambda_dur=float(config.lambda_dur),
@@ -982,6 +1058,26 @@ def _align_duration_v3_surface(
     return aligned
 
 
+def _resolve_duration_v3_prediction_anchor(
+    *,
+    unit_batch,
+    unit_mask: torch.Tensor,
+    speech_mask: torch.Tensor,
+    anchor_mode: str,
+) -> torch.Tensor:
+    normalized_mode = str(anchor_mode or "baseline").strip().lower()
+    if normalized_mode not in {"baseline", "source_observed"}:
+        raise ValueError("rhythm_v3_anchor_mode must be one of: baseline, source_observed")
+    if normalized_mode == "baseline":
+        return unit_batch.unit_anchor_base.float() * unit_mask.float()
+    source_duration_obs = getattr(unit_batch, "source_duration_obs", None)
+    if not isinstance(source_duration_obs, torch.Tensor):
+        raise ValueError("rhythm_v3_anchor_mode='source_observed' requires source_duration_obs in rhythm_unit_batch.")
+    observed = source_duration_obs.float().clamp_min(1.0e-4) * speech_mask.float()
+    fallback = unit_batch.unit_anchor_base.float().clamp_min(1.0e-4) * speech_mask.float()
+    return torch.where(observed > 0.0, observed, fallback)
+
+
 def _resolve_duration_v3_prompt_targets(
     *,
     ref_memory,
@@ -997,10 +1093,20 @@ def _resolve_duration_v3_prompt_targets(
     prompt_eval_mask = getattr(ref_memory, "prompt_eval_mask", None)
     prompt_operator_fit_pred = getattr(ref_memory, "prompt_operator_fit", None)
     prompt_operator_cv_fit_pred = getattr(ref_memory, "prompt_operator_cv_fit", None)
+    prompt_role_attn = getattr(ref_memory, "prompt_role_attn", None)
+    prompt_role_fit_pred = getattr(ref_memory, "prompt_role_fit", None)
+    prompt_role_value = getattr(ref_memory, "role_value", None)
+    prompt_role_var = getattr(ref_memory, "role_var", None)
+    prompt_log_duration = getattr(ref_memory, "prompt_log_duration", None)
     if float(lambda_op) > 0.0 and not isinstance(prompt_random_target_tgt, torch.Tensor):
-        raise ValueError(
-            "Duration V3 operator loss requires prompt random targets in output['rhythm_ref_conditioning']."
+        role_ready = all(
+            isinstance(value, torch.Tensor)
+            for value in (prompt_role_attn, prompt_role_value, prompt_role_var, prompt_log_duration, prompt_mask)
         )
+        if not role_ready:
+            raise ValueError(
+                "Duration V3 prompt-memory loss requires role prompt targets or operator prompt targets in output['rhythm_ref_conditioning']."
+            )
     if float(lambda_zero) > 0.0:
         if not isinstance(prompt_operator_fit_pred, torch.Tensor) or not isinstance(prompt_mask, torch.Tensor):
             raise ValueError(
@@ -1027,6 +1133,15 @@ def _resolve_duration_v3_prompt_targets(
         ),
         "prompt_operator_cv_fit_pred": (
             prompt_operator_cv_fit_pred.float() if isinstance(prompt_operator_cv_fit_pred, torch.Tensor) else None
+        ),
+        "prompt_role_attn": prompt_role_attn.float() if isinstance(prompt_role_attn, torch.Tensor) else None,
+        "prompt_role_fit_pred": (
+            prompt_role_fit_pred.float() if isinstance(prompt_role_fit_pred, torch.Tensor) else None
+        ),
+        "prompt_role_value": prompt_role_value.float().detach() if isinstance(prompt_role_value, torch.Tensor) else None,
+        "prompt_role_var": prompt_role_var.float().detach() if isinstance(prompt_role_var, torch.Tensor) else None,
+        "prompt_log_duration": (
+            prompt_log_duration.float().detach() if isinstance(prompt_log_duration, torch.Tensor) else None
         ),
     }
 

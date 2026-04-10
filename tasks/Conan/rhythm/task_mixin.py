@@ -212,6 +212,8 @@ class RhythmConanTaskMixin:
     def _collect_rhythm_v3_baseline_only_params(self):
         if self.model is None or not getattr(self.model, "rhythm_enable_v3", False):
             return []
+        if str(hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() == "role_memory":
+            return []
         baseline_module = self._get_rhythm_v3_baseline_module()
         if baseline_module is None:
             return []
@@ -219,6 +221,8 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _should_collect_rhythm_v3_baseline_params() -> bool:
+        if str(hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() == "role_memory":
+            return False
         baseline_mode = RhythmConanTaskMixin._resolve_rhythm_v3_baseline_train_mode()
         if baseline_mode != "joint":
             return False

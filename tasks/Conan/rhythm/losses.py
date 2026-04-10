@@ -88,6 +88,7 @@ class DurationV3LossTargets:
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
     committed_mask: torch.Tensor
+    prediction_anchor: Optional[torch.Tensor] = None
     baseline_duration_tgt: Optional[torch.Tensor] = None
     baseline_mask: Optional[torch.Tensor] = None
     baseline_global_tgt: Optional[torch.Tensor] = None
@@ -99,6 +100,11 @@ class DurationV3LossTargets:
     prompt_eval_mask: Optional[torch.Tensor] = None
     prompt_operator_fit_pred: Optional[torch.Tensor] = None
     prompt_operator_cv_fit_pred: Optional[torch.Tensor] = None
+    prompt_role_attn: Optional[torch.Tensor] = None
+    prompt_role_fit_pred: Optional[torch.Tensor] = None
+    prompt_role_value: Optional[torch.Tensor] = None
+    prompt_role_var: Optional[torch.Tensor] = None
+    prompt_log_duration: Optional[torch.Tensor] = None
     consistency_duration_tgt: Optional[torch.Tensor] = None
     consistency_mask: Optional[torch.Tensor] = None
     lambda_dur: float = 1.0
@@ -109,6 +115,10 @@ class DurationV3LossTargets:
     lambda_zero: float = 0.0
     lambda_ortho: float = 0.0
     baseline_pretrain_only: bool = False
+
+    @property
+    def lambda_mem(self) -> float:
+        return float(self.lambda_op)
 
 
 @dataclass(frozen=True)
@@ -1206,9 +1216,14 @@ def _build_duration_v3_duration_loss(
     targets: DurationV3LossTargets,
     committed_mask: torch.Tensor,
 ) -> torch.Tensor:
-    unit_anchor_base = targets.unit_anchor_base.float().clamp_min(1.0e-6)
+    prediction_anchor = (
+        targets.prediction_anchor
+        if isinstance(targets.prediction_anchor, torch.Tensor)
+        else targets.unit_anchor_base
+    )
+    prediction_anchor = prediction_anchor.float().clamp_min(1.0e-6)
     pred_logstretch = execution.unit_logstretch.float()
-    tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
+    tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(prediction_anchor)
     return _masked_huber(
         pred_logstretch,
         tgt_logstretch,
@@ -1243,6 +1258,24 @@ def _build_duration_v3_operator_loss(
 ) -> torch.Tensor:
     zero = pred_speech.new_tensor(0.0)
     operator_loss = zero
+    if (
+        isinstance(targets.prompt_role_attn, torch.Tensor)
+        and isinstance(targets.prompt_role_value, torch.Tensor)
+        and isinstance(targets.prompt_role_var, torch.Tensor)
+        and isinstance(targets.prompt_log_duration, torch.Tensor)
+        and isinstance(targets.prompt_mask, torch.Tensor)
+        and isinstance(targets.global_rate, torch.Tensor)
+    ):
+        prompt_mask = targets.prompt_mask.float()
+        centered = (targets.prompt_log_duration.float() - targets.global_rate.float()) * prompt_mask
+        mean_fit = torch.einsum("btm,bm->bt", targets.prompt_role_attn.float(), targets.prompt_role_value.float())
+        var_fit = torch.einsum("btm,bm->bt", targets.prompt_role_attn.float(), targets.prompt_role_var.float()).clamp_min(1.0e-4)
+        nll = (((centered - mean_fit) ** 2) / var_fit) + torch.log(var_fit)
+        operator_loss = (nll * prompt_mask).sum() / prompt_mask.sum().clamp_min(1.0)
+        usage = targets.prompt_role_attn.float().mean(dim=(0, 1))
+        uniform = torch.full_like(usage, 1.0 / max(1, usage.numel()))
+        reg = F.kl_div(usage.clamp_min(1.0e-6).log(), uniform, reduction="batchmean")
+        return operator_loss + (0.01 * reg)
     if targets.prompt_random_target_tgt is not None:
         prompt_pred = targets.prompt_operator_cv_fit_pred
         prompt_mask = targets.prompt_eval_mask
@@ -1346,7 +1379,12 @@ def _rebuild_duration_v3_sgbase_prediction(
     execution,
     targets: DurationV3LossTargets,
 ) -> torch.Tensor:
-    anchor = targets.unit_anchor_base.float().detach().clamp_min(1.0e-6)
+    anchor = (
+        targets.prediction_anchor
+        if isinstance(targets.prediction_anchor, torch.Tensor)
+        else targets.unit_anchor_base
+    )
+    anchor = anchor.float().detach().clamp_min(1.0e-6)
     return anchor * torch.exp(execution.unit_logstretch.float())
 
 
@@ -1400,7 +1438,7 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
     )
     scaled_base = l_base * float(targets.lambda_base)
     total = scaled_dur + scaled_op + scaled_zero + scaled_ortho + scaled_stream + scaled_base
-    return {
+    loss_dict = {
         "rhythm_exec_speech": scaled_dur,
         "rhythm_exec_stretch": scaled_op + scaled_zero + scaled_ortho,
         "rhythm_prefix_state": scaled_stream,
@@ -1415,6 +1453,13 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
         "rhythm_is_v3_bundle": pred_speech.new_tensor(1.0),
         "rhythm_total": total,
     }
+    if (
+        isinstance(targets.prompt_role_attn, torch.Tensor)
+        and isinstance(targets.prompt_role_value, torch.Tensor)
+        and isinstance(targets.prompt_role_var, torch.Tensor)
+    ):
+        loss_dict["rhythm_v3_mem"] = loss_dict["rhythm_v3_op"]
+    return loss_dict
 
 
 def build_rhythm_loss_dict(execution, targets: RhythmLossTargets) -> dict[str, torch.Tensor]:

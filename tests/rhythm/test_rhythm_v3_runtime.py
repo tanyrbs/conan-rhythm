@@ -18,7 +18,6 @@ def _build_hparams():
         "rhythm_response_rank": 4,
         "rhythm_response_window_left": 2,
         "rhythm_response_window_right": 0,
-        "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_max_logstretch": 0.8,
         "rhythm_streaming_mode": "strict",
@@ -27,6 +26,22 @@ def _build_hparams():
         "rhythm_v3_allow_hybrid": True,
         "rhythm_apply_mode": "always",
     }
+
+
+def _build_role_memory_hparams():
+    hparams = _build_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "rhythm_role_dim": 32,
+            "rhythm_num_role_slots": 8,
+            "rhythm_v3_source_residual_gain": 0.0,
+        }
+    )
+    return hparams
 
 
 def _run_adapter(adapter, *, content, ref, state=None, ref_conditioning=None, ref_lengths=None, auto_prompt_from_ref=True):
@@ -84,8 +99,6 @@ def test_rhythm_v3_adapter_emits_prompt_conditioned_operator_runtime():
     assert torch.all(ret["speech_duration_exec"] >= 0.0)
     assert torch.all(ret["rhythm_execution"].commit_mask >= 0.0)
     assert ret["rhythm_v3_runtime_mode"] == "operator_progress"
-    assert ret["rhythm_execution"].coarse_response is not None
-    assert torch.isfinite(ret["rhythm_execution"].coarse_response).all()
     assert ret["rhythm_execution"].progress_response is not None
     assert torch.isfinite(ret["rhythm_execution"].progress_response).all()
     assert ret["rhythm_execution"].local_response is not None
@@ -111,6 +124,26 @@ def test_rhythm_v3_adapter_emits_prompt_conditioned_operator_runtime():
     assert "blank_duration_exec" not in ret
     assert "rhythm_render_slot_index" not in ret
     assert "rhythm_render_phase_features" not in ret
+
+
+def test_rhythm_v3_role_memory_runtime_uses_static_prompt_memory_and_source_anchor():
+    adapter = ConanDurationAdapter(_build_role_memory_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]], dtype=torch.long)
+    ret = _run_adapter(adapter, content=content, ref=None, ref_conditioning=_build_prompt_conditioning())
+    ref_memory = ret["rhythm_ref_conditioning"]
+    execution = ret["rhythm_execution"]
+    assert ret["rhythm_v3_runtime_mode"] == "role_memory"
+    assert ref_memory.role_value is not None
+    assert ref_memory.role_var is not None
+    assert ref_memory.role_coverage is not None
+    assert ref_memory.prompt_role_attn is not None
+    assert execution.role_conf_unit is not None
+    assert torch.isfinite(execution.role_conf_unit).all()
+    assert execution.progress_response is None
+    assert execution.detector_response is None
+    assert execution.local_response is not None
+    assert ret["speech_duration_exec"].shape[1] == ret["rhythm_unit_batch"].content_units.shape[1]
+    assert torch.isfinite(ret["speech_duration_exec"]).all()
 
 
 def test_rhythm_v3_baseline_pretrain_can_run_without_reference_prompt():
@@ -555,7 +588,7 @@ def test_rhythm_v3_zero_progress_profile_matches_global_only():
         hidden_size=32,
         vocab_size=128,
     )
-    coarse_adapter = ConanDurationAdapter(
+    progress_adapter = ConanDurationAdapter(
         {
             **_build_hparams(),
             "rhythm_v3_backbone": "global_only",
@@ -579,15 +612,15 @@ def test_rhythm_v3_zero_progress_profile_matches_global_only():
         ref=None,
         ref_conditioning=conditioning,
     )
-    ret_coarse = _run_adapter(
-        coarse_adapter,
+    ret_progress = _run_adapter(
+        progress_adapter,
         content=torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long),
         ref=None,
         ref_conditioning=conditioning,
     )
     assert torch.allclose(
         ret_global["rhythm_execution"].unit_logstretch,
-        ret_coarse["rhythm_execution"].unit_logstretch,
+        ret_progress["rhythm_execution"].unit_logstretch,
         atol=1.0e-5,
     )
 

@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -201,6 +203,58 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertIn(("ref_phrase_trace",), groups)
         self.assertIn(("planner_ref_phrase_trace",), groups)
         self.assertIn(("ref_phrase_boundary_strength",), groups)
+
+    def test_role_memory_training_source_cache_uses_pseudo_source_duration_context(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "pseudo_source_duration_perturbation": True,
+                "rhythm_augmentation_deterministic": True,
+                "seed": 7,
+            }
+        )
+        source_cache = {
+            "content_units": np.asarray([1, 2, 3], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 4.0, 5.0], dtype=np.float32),
+            "sep_hint": np.asarray([0, 0, 1], dtype=np.int64),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+        }
+        perturbed = dataset._maybe_build_duration_v3_training_source_cache(source_cache, item_name="utt_a")
+        self.assertEqual(perturbed["dur_anchor_src"].shape, source_cache["dur_anchor_src"].shape)
+        self.assertFalse(np.allclose(perturbed["dur_anchor_src"], source_cache["dur_anchor_src"]))
+        self.assertTrue(np.all(perturbed["dur_anchor_src"] > 0.0))
+        self.assertTrue(np.allclose(source_cache["dur_anchor_src"], np.asarray([3.0, 4.0, 5.0], dtype=np.float32)))
+
+    def test_role_memory_prompt_unit_conditioning_supports_truncation_and_dropout(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_prompt_truncation": 2.0,
+                "rhythm_prompt_dropout": 0.5,
+                "rhythm_augmentation_deterministic": True,
+                "seed": 11,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_a",
+            "content_units": np.asarray([1, 2, 3, 4], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 4.0, 2.0, 5.0], dtype=np.float32),
+            "sep_hint": np.asarray([0, 0, 0, 0], dtype=np.int64),
+            "source_boundary_cue": np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
+            "phrase_group_pos": np.asarray([0.0, 0.1, 0.2, 0.3], dtype=np.float32),
+            "phrase_final_mask": np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        }
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        mask = conditioning["prompt_unit_mask"]
+        self.assertGreaterEqual(float(mask.sum()), 1.0)
+        self.assertLessEqual(float(mask.sum()), 2.0)
+        zeroed = mask <= 0.0
+        self.assertTrue(np.all(conditioning["prompt_duration_obs"][zeroed] == 0.0))
+        self.assertTrue(np.all(conditioning["prompt_source_boundary_cue"][zeroed] == 0.0))
 
 
 if __name__ == "__main__":

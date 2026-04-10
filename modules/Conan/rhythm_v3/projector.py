@@ -20,6 +20,8 @@ class StreamingDurationProjector(nn.Module):
             committed_units=torch.zeros((batch_size,), dtype=torch.long, device=device),
             rounding_residual=zeros.clone(),
             cached_duration_exec=None,
+            local_rate_ema=zeros.clone(),
+            since_last_boundary=zeros.clone(),
         )
 
     @staticmethod
@@ -131,11 +133,14 @@ class StreamingDurationProjector(nn.Module):
         commit_mask: torch.Tensor,
         residual_next: torch.Tensor,
         cached_duration_exec: torch.Tensor,
+        state_prev: DurationRuntimeState,
     ) -> DurationRuntimeState:
         return DurationRuntimeState(
             committed_units=commit_mask.sum(dim=1).long(),
             rounding_residual=residual_next.detach(),
             cached_duration_exec=cached_duration_exec.detach(),
+            local_rate_ema=None if state_prev.local_rate_ema is None else state_prev.local_rate_ema.detach(),
+            since_last_boundary=None if state_prev.since_last_boundary is None else state_prev.since_last_boundary.detach(),
         )
 
     def finalize_execution(
@@ -149,9 +154,13 @@ class StreamingDurationProjector(nn.Module):
         sealed_mask: torch.Tensor | None,
         speech_commit_mask: torch.Tensor,
         state: DurationRuntimeState | None,
-        coarse_response: torch.Tensor | None = None,
+        progress_response: torch.Tensor | None = None,
         detector_response: torch.Tensor | None = None,
         local_response: torch.Tensor | None = None,
+        role_attn_unit: torch.Tensor | None = None,
+        role_value_unit: torch.Tensor | None = None,
+        role_var_unit: torch.Tensor | None = None,
+        role_conf_unit: torch.Tensor | None = None,
         unit_logstretch_raw: torch.Tensor | None = None,
         unit_duration_raw: torch.Tensor | None = None,
     ) -> DurationExecution:
@@ -182,6 +191,7 @@ class StreamingDurationProjector(nn.Module):
             commit_mask=commit_mask,
             residual_next=residual_next,
             cached_duration_exec=cached_duration_exec,
+            state_prev=state,
         )
         frame_plan = self.build_frame_plan(
             source_duration_obs=source_duration_obs,
@@ -194,9 +204,13 @@ class StreamingDurationProjector(nn.Module):
             basis_activation=basis_activation,
             commit_mask=commit_mask,
             next_state=next_state,
-            coarse_response=coarse_response,
+            progress_response=progress_response,
             detector_response=detector_response,
             local_response=local_response,
+            role_attn_unit=role_attn_unit,
+            role_value_unit=role_value_unit,
+            role_var_unit=role_var_unit,
+            role_conf_unit=role_conf_unit,
             unit_logstretch_raw=unit_logstretch_raw,
             unit_duration_raw=unit_duration_raw,
             frame_plan=frame_plan,

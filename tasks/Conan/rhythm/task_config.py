@@ -9,28 +9,24 @@ from modules.Conan.rhythm.policy import (
     parse_optional_bool,
     resolve_pause_boundary_weight,
 )
-from modules.Conan.rhythm_v3.hparam_aliases import (
-    resolve_progress_bins,
-    resolve_progress_support_tau,
-)
 from tasks.Conan.rhythm.config_contract import (
     collect_config_contract_evaluation,
 )
 
 _DEPRECATED_V3_HPARAM_RENAMES = {
-    "lambda_rhythm_mem": "lambda_rhythm_op",
     "lambda_rhythm_anti": "lambda_rhythm_zero",
 }
 _REMOVED_V3_HPARAMS = (
     "rhythm_v3_mem",
     "rhythm_v3_anti",
     "rhythm_v3_allow_proxy_infer",
-    "rhythm_role_dim",
     "rhythm_role_codebook_size",
     "rhythm_anti_pos_bins",
     "rhythm_anti_pos_grl_scale",
     "rhythm_baseline_struct_enable",
     "rhythm_baseline_struct_scale_init",
+    "rhythm_coarse_bins",
+    "rhythm_coarse_support_tau",
 )
 _REQUIRED_V3_PUBLIC_INPUTS = (
     "content_units",
@@ -54,9 +50,7 @@ _FORBIDDEN_V3_PUBLIC_OUTPUTS = ("pause_after_exec",)
 _REQUIRED_V3_PUBLIC_LOSSES = (
     "rhythm_total",
     "rhythm_v3_dur",
-    "rhythm_v3_op",
     "rhythm_v3_pref",
-    "rhythm_v3_zero",
 )
 _FORBIDDEN_V3_PUBLIC_LOSSES = (
     "L_exec_speech",
@@ -146,12 +140,17 @@ def validate_rhythm_training_hparams(hparams) -> None:
         backbone_mode = str(hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower()
         warp_mode = str(hparams.get("rhythm_v3_warp_mode", "none") or "none").strip().lower()
         allow_hybrid = bool(hparams.get("rhythm_v3_allow_hybrid", False))
-        if backbone_mode not in {"global_only", "operator"}:
-            raise ValueError("rhythm_v3_backbone must be one of: global_only, operator")
+        if backbone_mode not in {"global_only", "operator", "role_memory"}:
+            raise ValueError("rhythm_v3_backbone must be one of: global_only, operator, role_memory")
         if warp_mode not in {"none", "progress", "detector"}:
             raise ValueError("rhythm_v3_warp_mode must be one of: none, progress, detector")
         if backbone_mode == "global_only" and allow_hybrid:
             raise ValueError("rhythm_v3_allow_hybrid is only valid when rhythm_v3_backbone='operator'.")
+        if backbone_mode == "role_memory":
+            if warp_mode != "none":
+                raise ValueError("rhythm_v3_backbone='role_memory' only supports rhythm_v3_warp_mode='none'.")
+            if allow_hybrid:
+                raise ValueError("rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='role_memory'.")
         if backbone_mode == "operator" and warp_mode == "progress" and not allow_hybrid:
             raise ValueError(
                 "rhythm_v3_backbone='operator' with rhythm_v3_warp_mode='progress' "
@@ -166,22 +165,35 @@ def validate_rhythm_training_hparams(hparams) -> None:
             raise ValueError(
                 "rhythm_v3_source_residual_gain requires rhythm_v3_backbone='operator'."
             )
+        anchor_mode = str(hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower()
+        if anchor_mode not in {"baseline", "source_observed"}:
+            raise ValueError("rhythm_v3_anchor_mode must be one of: baseline, source_observed")
+        if backbone_mode == "role_memory" and anchor_mode != "source_observed":
+            raise ValueError("rhythm_v3_backbone='role_memory' requires rhythm_v3_anchor_mode='source_observed'.")
         if source_residual_gain > 0.0 and warp_mode == "progress":
             raise ValueError(
                 "rhythm_v3_source_residual_gain cannot be combined with hybrid operator+progress warp. "
                 "Disable progress warp or set source residual gain back to 0."
             )
         runtime_mode = (
-            "progress_only" if backbone_mode == "global_only" and warp_mode == "progress"
-            else "detector_only" if backbone_mode == "global_only" and warp_mode == "detector"
-            else "global_only" if backbone_mode == "global_only"
-            else "operator_progress" if warp_mode == "progress"
-            else "operator_srcres" if source_residual_gain > 0.0
+            "role_memory"
+            if backbone_mode == "role_memory"
+            else "progress_only"
+            if backbone_mode == "global_only" and warp_mode == "progress"
+            else "detector_only"
+            if backbone_mode == "global_only" and warp_mode == "detector"
+            else "global_only"
+            if backbone_mode == "global_only"
+            else "operator_progress"
+            if warp_mode == "progress"
+            else "operator_srcres"
+            if source_residual_gain > 0.0
             else "operator"
         )
         for key in (
             "lambda_rhythm_dur",
             "lambda_rhythm_op",
+            "lambda_rhythm_mem",
             "lambda_rhythm_pref",
             "lambda_rhythm_base",
             "lambda_rhythm_cons",
@@ -194,10 +206,10 @@ def validate_rhythm_training_hparams(hparams) -> None:
         ):
             if float(hparams.get(key, 0.0) or 0.0) < 0.0:
                 raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
-        if resolve_progress_support_tau(hparams, default=8.0) < 0.0:
-            raise ValueError("rhythm_progress_support_tau / rhythm_coarse_support_tau must be >= 0 for rhythm_v3.")
-        if resolve_progress_bins(hparams, default=4) <= 0:
-            raise ValueError("rhythm_progress_bins / rhythm_coarse_bins must be > 0 for rhythm_v3.")
+        if float(hparams.get("rhythm_progress_support_tau", 8.0) or 0.0) < 0.0:
+            raise ValueError("rhythm_progress_support_tau must be >= 0 for rhythm_v3.")
+        if int(hparams.get("rhythm_progress_bins", 4) or 0) <= 0:
+            raise ValueError("rhythm_progress_bins must be > 0 for rhythm_v3.")
         holdout_ratio = float(hparams.get("rhythm_operator_holdout_ratio", 0.30) or 0.0)
         if holdout_ratio >= 1.0:
             raise ValueError("rhythm_operator_holdout_ratio must be < 1 for rhythm_v3.")
@@ -206,14 +218,24 @@ def validate_rhythm_training_hparams(hparams) -> None:
         source_residual_gain = float(hparams.get("rhythm_v3_source_residual_gain", 0.0) or 0.0)
         if source_residual_gain < 0.0:
             raise ValueError("rhythm_v3_source_residual_gain must be >= 0 for rhythm_v3.")
-        if runtime_mode in {"global_only", "progress_only", "detector_only"}:
-            for key in ("lambda_rhythm_op", "lambda_rhythm_zero", "lambda_rhythm_ortho"):
-                if float(hparams.get(key, 0.0) or 0.0) > 0.0:
+        if runtime_mode in {"global_only", "progress_only", "detector_only", "role_memory"}:
+            for key in ("lambda_rhythm_op", "lambda_rhythm_mem", "lambda_rhythm_zero", "lambda_rhythm_ortho"):
+                value = float(hparams.get(key, 0.0) or 0.0)
+                if runtime_mode == "role_memory" and key in {"lambda_rhythm_op", "lambda_rhythm_mem"}:
+                    continue
+                if value > 0.0:
                     raise ValueError(f"{key} must be 0 when rhythm_v3 runtime mode is '{runtime_mode}'.")
             if source_residual_gain > 0.0:
                 raise ValueError(
                     f"rhythm_v3_source_residual_gain must be 0 when rhythm_v3 runtime mode is '{runtime_mode}'."
                 )
+        if runtime_mode == "role_memory":
+            if float(hparams.get("lambda_rhythm_zero", 0.0) or 0.0) > 0.0:
+                raise ValueError("lambda_rhythm_zero must be 0 when rhythm_v3_backbone='role_memory'.")
+            if float(hparams.get("lambda_rhythm_ortho", 0.0) or 0.0) > 0.0:
+                raise ValueError("lambda_rhythm_ortho must be 0 when rhythm_v3_backbone='role_memory'.")
+        elif float(hparams.get("lambda_rhythm_mem", 0.0) or 0.0) > 0.0:
+            raise ValueError("lambda_rhythm_mem is only valid when rhythm_v3_backbone='role_memory'.")
         elif runtime_mode != "operator_srcres" and source_residual_gain > 0.0:
             raise ValueError(
                 "rhythm_v3_source_residual_gain is only valid when rhythm_v3 runtime mode is 'operator_srcres'."
@@ -240,6 +262,17 @@ def validate_rhythm_training_hparams(hparams) -> None:
             forbidden=_FORBIDDEN_V3_PUBLIC_LOSSES,
         )
         if public_losses is not None:
+            if runtime_mode == "role_memory":
+                if not any(key in public_losses for key in ("rhythm_v3_mem", "rhythm_v3_op")):
+                    raise ValueError(
+                        "rhythm_public_losses must include rhythm_v3_mem (or legacy alias rhythm_v3_op) "
+                        "when rhythm_v3_backbone='role_memory'."
+                    )
+            else:
+                if "rhythm_v3_op" not in public_losses:
+                    raise ValueError("rhythm_public_losses must include rhythm_v3_op for non-role-memory rhythm_v3 modes.")
+                if float(hparams.get("lambda_rhythm_zero", 0.0) or 0.0) > 0.0 and "rhythm_v3_zero" not in public_losses:
+                    raise ValueError("rhythm_public_losses must include rhythm_v3_zero when lambda_rhythm_zero > 0.")
             if float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) > 0.0 and "rhythm_v3_base" not in public_losses:
                 raise ValueError("rhythm_public_losses must include rhythm_v3_base when lambda_rhythm_base > 0.")
             if float(hparams.get("lambda_rhythm_cons", 0.0) or 0.0) > 0.0 and "rhythm_v3_cons" not in public_losses:
