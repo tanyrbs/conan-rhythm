@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.Conan.rhythm.source_boundary import build_source_boundary_cue
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 
 from .contracts import SourceUnitBatch
@@ -24,7 +23,7 @@ class AnchorNet(nn.Module):
         self.min_frames = float(max(0.25, min_frames))
         self.max_frames = float(max(self.min_frames + 1.0e-3, max_frames))
         self.unit_embedding = nn.Embedding(vocab_size, hidden_size)
-        self.in_proj = nn.Linear(hidden_size + 2, hidden_size)
+        self.in_proj = nn.Linear(hidden_size, hidden_size)
         self.conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, bias=True)
         self.out_proj = nn.Linear(hidden_size, 1)
 
@@ -32,26 +31,16 @@ class AnchorNet(nn.Module):
         self,
         content_units: torch.Tensor,
         unit_mask: torch.Tensor,
-        edge_cue: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if content_units.size(1) <= 0:
             return unit_mask.new_zeros(unit_mask.shape, dtype=torch.float32)
-        content_units = content_units.long()
         unit_mask = unit_mask.float()
-        if edge_cue is None:
-            edge_cue = unit_mask.new_zeros(unit_mask.shape)
-        edge_cue = edge_cue.float() * unit_mask
-        embed = self.unit_embedding(content_units)
-        boundary_feat = edge_cue.unsqueeze(-1)
-        mask_feat = unit_mask.unsqueeze(-1)
-        hidden = self.in_proj(torch.cat([embed, boundary_feat, mask_feat], dim=-1))
-        hidden = F.silu(hidden)
-        conv_inp = hidden.transpose(1, 2)
-        conv_inp = F.pad(conv_inp, (self.conv.kernel_size[0] - 1, 0))
-        conv = self.conv(conv_inp).transpose(1, 2)
-        hidden = F.silu(hidden + conv)
-        raw = self.out_proj(hidden).squeeze(-1)
-        scale = torch.sigmoid(raw)
+        embed = self.unit_embedding(content_units.long())
+        hidden = F.silu(self.in_proj(embed))
+        conv_input = F.pad(hidden.transpose(1, 2), (self.conv.kernel_size[0] - 1, 0))
+        conv_hidden = self.conv(conv_input).transpose(1, 2)
+        hidden = F.silu(hidden + conv_hidden)
+        scale = torch.sigmoid(self.out_proj(hidden).squeeze(-1))
         anchor = self.min_frames + (self.max_frames - self.min_frames) * scale
         return anchor * unit_mask
 
@@ -81,38 +70,53 @@ class DurationUnitFrontend(nn.Module):
             max_frames=anchor_max_frames,
         )
 
+    @staticmethod
+    def _validate_precomputed_shapes(**named_tensors) -> None:
+        expected_shape = None
+        for name, value in named_tensors.items():
+            if value is None:
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"{name} must be a tensor when provided, got {type(value)!r}")
+            if value.dim() != 2:
+                raise ValueError(f"{name} must be rank-2 [B, U], got shape={tuple(value.shape)}")
+            if expected_shape is None:
+                expected_shape = tuple(value.shape)
+                continue
+            if tuple(value.shape) != expected_shape:
+                raise ValueError(
+                    f"Precomputed source cache shape mismatch for {name}: expected {expected_shape}, got {tuple(value.shape)}"
+                )
+
+    def _resolve_anchor_base(
+        self,
+        *,
+        base_batch,
+        unit_anchor_base: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if unit_anchor_base is not None:
+            return unit_anchor_base.float() * base_batch.unit_mask.float()
+        return self.anchor_net(
+            content_units=base_batch.content_units,
+            unit_mask=base_batch.unit_mask,
+        )
+
     def _convert_batch(
         self,
         base_batch,
         *,
         unit_anchor_base: torch.Tensor | None = None,
-        edge_cue: torch.Tensor | None = None,
     ) -> SourceUnitBatch:
-        if edge_cue is None:
-            edge_cue = build_source_boundary_cue(
-                dur_anchor_src=base_batch.dur_anchor_src.float(),
-                unit_mask=base_batch.unit_mask.float(),
-                sep_hint=base_batch.sep_hint,
-                open_run_mask=base_batch.open_run_mask,
-                sealed_mask=base_batch.sealed_mask,
-                boundary_confidence=base_batch.boundary_confidence,
-            )
-        if unit_anchor_base is None:
-            unit_anchor_base = self.anchor_net(
-                content_units=base_batch.content_units,
-                unit_mask=base_batch.unit_mask,
-                edge_cue=edge_cue,
-            )
+        unit_mask = base_batch.unit_mask.float()
+        sep_mask = base_batch.sep_hint.float() * unit_mask
+        resolved_anchor_base = self._resolve_anchor_base(base_batch=base_batch, unit_anchor_base=unit_anchor_base)
         return SourceUnitBatch(
             content_units=base_batch.content_units,
-            source_runlen_src=base_batch.dur_anchor_src.float() * base_batch.unit_mask.float(),
-            unit_anchor_base=unit_anchor_base.float() * base_batch.unit_mask.float(),
-            unit_mask=base_batch.unit_mask.float(),
-            edge_cue=edge_cue.float() * base_batch.unit_mask.float(),
-            open_run_mask=base_batch.open_run_mask.long(),
-            sealed_mask=base_batch.sealed_mask.float(),
-            sep_hint=base_batch.sep_hint.long(),
-            boundary_confidence=base_batch.boundary_confidence.float(),
+            source_duration_obs=base_batch.dur_anchor_src.float() * unit_mask,
+            unit_anchor_base=resolved_anchor_base,
+            unit_mask=unit_mask,
+            sealed_mask=base_batch.sealed_mask.float() * unit_mask,
+            sep_mask=sep_mask,
         )
 
     def from_content_tensor(
@@ -133,25 +137,28 @@ class DurationUnitFrontend(nn.Module):
         self,
         *,
         content_units: torch.Tensor,
-        dur_anchor_src: torch.Tensor,
+        source_duration_obs: torch.Tensor,
         unit_mask: torch.Tensor | None = None,
-        open_run_mask: torch.Tensor | None = None,
         sealed_mask: torch.Tensor | None = None,
-        sep_hint: torch.Tensor | None = None,
-        boundary_confidence: torch.Tensor | None = None,
+        sep_mask: torch.Tensor | None = None,
         unit_anchor_base: torch.Tensor | None = None,
-        edge_cue: torch.Tensor | None = None,
     ) -> SourceUnitBatch:
+        self._validate_precomputed_shapes(
+            content_units=content_units,
+            source_duration_obs=source_duration_obs,
+            unit_mask=unit_mask,
+            sealed_mask=sealed_mask,
+            sep_mask=sep_mask,
+            unit_anchor_base=unit_anchor_base,
+        )
         base_batch = self.base_frontend.from_precomputed(
             content_units=content_units,
-            dur_anchor_src=dur_anchor_src,
+            dur_anchor_src=source_duration_obs,
             unit_mask=unit_mask,
-            open_run_mask=open_run_mask,
             sealed_mask=sealed_mask,
-            sep_hint=sep_hint,
-            boundary_confidence=boundary_confidence,
+            sep_hint=sep_mask,
         )
-        return self._convert_batch(base_batch, unit_anchor_base=unit_anchor_base, edge_cue=edge_cue)
+        return self._convert_batch(base_batch, unit_anchor_base=unit_anchor_base)
 
     def init_stream_state(self, batch_size: int, *, device: torch.device | None = None):
         return self.base_frontend.init_stream_state(batch_size=batch_size, device=device)

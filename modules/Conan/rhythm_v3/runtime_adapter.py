@@ -8,6 +8,7 @@ from modules.Conan.rhythm.renderer import render_rhythm_sequence
 
 from .contracts import (
     ReferenceDurationMemory,
+    collect_duration_v3_source_cache,
     move_duration_runtime_state,
     move_reference_duration_memory,
     move_source_unit_batch,
@@ -29,20 +30,18 @@ class ConanDurationAdapter(nn.Module):
             anchor_min_frames=float(hparams.get("rhythm_anchor_min_frames", 1.0)),
             anchor_max_frames=float(hparams.get("rhythm_anchor_max_frames", 12.0)),
         )
+        streaming_mode = str(hparams.get("rhythm_streaming_mode", "strict") or "strict")
+        micro_lookahead_units = hparams.get("rhythm_micro_lookahead_units")
         self.module = StreamingDurationModule(
             vocab_size=vocab_size,
             hidden_size=int(hparams.get("rhythm_hidden_size", hidden_size)),
-            role_dim=int(hparams.get("rhythm_role_dim", 64)),
-            codebook_size=int(hparams.get("rhythm_role_codebook_size", 12)),
-            role_window_left=int(hparams.get("rhythm_role_window_left", 4)),
-            role_window_right=int(hparams.get("rhythm_role_window_right", 0)),
+            basis_rank=int(hparams.get("rhythm_response_rank", 12)),
+            response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
+            response_window_right=int(hparams.get("rhythm_response_window_right", 0)),
             trace_bins=int(hparams.get("rhythm_trace_bins", 24)),
-            coverage_floor=float(hparams.get("rhythm_ref_coverage_floor", 0.05)),
-            prefix_drift_gain=float(hparams.get("rhythm_prefix_drift_gain", 0.25)),
-            prefix_drift_clip=float(hparams.get("rhythm_prefix_drift_clip", 0.05)),
-            max_logstretch=float(hparams.get("rhythm_max_logstretch", 1.0)),
-            anti_pos_bins=int(hparams.get("rhythm_anti_pos_bins", 8)),
-            anti_pos_grl_scale=float(hparams.get("rhythm_anti_pos_grl_scale", 1.0)),
+            streaming_mode=streaming_mode,
+            micro_lookahead_units=(None if micro_lookahead_units is None else int(micro_lookahead_units)),
+            ridge_lambda=float(hparams.get("rhythm_operator_ridge_lambda", 1.0)),
         )
         self.pause_state = nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
         self.render_phase_mlp = None
@@ -76,17 +75,10 @@ class ConanDurationAdapter(nn.Module):
         rhythm_source_cache: dict | None,
         infer: bool,
     ):
-        if rhythm_source_cache is not None:
+        precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
+        if precomputed_cache is not None:
             return self.unit_frontend.from_precomputed(
-                content_units=rhythm_source_cache["content_units"],
-                dur_anchor_src=rhythm_source_cache["dur_anchor_src"],
-                unit_mask=rhythm_source_cache.get("unit_mask"),
-                open_run_mask=rhythm_source_cache.get("open_run_mask"),
-                sealed_mask=rhythm_source_cache.get("sealed_mask"),
-                sep_hint=rhythm_source_cache.get("sep_hint"),
-                boundary_confidence=rhythm_source_cache.get("boundary_confidence"),
-                unit_anchor_base=rhythm_source_cache.get("unit_anchor_base"),
-                edge_cue=rhythm_source_cache.get("edge_cue"),
+                **precomputed_cache,
             )
         return self.unit_frontend.from_content_tensor(
             content,
@@ -101,38 +93,17 @@ class ConanDurationAdapter(nn.Module):
         source_batch,
         ref_memory: ReferenceDurationMemory,
         execution,
+        rhythm_state_prev,
     ) -> None:
         ret["rhythm_version"] = "v3"
         ret["rhythm_teacher_as_main"] = 0.0
         ret["rhythm_unit_batch"] = source_batch
         ret["rhythm_execution"] = execution
+        ret["rhythm_state_prev"] = rhythm_state_prev
         ret["rhythm_state_next"] = execution.next_state
         ret["rhythm_ref_conditioning"] = ref_memory
-        ret["ref_rhythm_stats"] = ref_memory.raw_stats
-        ret["ref_rhythm_trace"] = ref_memory.raw_trace
-        ret["global_rate"] = ref_memory.global_rate
-        ret["role_value"] = ref_memory.role_value
-        ret["role_coverage"] = ref_memory.role_coverage
-        ret["role_attention"] = execution.role_attention
-        ret["dur_logratio_unit"] = execution.unit_logstretch
         ret["speech_duration_exec"] = execution.speech_duration_exec
-        ret["blank_duration_exec"] = execution.blank_duration_exec
-        ret["pause_after_exec"] = execution.pause_after_exec
-        ret["effective_duration_exec"] = execution.effective_duration_exec
         ret["commit_frontier"] = execution.commit_frontier
-        ret["source_boundary_cue"] = source_batch.edge_cue
-        ret["unit_anchor_base"] = source_batch.unit_anchor_base
-        ret["source_runlen_src"] = source_batch.source_runlen_src
-        ret["sealed_mask"] = source_batch.sealed_mask
-        ret["boundary_confidence"] = source_batch.boundary_confidence
-        if ref_memory.prompt_reconstruction is not None:
-            ret["rhythm_prompt_reconstruction"] = ref_memory.prompt_reconstruction
-        if ref_memory.prompt_rel_stretch is not None:
-            ret["rhythm_prompt_rel_stretch"] = ref_memory.prompt_rel_stretch
-        if ref_memory.prompt_mask is not None:
-            ret["rhythm_prompt_mask"] = ref_memory.prompt_mask
-        if execution.anti_pos_logits is not None:
-            ret["rhythm_anti_pos_logits"] = execution.anti_pos_logits
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
 
@@ -162,6 +133,14 @@ class ConanDurationAdapter(nn.Module):
         del target, global_steps, rhythm_runtime_overrides, rhythm_offline_source_cache
         if ref is None and rhythm_ref_conditioning is None:
             return content_embed, tgt_nonpadding, f0, uv
+        if content_embed.device != content.device:
+            raise ValueError(
+                f"content/content_embed device mismatch: content={content.device}, content_embed={content_embed.device}"
+            )
+        if tgt_nonpadding.device != content.device:
+            raise ValueError(
+                f"content/tgt_nonpadding device mismatch: content={content.device}, tgt_nonpadding={tgt_nonpadding.device}"
+            )
         source_batch = self._build_source_batch(
             content=content,
             content_lengths=content_lengths,
@@ -169,7 +148,7 @@ class ConanDurationAdapter(nn.Module):
             infer=infer,
         )
         source_batch = move_source_unit_batch(source_batch, device=content.device)
-        rhythm_state = move_duration_runtime_state(rhythm_state, device=content.device)
+        rhythm_state_prev = move_duration_runtime_state(rhythm_state, device=content.device)
         ref_memory = self.module.build_reference_conditioning(
             ref_conditioning=rhythm_ref_conditioning,
             ref_mel=ref,
@@ -183,19 +162,32 @@ class ConanDurationAdapter(nn.Module):
         execution = self.module(
             source_batch=source_batch,
             ref_memory=ref_memory,
-            state=rhythm_state,
+            state=rhythm_state_prev,
         )
         self._attach_runtime_outputs(
             ret=ret,
             source_batch=source_batch,
             ref_memory=ref_memory,
             execution=execution,
+            rhythm_state_prev=rhythm_state_prev,
         )
         apply_rhythm_render = resolve_rhythm_apply_mode(
             self.hparams,
             infer=infer,
             override=rhythm_apply_override,
         )
+        if (
+            bool(apply_rhythm_render)
+            and (
+                execution.frame_plan is None
+                or source_batch.content_units.size(1) <= 0
+                or execution.frame_plan.total_mask.numel() <= 0
+                or float(execution.frame_plan.total_mask.sum().item()) <= 0.0
+            )
+        ):
+            ret["rhythm_apply_render"] = 0.0
+            ret["rhythm_render_skipped_empty"] = 1.0
+            return content_embed, tgt_nonpadding, f0, uv
         ret["rhythm_apply_render"] = float(apply_rhythm_render)
         if not apply_rhythm_render:
             return content_embed, tgt_nonpadding, f0, uv
@@ -215,8 +207,6 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_total_mask"] = rendered.total_mask
         ret["rhythm_speech_mask"] = rendered.speech_mask
         ret["rhythm_blank_mask"] = rendered.blank_mask
-        ret["rhythm_render_slot_index"] = rendered.frame_slot_index
         ret["rhythm_render_unit_index"] = rendered.frame_unit_index
-        ret["rhythm_render_phase_features"] = rendered.frame_phase_features
         ret["rhythm_frame_plan"] = rendered.frame_plan
         return rendered.frame_states, rendered.total_mask[:, :, None], f0, uv

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
@@ -12,41 +13,112 @@ if TYPE_CHECKING:
 @dataclass
 class SourceUnitBatch:
     content_units: torch.Tensor
-    source_runlen_src: torch.Tensor
+    source_duration_obs: torch.Tensor
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
-    edge_cue: torch.Tensor
-    open_run_mask: Optional[torch.Tensor] = None
-    sealed_mask: Optional[torch.Tensor] = None
-    sep_hint: Optional[torch.Tensor] = None
-    boundary_confidence: Optional[torch.Tensor] = None
+    sealed_mask: torch.Tensor
+    sep_mask: torch.Tensor
 
-    @property
-    def dur_anchor_src(self) -> torch.Tensor:
-        return self.source_runlen_src
+
+DURATION_V3_SOURCE_CACHE_REQUIRED_KEYS = (
+    "content_units",
+    "source_duration_obs",
+)
+
+DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS = (
+    "unit_mask",
+    "sealed_mask",
+    "sep_mask",
+    "unit_anchor_base",
+)
+
+DURATION_V3_SOURCE_CACHE_KEYS = (
+    DURATION_V3_SOURCE_CACHE_REQUIRED_KEYS
+    + DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS
+)
+
+
+def collect_duration_v3_source_cache(source, *, prefix: str = "") -> dict[str, torch.Tensor] | None:
+    payload: dict[str, torch.Tensor] = {}
+    for key in DURATION_V3_SOURCE_CACHE_KEYS:
+        source_key = f"{prefix}{key}"
+        if isinstance(source, Mapping):
+            value = source.get(source_key)
+        else:
+            value = getattr(source, source_key, None)
+        if value is not None:
+            payload[key] = value
+    if any(key not in payload for key in DURATION_V3_SOURCE_CACHE_REQUIRED_KEYS):
+        return None
+    return payload
+
+
+def export_duration_v3_source_cache(batch: SourceUnitBatch) -> dict[str, torch.Tensor]:
+    payload = collect_duration_v3_source_cache(batch)
+    if payload is None:
+        raise ValueError("Duration-v3 source batch is missing required cache fields.")
+    return payload
+
+
+@dataclass
+class StructuredDurationOperatorMemory:
+    operator_coeff: torch.Tensor
+
+
+@dataclass
+class PromptConditioningEvidence:
+    prompt_basis_activation: Optional[torch.Tensor] = None
+    prompt_random_target: Optional[torch.Tensor] = None
+    prompt_mask: Optional[torch.Tensor] = None
+    prompt_operator_fit: Optional[torch.Tensor] = None
+    prompt_log_base: Optional[torch.Tensor] = None
+    prompt_log_duration: Optional[torch.Tensor] = None
+    prompt_log_residual: Optional[torch.Tensor] = None
 
 
 @dataclass
 class ReferenceDurationMemory:
     global_rate: torch.Tensor
-    role_keys: torch.Tensor
-    role_value: torch.Tensor
-    role_coverage: torch.Tensor
-    prompt_role_feat: Optional[torch.Tensor] = None
-    prompt_rel_stretch: Optional[torch.Tensor] = None
-    prompt_mask: Optional[torch.Tensor] = None
-    prompt_role_attention: Optional[torch.Tensor] = None
-    prompt_reconstruction: Optional[torch.Tensor] = None
-    role_summary: Optional[torch.Tensor] = None
-    raw_stats: Optional[torch.Tensor] = None
-    raw_trace: Optional[torch.Tensor] = None
+    operator: StructuredDurationOperatorMemory
+    prompt: Optional[PromptConditioningEvidence] = None
+
+    @property
+    def operator_coeff(self) -> torch.Tensor:
+        return self.operator.operator_coeff
+
+    @property
+    def prompt_basis_activation(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_basis_activation
+
+    @property
+    def prompt_random_target(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_random_target
+
+    @property
+    def prompt_mask(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_mask
+
+    @property
+    def prompt_operator_fit(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_operator_fit
+
+    @property
+    def prompt_log_base(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_log_base
+
+    @property
+    def prompt_log_duration(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_log_duration
+
+    @property
+    def prompt_log_residual(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_log_residual
 
 
 @dataclass
 class DurationRuntimeState:
     committed_units: torch.Tensor
-    cumulative_pred_frames: torch.Tensor
-    cumulative_tgt_frames: Optional[torch.Tensor] = None
+    rounding_residual: torch.Tensor
     cached_duration_exec: Optional[torch.Tensor] = None
 
     @property
@@ -55,41 +127,24 @@ class DurationRuntimeState:
 
     @property
     def clock_delta(self) -> torch.Tensor:
-        if self.cumulative_tgt_frames is None:
-            return self.cumulative_pred_frames.new_zeros(self.cumulative_pred_frames.shape)
-        return self.cumulative_pred_frames - self.cumulative_tgt_frames
+        return self.rounding_residual.new_zeros(self.rounding_residual.shape)
 
     @property
     def backlog(self) -> torch.Tensor:
-        return self.clock_delta.clamp_min(0.0)
+        return self.rounding_residual.new_zeros(self.rounding_residual.shape)
 
 
 @dataclass
 class DurationExecution:
     unit_logstretch: torch.Tensor
     unit_duration_exec: torch.Tensor
-    role_attention: torch.Tensor
+    basis_activation: torch.Tensor
+    commit_mask: torch.Tensor
     next_state: DurationRuntimeState
     frame_plan: Optional["RhythmFramePlan"] = None
-    anti_pos_logits: Optional[torch.Tensor] = None
-    prompt_reconstruction: Optional[torch.Tensor] = None
-    prompt_rel_stretch: Optional[torch.Tensor] = None
-    prompt_mask: Optional[torch.Tensor] = None
 
     @property
     def speech_duration_exec(self) -> torch.Tensor:
-        return self.unit_duration_exec
-
-    @property
-    def blank_duration_exec(self) -> torch.Tensor:
-        return torch.zeros_like(self.unit_duration_exec)
-
-    @property
-    def pause_after_exec(self) -> torch.Tensor:
-        return self.blank_duration_exec
-
-    @property
-    def effective_duration_exec(self) -> torch.Tensor:
         return self.unit_duration_exec
 
     @property
@@ -134,27 +189,51 @@ def move_source_unit_batch(
         _tensor_on_device_dtype(value, device=device)
         for value in (
             batch.content_units,
-            batch.source_runlen_src,
+            batch.source_duration_obs,
             batch.unit_anchor_base,
             batch.unit_mask,
-            batch.edge_cue,
-            batch.open_run_mask,
             batch.sealed_mask,
-            batch.sep_hint,
-            batch.boundary_confidence,
+            batch.sep_mask,
         )
     ):
         return batch
     return SourceUnitBatch(
         content_units=_move_tensor(batch.content_units, device=device),
-        source_runlen_src=_move_tensor(batch.source_runlen_src, device=device),
+        source_duration_obs=_move_tensor(batch.source_duration_obs, device=device),
         unit_anchor_base=_move_tensor(batch.unit_anchor_base, device=device),
         unit_mask=_move_tensor(batch.unit_mask, device=device),
-        edge_cue=_move_tensor(batch.edge_cue, device=device),
-        open_run_mask=_move_tensor(batch.open_run_mask, device=device),
         sealed_mask=_move_tensor(batch.sealed_mask, device=device),
-        sep_hint=_move_tensor(batch.sep_hint, device=device),
-        boundary_confidence=_move_tensor(batch.boundary_confidence, device=device),
+        sep_mask=_move_tensor(batch.sep_mask, device=device),
+    )
+
+
+def move_structured_duration_operator_memory(
+    operator: StructuredDurationOperatorMemory,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> StructuredDurationOperatorMemory:
+    return StructuredDurationOperatorMemory(
+        operator_coeff=_move_tensor(operator.operator_coeff, device=device, dtype=dtype),
+    )
+
+
+def move_prompt_conditioning_evidence(
+    prompt: PromptConditioningEvidence | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> PromptConditioningEvidence | None:
+    if prompt is None:
+        return None
+    return PromptConditioningEvidence(
+        prompt_basis_activation=_move_tensor(prompt.prompt_basis_activation, device=device, dtype=dtype),
+        prompt_random_target=_move_tensor(prompt.prompt_random_target, device=device, dtype=dtype),
+        prompt_mask=_move_tensor(prompt.prompt_mask, device=device, dtype=dtype),
+        prompt_operator_fit=_move_tensor(prompt.prompt_operator_fit, device=device, dtype=dtype),
+        prompt_log_base=_move_tensor(prompt.prompt_log_base, device=device, dtype=dtype),
+        prompt_log_duration=_move_tensor(prompt.prompt_log_duration, device=device, dtype=dtype),
+        prompt_log_residual=_move_tensor(prompt.prompt_log_residual, device=device, dtype=dtype),
     )
 
 
@@ -164,38 +243,127 @@ def move_reference_duration_memory(
     device: torch.device,
     dtype: torch.dtype | None = None,
 ) -> ReferenceDurationMemory:
+    validate_reference_duration_memory(memory)
     if all(
         _tensor_on_device_dtype(value, device=device, dtype=dtype)
         for value in (
             memory.global_rate,
-            memory.role_keys,
-            memory.role_value,
-            memory.role_coverage,
-            memory.prompt_role_feat,
-            memory.prompt_rel_stretch,
+            memory.operator_coeff,
+            memory.prompt_basis_activation,
+            memory.prompt_random_target,
             memory.prompt_mask,
-            memory.prompt_role_attention,
-            memory.prompt_reconstruction,
-            memory.role_summary,
-            memory.raw_stats,
-            memory.raw_trace,
+            memory.prompt_operator_fit,
+            memory.prompt_log_base,
+            memory.prompt_log_duration,
+            memory.prompt_log_residual,
         )
     ):
         return memory
     return ReferenceDurationMemory(
         global_rate=_move_tensor(memory.global_rate, device=device, dtype=dtype),
-        role_keys=_move_tensor(memory.role_keys, device=device, dtype=dtype),
-        role_value=_move_tensor(memory.role_value, device=device, dtype=dtype),
-        role_coverage=_move_tensor(memory.role_coverage, device=device, dtype=dtype),
-        prompt_role_feat=_move_tensor(memory.prompt_role_feat, device=device, dtype=dtype),
-        prompt_rel_stretch=_move_tensor(memory.prompt_rel_stretch, device=device, dtype=dtype),
-        prompt_mask=_move_tensor(memory.prompt_mask, device=device, dtype=dtype),
-        prompt_role_attention=_move_tensor(memory.prompt_role_attention, device=device, dtype=dtype),
-        prompt_reconstruction=_move_tensor(memory.prompt_reconstruction, device=device, dtype=dtype),
-        role_summary=_move_tensor(memory.role_summary, device=device, dtype=dtype),
-        raw_stats=_move_tensor(memory.raw_stats, device=device, dtype=dtype),
-        raw_trace=_move_tensor(memory.raw_trace, device=device, dtype=dtype),
+        operator=move_structured_duration_operator_memory(memory.operator, device=device, dtype=dtype),
+        prompt=move_prompt_conditioning_evidence(memory.prompt, device=device, dtype=dtype),
     )
+
+
+def validate_structured_duration_operator_memory(
+    operator: StructuredDurationOperatorMemory,
+    *,
+    batch_size: int,
+) -> StructuredDurationOperatorMemory:
+    coeff = operator.operator_coeff
+    if not isinstance(coeff, torch.Tensor) or coeff.dim() != 2:
+        raise ValueError(
+            "StructuredDurationOperatorMemory.operator_coeff must have shape [B, K], "
+            f"got {getattr(coeff, 'shape', None)}"
+        )
+    if coeff.size(0) != batch_size:
+        raise ValueError(
+            "StructuredDurationOperatorMemory.operator_coeff batch mismatch: "
+            f"expected {batch_size}, got {tuple(coeff.shape)}"
+        )
+    return operator
+
+
+def validate_prompt_conditioning_evidence(
+    prompt: PromptConditioningEvidence | None,
+    *,
+    batch_size: int,
+    operator_rank: int,
+) -> PromptConditioningEvidence | None:
+    if prompt is None:
+        return None
+
+    def _check_batch(name: str, value: torch.Tensor | None, *, dims: int | None = None):
+        if value is None:
+            return
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"PromptConditioningEvidence.{name} must be a tensor when provided, got {type(value)!r}")
+        if dims is not None and value.dim() != dims:
+            raise ValueError(
+                f"PromptConditioningEvidence.{name} must be rank-{dims}, got shape={tuple(value.shape)}"
+            )
+        if value.dim() > 0 and value.size(0) != batch_size:
+            raise ValueError(
+                f"PromptConditioningEvidence.{name} batch mismatch: expected {batch_size}, got {tuple(value.shape)}"
+            )
+
+    _check_batch("prompt_basis_activation", prompt.prompt_basis_activation, dims=3)
+    _check_batch("prompt_random_target", prompt.prompt_random_target, dims=2)
+    _check_batch("prompt_mask", prompt.prompt_mask, dims=2)
+    _check_batch("prompt_operator_fit", prompt.prompt_operator_fit, dims=2)
+    _check_batch("prompt_log_base", prompt.prompt_log_base, dims=2)
+    _check_batch("prompt_log_duration", prompt.prompt_log_duration, dims=2)
+    _check_batch("prompt_log_residual", prompt.prompt_log_residual, dims=2)
+
+    if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
+        raise ValueError(
+            "PromptConditioningEvidence.prompt_basis_activation operator-rank mismatch: "
+            f"expected last dim {operator_rank}, got {tuple(prompt.prompt_basis_activation.shape)}"
+        )
+    if prompt.prompt_random_target is not None and prompt.prompt_mask is not None:
+        if tuple(prompt.prompt_random_target.shape) != tuple(prompt.prompt_mask.shape):
+            raise ValueError(
+                "PromptConditioningEvidence.prompt_random_target/prompt_mask shape mismatch: "
+                f"{tuple(prompt.prompt_random_target.shape)} vs {tuple(prompt.prompt_mask.shape)}"
+            )
+    if prompt.prompt_operator_fit is not None and prompt.prompt_random_target is not None:
+        if tuple(prompt.prompt_operator_fit.shape) != tuple(prompt.prompt_random_target.shape):
+            raise ValueError(
+                "PromptConditioningEvidence.prompt_operator_fit/prompt_random_target shape mismatch: "
+                f"{tuple(prompt.prompt_operator_fit.shape)} vs {tuple(prompt.prompt_random_target.shape)}"
+            )
+    for name, value in (
+        ("prompt_log_base", prompt.prompt_log_base),
+        ("prompt_log_duration", prompt.prompt_log_duration),
+        ("prompt_log_residual", prompt.prompt_log_residual),
+        ("prompt_operator_fit", prompt.prompt_operator_fit),
+        ("prompt_random_target", prompt.prompt_random_target),
+    ):
+        if value is not None and prompt.prompt_mask is not None:
+            if tuple(value.shape) != tuple(prompt.prompt_mask.shape):
+                raise ValueError(
+                    f"PromptConditioningEvidence.{name}/prompt_mask shape mismatch: "
+                    f"{tuple(value.shape)} vs {tuple(prompt.prompt_mask.shape)}"
+                )
+    return prompt
+
+
+def validate_reference_duration_memory(
+    memory: ReferenceDurationMemory,
+) -> ReferenceDurationMemory:
+    if not isinstance(memory.global_rate, torch.Tensor) or memory.global_rate.dim() != 2 or memory.global_rate.size(1) != 1:
+        raise ValueError(
+            f"ReferenceDurationMemory.global_rate must have shape [B, 1], got {getattr(memory.global_rate, 'shape', None)}"
+        )
+    batch_size = int(memory.global_rate.size(0))
+    validate_structured_duration_operator_memory(memory.operator, batch_size=batch_size)
+    validate_prompt_conditioning_evidence(
+        memory.prompt,
+        batch_size=batch_size,
+        operator_rank=int(memory.operator_coeff.size(1)),
+    )
+    return memory
 
 
 def ensure_reference_duration_memory_batch(
@@ -203,6 +371,7 @@ def ensure_reference_duration_memory_batch(
     *,
     batch_size: int,
 ) -> ReferenceDurationMemory:
+    validate_reference_duration_memory(memory)
     current_batch = int(memory.global_rate.size(0))
     if current_batch == batch_size:
         return memory
@@ -216,23 +385,28 @@ def ensure_reference_duration_memory_batch(
             return value
         if value.dim() <= 0 or value.size(0) != 1:
             return value
-        repeat_dims = [batch_size] + [1] * (value.dim() - 1)
-        return value.repeat(*repeat_dims)
+        return value.expand(batch_size, *value.shape[1:])
 
-    return ReferenceDurationMemory(
+    expanded = ReferenceDurationMemory(
         global_rate=_expand(memory.global_rate),
-        role_keys=memory.role_keys,
-        role_value=_expand(memory.role_value),
-        role_coverage=_expand(memory.role_coverage),
-        prompt_role_feat=_expand(memory.prompt_role_feat),
-        prompt_rel_stretch=_expand(memory.prompt_rel_stretch),
-        prompt_mask=_expand(memory.prompt_mask),
-        prompt_role_attention=_expand(memory.prompt_role_attention),
-        prompt_reconstruction=_expand(memory.prompt_reconstruction),
-        role_summary=_expand(memory.role_summary),
-        raw_stats=_expand(memory.raw_stats),
-        raw_trace=_expand(memory.raw_trace),
+        operator=StructuredDurationOperatorMemory(
+            operator_coeff=_expand(memory.operator_coeff),
+        ),
+        prompt=(
+            None
+            if memory.prompt is None
+            else PromptConditioningEvidence(
+                prompt_basis_activation=_expand(memory.prompt_basis_activation),
+                prompt_random_target=_expand(memory.prompt_random_target),
+                prompt_mask=_expand(memory.prompt_mask),
+                prompt_operator_fit=_expand(memory.prompt_operator_fit),
+                prompt_log_base=_expand(memory.prompt_log_base),
+                prompt_log_duration=_expand(memory.prompt_log_duration),
+                prompt_log_residual=_expand(memory.prompt_log_residual),
+            )
+        ),
     )
+    return validate_reference_duration_memory(expanded)
 
 
 def move_duration_runtime_state(
@@ -242,20 +416,36 @@ def move_duration_runtime_state(
 ) -> DurationRuntimeState | None:
     if state is None:
         return None
-    if all(
-        _tensor_on_device_dtype(value, device=device)
-        for value in (
-            state.committed_units,
-            state.cumulative_pred_frames,
-            state.cumulative_tgt_frames,
-            state.cached_duration_exec,
-        )
-    ):
-        return state
     return replace(
         state,
         committed_units=_move_tensor(state.committed_units, device=device),
-        cumulative_pred_frames=_move_tensor(state.cumulative_pred_frames, device=device),
-        cumulative_tgt_frames=_move_tensor(state.cumulative_tgt_frames, device=device),
+        rounding_residual=_move_tensor(state.rounding_residual, device=device),
         cached_duration_exec=_move_tensor(state.cached_duration_exec, device=device),
     )
+
+
+def ensure_duration_runtime_state_batch(
+    state: DurationRuntimeState | None,
+    *,
+    batch_size: int,
+) -> DurationRuntimeState | None:
+    if state is None:
+        return None
+    current_batch = int(state.committed_units.size(0))
+    if current_batch != batch_size:
+        raise ValueError(
+            f"DurationRuntimeState batch mismatch: source_batch={batch_size}, state_batch={current_batch}."
+        )
+    for name in ("committed_units", "rounding_residual", "cached_duration_exec"):
+        value = getattr(state, name)
+        if value is None or not isinstance(value, torch.Tensor):
+            continue
+        if value.size(0) != batch_size:
+            raise ValueError(
+                f"DurationRuntimeState.{name} batch mismatch: source_batch={batch_size}, tensor_shape={tuple(value.shape)}."
+            )
+    if state.rounding_residual.dim() != 2 or state.rounding_residual.size(1) != 1:
+        raise ValueError(
+            f"DurationRuntimeState.rounding_residual must be rank-2 [B, 1], got shape={tuple(state.rounding_residual.shape)}."
+        )
+    return state

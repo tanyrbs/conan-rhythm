@@ -7,9 +7,10 @@ def _rounded_effective_durations(output: dict) -> torch.Tensor | None:
     execution = output.get("rhythm_execution")
     if execution is None:
         return None
-    speech = torch.round(execution.speech_duration_exec.float()).long().clamp_min(0)
-    pause = torch.round(execution.pause_after_exec.float()).long().clamp_min(0)
-    return speech + pause
+    speech_exec = output.get("speech_duration_exec")
+    if not isinstance(speech_exec, torch.Tensor):
+        speech_exec = execution.speech_duration_exec
+    return torch.round(speech_exec.float()).long().clamp_min(0)
 
 
 def compute_committed_mel_length(output: dict, batch_index: int = 0) -> int:

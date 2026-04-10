@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
+
 from .streaming_commit import extract_incremental_committed_mel
 
 
@@ -18,6 +20,20 @@ class StreamingEvalResult:
     backlog_history: list[float]
     clock_history: list[float]
     blank_ratio_history: list[float]
+
+
+def _export_stream_source_cache(unit_batch) -> dict:
+    if hasattr(unit_batch, "source_duration_obs"):
+        return export_duration_v3_source_cache(unit_batch)
+    return {
+        "content_units": unit_batch.content_units,
+        "dur_anchor_src": unit_batch.dur_anchor_src,
+        "unit_mask": unit_batch.unit_mask,
+        "open_run_mask": getattr(unit_batch, "open_run_mask", None),
+        "sealed_mask": unit_batch.sealed_mask,
+        "sep_hint": getattr(unit_batch, "sep_hint", None),
+        "boundary_confidence": getattr(unit_batch, "boundary_confidence", None),
+    }
 
 
 def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4) -> StreamingEvalResult:
@@ -69,12 +85,13 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
                 content_lengths=sample_chunk["content_lengths"],
                 mark_last_open=True,
             )
-            sample_chunk["content_units"] = unit_batch.content_units
-            sample_chunk["dur_anchor_src"] = unit_batch.dur_anchor_src
-            sample_chunk["open_run_mask"] = unit_batch.open_run_mask
-            sample_chunk["sealed_mask"] = unit_batch.sealed_mask
-            sample_chunk["sep_hint"] = unit_batch.sep_hint
-            sample_chunk["boundary_confidence"] = unit_batch.boundary_confidence
+            sample_chunk.update(
+                {
+                    key: value
+                    for key, value in _export_stream_source_cache(unit_batch).items()
+                    if value is not None
+                }
+            )
         losses, outputs = task.run_model(
             sample_chunk,
             infer=True,
@@ -99,30 +116,26 @@ def run_chunkwise_streaming_inference(task, sample, *, tokens_per_chunk: int = 4
         commit_list = commit.detach().cpu().tolist() if commit is not None else []
         commit_history.append(commit_list)
         execution = outputs.get("rhythm_execution")
-        if execution is not None and prev_speech_exec is not None and prev_pause_exec is not None and prev_commit_units > 0:
-            curr_speech = execution.speech_duration_exec[0, :prev_commit_units]
-            curr_pause = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[0, :prev_commit_units]
-            delta = torch.cat(
-                [
-                    (curr_speech - prev_speech_exec[0, :prev_commit_units]).abs(),
-                    (curr_pause - prev_pause_exec[0, :prev_commit_units]).abs(),
-                ],
-                dim=0,
-            ).max().item()
+        public_speech_exec = outputs.get("speech_duration_exec")
+        if execution is not None and not isinstance(public_speech_exec, torch.Tensor):
+            public_speech_exec = execution.speech_duration_exec
+        if execution is not None and prev_speech_exec is not None and prev_commit_units > 0:
+            curr_speech = public_speech_exec[0, :prev_commit_units]
+            delta = (curr_speech - prev_speech_exec[0, :prev_commit_units]).abs().max().item()
             prefix_exec_deltas.append(float(delta))
         else:
             prefix_exec_deltas.append(0.0)
         if execution is not None:
-            prev_speech_exec = execution.speech_duration_exec.detach()
-            prev_pause_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec).detach()
+            prev_speech_exec = public_speech_exec.detach()
             unit_batch = outputs.get("rhythm_unit_batch")
             if unit_batch is not None:
                 unit_mask = unit_batch.unit_mask[0].float()
                 visible = unit_mask.sum().clamp_min(1.0)
-                blank_exec = getattr(execution, "blank_duration_exec", execution.pause_after_exec)[0]
-                blank_ratio_history.append(float(((blank_exec > 0.5).float() * unit_mask).sum().item() / visible.item()))
+                blank_ratio_history.append(0.0)
             else:
                 blank_ratio_history.append(0.0)
+        else:
+            blank_ratio_history.append(0.0)
         prev_commit_units = int(commit_list[0]) if len(commit_list) > 0 else 0
         state_next = outputs.get("rhythm_state_next")
         if state_next is not None:

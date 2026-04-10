@@ -57,7 +57,40 @@ def render_rhythm_sequence(
             slot_unit_index=slot_unit_index,
         )
 
+    if content_units.dim() != 2:
+        raise ValueError(f"content_units must be rank-2 [B, U], got {tuple(content_units.shape)}")
+    if content_units.size(1) <= 0:
+        batch_size = int(content_units.size(0))
+        hidden_size = int(pause_state.numel())
+        zero_frames = frame_plan.total_mask.new_zeros((batch_size, 0))
+        zero_states = pause_state.new_zeros((batch_size, 0, hidden_size))
+        zero_tokens = content_units.new_zeros((batch_size, 0))
+        zero_phase = pause_state.new_zeros((batch_size, 0, frame_plan.frame_phase_features.size(-1)))
+        zero_index = content_units.new_zeros((batch_size, 0), dtype=torch.long)
+        return RenderedRhythmSequence(
+            frame_states=zero_states,
+            frame_tokens=zero_tokens,
+            speech_mask=zero_frames,
+            blank_mask=zero_frames,
+            total_mask=zero_frames,
+            frame_slot_index=zero_index,
+            frame_unit_index=zero_index,
+            frame_phase_features=zero_phase,
+            frame_plan=frame_plan,
+        )
+
     unit_states = speech_state_fn(content_units.long())
+    if unit_states.dim() != 3:
+        raise ValueError(f"speech_state_fn must return rank-3 [B, U, H], got {tuple(unit_states.shape)}")
+    if unit_states.size(0) != content_units.size(0) or unit_states.size(1) != content_units.size(1):
+        raise ValueError(
+            "speech_state_fn output shape mismatch: "
+            f"content_units={tuple(content_units.shape)}, unit_states={tuple(unit_states.shape)}"
+        )
+    if unit_states.device != content_units.device:
+        raise ValueError(
+            f"speech_state_fn output device mismatch: content_units={content_units.device}, unit_states={unit_states.device}"
+        )
     hidden_size = int(unit_states.size(-1))
     safe_unit_index = frame_plan.frame_unit_index.clamp_min(0)
 

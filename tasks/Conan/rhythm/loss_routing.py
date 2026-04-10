@@ -11,7 +11,14 @@ _AUX_REPORTING_KEYS = {
     "rhythm_distill": "lambda_rhythm_distill",
     "rhythm_teacher_aux_loss": "lambda_rhythm_teacher_aux",
 }
-_V3_NATIVE_DIAGNOSTIC_KEYS = ("rhythm_v3_dur", "rhythm_v3_mem", "rhythm_v3_pref", "rhythm_v3_anti")
+_V3_NATIVE_DIAGNOSTIC_KEYS = (
+    "rhythm_v3_dur",
+    "rhythm_v3_op",
+    "rhythm_v3_zero",
+    "rhythm_v3_pref",
+    "rhythm_v3_cons",
+    "rhythm_v3_stream",
+)
 
 
 def _detach_loss_value(losses, key):
@@ -59,6 +66,8 @@ def _resolve_aux_optimizer_policy(hparams) -> dict[str, bool]:
 
 
 def _is_duration_v3_loss_bundle(losses) -> bool:
+    if isinstance(losses.get("rhythm_is_v3_bundle"), torch.Tensor):
+        return True
     return isinstance(losses.get("rhythm_total"), torch.Tensor) and any(
         key in losses for key in _V3_NATIVE_DIAGNOSTIC_KEYS
     )
@@ -289,6 +298,28 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
             device = value.device
             break
     zero = torch.tensor(0.0, device=device or "cpu")
+    if _is_duration_v3_loss_bundle(losses):
+        pitch_value = losses.get("pitch")
+        if not isinstance(pitch_value, torch.Tensor):
+            pitch_value = zero
+            for loss_name in _PITCH_LOSS_KEYS:
+                value = losses.get(loss_name)
+                if isinstance(value, torch.Tensor):
+                    pitch_value = pitch_value + value.detach()
+        else:
+            pitch_value = pitch_value.detach()
+        losses["L_pitch"] = pitch_value
+        base_value = losses.get("base")
+        if isinstance(base_value, torch.Tensor):
+            base = base_value.detach()
+        else:
+            base = zero
+            for loss_name in mel_loss_names:
+                value = losses.get(loss_name)
+                if isinstance(value, torch.Tensor):
+                    base = base + value.detach()
+        losses["L_base"] = base
+        return
     if "rhythm_exec_speech" in losses:
         losses["L_exec_speech"] = losses["rhythm_exec_speech"].detach()
     if "rhythm_exec_stretch" in losses:

@@ -1113,60 +1113,72 @@ def _build_duration_v3_metric_sections(
     execution = output.get("rhythm_execution")
     if execution is None:
         return {}
-    device = execution.speech_duration_exec.device
+    public_speech_exec = output.get("speech_duration_exec")
+    if not isinstance(public_speech_exec, torch.Tensor):
+        public_speech_exec = execution.speech_duration_exec
+    public_speech_exec = public_speech_exec.float()
+    device = public_speech_exec.device
     unit_batch = output.get("rhythm_unit_batch")
-    unit_mask = unit_batch.unit_mask.float() if unit_batch is not None else torch.ones_like(execution.speech_duration_exec)
-    total_exec = (execution.speech_duration_exec.float() * unit_mask).sum(dim=1)
+    unit_mask = unit_batch.unit_mask.float() if unit_batch is not None else torch.ones_like(public_speech_exec)
+    commit_mask = getattr(execution, "commit_mask", None)
+    if not isinstance(commit_mask, torch.Tensor):
+        commit_mask = getattr(unit_batch, "sealed_mask", unit_mask)
+    commit_mask = commit_mask.float() * unit_mask
+    total_exec = (public_speech_exec * commit_mask).sum(dim=1)
     visible_units = unit_mask.sum(dim=1).clamp_min(1.0)
-    role_attention = output.get("role_attention", getattr(execution, "role_attention", None))
-    if isinstance(role_attention, torch.Tensor):
-        entropy = -(role_attention.clamp_min(1.0e-6) * role_attention.clamp_min(1.0e-6).log()).sum(dim=-1)
-        role_entropy = _masked_mean(entropy, unit_mask)
+    committed_units = commit_mask.sum(dim=1).clamp_min(1.0)
+    basis_activation = getattr(execution, "basis_activation", None)
+    if isinstance(basis_activation, torch.Tensor):
+        basis_activation_abs_mean = _masked_mean(basis_activation.abs(), commit_mask)
     else:
-        role_entropy = torch.tensor(0.0, device=device)
+        basis_activation_abs_mean = torch.tensor(0.0, device=device)
     runtime_state = output.get("rhythm_state_next")
     state_metrics = {}
     if runtime_state is not None:
         state_metrics = {
             "rhythm_metric_commit_frontier_mean": _safe_mean(runtime_state.commit_frontier.float()),
-            "rhythm_metric_backlog_mean": _safe_mean(runtime_state.backlog),
-            "rhythm_metric_clock_delta_mean": _safe_mean(runtime_state.clock_delta),
-            "rhythm_metric_clock_delta_abs_mean": _safe_mean(runtime_state.clock_delta.abs()),
+            "rhythm_metric_rounding_residual_mean": _safe_mean(runtime_state.rounding_residual.float()),
+            "rhythm_metric_rounding_residual_abs_mean": _safe_mean(runtime_state.rounding_residual.float().abs()),
         }
     core_metrics = {
         "rhythm_metric_exec_total_mean": _safe_mean(total_exec),
         "rhythm_metric_visible_units_mean": _safe_mean(visible_units),
-        "rhythm_metric_unit_duration_mean": _masked_mean(execution.speech_duration_exec.float(), unit_mask),
-        "rhythm_metric_logstretch_abs_mean": _masked_mean(execution.unit_logstretch.abs(), unit_mask),
-        "rhythm_metric_role_entropy": role_entropy,
-        "rhythm_metric_frame_plan_present": execution.speech_duration_exec.new_tensor(
+        "rhythm_metric_committed_units_mean": _safe_mean(committed_units),
+        "rhythm_metric_commit_ratio_mean": _safe_mean(committed_units / visible_units),
+        "rhythm_metric_unit_duration_mean": _masked_mean(public_speech_exec, commit_mask),
+        "rhythm_metric_logstretch_abs_mean": _masked_mean(execution.unit_logstretch.abs(), commit_mask),
+        "rhythm_metric_basis_activation_abs_mean": basis_activation_abs_mean,
+        "rhythm_metric_frame_plan_present": public_speech_exec.new_tensor(
             1.0 if output.get("rhythm_frame_plan") is not None else 0.0
         ),
     }
-    if isinstance(output.get("global_rate"), torch.Tensor):
-        core_metrics["rhythm_metric_global_rate_mean"] = _safe_mean(output["global_rate"])
-    if isinstance(output.get("role_coverage"), torch.Tensor):
-        core_metrics["rhythm_metric_role_coverage_mean"] = _safe_mean(output["role_coverage"])
-    if sample is not None and "rhythm_speech_exec_tgt" in sample:
-        target = sample["rhythm_speech_exec_tgt"].float().to(device=device)
+    ref_memory = output.get("rhythm_ref_conditioning")
+    if ref_memory is not None and isinstance(getattr(ref_memory, "global_rate", None), torch.Tensor):
+        core_metrics["rhythm_metric_global_rate_mean"] = _safe_mean(ref_memory.global_rate)
+    if ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
+        core_metrics["rhythm_metric_operator_coeff_abs_mean"] = _safe_mean(ref_memory.operator_coeff.abs())
+    target = None
+    if sample is not None:
+        value = sample.get("unit_duration_tgt")
+        if isinstance(value, torch.Tensor):
+            target = value.float().to(device=device)
+    if target is not None:
         core_metrics["rhythm_metric_exec_speech_l1"] = _masked_l1(
-            execution.speech_duration_exec.float(),
+            public_speech_exec,
             target,
-            unit_mask,
+            commit_mask,
         )
-        pred_prefix = torch.cumsum(execution.speech_duration_exec.float() * unit_mask, dim=1)
-        tgt_prefix = torch.cumsum(target * unit_mask, dim=1)
-        core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, unit_mask)
-        core_metrics["rhythm_metric_cumplan_l1"] = core_metrics["rhythm_metric_prefix_drift_l1"]
+        pred_prefix = torch.cumsum(public_speech_exec * commit_mask, dim=1)
+        tgt_prefix = torch.cumsum(target * commit_mask, dim=1)
+        core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, commit_mask)
     for loss_key in (
-        "L_exec_speech",
-        "L_exec_stretch",
-        "L_exec_pause",
-        "L_cumplan",
+        "rhythm_total",
         "rhythm_v3_dur",
-        "rhythm_v3_mem",
+        "rhythm_v3_op",
+        "rhythm_v3_zero",
         "rhythm_v3_pref",
-        "rhythm_v3_anti",
+        "rhythm_v3_cons",
+        "rhythm_v3_stream",
     ):
         value = output.get(loss_key)
         if isinstance(value, torch.Tensor):

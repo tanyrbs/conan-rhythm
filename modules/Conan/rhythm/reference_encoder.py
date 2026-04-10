@@ -425,6 +425,11 @@ class ReferenceRhythmEncoder(nn.Module):
         ref_lengths: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         ref_mel = _ensure_btf(ref_mel).float()
+        if ref_mel.size(1) <= 0:
+            return {
+                "ref_rhythm_stats": ref_mel.new_zeros((ref_mel.size(0), self.stats_dim)),
+                "ref_rhythm_trace": ref_mel.new_zeros((ref_mel.size(0), self.trace_bins, self.trace_dim)),
+            }
         if ref_lengths is not None:
             ref_lengths = ref_lengths.long().reshape(-1).to(device=ref_mel.device)
             if ref_lengths.size(0) != ref_mel.size(0):

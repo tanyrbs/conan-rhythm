@@ -112,7 +112,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
         self.rhythm_enable_v3 = bool(
             hparams.get("rhythm_enable_v3", False)
-            or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_ref_memory"
+            or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_operator"
         )
         if self.rhythm_enable_v2 and self.rhythm_enable_v3:
             raise ValueError("Enable only one rhythm runtime backend at a time: rhythm_enable_v2 or rhythm_enable_v3.")

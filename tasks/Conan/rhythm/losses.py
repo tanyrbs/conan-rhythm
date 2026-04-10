@@ -87,13 +87,18 @@ class DurationV3LossTargets:
     unit_duration_tgt: torch.Tensor
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
-    prompt_rel_stretch_tgt: Optional[torch.Tensor] = None
+    committed_mask: torch.Tensor
+    global_rate: Optional[torch.Tensor] = None
+    prompt_random_target_tgt: Optional[torch.Tensor] = None
     prompt_mask: Optional[torch.Tensor] = None
-    position_bin_tgt: Optional[torch.Tensor] = None
+    prompt_operator_fit_pred: Optional[torch.Tensor] = None
+    consistency_duration_tgt: Optional[torch.Tensor] = None
+    consistency_mask: Optional[torch.Tensor] = None
     lambda_dur: float = 1.0
-    lambda_mem: float = 0.25
+    lambda_op: float = 0.25
     lambda_pref: float = 0.20
-    lambda_anti: float = 0.05
+    lambda_cons: float = 0.10
+    lambda_zero: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,29 @@ def _masked_log_huber(
         beta=beta,
         batch_weight=batch_weight,
     )
+
+
+def _masked_bce_with_logits(
+    logits: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    batch_weight: Optional[torch.Tensor] = None,
+    pos_weight: float | None = None,
+) -> torch.Tensor:
+    mask = mask.float()
+    loss = F.binary_cross_entropy_with_logits(logits.float(), tgt.float(), reduction="none")
+    if pos_weight is not None and float(pos_weight) != 1.0:
+        scale = torch.where(
+            tgt.float() > 0.5,
+            loss.new_full(loss.shape, float(pos_weight)),
+            loss.new_ones(loss.shape),
+        )
+        loss = loss * scale
+    reduce_dims = tuple(range(1, loss.dim()))
+    masked_loss = (loss * mask).sum(dim=reduce_dims)
+    masked_denom = mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
 
 
 def _batch_l1(pred: torch.Tensor, tgt: torch.Tensor, batch_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -1161,75 +1189,141 @@ def _compute_distill_losses(
     return losses
 
 
-def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> dict[str, torch.Tensor]:
-    unit_mask = targets.unit_mask.float()
+def _build_duration_v3_duration_loss(
+    *,
+    execution,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+    committed_mask: torch.Tensor,
+) -> torch.Tensor:
     unit_anchor_base = targets.unit_anchor_base.float().clamp_min(1.0e-6)
-    pred_duration = execution.speech_duration_exec.float()
-    pred_logstretch = torch.log(pred_duration.clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
+    pred_logstretch = execution.unit_logstretch.float()
     tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
-    l_dur = _masked_huber(
+    if targets.global_rate is not None:
+        global_rate = targets.global_rate.float().expand_as(tgt_logstretch)
+        pred_logstretch = pred_logstretch - global_rate
+        tgt_logstretch = tgt_logstretch - global_rate
+    return _masked_huber(
         pred_logstretch,
         tgt_logstretch,
-        unit_mask,
+        committed_mask,
         beta=0.25,
         batch_weight=None,
     )
-    zero = pred_duration.new_tensor(0.0)
-    l_mem = zero
-    if targets.prompt_rel_stretch_tgt is not None:
-        prompt_pred = getattr(execution, "prompt_reconstruction", None)
-        if prompt_pred is None and float(targets.lambda_mem) > 0.0:
-            raise ValueError("Duration V3 memory loss requires execution.prompt_reconstruction.")
-        if prompt_pred is None:
-            prompt_pred = targets.prompt_rel_stretch_tgt.new_zeros(targets.prompt_rel_stretch_tgt.shape)
-        prompt_mask = targets.prompt_mask if targets.prompt_mask is not None else torch.ones_like(targets.prompt_rel_stretch_tgt)
-        l_mem = _masked_huber(
-            prompt_pred.float(),
-            targets.prompt_rel_stretch_tgt.float(),
-            prompt_mask.float(),
-            beta=0.25,
-            batch_weight=None,
-        )
-    pred_prefix = torch.cumsum(pred_duration * unit_mask, dim=1)
-    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * unit_mask, dim=1)
+
+
+def _build_duration_v3_operator_loss(
+    *,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+) -> torch.Tensor:
+    zero = pred_speech.new_tensor(0.0)
+    operator_loss = zero
+    if targets.prompt_random_target_tgt is not None:
+        prompt_pred = targets.prompt_operator_fit_pred
+        if prompt_pred is None and float(targets.lambda_op) > 0.0:
+            raise ValueError("Duration V3 operator loss requires prompt_operator_fit on rhythm_ref_conditioning.")
+        if prompt_pred is not None:
+            prompt_mask = (
+                targets.prompt_mask
+                if targets.prompt_mask is not None
+                else torch.ones_like(targets.prompt_random_target_tgt)
+            )
+            prompt_delta = F.smooth_l1_loss(
+                prompt_pred.float(),
+                targets.prompt_random_target_tgt.float(),
+                beta=0.25,
+                reduction="none",
+            )
+            operator_loss = (prompt_delta * prompt_mask.float()).sum() / prompt_mask.float().sum().clamp_min(1.0)
+    return operator_loss
+
+
+def _build_duration_v3_zero_loss(
+    *,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+) -> torch.Tensor:
+    if targets.prompt_operator_fit_pred is None or targets.prompt_mask is None:
+        return pred_speech.new_tensor(0.0)
+    prompt_mask = targets.prompt_mask.float()
+    zero_center = (targets.prompt_operator_fit_pred.float() * prompt_mask).sum(dim=1) / prompt_mask.sum(
+        dim=1
+    ).clamp_min(1.0)
+    return F.smooth_l1_loss(
+        zero_center,
+        torch.zeros_like(zero_center),
+        beta=0.1,
+        reduction="mean",
+    )
+
+
+def _build_duration_v3_stream_losses(
+    *,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+    committed_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pred_prefix = torch.cumsum(pred_speech * committed_mask, dim=1)
+    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * committed_mask, dim=1)
     l_pref = _masked_huber(
         pred_prefix,
         tgt_prefix,
-        unit_mask,
+        committed_mask,
         beta=1.0,
         batch_weight=None,
     )
-    l_anti = zero
-    anti_pos_logits = getattr(execution, "anti_pos_logits", None)
-    if anti_pos_logits is not None and targets.position_bin_tgt is not None:
-        flat_mask = unit_mask.reshape(-1) > 0.5
-        if bool(flat_mask.any().item()):
-            flat_logits = anti_pos_logits.reshape(-1, anti_pos_logits.size(-1))[flat_mask]
-            flat_target = targets.position_bin_tgt.reshape(-1)[flat_mask]
-            l_anti = F.cross_entropy(flat_logits, flat_target, reduction="mean")
+    l_cons = pred_speech.new_tensor(0.0)
+    if targets.consistency_duration_tgt is not None and targets.consistency_mask is not None:
+        l_cons = _masked_huber(
+            pred_speech,
+            targets.consistency_duration_tgt.float(),
+            targets.consistency_mask.float(),
+            beta=0.25,
+            batch_weight=None,
+        )
+    return l_pref, l_cons, l_pref + l_cons
+
+
+def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> dict[str, torch.Tensor]:
+    unit_mask = targets.unit_mask.float()
+    committed_mask = targets.committed_mask.float() * unit_mask
+    pred_speech = execution.speech_duration_exec.float()
+    l_dur = _build_duration_v3_duration_loss(
+        execution=execution,
+        pred_speech=pred_speech,
+        targets=targets,
+        committed_mask=committed_mask,
+    )
+    l_op = _build_duration_v3_operator_loss(
+        pred_speech=pred_speech,
+        targets=targets,
+    )
+    l_zero = _build_duration_v3_zero_loss(
+        pred_speech=pred_speech,
+        targets=targets,
+    )
+    l_pref, l_cons, l_stream = _build_duration_v3_stream_losses(
+        pred_speech=pred_speech,
+        targets=targets,
+        committed_mask=committed_mask,
+    )
     scaled_dur = l_dur * float(targets.lambda_dur)
-    scaled_mem = l_mem * float(targets.lambda_mem)
-    scaled_pref = l_pref * float(targets.lambda_pref)
-    scaled_anti = l_anti * float(targets.lambda_anti)
-    total = scaled_dur + scaled_mem + scaled_pref + scaled_anti
+    scaled_op = l_op * float(targets.lambda_op)
+    scaled_zero = l_zero * float(targets.lambda_zero)
+    scaled_stream = (l_pref * float(targets.lambda_pref)) + (l_cons * float(targets.lambda_cons))
+    total = scaled_dur + scaled_op + scaled_zero + scaled_stream
     return {
         "rhythm_exec_speech": scaled_dur,
-        "rhythm_exec_stretch": scaled_mem,
-        "rhythm_exec_pause": scaled_anti,
-        "rhythm_budget": zero,
-        "rhythm_prefix_clock": scaled_pref.detach(),
-        "rhythm_prefix_backlog": scaled_pref.detach(),
-        "rhythm_prefix_state": scaled_pref,
-        "rhythm_carry": scaled_pref.detach(),
-        "rhythm_cumplan": scaled_pref.detach(),
-        "rhythm_plan": zero,
-        "rhythm_guidance": zero,
-        "rhythm_distill": zero,
-        "rhythm_distill_student": zero.detach(),
+        "rhythm_exec_stretch": scaled_op + scaled_zero,
+        "rhythm_prefix_state": scaled_stream,
         "rhythm_v3_dur": l_dur.detach(),
-        "rhythm_v3_mem": l_mem.detach(),
+        "rhythm_v3_op": l_op.detach(),
+        "rhythm_v3_zero": l_zero.detach(),
         "rhythm_v3_pref": l_pref.detach(),
-        "rhythm_v3_anti": l_anti.detach(),
+        "rhythm_v3_cons": l_cons.detach(),
+        "rhythm_v3_stream": l_stream.detach(),
+        "rhythm_is_v3_bundle": pred_speech.new_tensor(1.0),
         "rhythm_total": total,
     }
 

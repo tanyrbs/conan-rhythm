@@ -27,8 +27,9 @@ from tasks.Conan.rhythm.runtime_teacher_supervision import (
 )
 from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
 from tasks.Conan.rhythm.runtime_modes import (
-    build_rhythm_ref_conditioning,
-    collect_planner_runtime_outputs,
+    build_duration_v3_ref_conditioning,
+    build_legacy_v2_ref_conditioning,
+    collect_legacy_planner_runtime_outputs,
     resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
     resolve_task_runtime_state,
 )
@@ -63,6 +64,7 @@ from modules.Conan.rhythm.policy import (
     should_optimize_render_params,
     use_strict_mainline,
 )
+from modules.Conan.rhythm_v3.contracts import collect_duration_v3_source_cache
 from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
 from modules.Conan.rhythm.stages import (
     resolve_runtime_dual_mode_teacher_enable,
@@ -74,6 +76,17 @@ from utils.metrics.ssim import ssim
 
 
 class RhythmConanTaskMixin:
+    _LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS = (
+        "content_units",
+        "dur_anchor_src",
+    )
+    _LEGACY_RHYTHM_SOURCE_CACHE_OPTIONAL_KEYS = (
+        "open_run_mask",
+        "sealed_mask",
+        "sep_hint",
+        "boundary_confidence",
+    )
+
     def _task_runtime_support(self) -> RhythmTaskRuntimeSupport:
         helper = getattr(self, "_cached_rhythm_task_runtime_support", None)
         if helper is None:
@@ -247,25 +260,18 @@ class RhythmConanTaskMixin:
     def _use_runtime_dual_mode_teacher() -> bool:
         return resolve_runtime_dual_mode_teacher_enable(hparams, infer=False)
 
-    @staticmethod
-    def _collect_rhythm_source_cache(sample, *, prefix: str = ""):
-        keys = (
-            "content_units",
-            "dur_anchor_src",
-            "unit_mask",
-            "open_run_mask",
-            "sealed_mask",
-            "sep_hint",
-            "boundary_confidence",
-            "unit_anchor_base",
-            "edge_cue",
-        )
+    def _collect_rhythm_source_cache(self, sample, *, prefix: str = ""):
+        if getattr(getattr(self, "model", None), "rhythm_enable_v3", False):
+            return collect_duration_v3_source_cache(sample, prefix=prefix)
+        keys = self._LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS + self._LEGACY_RHYTHM_SOURCE_CACHE_OPTIONAL_KEYS
         payload = {}
         for key in keys:
             sample_key = f"{prefix}{key}"
             value = sample.get(sample_key)
             if value is not None:
                 payload[key] = value
+        if any(key not in payload for key in self._LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS):
+            return None
         return payload or None
 
     @staticmethod
@@ -635,7 +641,7 @@ class RhythmConanTaskMixin:
             sep_hint=source_cache.get("sep_hint"),
             boundary_confidence=source_cache.get("boundary_confidence"),
         )
-        rhythm_ref_conditioning = build_rhythm_ref_conditioning(
+        rhythm_ref_conditioning = build_legacy_v2_ref_conditioning(
             sample,
             explicit=kwargs.get("rhythm_ref_conditioning"),
         )
@@ -689,7 +695,7 @@ class RhythmConanTaskMixin:
                 (unit_batch.dur_anchor_src.size(0), 1),
                 1.0 if teacher_soft_pause_selection else 0.0,
             )
-        output.update(collect_planner_runtime_outputs(execution))
+        output.update(collect_legacy_planner_runtime_outputs(execution))
         losses = {}
         self.add_rhythm_loss(output, sample, losses)
         self._task_runtime_support().route_conan_losses(losses, schedule_only_stage=False)
@@ -724,7 +730,12 @@ class RhythmConanTaskMixin:
         if disable_source_pitch_supervision and retimed_stage_active and not self._warned_retimed_pitch_supervision:
             print("| Rhythm V2: retimed canvas active, disabling source-aligned pitch supervision for this run.")
             self._warned_retimed_pitch_supervision = True
-        rhythm_ref_conditioning = build_rhythm_ref_conditioning(
+        ref_conditioning_builder = (
+            build_duration_v3_ref_conditioning
+            if getattr(self.model, "rhythm_enable_v3", False)
+            else build_legacy_v2_ref_conditioning
+        )
+        rhythm_ref_conditioning = ref_conditioning_builder(
             sample,
             explicit=kwargs.get("rhythm_ref_conditioning"),
         )
@@ -792,7 +803,7 @@ class RhythmConanTaskMixin:
             current_step=effective_global_step,
         )
         if output.get("rhythm_version") != "v3":
-            output.update(collect_planner_runtime_outputs(output.get("rhythm_execution")))
+            output.update(collect_legacy_planner_runtime_outputs(output.get("rhythm_execution")))
         
         losses = {}
         acoustic_target, acoustic_weight = runtime_helper.attach_acoustic_target_bundle(

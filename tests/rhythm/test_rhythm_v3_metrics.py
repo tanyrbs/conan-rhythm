@@ -15,17 +15,15 @@ def _build_hparams():
         "rhythm_anchor_min_frames": 1.0,
         "rhythm_anchor_max_frames": 6.0,
         "rhythm_hidden_size": 64,
-        "rhythm_role_dim": 16,
-        "rhythm_role_codebook_size": 4,
-        "rhythm_role_window_left": 2,
-        "rhythm_role_window_right": 0,
+        "rhythm_response_rank": 4,
+        "rhythm_response_window_left": 2,
+        "rhythm_response_window_right": 0,
         "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
-        "rhythm_prefix_drift_gain": 0.25,
-        "rhythm_prefix_drift_clip": 0.05,
         "rhythm_max_logstretch": 0.8,
         "rhythm_anti_pos_bins": 4,
         "rhythm_anti_pos_grl_scale": 1.0,
+        "rhythm_streaming_mode": "strict",
         "rhythm_apply_mode": "always",
     }
 
@@ -42,7 +40,7 @@ def _run_adapter():
         target=None,
         f0=None,
         uv=None,
-        infer=False,
+        infer=True,
         global_steps=0,
         content_embed=torch.randn(content.size(0), content.size(1), 32),
         tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
@@ -58,36 +56,70 @@ def _run_adapter():
     ret["rhythm_v3_dur"] = torch.tensor(0.1)
     ret["rhythm_v3_mem"] = torch.tensor(0.2)
     ret["rhythm_v3_pref"] = torch.tensor(0.3)
+    ret["rhythm_v3_cons"] = torch.tensor(0.35)
+    ret["rhythm_v3_stream"] = torch.tensor(0.37)
     ret["rhythm_v3_anti"] = torch.tensor(0.4)
+    ret["rhythm_total"] = torch.tensor(1.35)
     return ret
 
 
-def test_rhythm_v3_metric_sections_cover_duration_path():
+def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
     output = _run_adapter()
-    sample = {"rhythm_speech_exec_tgt": output["speech_duration_exec"].detach() + 0.1}
+    commit_mask = output["rhythm_execution"].commit_mask > 0.5
+    visible_mask = output["rhythm_unit_batch"].unit_mask > 0.5
+    assert torch.any(visible_mask & (~commit_mask))
+    target = output["speech_duration_exec"].detach().clone()
+    target[visible_mask & (~commit_mask)] = target[visible_mask & (~commit_mask)] + 100.0
+    sample = {"unit_duration_tgt": target}
     sections = build_rhythm_metric_sections(output, sample=sample)
     metrics = build_rhythm_metric_dict(output, sample=sample)
     assert "plan_surfaces" in sections
+    assert "runtime_state" in sections
     for key in (
-        "rhythm_metric_exec_total_mean",
+        "rhythm_metric_committed_units_mean",
+        "rhythm_metric_commit_ratio_mean",
         "rhythm_metric_unit_duration_mean",
         "rhythm_metric_logstretch_abs_mean",
-        "rhythm_metric_role_entropy",
+        "rhythm_metric_basis_activation_abs_mean",
         "rhythm_metric_frame_plan_present",
         "rhythm_metric_global_rate_mean",
-        "rhythm_metric_role_coverage_mean",
+        "rhythm_metric_operator_coeff_abs_mean",
+        "rhythm_metric_commit_frontier_mean",
+        "rhythm_metric_rounding_residual_mean",
+        "rhythm_metric_rounding_residual_abs_mean",
         "rhythm_metric_exec_speech_l1",
         "rhythm_metric_prefix_drift_l1",
+        "rhythm_metric_rhythm_total",
         "rhythm_metric_rhythm_v3_dur",
+        "rhythm_metric_rhythm_v3_mem",
+        "rhythm_metric_rhythm_v3_pref",
+        "rhythm_metric_rhythm_v3_cons",
+        "rhythm_metric_rhythm_v3_stream",
+        "rhythm_metric_rhythm_v3_anti",
     ):
         assert key in metrics
         assert torch.isfinite(metrics[key]).all()
+    assert torch.allclose(metrics["rhythm_metric_exec_speech_l1"], torch.tensor(0.0))
+    assert torch.allclose(metrics["rhythm_metric_prefix_drift_l1"], torch.tensor(0.0))
+    for key in (
+        "rhythm_metric_pause_duration_mean",
+        "rhythm_metric_pause_event_rate",
+        "rhythm_metric_phrase_state_norm",
+        "rhythm_metric_rhythm_v3_break",
+        "rhythm_metric_L_exec_speech",
+        "rhythm_metric_L_exec_stretch",
+        "rhythm_metric_L_prefix_state",
+        "rhythm_metric_L_rhythm_exec",
+        "rhythm_metric_L_stream_state",
+    ):
+        assert key not in metrics
 
 
 def test_rhythm_v3_metric_path_works_when_version_flag_is_missing():
     output = _run_adapter()
     output.pop("rhythm_version", None)
-    sample = {"rhythm_speech_exec_tgt": output["speech_duration_exec"].detach()}
+    sample = {"unit_duration_tgt": output["speech_duration_exec"].detach()}
     metrics = build_rhythm_metric_dict(output, sample=sample)
-    assert "rhythm_metric_exec_total_mean" in metrics
-    assert "rhythm_metric_role_entropy" in metrics
+    assert "rhythm_metric_basis_activation_abs_mean" in metrics
+    assert "rhythm_metric_exec_speech_l1" in metrics
+    assert "rhythm_metric_pause_duration_mean" not in metrics

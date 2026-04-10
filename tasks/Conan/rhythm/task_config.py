@@ -17,18 +17,36 @@ def validate_rhythm_training_hparams(hparams) -> None:
     rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
     rhythm_enable_v3 = bool(
         hparams.get("rhythm_enable_v3", False)
-        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_ref_memory"
+        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_operator"
     )
     if rhythm_enable_v2 and rhythm_enable_v3:
         raise ValueError("Enable only one rhythm backend: rhythm_enable_v2 or rhythm_enable_v3.")
     if rhythm_enable_v3 and not rhythm_enable_v2:
-        if int(hparams.get("rhythm_role_codebook_size", 12) or 0) <= 0:
-            raise ValueError("rhythm_role_codebook_size must be > 0 for rhythm_v3.")
-        if int(hparams.get("rhythm_role_dim", 64) or 0) <= 0:
-            raise ValueError("rhythm_role_dim must be > 0 for rhythm_v3.")
-        for key in ("lambda_rhythm_dur", "lambda_rhythm_mem", "lambda_rhythm_pref", "lambda_rhythm_anti"):
+        if int(hparams.get("rhythm_response_rank", 12) or 0) <= 0:
+            raise ValueError("rhythm_response_rank must be > 0 for rhythm_v3.")
+        for key in (
+            "lambda_rhythm_dur",
+            "lambda_rhythm_op",
+            "lambda_rhythm_pref",
+            "lambda_rhythm_cons",
+            "lambda_rhythm_zero",
+        ):
             if float(hparams.get(key, 0.0) or 0.0) < 0.0:
                 raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
+        streaming_mode = str(hparams.get("rhythm_streaming_mode", "strict") or "strict").strip().lower()
+        if streaming_mode not in {"strict", "micro_lookahead"}:
+            raise ValueError("rhythm_streaming_mode must be one of: strict, micro_lookahead")
+        response_window_right = int(hparams.get("rhythm_response_window_right", 0) or 0)
+        micro_lookahead_units = hparams.get("rhythm_micro_lookahead_units")
+        if streaming_mode == "strict":
+            if response_window_right != 0:
+                raise ValueError("rhythm_response_window_right must be 0 when rhythm_streaming_mode='strict'.")
+            if micro_lookahead_units is not None and int(micro_lookahead_units) != 0:
+                raise ValueError("rhythm_micro_lookahead_units must be 0/None when rhythm_streaming_mode='strict'.")
+        else:
+            effective_lookahead = response_window_right if micro_lookahead_units is None else int(micro_lookahead_units)
+            if effective_lookahead <= 0:
+                raise ValueError("micro_lookahead mode requires positive rhythm_micro_lookahead_units or rhythm_response_window_right.")
         return
     if not rhythm_enable_v2:
         return

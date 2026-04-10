@@ -7,6 +7,7 @@ import torch
 from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
 from modules.Conan.rhythm.policy import resolve_apply_override
 from modules.Conan.rhythm.stages import detect_rhythm_stage, resolve_teacher_as_main
+from modules.Conan.rhythm_v3.reference_memory import normalize_duration_v3_conditioning
 from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
 from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
 from tasks.Conan.rhythm.task_config import (
@@ -59,7 +60,7 @@ def resolve_task_runtime_state(
     rhythm_enabled = bool(
         hparams.get("rhythm_enable_v2", False)
         or hparams.get("rhythm_enable_v3", False)
-        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_ref_memory"
+        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_operator"
     )
     effective_global_step = 200000 if test else int(global_step)
     use_reference = (
@@ -125,32 +126,16 @@ def resolve_task_runtime_state(
         module_only_objective=module_only_objective,
     )
 
+def build_duration_v3_ref_conditioning(sample, *, explicit=None):
+    if explicit is not None and not isinstance(explicit, dict):
+        return explicit
+    source = explicit if isinstance(explicit, dict) else sample
+    return normalize_duration_v3_conditioning(source)
 
-def build_rhythm_ref_conditioning(sample, *, explicit=None):
+
+def build_legacy_v2_ref_conditioning(sample, *, explicit=None):
     if explicit is not None:
         return explicit
-    has_v3_memory = all(sample.get(key) is not None for key in ("global_rate", "role_value", "role_coverage"))
-    if has_v3_memory:
-        conditioning = {
-            "global_rate": sample["global_rate"],
-            "role_value": sample["role_value"],
-            "role_coverage": sample["role_coverage"],
-        }
-        for extra_key in (
-            "role_keys",
-            "prompt_role_feat",
-            "prompt_rel_stretch",
-            "prompt_mask",
-            "prompt_role_attention",
-            "prompt_reconstruction",
-            "role_summary",
-            "ref_rhythm_stats",
-            "ref_rhythm_trace",
-        ):
-            extra_value = sample.get(extra_key)
-            if extra_value is not None:
-                conditioning[extra_key] = extra_value
-        return conditioning
     ref_stats = sample.get("ref_rhythm_stats")
     ref_trace = sample.get("ref_rhythm_trace")
     if ref_stats is None or ref_trace is None:
@@ -189,7 +174,22 @@ def build_rhythm_ref_conditioning(sample, *, explicit=None):
     return conditioning
 
 
-def collect_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]:
+def build_rhythm_ref_conditioning(sample, *, explicit=None, backend=None):
+    normalized_backend = str(backend or "").strip().lower()
+    if normalized_backend == "v3":
+        return build_duration_v3_ref_conditioning(sample, explicit=explicit)
+    if normalized_backend == "v2":
+        return build_legacy_v2_ref_conditioning(sample, explicit=explicit)
+    if explicit is not None and not isinstance(explicit, dict):
+        return explicit
+    source = explicit if isinstance(explicit, dict) else sample
+    normalized_v3 = normalize_duration_v3_conditioning(source)
+    if isinstance(normalized_v3, dict) and all(key in normalized_v3 for key in ("global_rate", "operator_coeff")):
+        return build_duration_v3_ref_conditioning(sample, explicit=explicit)
+    return build_legacy_v2_ref_conditioning(sample, explicit=explicit)
+
+
+def collect_legacy_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]:
     runtime_outputs = {}
     if rhythm_execution is None or getattr(rhythm_execution, "planner", None) is None:
         return runtime_outputs
