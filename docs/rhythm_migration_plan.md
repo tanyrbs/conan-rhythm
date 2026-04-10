@@ -1,395 +1,177 @@
-# Rhythm Migration Plan (2026-04-08)
+# Rhythm Migration Plan (2026-04-10)
 
-This file is the **concise architecture / migration note**.
-Operational launch details live in `docs/autodl_training_handoff.md`.
-Historical probe transcripts, large ablation menus, and outdated branch diaries
-were intentionally removed.
+This file is now the **concise current-mechanism note** for rhythm.
+Historical branch diaries, slot-memory narratives, phrase-pointer controller
+stories, and oversized v2 stage menus were intentionally removed.
 
-## 1. Mainline decision
+## 1. Current mechanism mainline
 
-The audited/default project path is still explicitly **teacher-first (v2)**:
+The current rhythm mechanism mainline is **`rhythm_v3`**:
 
-1. train the offline teacher into a stable rhythm oracle;
-2. verify that teacher through teacher-conditioned audio closure and export;
-3. distill the student from those teacher assets;
-4. close student acoustic behavior in `S3-retimed`.
+> `log d_hat_i = b_i + g_ref + phi_i^T s_ref`
 
-The key judgment is architectural, not cosmetic:
+with:
 
-- the teacher in this repo is a **non-causal offline teacher**
-- it is naturally an oracle / asset producer / supervision source
-- it is **not** naturally the final deployment model
+- `b_i`: content-conditioned nominal duration baseline
+- `g_ref`: speech-only prompt-global stretch
+- `phi_i`: shared causal basis activation
+- `s_ref`: prompt-conditioned operator coefficients
 
-## 2. Current implementation truth
+This is a **neural mixed-effects / low-rank operator** formulation:
 
-The maintained implementation is best described as:
+- **fixed effect**: content baseline
+- **random intercept**: prompt-global stretch
+- **random slopes**: prompt-conditioned operator over shared bases
 
-> **source-side boundary / commit evidence -> explicit speech/pause budget planner -> projector execution authority -> renderer**
+## 2. Five maintained parts only
 
-Reference conditioning remains useful, but its role is narrower:
+The maintained main path keeps only five necessary parts:
 
-- global rhythm prior
-- phrase-style prior
-- optional compatibility / observability path
+1. **content baseline `B`**
+2. **speech-only global stretch `g_ref`**
+3. **shared causal basis `F`**
+4. **prompt-conditioned operator `s_ref`**
+5. **deterministic projector**
 
-`phase_ptr`, local trace sampling, trace reliability, cold-start gating, and
-active-tail sampling still exist in the codebase, but the maintained controller
-is now **phase-decoupled timing** as a canonical direction: phase remains
-observer/telemetry plus compatibility support, not the runtime control
-authority, while compatibility-default configs may still require explicit
-`rhythm_phase_decoupled_timing: true`.
+Everything else is secondary, diagnostic, ablation-only, or legacy.
 
-Two clarifications matter for the current code, not just the paper story:
+## 3. What was explicitly removed from the main story
 
-- the maintained runtime now uses **typed junction semantics**
-  (`JOIN / WEAK / PHRASE`)
-- phrase-bank retrieval is currently driven by the persisted runtime pointer
-  `ref_phrase_ptr`, which advances with committed-frontier progress
+The current docs no longer treat these as the core mechanism:
 
-So the practical controller is better read as:
+- slot memory
+- role codebooks
+- static prompt memory queried at runtime
+- posterior precision as an inference-time control path
+- runtime retrieval weights as the central explanation
+- source residual as a required core variable
+- boundary controller / pause controller as main duration writers
+- reference timeline / pointer traversal as the duration-conditioning story
 
-> **committed structure -> phrase/global reference prior -> explicit timing plan -> projector**
+If any of these still exist in legacy code or archives, read them as
+compatibility-era surfaces, not as the current mainline claim.
 
-not as "every visible lexical boundary advances phrase retrieval".
+## 4. Scope of the current claim
 
-The runtime meaning should now be read more narrowly:
+The maintained v3 claim is intentionally narrow:
 
-- this stack is a **reference-conditioned temporal pacing / timing controller**
-- its maintained control surface is:
-  - speech duration
-  - pause placement / pause amount
-  - boundary-related local lengthening hints / side signals
-- full accent / full F0 contour / expressive intonation remain downstream style
-  realization concerns
+- **speech-unit duration transfer**
+- **causal / sealed-unit prediction**
+- **prompt-conditioned local duration response**
 
-Boundary semantics are also typed rather than binary:
+The mainline does **not** claim full rhythm/prosody transfer.
+Separator / pause duration is outside the core mechanism and should not be used
+to redefine the mainline story.
 
-- `JOIN`
-- `WEAK`
-- `PHRASE`
+## 5. Current implementation invariants
 
-Current execution semantics are stricter than a plain label view:
+The current repo implementation commits to the following:
 
-- `JOIN` = no pause insertion
-- `WEAK` = pause capped by `rhythm_projector_weak_boundary_pause_cap`
-- `PHRASE` = main carrier for redistributed pause mass in the editable tail
+### 5.1 Prompt evidence and training semantics
 
-A stricter PHRASE-only phrase-pointer update is a possible future contract
-change, not current checkout truth.
+- mainline training requires explicit prompt-unit conditioning:
+  - `prompt_content_units`
+  - `prompt_duration_obs`
+  - `prompt_unit_mask`
+- trace/proxy-only conditioning is fallback/inference-side only
+- `ReferenceDurationMemory` should be read as a **prompt summary / operator
+  evidence pack**, not as slot memory
 
-Reference is now best described as three-layer conditioning:
+### 5.2 Baseline separation
 
-- global rhythm prior
-- phrase-level prior selected by committed structure
-- bounded local residual style cue
+- baseline is content-only
+- operator-side prompt/source baseline features are detached
+- baseline is not allowed to absorb prompt-style transfer through the operator path
 
-not as a continuous wall-clock script.
+### 5.3 Global/local factorization
 
-## 2.1 Preferred next-step duration-only direction
+- `g_ref` is estimated from **speech-only** prompt units
+- local response is represented through shared causal bases plus prompt operator coefficients
+- separator units do not define the main duration mechanism
 
-The current checkout still contains phrase-bank / pointer-era machinery, but
-the preferred next-step duration design is **not** to keep growing
+### 5.4 Supervision/reporting
 
-> `reference segment bank + soft progress + planner + side controllers`
+- v3 main supervision is **speech-only**
+- separator units are excluded from duration/prefix supervision and v3 speech-side metrics
+- holdout operator self-fit is the maintained prompt diagnostic
 
-for streaming VC rhythm transfer.
+### 5.5 Consistency semantics
 
-The more defensible target architecture is:
+- `lambda_rhythm_cons` defaults to `0.0`
+- current consistency is diagnostic-only, not a mainline mechanism claim
+- a stronger consistency loss should only be revived after raw short/long prefix
+  views are compared before freeze/projector
 
-> **shared role codebook + prompt-specific static duration memory + single
-> duration head + very weak deterministic prefix stabilizer**
+## 6. Current public v3 surface
 
-This keeps the strongest ideas already surfaced in the repo and recent design
-discussion:
+The compact public surface is the one in
+`egs/conan_emformer_rhythm_v3.yaml`.
 
-- reference should act as **static style memory**, not as an exhaustible timeline
-- current unit duration should be decided by **local role matching**
-- source global processed position should not become a hidden control authority
-- prefix stabilization is still useful, but should stay a **small external
-  correction**, not grow back into a learned phase/debt controller
+### Inputs
 
-In practical terms, new duration work should prefer the following factorization:
+- `content_units`
+- `dur_anchor_src`
+- `unit_anchor_base`
+- `prompt_content_units`
+- `prompt_duration_obs`
+- `prompt_unit_mask`
 
-- **source causal unitizer + anchor**
-  - stable discrete/SSL units plus anchor durations and local edge cues
-- **shared role codebook**
-  - globally shared duration-role prototypes such as weak-link, neutral,
-    content-expand, pre-boundary, and closure
-- **prompt-specific static duration memory**
-  - the prompt writes values into that shared codebook once, then stays fixed
-- **single duration head**
-  - the current source unit queries the static prompt memory and predicts one
-    relative stretch value
-- **clip-only prefix stabilizer**
-  - deterministic bounded correction for cumulative drift; excluded from memory
-    retrieval and role selection
+### Outputs
 
-The critical judgment is architectural:
+- `speech_duration_exec`
+- `rhythm_frame_plan`
+- `commit_frontier`
+- `rhythm_state_next`
 
-> do not consume the reference; distill it into prompt-specific static duration
-> memory and query it content-synchronously
+### Compact public losses
 
-No single paper proves this exact module is universally optimal. The repo's
-direction is instead an engineering synthesis of several strong signals:
+- `rhythm_total`
+- `rhythm_v3_dur`
+- `rhythm_v3_op`
+- `rhythm_v3_pref`
+- `rhythm_v3_zero`
 
-- **TVTSyn** motivates content-synchronous memory querying rather than relying
-  on one static global prompt for time-varying content
-- **R-VC** shows that rhythm/duration can be modeled explicitly with discrete
-  content units
-- **UUVC-style discrete-unit duration modeling** supports using unit-level
-  duration targets directly
+Optional/internal diagnostics such as consistency or orthogonality should not
+be mistaken for the compact public contract.
 
-## 2.2 Implemented bootstrap in this checkout
+## 7. File map for the current story
 
-The current checkout now contains a first runnable bootstrap of that direction
-under:
+### Runtime
 
-- `modules/Conan/rhythm_v3/`
+- `modules/Conan/rhythm_v3/runtime_adapter.py`
+- `modules/Conan/rhythm_v3/module.py`
+- `modules/Conan/rhythm_v3/reference_memory.py`
+- `modules/Conan/rhythm_v3/projector.py`
 
-This new branch is intentionally **duration-only** and routes around the old
-phrase-pointer planner stack when `rhythm_enable_v3: true`. The string
-`rhythm_mode: duration_ref_memory` remains accepted as a compatibility alias,
-not as a separate runtime family.
+### Training surfaces
 
-The implemented runtime keeps only the minimum controllable pieces:
+- `tasks/Conan/rhythm/targets.py`
+- `tasks/Conan/rhythm/losses.py`
+- `tasks/Conan/rhythm/metrics.py`
+- `tasks/Conan/rhythm/task_config.py`
+- `tasks/Conan/rhythm/task_runtime_support.py`
 
-- `SourceUnitBatch`
-- `ReferenceDurationMemory`
-- `DurationRuntimeState`
-- `DurationExecution`
-- shared role codebook + prompt-specific slot values
-- single duration head
-- deterministic clipped prefix-drift correction
+## 8. Legacy status of v2
 
-Legacy `modules/Conan/rhythm/` remains in place for:
+`modules/Conan/rhythm/` and the associated teacher/planner/pointer-era docs
+remain in the repository for:
 
-- teacher / dual-mode / phrase-bank experiments
 - old checkpoints
-- old test contracts
+- compatibility
+- teacher/export history
+- archival experiments
 
-but it is no longer the only rhythm backend. In practice:
+They should not be read as the current mechanism mainline.
 
-- **v2** = audited/default training path
-- **v3** = integrated bootstrap path with tests and inference support, but not
-  yet a fully standalone training recipe
-- **StreamVoice / streaming VC work** reinforces that causal modeling and
-  missing-context training matter more than stacking many runtime controllers
-- **ProsodyFM-style factorization** supports separating duration/phrasing from
-  broader intonation modeling
+## 9. Documentation policy from now on
 
-This should be read as the preferred **duration-only V1** for streaming VC,
-not as a claim that the repo already implements the full end-state.
+When docs disagree, prefer the smallest current v3 surface:
 
-## 2.2 Canonical naming and interface notes
+- operator, not slot memory
+- speech-unit duration transfer, not full prosody control
+- explicit prompt-unit training semantics
+- speech-only supervision
+- deterministic projector
 
-Canonical naming:
-
-- `rhythm_phase_decoupled_timing`
-- `rhythm_phase_decoupled_phrase_gate_boundary_threshold`
-- `rhythm_phase_decoupled_boundary_style_residual_scale`
-- `rhythm_debt_control_scale`
-- `rhythm_debt_pause_priority`
-- `rhythm_debt_speech_priority`
-- `rhythm_projector_debt_leak`
-- `rhythm_projector_debt_max_abs`
-- `rhythm_projector_debt_correction_horizon`
-- `rhythm_runtime_phrase_bank_enable`
-- `rhythm_runtime_phrase_select_window`
-- `rhythm_runtime_phrase_neighbor_mix_alpha`
-- `rhythm_weak_boundary_threshold`
-- `rhythm_phrase_boundary_threshold`
-- `rhythm_boundary_lengthening_max`
-- `rhythm_projector_weak_boundary_pause_cap`
-
-Deprecated compatibility aliases:
-
-- `rhythm_phase_free_timing`
-- `rhythm_phase_free_phrase_boundary_threshold`
-- `rhythm_phase_decoupled_phrase_boundary_threshold`
-
-Some `phase_free_*` compatibility attributes are still materialized internally
-so older tests/callers do not break, but new configs should not use them.
-
-Public runtime interface:
-
-- model-level entry: `Conan.forward -> _run_rhythm_stage`
-- v2 adapter: `ConanRhythmAdapter.forward`
-- v3 adapter: `ConanDurationAdapter.forward`
-- `run_rhythm_frontend()` = lower-level **legacy-v2** integration/test helper
-
-Teacher runtime semantics (**v2-only**):
-
-- `rhythm_teacher_as_main` = offline/full-commit learned-teacher execution path for
-  teacher-only audit/export style stages
-- `rhythm_enable_dual_mode_teacher` = training-time paired streaming + offline teacher path
-- canonical teacher projector knobs:
-  - `rhythm_teacher_projector_force_full_commit`
-  - `rhythm_teacher_projector_soft_pause_selection`
-
-These teacher branches are not the deployment runtime replacement and are not
-activated during `infer=true`.
-
-Reference sidecar terminology:
-
-- `rhythm_emit_reference_sidecar`
-  - module/runtime conditioning auxiliaries
-  - covers generic slow-memory and planner-side summaries
-- `rhythm_export_debug_sidecars`
-  - dataset/sample/cache audit export fields
-
-`rhythm_emit_reference_sidecar` may be auto-enabled when the config requests
-external sampled references, `sample_ref` cached reference policy,
-descriptor-bootstrap losses, or trace-reliability fallback.
-
-Phrase-bank conditioning is adjacent but separately materializable:
-
-- it may be emitted with sidecars
-- it may be enabled by `rhythm_runtime_phrase_bank_enable`
-- it may be consumed directly when `ref_phrase_*` is already present
-- if those external sidecars drift from the rebuilt compact/raw contract,
-  `build_reference_conditioning()` now drops those stale sidecars and rebuilds
-  from the raw cached reference contract; matching sidecars are still kept
-
-Runtime override rule of thumb:
-
-- supported runtime overrides are the trace window / phase-decoupled switch /
-  source-boundary scaling / streaming debt shaping / projector sparsity /
-  projector debt knobs for **v2**
-- teacher-only runtime intentionally does **not** expose the full streaming
-  scheduler override surface
-- the current **v3** adapter ignores `rhythm_runtime_overrides`
-
-Legacy v2 planner compact contract:
-
-- `planner_ref_stats [B,2]`
-- `planner_ref_trace [B,bins,2]`
-- `planner_slow_rhythm_memory [B,K,2]`
-- `planner_slow_rhythm_summary [B,2]`
-- `planner_ref_phrase_trace [B,P,bins,2]`
-
-By contrast, `rhythm_v3` execution exposes `planner=None` and uses
-`ReferenceDurationMemory` as its main prompt contract.
-
-## 3. Maintained stage naming
-
-To stop documentation drift, the active stage map is intentionally small:
-
-| Stage | Meaning | Current implementation |
-|---|---|---|
-| `T1-surface` | stable offline teacher surface | `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` |
-| `T2-audio` | teacher-conditioned audio closure, audit, and export | maintained as a procedure centered on `scripts/export_rhythm_teacher_targets.py` |
-| `S2-kd` | conservative teacher-conditioned student KD | `egs/conan_emformer_rhythm_v2_student_kd.yaml` |
-| `S3-retimed` | student acoustic closure | `egs/conan_emformer_rhythm_v2_student_retimed.yaml` |
-
-Anything outside this list should be treated as non-mainline, historical, or
-experimental unless promoted explicitly later.
-
-For bootstrap v3 runs, the repo now also includes:
-
-- `egs/conan_emformer_rhythm_v3.yaml`
-
-## 4. What changed from the old story
-
-The active docs now commit to these decisions:
-
-- **teacher-first, not teacher-as-deployment-model**
-- **boundary / budget / execution authority first**, not phase-first storytelling
-- **reference as prior**, not as a long continuous local script
-- **preferred next-step duration path = static role memory**, not a larger
-  phrase-pointer / segment-bank stack
-- **timing controller first**, not full expressive prosody controller
-- **typed boundaries**, where JOIN/WEAK remain local realization events and the
-  current phrase-bank pointer is still a persisted runtime pointer advanced with
-  committed-frontier progress
-- **cloud1 snapshot as archive**, not as the live design document
-
-This is the critical cleanup: the repo already behaves more like a
-boundary-first, teacher-first system than the older documentation admitted.
-The docs now follow the implementation instead of preserving every historical
-explanation.
-
-## 5. Migration rule of thumb
-
-Use the smallest migration class that matches the real change.
-
-### A. Runtime-only change
-
-- metrics
-- diagnostics
-- inference override
-- execution-time routing only
-
-**Action:** no retraining required.
-
-### B. Sampling / routing semantic change
-
-- active-tail normalization
-- open-tail semantic alignment
-- train/infer sparse-selection alignment
-
-**Action:** old checkpoints remain usable, but short fine-tuning is the honest default.
-
-### C. Public-contract change
-
-- teacher export truth changes
-- student-visible cache contract changes
-- new planner head / new loss / new embedding changes the learned target surface
-
-**Action:** treat it as a new experiment, rebuild export/cache, and use a fresh `exp_name`.
-
-The practical question is simple:
-
-> if the public teacher/student truth surface changed, it is not a "small patch"
-
-## 6. Teacher runtime semantics
-
-The repo still contains teacher runtime branches, but they now have stricter
-semantics:
-
-- `rhythm_teacher_as_main` = **offline/full-commit audit/export execution**
-- `rhythm_enable_dual_mode_teacher` = run streaming student/mainline **plus** offline teacher
-  branch during training
-- teacher branches do not inherit every streaming override:
-  - streaming-only scheduler controls stay on the streaming branch
-  - teacher branches only consume trace/phrase-gate controls, source-boundary
-    scaling, teacher pause sparsity, and projector debt anti-windup
-- in the current module implementation, `forward_teacher()` canonicalizes the
-  teacher branch into a closed/full-commit view with internally built masks and
-  fresh state rather than reusing streaming prefix state
-
-This is intentional cleanup, not a missing feature. The offline teacher planner
-is not the same object as the streaming scheduler/controller.
-
-## 7. Cloud1 preservation rule
-
-The cloud AutoDL state is preserved in:
-
-- `docs/cloud1_autodl_project_status_snapshot_2026-04-08.md`
-
-That file is a frozen archive.
-This local repository is the successor surface for new work.
-For actual inheritance / warm-start procedure, use:
-
-- `docs/autodl_training_handoff.md`
-
-## 8. Current practical boundary
-
-The remaining blockers are mostly asset-side:
-
-- formal processed data and binary caches are external
-- teacher export assets are external
-- `S3-retimed` still requires matched retimed mel / F0 / UV side assets
-
-`T2-audio` currently exists as a maintained **procedure**, not as a separate
-checked-in audio-polish training YAML. That is intentional, not a missing
-artifact.
-
-## 9. Documentation rule
-
-If a document section does not improve one of these, it should not stay in the
-mainline docs:
-
-- teacher asset quality and auditability
-- student handoff clarity
-- execution authority clarity
-- asset reproducibility and inheritance safety
+Older v2 boundary/planner/phrase-bank descriptions may remain in archival docs,
+but they are not authoritative for the current mainline.

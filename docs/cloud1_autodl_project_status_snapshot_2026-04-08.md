@@ -1,39 +1,43 @@
 > **Archive snapshot only.**
 > This file records a historical training/status snapshot and may reflect runs
 > started before the current repository HEAD. It is not the live
-> runtime-contract or architecture document. For current semantics, use
-> `README.md`, `docs/rhythm_migration_plan.md`, and
-> `docs/autodl_training_handoff.md`.
+> runtime-contract or architecture document. For the current `rhythm_v3`
+> mainline semantics, use:
+>
+> - `README.md`
+> - `docs/rhythm_migration_plan.md`
+>
+> `docs/autodl_training_handoff.md` is now legacy v2 operational guidance only.
 
 # Project Status
 
-更新时间：2026-04-08 UTC
+鏇存柊鏃堕棿锛?026-04-08 UTC
 
-## 1. 当前项目状态
+## 1. 褰撳墠椤圭洰鐘舵€?
 
-### 当前唯一维护主线
+### 褰撳墠鍞竴缁存姢涓荤嚎
 - stage: `teacher_offline`
 - data: `mixed train100 + train360`
 - lineage: `v6`
 - pause path: `split-head support + allocation`
 - semantic: `weight-only warm-start`
 
-### 当前 active experiment
+### 褰撳墠 active experiment
 - exp: `teacher_offline_train100_360_v6_split_heads_restart17500_fix1`
 - log: `logs/teacher_offline_train100_360_v6_split_heads_restart17500_fix1.log`
 - ckpt dir: `checkpoints/teacher_offline_train100_360_v6_split_heads_restart17500_fix1`
 - bootstrap: `/root/autodl-tmp/project/conan-rhythm/checkpoints/model_ckpt_steps_17500.ckpt`
 
-### 当前运行状态
-- 训练进程仍在运行
+### 褰撳墠杩愯鐘舵€?
+- 璁粌杩涚▼浠嶅湪杩愯
 - latest observed train step token in log: **33236**
-- 已完成 validation step：`5000 / 10000 / 15000 / 20000 / 25000 / 30000`
+- 宸插畬鎴?validation step锛歚5000 / 10000 / 15000 / 20000 / 25000 / 30000`
 
-> 注意：当前正在运行的进程早于最近一次代码提交启动，因此它反映的是**旧的进程内代码**，不是当前仓库 HEAD 对应的新逻辑。
+> 娉ㄦ剰锛氬綋鍓嶆鍦ㄨ繍琛岀殑杩涚▼鏃╀簬鏈€杩戜竴娆′唬鐮佹彁浜ゅ惎鍔紝鍥犳瀹冨弽鏄犵殑鏄?*鏃х殑杩涚▼鍐呬唬鐮?*锛屼笉鏄綋鍓嶄粨搴?HEAD 瀵瑰簲鐨勬柊閫昏緫銆?
 
 ---
 
-## 2. 当前训练进度记录
+## 2. 褰撳墠璁粌杩涘害璁板綍
 
 | val step | pause_event_f1 | exec_total_corr | prefix_drift_l1 | support_cover_at_topk | recall_drop_post_from_planner | boundary recall |
 |---|---:|---:|---:|---:|---:|---:|
@@ -44,49 +48,49 @@
 | 25000 | 0.8226 | 0.9203 | 21.4935 | 0.9367 | 0.0474 | 0.0019 |
 | 30000 | 0.8271 | 0.9185 | 21.8889 | 0.9355 | 0.0531 | 0.0019 |
 
-### 当前 best 记录
-- overall best (`model_ckpt_best.pt`): **@15000**，按 `val_loss=0.22422`
-- pause best (`model_ckpt_pause_best.pt`): **@30000**，按 `rhythm_metric_pause_event_f1=0.82708`
-- 最近 step ckpt：`20000 / 25000 / 30000`
+### 褰撳墠 best 璁板綍
+- overall best (`model_ckpt_best.pt`): **@15000**锛屾寜 `val_loss=0.22422`
+- pause best (`model_ckpt_pause_best.pt`): **@30000**锛屾寜 `rhythm_metric_pause_event_f1=0.82708`
+- 鏈€杩?step ckpt锛歚20000 / 25000 / 30000`
 
 ---
 
-## 3. 当前判断
+## 3. 褰撳墠鍒ゆ柇
 
-### 结论
-**全局健康，但 boundary 仍明显滞后。**
+### 缁撹
+**鍏ㄥ眬鍋ュ悍锛屼絾 boundary 浠嶆槑鏄炬粸鍚庛€?*
 
-### 支持这个判断的事实
-- `pause_event_f1` 整体维持在 `0.81~0.83` 区间，没有主线崩坏迹象
-- `exec_total_corr` 维持高位，`@25000=0.9203`、`@30000=0.9185`
-- `prefix_drift_l1` 维持在 `21~22` 区间，`@30000` 略有上行但未失控
-- `pause_support_cover_at_topk` 维持在 `0.93+`，说明 planner → projector 的主要 support 覆盖仍健康
-- `pause_recall_drop_post_from_planner` 约 `0.04~0.05`，`@30000` 略抬到 `0.0531`，仍需盯紧
-- `boundary recall` 持续约 `0.0018~0.0019`，说明 boundary 子集收益尚未体现出来
+### 鏀寔杩欎釜鍒ゆ柇鐨勪簨瀹?
+- `pause_event_f1` 鏁翠綋缁存寔鍦?`0.81~0.83` 鍖洪棿锛屾病鏈変富绾垮穿鍧忚抗璞?
+- `exec_total_corr` 缁存寔楂樹綅锛宍@25000=0.9203`銆乣@30000=0.9185`
+- `prefix_drift_l1` 缁存寔鍦?`21~22` 鍖洪棿锛宍@30000` 鐣ユ湁涓婅浣嗘湭澶辨帶
+- `pause_support_cover_at_topk` 缁存寔鍦?`0.93+`锛岃鏄?planner 鈫?projector 鐨勪富瑕?support 瑕嗙洊浠嶅仴搴?
+- `pause_recall_drop_post_from_planner` 绾?`0.04~0.05`锛宍@30000` 鐣ユ姮鍒?`0.0531`锛屼粛闇€鐩揣
+- `boundary recall` 鎸佺画绾?`0.0018~0.0019`锛岃鏄?boundary 瀛愰泦鏀剁泭灏氭湭浣撶幇鍑烘潵
 
-### 当前最重要风险
-当前 Stage1 还不能因为全局指标健康就直接判定完成，主要卡点仍是：
-- boundary pause 子集几乎没有抬起来
-- boundary 相关收益还没有稳定反映到监控值上
-
----
-
-## 4. 当前代码与训练的关系
-
-当前仓库 HEAD 已经包含一批代码与文档修复，主要包括：
-- 文档主线收敛
-- commit controller / projector / metrics / losses 的若干修复
-- boundary valid-only 指标与监控补强
-
-但这些修改**尚未应用到当前正在运行的训练进程**。因此：
-- 当前 run 仍可作为旧逻辑 baseline 观察
-- 如果要验证新逻辑，必须新开 experiment 或重启 run
+### 褰撳墠鏈€閲嶈椋庨櫓
+褰撳墠 Stage1 杩樹笉鑳藉洜涓哄叏灞€鎸囨爣鍋ュ悍灏辩洿鎺ュ垽瀹氬畬鎴愶紝涓昏鍗＄偣浠嶆槸锛?
+- boundary pause 瀛愰泦鍑犱箮娌℃湁鎶捣鏉?
+- boundary 鐩稿叧鏀剁泭杩樻病鏈夌ǔ瀹氬弽鏄犲埌鐩戞帶鍊间笂
 
 ---
 
-## 5. 当前下一步建议
+## 4. 褰撳墠浠ｇ爜涓庤缁冪殑鍏崇郴
 
-1. 保持当前 run 继续跑到下一个 validation 点
-2. 文档只保留 README + code/config guide + project status 三份
-3. 本地代码整理后提交到 `autodl` 分支
-4. 需要验证新 boundary 修复时，使用 `17500` warm-start 新开 experiment，不要污染当前 run
+褰撳墠浠撳簱 HEAD 宸茬粡鍖呭惈涓€鎵逛唬鐮佷笌鏂囨。淇锛屼富瑕佸寘鎷細
+- 鏂囨。涓荤嚎鏀舵暃
+- commit controller / projector / metrics / losses 鐨勮嫢骞蹭慨澶?
+- boundary valid-only 鎸囨爣涓庣洃鎺цˉ寮?
+
+浣嗚繖浜涗慨鏀?*灏氭湭搴旂敤鍒板綋鍓嶆鍦ㄨ繍琛岀殑璁粌杩涚▼**銆傚洜姝わ細
+- 褰撳墠 run 浠嶅彲浣滀负鏃ч€昏緫 baseline 瑙傚療
+- 濡傛灉瑕侀獙璇佹柊閫昏緫锛屽繀椤绘柊寮€ experiment 鎴栭噸鍚?run
+
+---
+
+## 5. 褰撳墠涓嬩竴姝ュ缓璁?
+
+1. 淇濇寔褰撳墠 run 缁х画璺戝埌涓嬩竴涓?validation 鐐?
+2. 鏂囨。鍙繚鐣?README + code/config guide + project status 涓変唤
+3. 鏈湴浠ｇ爜鏁寸悊鍚庢彁浜ゅ埌 `autodl` 鍒嗘敮
+4. 闇€瑕侀獙璇佹柊 boundary 淇鏃讹紝浣跨敤 `17500` warm-start 鏂板紑 experiment锛屼笉瑕佹薄鏌撳綋鍓?run

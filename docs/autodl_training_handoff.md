@@ -1,12 +1,18 @@
-# AutoDL Training Handoff (2026-04-08)
+# AutoDL Training Handoff (legacy v2 operations, 2026-04-08)
 
-This file is the **single operational handoff document**.
-Historical audit detail, large ablation menus, and outdated stage digressions
-were intentionally removed.
+> **Legacy v2 operational note only.**
+> This file is no longer the current rhythm architecture or runtime-contract
+> document. For the current `rhythm_v3` mainline, use:
+>
+> - `README.md`
+> - `docs/rhythm_migration_plan.md`
+
+This file remains only as a legacy operational handoff note for the older
+teacher-first v2 training/export chain.
 
 ## 1. Scope and authority
 
-The maintained launch story is:
+The scope of this file is the **legacy v2 teacher/export launch chain only**:
 
 1. `T1-surface`: train the offline teacher into a stable rhythm oracle
 2. `T2-audio`: verify the teacher through teacher-conditioned audio closure and export
@@ -14,61 +20,32 @@ The maintained launch story is:
 4. `S3-retimed`: close student acoustic behavior on retimed targets
 
 The teacher is the offline oracle / asset producer.
-The student is the deployment-facing line.
+The student is the deployment-facing line for that legacy v2 chain.
 
 Non-mainline or experimental paths may still exist in `egs/`, but they are not
-the default handoff chain.
+defined here. The current `rhythm_v3` mechanism story was intentionally removed
+from this file to stop architecture drift.
 
-## 2. Current local successor architecture summary
+## 2. What this file does not define
 
-The stage chain below is a **training logistics chain**, not the full
-architecture story.
+This file does **not** define the current `rhythm_v3` mechanism.
 
-The current local successor branch already assumes:
+In particular, do not read this document as the authority for:
 
-- source-side boundary / commit remains the main control entry
-- duration / pause budgeting is the explicit control surface
-- projector execution remains the binding authority
-- reference is treated as global / phrase prior, not as a long continuous control script
-- `phase_ptr` remains observer/telemetry; phase-decoupled timing is the canonical maintained runtime direction, but compatibility-default configs may still need explicit `rhythm_phase_decoupled_timing: true`
+- the mixed-effects/operator duration formulation
+- `log d_hat_i = b_i + g_ref + phi_i^T s_ref`
+- the five-part v3 mainline (`B`, `g_ref`, `F`, `s_ref`, projector)
+- current prompt-unit training semantics
+- current compact v3 public inputs/outputs/losses
 
-Read the current runtime literally:
+Those semantics now live in:
 
-- rhythm control here means **timeline control** first
-  (`duration + pause + boundary-related local lengthening hints`)
-- full accent / full F0 contour is not the maintained rhythm-controller claim
-- `JOIN / WEAK / PHRASE` primarily govern local realization and projector pause
-  behavior; phrase-bank retrieval is currently driven by the persisted runtime
-  pointer `ref_phrase_ptr`
-
-The maintained runtime meaning is now narrower and more explicit:
-
-- the mainline controller is a **timing controller**
-- planner responsibility is:
-  - speech duration budget
-  - pause budget
-  - unit-level redistribution
-  - boundary-related local lengthening hints / side signals
-- full accent / F0 contour / expressive intonation are **not** the maintained
-  runtime control target of this stack
-
-Boundary handling is also typed:
-
-- `JOIN`: no runtime pause insertion
-- `WEAK`: weak local junction, local timing variation allowed, runtime pause capped
-- `PHRASE`: main carrier for redistributed editable-tail pause mass
-
-Reference conditioning is therefore used as:
-
-- global rhythm prior
-- phrase prior selected by persisted `ref_phrase_ptr`
-- bounded local boundary-style residual
-
-not as a wall-clock script.
+- `README.md`
+- `docs/rhythm_migration_plan.md`
 
 ### Canonical runtime names
 
-Use these names in new configs and handoffs:
+For legacy v2 configs/handoffs, use these names:
 
 - `rhythm_phase_decoupled_timing`
 - `rhythm_phase_decoupled_phrase_gate_boundary_threshold`
@@ -84,6 +61,8 @@ Some `phase_free_*` compatibility attributes are still materialized internally
 so older tests/callers do not break, but new configs should not use them.
 
 ### Sidecar terminology
+
+This section is legacy-v2 terminology only.
 
 Keep the two sidecar concepts separate:
 
@@ -449,3 +428,4 @@ Stop and inspect if any of the following happens:
 10. prepare retimed cache + matched F0/UV assets
 11. run strict preflight for `S3-retimed`
 12. only then launch `S3-retimed`
+
