@@ -12,6 +12,23 @@ class RhythmDatasetSampleAssembler:
     def hparams(self):
         return self.owner.hparams
 
+    def _build_reference_conditioning(self, *, rhythm_ref_item, sample, item, target_mode: str):
+        try:
+            return self.owner._get_reference_rhythm_conditioning(
+                rhythm_ref_item,
+                sample,
+                target_mode=target_mode,
+                item=item,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument 'item'" not in str(exc):
+                raise
+            return self.owner._get_reference_rhythm_conditioning(
+                rhythm_ref_item,
+                sample,
+                target_mode=target_mode,
+            )
+
     def _tensorize_optional_value(self, key, value):
         if key in {
             "ref_rhythm_trace",
@@ -55,11 +72,15 @@ class RhythmDatasetSampleAssembler:
             "rhythm_teacher_confidence_allocation",
             "rhythm_teacher_confidence_shape",
             "rhythm_offline_teacher_confidence",
+            "prompt_duration_obs",
+            "prompt_unit_mask",
+            "unit_duration_tgt",
         }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
             return torch.tensor(value, dtype=torch.float32)
         if key in {
+            "prompt_content_units",
             "phrase_group_index",
             "ref_phrase_lengths",
             "ref_phrase_starts",
@@ -199,11 +220,11 @@ class RhythmDatasetSampleAssembler:
                 sample["rhythm_pair_is_identity"].cpu().numpy(),
                 dtype=np.float32,
             )
-        ref_conditioning = self.owner._get_reference_rhythm_conditioning(
-            rhythm_ref_item,
-            sample,
-            target_mode=target_mode,
+        ref_conditioning = self._build_reference_conditioning(
+            rhythm_ref_item=rhythm_ref_item,
+            sample=sample,
             item=item,
+            target_mode=target_mode,
         )
         rhythm_runtime_fields.update(source_cache)
         rhythm_runtime_fields.update(ref_conditioning)

@@ -15,7 +15,7 @@ def _minimal_v3_hparams():
         "lambda_rhythm_dur": 1.0,
         "lambda_rhythm_op": 0.25,
         "lambda_rhythm_pref": 0.20,
-        "lambda_rhythm_cons": 0.10,
+        "lambda_rhythm_cons": 0.0,
         "lambda_rhythm_zero": 0.05,
         "rhythm_streaming_mode": "strict",
         "rhythm_response_window_right": 0,
@@ -83,10 +83,106 @@ def test_validate_rhythm_training_hparams_rejects_removed_v3_hparam_aliases(depr
         validate_rhythm_training_hparams(hparams)
 
 
+@pytest.mark.parametrize(
+    "removed_key",
+    [
+        "rhythm_v3_mem",
+        "rhythm_v3_anti",
+        "rhythm_role_dim",
+        "rhythm_role_codebook_size",
+        "rhythm_anti_pos_bins",
+        "rhythm_anti_pos_grl_scale",
+    ],
+)
+def test_validate_rhythm_training_hparams_rejects_removed_v3_surface_keys(removed_key):
+    hparams = _minimal_v3_hparams()
+    hparams[removed_key] = 1
+    with pytest.raises(ValueError, match=removed_key):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_valid_v3_skips_legacy_contract_evaluation():
     with mock.patch("tasks.Conan.rhythm.task_config.collect_config_contract_evaluation") as mocked:
         validate_rhythm_training_hparams(_minimal_v3_hparams())
     mocked.assert_not_called()
+
+
+def test_validate_rhythm_training_hparams_requires_prompt_unit_public_inputs_when_surface_is_declared():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_public_inputs"] = ["content_units", "dur_anchor_src", "unit_anchor_base"]
+    with pytest.raises(ValueError, match="rhythm_public_inputs is missing required rhythm_v3 entries"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_legacy_public_inputs_for_v3():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_public_inputs"] = [
+        "content_units",
+        "dur_anchor_src",
+        "unit_anchor_base",
+        "prompt_content_units",
+        "prompt_duration_obs",
+        "prompt_unit_mask",
+        "ref_rhythm_trace",
+    ]
+    with pytest.raises(ValueError, match="rhythm_public_inputs contains legacy"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_legacy_public_output_for_v3():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_public_outputs"] = [
+        "speech_duration_exec",
+        "rhythm_frame_plan",
+        "commit_frontier",
+        "rhythm_state_next",
+        "pause_after_exec",
+    ]
+    with pytest.raises(ValueError, match="rhythm_public_outputs contains legacy"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_requires_consistency_loss_surface_when_enabled():
+    hparams = _minimal_v3_hparams()
+    hparams["lambda_rhythm_cons"] = 0.10
+    hparams["rhythm_public_losses"] = [
+        "rhythm_total",
+        "rhythm_v3_dur",
+        "rhythm_v3_op",
+        "rhythm_v3_pref",
+        "rhythm_v3_zero",
+    ]
+    with pytest.raises(ValueError, match="rhythm_v3_cons"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_compact_example_public_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_public_inputs": [
+                "content_units",
+                "dur_anchor_src",
+                "unit_anchor_base",
+                "prompt_content_units",
+                "prompt_duration_obs",
+                "prompt_unit_mask",
+            ],
+            "rhythm_public_outputs": [
+                "speech_duration_exec",
+                "rhythm_frame_plan",
+                "commit_frontier",
+                "rhythm_state_next",
+            ],
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_dur",
+                "rhythm_v3_op",
+                "rhythm_v3_pref",
+                "rhythm_v3_zero",
+            ],
+        }
+    )
 
 
 def test_validate_rhythm_training_hparams_rejects_unknown_streaming_mode():

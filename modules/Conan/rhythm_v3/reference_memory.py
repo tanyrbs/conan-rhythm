@@ -20,8 +20,11 @@ _V3_MEMORY_REQUIRED_FIELDS = ("global_rate", "operator_coeff")
 _V3_MEMORY_OPTIONAL_FIELDS = (
     "prompt_basis_activation",
     "prompt_operator_fit",
+    "prompt_operator_cv_fit",
     "prompt_random_target",
     "prompt_mask",
+    "prompt_fit_mask",
+    "prompt_eval_mask",
     "prompt_log_base",
     "prompt_log_duration",
     "prompt_log_residual",
@@ -38,8 +41,11 @@ _V3_PROMPT_UNIT_OPTIONAL_FIELDS = (
 _V3_NESTED_PROMPT_FIELDS = (
     "prompt_basis_activation",
     "prompt_operator_fit",
+    "prompt_operator_cv_fit",
     "prompt_random_target",
     "prompt_mask",
+    "prompt_fit_mask",
+    "prompt_eval_mask",
     "prompt_log_base",
     "prompt_log_duration",
     "prompt_log_residual",
@@ -54,6 +60,13 @@ class PromptOperatorSummary:
     prompt_log_residual: torch.Tensor
     prompt_random_target: torch.Tensor
     global_rate: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PromptOperatorDiagnostics:
+    fit_mask: torch.Tensor
+    eval_mask: torch.Tensor
+    operator_cv_fit: torch.Tensor
 
 
 def _collect_flat_v3_memory(source: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -145,18 +158,24 @@ def normalize_duration_v3_conditioning(source: Any) -> ReferenceDurationMemory |
     return normalized
 
 
-class PromptDurationOperatorBuilder(nn.Module):
+class PromptConditionedOperatorEstimator(nn.Module):
     def __init__(
         self,
         *,
         trace_bins: int = 24,
         ridge_lambda: float = 1.0,
         speech_threshold: float = 0.10,
+        global_shrink_tau: float = 8.0,
+        ridge_support_tau: float = 8.0,
+        holdout_ratio: float = 0.30,
     ) -> None:
         super().__init__()
         self.reference_encoder = ReferenceRhythmEncoder(trace_bins=trace_bins)
         self.ridge_lambda = float(max(1.0e-4, ridge_lambda))
         self.speech_threshold = float(max(0.0, min(1.0, speech_threshold)))
+        self.global_shrink_tau = float(max(0.0, global_shrink_tau))
+        self.ridge_support_tau = float(max(0.0, ridge_support_tau))
+        self.holdout_ratio = float(max(0.0, min(0.95, holdout_ratio)))
 
     @staticmethod
     def _masked_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -167,6 +186,18 @@ class PromptDurationOperatorBuilder(nn.Module):
             if bool(valid.any().item()):
                 median[batch_idx, 0] = values[batch_idx][valid].median()
         return median
+
+    @staticmethod
+    def _masked_count(mask: torch.Tensor) -> torch.Tensor:
+        return mask.float().sum(dim=1, keepdim=True)
+
+    @staticmethod
+    def _support_shrink(value: torch.Tensor, support: torch.Tensor, tau: float) -> torch.Tensor:
+        if tau <= 0.0:
+            return value
+        support = support.float().clamp_min(0.0)
+        conf = support / (support + float(tau))
+        return value * conf
 
     def _build_proxy_prompt_mask(self, ref_rhythm_trace: torch.Tensor) -> torch.Tensor:
         if ref_rhythm_trace.size(1) <= 0:
@@ -191,9 +222,13 @@ class PromptDurationOperatorBuilder(nn.Module):
         prompt_mask = self._build_proxy_prompt_mask(trace)
         prompt_log_base = torch.zeros_like(prompt_mask)
         prompt_log_duration = None
-        prompt_log_residual = self.derive_prompt_proxy_residual(trace) * prompt_mask
+        prompt_log_residual = self.derive_prompt_proxy_residual(trace).detach() * prompt_mask
         speech_support = (prompt_mask > self.speech_threshold).float()
-        global_rate = self._masked_median(prompt_log_residual, speech_support)
+        global_rate = self._support_shrink(
+            self._masked_median(prompt_log_residual, speech_support),
+            self._masked_count(speech_support),
+            self.global_shrink_tau,
+        ).detach()
         prompt_random_target = (prompt_log_residual - global_rate) * prompt_mask
         return PromptOperatorSummary(
             prompt_mask=prompt_mask,
@@ -221,10 +256,10 @@ class PromptDurationOperatorBuilder(nn.Module):
         prompt_log_base: torch.Tensor | None,
     ) -> torch.Tensor:
         if isinstance(prompt_log_base, torch.Tensor):
-            return prompt_log_base.float()
+            return prompt_log_base.float().detach()
         if not isinstance(prompt_unit_anchor_base, torch.Tensor):
             raise ValueError("Prompt unit conditioning requires prompt_unit_anchor_base or prompt_log_base.")
-        return torch.log(prompt_unit_anchor_base.float().clamp_min(1.0e-6))
+        return torch.log(prompt_unit_anchor_base.float().detach().clamp_min(1.0e-6))
 
     def _build_prompt_summary_from_units(
         self,
@@ -242,10 +277,14 @@ class PromptDurationOperatorBuilder(nn.Module):
             prompt_unit_anchor_base=prompt_unit_anchor_base,
             prompt_log_base=prompt_log_base,
         )
-        prompt_log_duration = torch.log(prompt_duration_obs.float().clamp_min(1.0e-6)) * prompt_mask
-        prompt_log_base = resolved_log_base * prompt_mask
-        prompt_log_residual = (prompt_log_duration - prompt_log_base) * prompt_mask
-        global_rate = self._masked_median(prompt_log_residual, prompt_mask)
+        prompt_log_duration = torch.log(prompt_duration_obs.float().clamp_min(1.0e-6)).detach() * prompt_mask
+        prompt_log_base = resolved_log_base.float().detach() * prompt_mask
+        prompt_log_residual = (prompt_log_duration - prompt_log_base).detach() * prompt_mask
+        global_rate = self._support_shrink(
+            self._masked_median(prompt_log_residual, prompt_mask),
+            self._masked_count(prompt_mask),
+            self.global_shrink_tau,
+        ).detach()
         prompt_random_target = (prompt_log_residual - global_rate) * prompt_mask
         return PromptOperatorSummary(
             prompt_mask=prompt_mask,
@@ -270,10 +309,65 @@ class PromptDurationOperatorBuilder(nn.Module):
         basis = prompt_basis_activation.float() * mask
         lhs = torch.matmul(basis.transpose(1, 2), basis)
         eye = torch.eye(basis_rank, device=basis.device, dtype=basis.dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        lhs = lhs + self.ridge_lambda * eye
+        support = prompt_mask.float().sum(dim=1).clamp_min(1.0)
+        ridge = self.ridge_lambda * (1.0 + (self.ridge_support_tau / support))
+        lhs = lhs + ridge[:, None, None] * eye
         rhs = torch.matmul(basis.transpose(1, 2), prompt_random_target.float().unsqueeze(-1))
         coeff = torch.linalg.solve(lhs, rhs).squeeze(-1)
         return coeff
+
+    def _build_blocked_holdout_masks(self, prompt_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        fit_mask = prompt_mask.float().clone()
+        eval_mask = torch.zeros_like(fit_mask)
+        if self.holdout_ratio <= 0.0:
+            return fit_mask, eval_mask
+        for batch_idx in range(prompt_mask.size(0)):
+            visible = torch.where(prompt_mask[batch_idx] > 0.5)[0]
+            visible_count = int(visible.numel())
+            if visible_count < 4:
+                continue
+            holdout = max(1, int(round(visible_count * self.holdout_ratio)))
+            holdout = min(max(1, visible_count - 1), holdout)
+            start = max(0, (visible_count - holdout) // 2)
+            chosen = visible[start : start + holdout]
+            fit_mask[batch_idx, chosen] = 0.0
+            eval_mask[batch_idx, chosen] = 1.0
+        return fit_mask, eval_mask
+
+    def _build_prompt_operator_diagnostics(
+        self,
+        *,
+        prompt_basis_activation: torch.Tensor,
+        prompt_random_target: torch.Tensor,
+        prompt_mask: torch.Tensor,
+    ) -> PromptOperatorDiagnostics:
+        fit_mask, eval_mask = self._build_blocked_holdout_masks(prompt_mask)
+        if bool(eval_mask.any().item()):
+            coeff = self._solve_operator_coeff(
+                prompt_basis_activation=prompt_basis_activation,
+                prompt_random_target=prompt_random_target,
+                prompt_mask=fit_mask,
+            )
+            operator_cv_fit = self._build_prompt_operator_fit(
+                prompt_basis_activation=prompt_basis_activation,
+                operator_coeff=coeff,
+                prompt_mask=prompt_mask,
+            )
+        else:
+            operator_cv_fit = self._build_prompt_operator_fit(
+                prompt_basis_activation=prompt_basis_activation,
+                operator_coeff=self._solve_operator_coeff(
+                    prompt_basis_activation=prompt_basis_activation,
+                    prompt_random_target=prompt_random_target,
+                    prompt_mask=prompt_mask,
+                ),
+                prompt_mask=prompt_mask,
+            )
+        return PromptOperatorDiagnostics(
+            fit_mask=fit_mask,
+            eval_mask=eval_mask,
+            operator_cv_fit=operator_cv_fit,
+        )
 
     @staticmethod
     def _build_prompt_operator_fit(
@@ -312,10 +406,15 @@ class PromptDurationOperatorBuilder(nn.Module):
         )
         prompt_basis_activation = response_encoder.encode_prompt_units(
             content_units=prompt_content_units.long(),
-            log_anchor_base=summary.prompt_log_base,
+            log_anchor_base=summary.prompt_log_base.detach(),
             prompt_mask=summary.prompt_mask,
         )
         operator_coeff = self._solve_operator_coeff(
+            prompt_basis_activation=prompt_basis_activation,
+            prompt_random_target=summary.prompt_random_target,
+            prompt_mask=summary.prompt_mask,
+        )
+        diagnostics = self._build_prompt_operator_diagnostics(
             prompt_basis_activation=prompt_basis_activation,
             prompt_random_target=summary.prompt_random_target,
             prompt_mask=summary.prompt_mask,
@@ -333,7 +432,10 @@ class PromptDurationOperatorBuilder(nn.Module):
                     prompt_basis_activation=prompt_basis_activation,
                     prompt_random_target=summary.prompt_random_target,
                     prompt_mask=summary.prompt_mask,
+                    prompt_fit_mask=diagnostics.fit_mask,
+                    prompt_eval_mask=diagnostics.eval_mask,
                     prompt_operator_fit=prompt_operator_fit,
+                    prompt_operator_cv_fit=diagnostics.operator_cv_fit,
                     prompt_log_base=summary.prompt_log_base,
                     prompt_log_duration=summary.prompt_log_duration,
                     prompt_log_residual=summary.prompt_log_residual,
@@ -359,6 +461,11 @@ class PromptDurationOperatorBuilder(nn.Module):
             prompt_random_target=summary.prompt_random_target,
             prompt_mask=summary.prompt_mask,
         )
+        diagnostics = self._build_prompt_operator_diagnostics(
+            prompt_basis_activation=prompt_basis_activation,
+            prompt_random_target=summary.prompt_random_target,
+            prompt_mask=summary.prompt_mask,
+        )
         prompt_operator_fit = self._build_prompt_operator_fit(
             prompt_basis_activation=prompt_basis_activation,
             operator_coeff=operator_coeff,
@@ -372,7 +479,10 @@ class PromptDurationOperatorBuilder(nn.Module):
                     prompt_basis_activation=prompt_basis_activation,
                     prompt_random_target=summary.prompt_random_target,
                     prompt_mask=summary.prompt_mask,
+                    prompt_fit_mask=diagnostics.fit_mask,
+                    prompt_eval_mask=diagnostics.eval_mask,
                     prompt_operator_fit=prompt_operator_fit,
+                    prompt_operator_cv_fit=diagnostics.operator_cv_fit,
                     prompt_log_base=summary.prompt_log_base,
                     prompt_log_duration=summary.prompt_log_duration,
                     prompt_log_residual=summary.prompt_log_residual,
@@ -385,14 +495,22 @@ class PromptDurationOperatorBuilder(nn.Module):
         *,
         ref_conditioning: Mapping[str, Any],
     ) -> ReferenceDurationMemory:
+        def _detach_float(value):
+            if not isinstance(value, torch.Tensor):
+                return value
+            return value.float().detach()
+
         prompt_kwargs = {
-            "prompt_basis_activation": ref_conditioning.get("prompt_basis_activation"),
-            "prompt_random_target": ref_conditioning.get("prompt_random_target"),
-            "prompt_mask": ref_conditioning.get("prompt_mask"),
-            "prompt_operator_fit": ref_conditioning.get("prompt_operator_fit"),
-            "prompt_log_base": ref_conditioning.get("prompt_log_base"),
-            "prompt_log_duration": ref_conditioning.get("prompt_log_duration"),
-            "prompt_log_residual": ref_conditioning.get("prompt_log_residual"),
+            "prompt_basis_activation": _detach_float(ref_conditioning.get("prompt_basis_activation")),
+            "prompt_random_target": _detach_float(ref_conditioning.get("prompt_random_target")),
+            "prompt_mask": _detach_float(ref_conditioning.get("prompt_mask")),
+            "prompt_fit_mask": _detach_float(ref_conditioning.get("prompt_fit_mask")),
+            "prompt_eval_mask": _detach_float(ref_conditioning.get("prompt_eval_mask")),
+            "prompt_operator_fit": _detach_float(ref_conditioning.get("prompt_operator_fit")),
+            "prompt_operator_cv_fit": _detach_float(ref_conditioning.get("prompt_operator_cv_fit")),
+            "prompt_log_base": _detach_float(ref_conditioning.get("prompt_log_base")),
+            "prompt_log_duration": _detach_float(ref_conditioning.get("prompt_log_duration")),
+            "prompt_log_residual": _detach_float(ref_conditioning.get("prompt_log_residual")),
         }
         prompt = (
             None
@@ -401,9 +519,9 @@ class PromptDurationOperatorBuilder(nn.Module):
         )
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
-                global_rate=ref_conditioning["global_rate"].float(),
+                global_rate=ref_conditioning["global_rate"].float().detach(),
                 operator=StructuredDurationOperatorMemory(
-                    operator_coeff=ref_conditioning["operator_coeff"].float(),
+                    operator_coeff=ref_conditioning["operator_coeff"].float().detach(),
                 ),
                 prompt=prompt,
             )
@@ -443,7 +561,6 @@ class PromptDurationOperatorBuilder(nn.Module):
             ref_rhythm_trace=ref_rhythm_trace,
             response_encoder=response_encoder,
         )
-
     def forward(
         self,
         *,
@@ -465,3 +582,6 @@ class PromptDurationOperatorBuilder(nn.Module):
             ref_rhythm_trace=ref_rhythm_trace,
             response_encoder=response_encoder,
         )
+
+
+PromptDurationOperatorBuilder = PromptConditionedOperatorEstimator

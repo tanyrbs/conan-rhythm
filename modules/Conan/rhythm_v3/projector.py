@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -104,7 +106,7 @@ class StreamingDurationProjector(nn.Module):
                 if float(commit_mask[batch_idx, unit_idx].item()) <= 0.5:
                     continue
                 total = max(0.0, float(unit_duration_exec[batch_idx, unit_idx].item()) + carry)
-                frames = float(int(torch.floor(torch.tensor(total)).item()))
+                frames = float(math.floor(total))
                 projected[batch_idx, unit_idx] = frames
                 carry = total - frames
             residual_next[batch_idx] = carry

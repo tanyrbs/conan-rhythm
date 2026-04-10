@@ -14,10 +14,10 @@ from .contracts import (
     validate_reference_duration_memory,
 )
 from .projector import StreamingDurationProjector
-from .reference_memory import PromptDurationOperatorBuilder
+from .reference_memory import PromptConditionedOperatorEstimator
 
 
-class SharedResponseEncoder(nn.Module):
+class SharedCausalBasisEncoder(nn.Module):
     def __init__(
         self,
         *,
@@ -37,6 +37,7 @@ class SharedResponseEncoder(nn.Module):
         self.source_adapter = nn.Linear(hidden_size + 1, hidden_size)
         self.prompt_proxy_adapter = nn.Linear(prompt_trace_dim + prompt_stats_dim, hidden_size)
         self.shared_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, bias=True)
+        self.hidden_norm = nn.LayerNorm(hidden_size)
         self.out_proj = nn.Linear(hidden_size, basis_rank)
 
     def _run_shared(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -45,8 +46,10 @@ class SharedResponseEncoder(nn.Module):
         conv_input = hidden.transpose(1, 2)
         conv_input = F.pad(conv_input, (self.window_left, self.window_right))
         conv_hidden = self.shared_conv(conv_input).transpose(1, 2)
-        hidden = F.silu(hidden + conv_hidden)
-        return torch.tanh(self.out_proj(hidden)) * mask.unsqueeze(-1)
+        hidden = self.hidden_norm(F.silu(hidden + conv_hidden))
+        basis = self.out_proj(hidden)
+        basis = F.normalize(basis, p=2.0, dim=-1, eps=1.0e-6)
+        return basis * mask.unsqueeze(-1)
 
     def encode_source(
         self,
@@ -89,7 +92,7 @@ class SharedResponseEncoder(nn.Module):
         return self._run_shared(hidden, prompt_mask.float())
 
 
-class StreamingDurationModule(nn.Module):
+class MixedEffectsDurationModule(nn.Module):
     def __init__(
         self,
         *,
@@ -105,6 +108,9 @@ class StreamingDurationModule(nn.Module):
         **unused_kwargs,
     ) -> None:
         super().__init__()
+        global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
+        ridge_support_tau = float(unused_kwargs.pop("ridge_support_tau", 8.0))
+        operator_holdout_ratio = float(unused_kwargs.pop("operator_holdout_ratio", 0.30))
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
@@ -115,33 +121,24 @@ class StreamingDurationModule(nn.Module):
         elif micro_lookahead_units is not None:
             effective_window_right = max(0, int(micro_lookahead_units))
 
-        self.response_encoder = SharedResponseEncoder(
+        self.response_encoder = SharedCausalBasisEncoder(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             basis_rank=basis_rank,
             window_left=response_window_left,
             window_right=effective_window_right,
         )
-        self.reference_memory_builder = PromptDurationOperatorBuilder(
+        self.reference_memory_builder = PromptConditionedOperatorEstimator(
             trace_bins=trace_bins,
             ridge_lambda=ridge_lambda,
+            global_shrink_tau=global_shrink_tau,
+            ridge_support_tau=ridge_support_tau,
+            holdout_ratio=operator_holdout_ratio,
         )
         self.projector = StreamingDurationProjector()
 
     def init_state(self, batch_size: int, device: torch.device) -> DurationRuntimeState:
         return self.projector.init_state(batch_size=batch_size, device=device)
-
-    def encode_reference(
-        self,
-        ref_mel: torch.Tensor,
-        *,
-        ref_lengths: torch.Tensor | None = None,
-    ) -> ReferenceDurationMemory:
-        return self.reference_memory_builder(
-            response_encoder=self.response_encoder,
-            ref_mel=ref_mel,
-            ref_lengths=ref_lengths,
-        )
 
     def build_reference_conditioning(
         self,
@@ -265,18 +262,18 @@ class StreamingDurationModule(nn.Module):
             init_state=self.init_state,
         )
         unit_mask, sealed_mask, commit_mask = self._resolve_commit_mask(source_batch)
-        log_anchor = torch.log(source_batch.unit_anchor_base.float().clamp_min(1.0e-6))
+        detached_log_anchor = torch.log(source_batch.unit_anchor_base.float().detach().clamp_min(1.0e-6))
         basis_activation = self._encode_source_basis(
             source_batch=source_batch,
             unit_mask=unit_mask,
-            log_anchor=log_anchor,
+            log_anchor=detached_log_anchor,
         )
         local_response = self._predict_local_response(
             basis_activation=basis_activation,
             ref_memory=ref_memory,
         )
-        global_rate = ref_memory.global_rate.float().expand(-1, unit_mask.size(1))
-        unit_logstretch = (global_rate + local_response) * commit_mask
+        global_stretch = ref_memory.global_rate.float().expand(-1, unit_mask.size(1))
+        unit_logstretch = (global_stretch + local_response) * commit_mask
         unit_duration_exec = self._predict_unit_duration(
             source_batch=source_batch,
             unit_logstretch=unit_logstretch,
@@ -296,3 +293,7 @@ class StreamingDurationModule(nn.Module):
             sealed_mask=sealed_mask,
             state=state,
         )
+
+
+SharedResponseEncoder = SharedCausalBasisEncoder
+StreamingDurationModule = MixedEffectsDurationModule

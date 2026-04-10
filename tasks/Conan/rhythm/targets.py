@@ -84,6 +84,7 @@ class DurationV3TargetBuildConfig:
     lambda_pref: float
     lambda_cons: float = 0.0
     lambda_zero: float = 0.0
+    lambda_ortho: float = 0.0
     strict_target_alignment: bool = True
 
 
@@ -835,7 +836,11 @@ def build_duration_v3_loss_targets(
     if execution is None or unit_batch is None:
         return None
     unit_mask = unit_batch.unit_mask.float()
-    committed_mask = getattr(execution, "commit_mask", getattr(unit_batch, "sealed_mask", unit_mask)).float() * unit_mask
+    sep_mask = getattr(unit_batch, "sep_mask", None)
+    speech_mask = unit_mask
+    if isinstance(sep_mask, torch.Tensor):
+        speech_mask = unit_mask * (1.0 - sep_mask.float().clamp(0.0, 1.0))
+    committed_mask = getattr(execution, "commit_mask", getattr(unit_batch, "sealed_mask", unit_mask)).float() * speech_mask
     unit_duration_tgt = _resolve_duration_v3_target(
         sample=sample,
         unit_mask=unit_mask,
@@ -848,22 +853,29 @@ def build_duration_v3_loss_targets(
         ref_memory=output.get("rhythm_ref_conditioning"),
         lambda_op=float(config.lambda_op),
         lambda_zero=float(config.lambda_zero),
+        lambda_ortho=float(config.lambda_ortho),
     )
-    consistency_duration_tgt, consistency_mask = _build_duration_v3_consistency_targets(
-        state_prev=output.get("rhythm_state_prev"),
-        unit_mask=unit_mask,
-        committed_mask=committed_mask,
-        strict_target_alignment=bool(config.strict_target_alignment),
-    )
+    consistency_duration_tgt = None
+    consistency_mask = None
+    if float(config.lambda_cons) > 0.0:
+        consistency_duration_tgt, consistency_mask = _build_duration_v3_consistency_targets(
+            state_prev=output.get("rhythm_state_prev"),
+            unit_mask=unit_mask,
+            committed_mask=committed_mask,
+        )
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
-        unit_anchor_base=unit_anchor_base.float(),
+        unit_anchor_base=unit_anchor_base.float().detach(),
         unit_mask=unit_mask,
         committed_mask=committed_mask.float(),
         global_rate=prompt_targets["global_rate"],
+        prompt_basis_activation=prompt_targets["prompt_basis_activation"],
         prompt_random_target_tgt=prompt_targets["prompt_random_target_tgt"],
         prompt_mask=prompt_targets["prompt_mask"],
+        prompt_fit_mask=prompt_targets["prompt_fit_mask"],
+        prompt_eval_mask=prompt_targets["prompt_eval_mask"],
         prompt_operator_fit_pred=prompt_targets["prompt_operator_fit_pred"],
+        prompt_operator_cv_fit_pred=prompt_targets["prompt_operator_cv_fit_pred"],
         consistency_duration_tgt=consistency_duration_tgt,
         consistency_mask=consistency_mask,
         lambda_dur=float(config.lambda_dur),
@@ -871,6 +883,7 @@ def build_duration_v3_loss_targets(
         lambda_pref=float(config.lambda_pref),
         lambda_cons=float(config.lambda_cons),
         lambda_zero=float(config.lambda_zero),
+        lambda_ortho=float(config.lambda_ortho),
     )
 
 
@@ -923,11 +936,16 @@ def _resolve_duration_v3_prompt_targets(
     ref_memory,
     lambda_op: float,
     lambda_zero: float,
+    lambda_ortho: float,
 ) -> dict[str, torch.Tensor | None]:
     global_rate = getattr(ref_memory, "global_rate", None)
+    prompt_basis_activation = getattr(ref_memory, "prompt_basis_activation", None)
     prompt_random_target_tgt = getattr(ref_memory, "prompt_random_target", None)
     prompt_mask = getattr(ref_memory, "prompt_mask", None)
+    prompt_fit_mask = getattr(ref_memory, "prompt_fit_mask", None)
+    prompt_eval_mask = getattr(ref_memory, "prompt_eval_mask", None)
     prompt_operator_fit_pred = getattr(ref_memory, "prompt_operator_fit", None)
+    prompt_operator_cv_fit_pred = getattr(ref_memory, "prompt_operator_cv_fit", None)
     if float(lambda_op) > 0.0 and not isinstance(prompt_random_target_tgt, torch.Tensor):
         raise ValueError(
             "Duration V3 operator loss requires prompt random targets in output['rhythm_ref_conditioning']."
@@ -937,14 +955,27 @@ def _resolve_duration_v3_prompt_targets(
             raise ValueError(
                 "Duration V3 zero-mean identifiability loss requires prompt_operator_fit and prompt_mask in output['rhythm_ref_conditioning']."
             )
+    if float(lambda_ortho) > 0.0:
+        if not isinstance(prompt_basis_activation, torch.Tensor) or not isinstance(prompt_mask, torch.Tensor):
+            raise ValueError(
+                "Duration V3 orthogonality loss requires prompt_basis_activation and prompt_mask in output['rhythm_ref_conditioning']."
+            )
     return {
-        "global_rate": global_rate.float() if isinstance(global_rate, torch.Tensor) else None,
+        "global_rate": global_rate.float().detach() if isinstance(global_rate, torch.Tensor) else None,
+        "prompt_basis_activation": (
+            prompt_basis_activation.float() if isinstance(prompt_basis_activation, torch.Tensor) else None
+        ),
         "prompt_random_target_tgt": (
             prompt_random_target_tgt.float() if isinstance(prompt_random_target_tgt, torch.Tensor) else None
         ),
         "prompt_mask": prompt_mask.float() if isinstance(prompt_mask, torch.Tensor) else None,
+        "prompt_fit_mask": prompt_fit_mask.float() if isinstance(prompt_fit_mask, torch.Tensor) else None,
+        "prompt_eval_mask": prompt_eval_mask.float() if isinstance(prompt_eval_mask, torch.Tensor) else None,
         "prompt_operator_fit_pred": (
             prompt_operator_fit_pred.float() if isinstance(prompt_operator_fit_pred, torch.Tensor) else None
+        ),
+        "prompt_operator_cv_fit_pred": (
+            prompt_operator_cv_fit_pred.float() if isinstance(prompt_operator_cv_fit_pred, torch.Tensor) else None
         ),
     }
 
@@ -954,17 +985,21 @@ def _build_duration_v3_consistency_targets(
     state_prev,
     unit_mask: torch.Tensor,
     committed_mask: torch.Tensor,
-    strict_target_alignment: bool,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     consistency_duration_tgt = None
     consistency_mask = None
     if state_prev is not None and isinstance(getattr(state_prev, "cached_duration_exec", None), torch.Tensor):
+        cached_duration_exec = state_prev.cached_duration_exec.float().detach()
         consistency_duration_tgt = _align_duration_v3_surface(
-            tensor=state_prev.cached_duration_exec.float(),
+            tensor=cached_duration_exec,
             unit_mask=unit_mask,
-            strict_target_alignment=strict_target_alignment,
+            strict_target_alignment=False,
         )
         prev_frontier = state_prev.committed_units.long().clamp_min(0)
+        prev_frontier = torch.clamp(
+            prev_frontier,
+            max=int(cached_duration_exec.size(1)),
+        )
         steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
         consistency_mask = (steps < prev_frontier[:, None]).float() * committed_mask
     return (

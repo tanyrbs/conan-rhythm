@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 import torch.nn as nn
 
@@ -13,7 +15,7 @@ from .contracts import (
     move_reference_duration_memory,
     move_source_unit_batch,
 )
-from .module import StreamingDurationModule
+from .module import MixedEffectsDurationModule
 from .unit_frontend import DurationUnitFrontend
 
 _PROMPT_UNIT_REQUIRED_KEYS = (
@@ -37,7 +39,7 @@ class ConanDurationAdapter(nn.Module):
         )
         streaming_mode = str(hparams.get("rhythm_streaming_mode", "strict") or "strict")
         micro_lookahead_units = hparams.get("rhythm_micro_lookahead_units")
-        self.module = StreamingDurationModule(
+        self.module = MixedEffectsDurationModule(
             vocab_size=vocab_size,
             hidden_size=int(hparams.get("rhythm_hidden_size", hidden_size)),
             basis_rank=int(hparams.get("rhythm_response_rank", 12)),
@@ -47,6 +49,9 @@ class ConanDurationAdapter(nn.Module):
             streaming_mode=streaming_mode,
             micro_lookahead_units=(None if micro_lookahead_units is None else int(micro_lookahead_units)),
             ridge_lambda=float(hparams.get("rhythm_operator_ridge_lambda", 1.0)),
+            global_shrink_tau=float(hparams.get("rhythm_global_shrink_tau", 8.0)),
+            ridge_support_tau=float(hparams.get("rhythm_operator_support_tau", 8.0)),
+            operator_holdout_ratio=float(hparams.get("rhythm_operator_holdout_ratio", 0.30)),
         )
         self.pause_state = nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
         self.render_phase_mlp = None
@@ -122,15 +127,58 @@ class ConanDurationAdapter(nn.Module):
         enriched["prompt_duration_obs"] = prompt_duration_obs
         enriched["prompt_unit_mask"] = prompt_unit_mask
         if isinstance(enriched.get("prompt_unit_anchor_base"), torch.Tensor):
-            enriched["prompt_unit_anchor_base"] = enriched["prompt_unit_anchor_base"].to(device=device)
+            enriched["prompt_unit_anchor_base"] = enriched["prompt_unit_anchor_base"].to(device=device).detach()
         if isinstance(enriched.get("prompt_log_base"), torch.Tensor):
-            enriched["prompt_log_base"] = enriched["prompt_log_base"].to(device=device)
+            enriched["prompt_log_base"] = enriched["prompt_log_base"].to(device=device).detach()
         if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
-            enriched["prompt_unit_anchor_base"] = self.unit_frontend.anchor_net(
+            enriched["prompt_unit_anchor_base"] = self.unit_frontend.baseline(
                 prompt_content_units,
                 prompt_unit_mask,
-            )
+            ).detach()
         return enriched
+
+    def _validate_training_reference_semantics(
+        self,
+        *,
+        infer: bool,
+        ref_conditioning,
+        ref,
+    ) -> None:
+        if infer or bool(self.hparams.get("rhythm_v3_allow_proxy_training", False)):
+            return
+        if isinstance(ref_conditioning, ReferenceDurationMemory):
+            prompt_log_duration = getattr(ref_conditioning, "prompt_log_duration", None)
+            prompt_mask = getattr(ref_conditioning, "prompt_mask", None)
+            if isinstance(prompt_log_duration, torch.Tensor) and isinstance(prompt_mask, torch.Tensor):
+                return
+            raise ValueError(
+                "rhythm_v3 mainline training requires explicit prompt units "
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
+                "trace proxy should be inference-only."
+            )
+        if isinstance(ref_conditioning, Mapping):
+            nested = ref_conditioning.get("rhythm_ref_conditioning")
+            if nested is not None and nested is not ref_conditioning:
+                self._validate_training_reference_semantics(
+                    infer=infer,
+                    ref_conditioning=nested,
+                    ref=ref,
+                )
+                return
+            has_prompt_units = all(key in ref_conditioning for key in _PROMPT_UNIT_REQUIRED_KEYS)
+            if has_prompt_units:
+                return
+            raise ValueError(
+                "rhythm_v3 mainline training requires explicit prompt units "
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
+                "trace proxy should be inference-only."
+            )
+        if ref_conditioning is None and ref is not None:
+            raise ValueError(
+                "rhythm_v3 mainline training requires explicit prompt units "
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
+                "trace proxy should be inference-only."
+            )
 
     def _attach_runtime_outputs(
         self,
@@ -195,6 +243,11 @@ class ConanDurationAdapter(nn.Module):
         )
         source_batch = move_source_unit_batch(source_batch, device=content.device)
         rhythm_state_prev = move_duration_runtime_state(rhythm_state, device=content.device)
+        self._validate_training_reference_semantics(
+            infer=bool(infer),
+            ref_conditioning=rhythm_ref_conditioning,
+            ref=ref,
+        )
         rhythm_ref_conditioning = self._prepare_prompt_unit_conditioning(
             ref_conditioning=rhythm_ref_conditioning,
             device=content.device,

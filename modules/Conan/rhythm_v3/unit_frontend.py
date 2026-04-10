@@ -9,7 +9,7 @@ from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
 from .contracts import SourceUnitBatch
 
 
-class AnchorNet(nn.Module):
+class NominalDurationBaseline(nn.Module):
     def __init__(
         self,
         *,
@@ -63,12 +63,14 @@ class DurationUnitFrontend(nn.Module):
             separator_aware=separator_aware,
             tail_open_units=tail_open_units,
         )
-        self.anchor_net = AnchorNet(
+        self.baseline = NominalDurationBaseline(
             vocab_size=vocab_size,
             hidden_size=anchor_hidden_size,
             min_frames=anchor_min_frames,
             max_frames=anchor_max_frames,
         )
+        # Compatibility alias; v3 mainline should use `.baseline`.
+        self.anchor_net = self.baseline
 
     @staticmethod
     def _validate_precomputed_shapes(**named_tensors) -> None:
@@ -96,7 +98,7 @@ class DurationUnitFrontend(nn.Module):
     ) -> torch.Tensor:
         if unit_anchor_base is not None:
             return unit_anchor_base.float() * base_batch.unit_mask.float()
-        return self.anchor_net(
+        return self.baseline(
             content_units=base_batch.content_units,
             unit_mask=base_batch.unit_mask,
         )
@@ -178,3 +180,6 @@ class DurationUnitFrontend(nn.Module):
             mark_last_open=mark_last_open,
         )
         return self._convert_batch(base_batch), next_state
+
+
+AnchorNet = NominalDurationBaseline

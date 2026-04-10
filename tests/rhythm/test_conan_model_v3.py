@@ -49,8 +49,8 @@ class _DummyV3Adapter:
             ref_lengths,
         )
         assert isinstance(rhythm_ref_conditioning, dict)
-        assert set(("global_rate", "operator_coeff")).issubset(rhythm_ref_conditioning.keys())
-        assert "slot_bias" not in rhythm_ref_conditioning
+        assert set(("prompt_content_units", "prompt_duration_obs")).issubset(rhythm_ref_conditioning.keys())
+        assert "prompt_unit_mask" in rhythm_ref_conditioning
         ret["rhythm_version"] = "v3"
         ret["rhythm_execution"] = object()
         ret["speech_duration_exec"] = torch.ones((content.size(0), content.size(1)), dtype=content_embed.dtype)
@@ -74,8 +74,9 @@ def _build_dummy_model():
 
 def _build_canonical_ref_conditioning():
     return {
-        "global_rate": torch.zeros((1, 1)),
-        "operator_coeff": torch.zeros((1, 4)),
+        "prompt_content_units": torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+        "prompt_duration_obs": torch.tensor([[3.0, 4.0, 2.0, 0.0]], dtype=torch.float32),
+        "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
     }
 
 

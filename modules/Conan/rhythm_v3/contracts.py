@@ -70,7 +70,10 @@ class PromptConditioningEvidence:
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target: Optional[torch.Tensor] = None
     prompt_mask: Optional[torch.Tensor] = None
+    prompt_fit_mask: Optional[torch.Tensor] = None
+    prompt_eval_mask: Optional[torch.Tensor] = None
     prompt_operator_fit: Optional[torch.Tensor] = None
+    prompt_operator_cv_fit: Optional[torch.Tensor] = None
     prompt_log_base: Optional[torch.Tensor] = None
     prompt_log_duration: Optional[torch.Tensor] = None
     prompt_log_residual: Optional[torch.Tensor] = None
@@ -81,6 +84,10 @@ class ReferenceDurationMemory:
     global_rate: torch.Tensor
     operator: StructuredDurationOperatorMemory
     prompt: Optional[PromptConditioningEvidence] = None
+
+    @property
+    def global_stretch(self) -> torch.Tensor:
+        return self.global_rate
 
     @property
     def operator_coeff(self) -> torch.Tensor:
@@ -101,6 +108,18 @@ class ReferenceDurationMemory:
     @property
     def prompt_operator_fit(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_operator_fit
+
+    @property
+    def prompt_operator_cv_fit(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_operator_cv_fit
+
+    @property
+    def prompt_fit_mask(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_fit_mask
+
+    @property
+    def prompt_eval_mask(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_eval_mask
 
     @property
     def prompt_log_base(self) -> Optional[torch.Tensor]:
@@ -230,7 +249,10 @@ def move_prompt_conditioning_evidence(
         prompt_basis_activation=_move_tensor(prompt.prompt_basis_activation, device=device, dtype=dtype),
         prompt_random_target=_move_tensor(prompt.prompt_random_target, device=device, dtype=dtype),
         prompt_mask=_move_tensor(prompt.prompt_mask, device=device, dtype=dtype),
+        prompt_fit_mask=_move_tensor(prompt.prompt_fit_mask, device=device, dtype=dtype),
+        prompt_eval_mask=_move_tensor(prompt.prompt_eval_mask, device=device, dtype=dtype),
         prompt_operator_fit=_move_tensor(prompt.prompt_operator_fit, device=device, dtype=dtype),
+        prompt_operator_cv_fit=_move_tensor(prompt.prompt_operator_cv_fit, device=device, dtype=dtype),
         prompt_log_base=_move_tensor(prompt.prompt_log_base, device=device, dtype=dtype),
         prompt_log_duration=_move_tensor(prompt.prompt_log_duration, device=device, dtype=dtype),
         prompt_log_residual=_move_tensor(prompt.prompt_log_residual, device=device, dtype=dtype),
@@ -252,7 +274,10 @@ def move_reference_duration_memory(
             memory.prompt_basis_activation,
             memory.prompt_random_target,
             memory.prompt_mask,
+            memory.prompt_fit_mask,
+            memory.prompt_eval_mask,
             memory.prompt_operator_fit,
+            memory.prompt_operator_cv_fit,
             memory.prompt_log_base,
             memory.prompt_log_duration,
             memory.prompt_log_residual,
@@ -311,7 +336,10 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_basis_activation", prompt.prompt_basis_activation, dims=3)
     _check_batch("prompt_random_target", prompt.prompt_random_target, dims=2)
     _check_batch("prompt_mask", prompt.prompt_mask, dims=2)
+    _check_batch("prompt_fit_mask", prompt.prompt_fit_mask, dims=2)
+    _check_batch("prompt_eval_mask", prompt.prompt_eval_mask, dims=2)
     _check_batch("prompt_operator_fit", prompt.prompt_operator_fit, dims=2)
+    _check_batch("prompt_operator_cv_fit", prompt.prompt_operator_cv_fit, dims=2)
     _check_batch("prompt_log_base", prompt.prompt_log_base, dims=2)
     _check_batch("prompt_log_duration", prompt.prompt_log_duration, dims=2)
     _check_batch("prompt_log_residual", prompt.prompt_log_residual, dims=2)
@@ -339,17 +367,34 @@ def validate_prompt_conditioning_evidence(
                 "PromptConditioningEvidence.prompt_random_target/prompt_mask shape mismatch: "
                 f"{tuple(prompt.prompt_random_target.shape)} vs {tuple(prompt.prompt_mask.shape)}"
             )
+    for name, value in (
+        ("prompt_fit_mask", prompt.prompt_fit_mask),
+        ("prompt_eval_mask", prompt.prompt_eval_mask),
+    ):
+        if value is not None and prompt.prompt_mask is not None:
+            if tuple(value.shape) != tuple(prompt.prompt_mask.shape):
+                raise ValueError(
+                    f"PromptConditioningEvidence.{name}/prompt_mask shape mismatch: "
+                    f"{tuple(value.shape)} vs {tuple(prompt.prompt_mask.shape)}"
+                )
     if prompt.prompt_operator_fit is not None and prompt.prompt_random_target is not None:
         if tuple(prompt.prompt_operator_fit.shape) != tuple(prompt.prompt_random_target.shape):
             raise ValueError(
                 "PromptConditioningEvidence.prompt_operator_fit/prompt_random_target shape mismatch: "
                 f"{tuple(prompt.prompt_operator_fit.shape)} vs {tuple(prompt.prompt_random_target.shape)}"
             )
+    if prompt.prompt_operator_cv_fit is not None and prompt.prompt_random_target is not None:
+        if tuple(prompt.prompt_operator_cv_fit.shape) != tuple(prompt.prompt_random_target.shape):
+            raise ValueError(
+                "PromptConditioningEvidence.prompt_operator_cv_fit/prompt_random_target shape mismatch: "
+                f"{tuple(prompt.prompt_operator_cv_fit.shape)} vs {tuple(prompt.prompt_random_target.shape)}"
+            )
     for name, value in (
         ("prompt_log_base", prompt.prompt_log_base),
         ("prompt_log_duration", prompt.prompt_log_duration),
         ("prompt_log_residual", prompt.prompt_log_residual),
         ("prompt_operator_fit", prompt.prompt_operator_fit),
+        ("prompt_operator_cv_fit", prompt.prompt_operator_cv_fit),
         ("prompt_random_target", prompt.prompt_random_target),
     ):
         if value is not None and prompt.prompt_mask is not None:
@@ -411,7 +456,10 @@ def ensure_reference_duration_memory_batch(
                 prompt_basis_activation=_expand(memory.prompt_basis_activation),
                 prompt_random_target=_expand(memory.prompt_random_target),
                 prompt_mask=_expand(memory.prompt_mask),
+                prompt_fit_mask=_expand(memory.prompt_fit_mask),
+                prompt_eval_mask=_expand(memory.prompt_eval_mask),
                 prompt_operator_fit=_expand(memory.prompt_operator_fit),
+                prompt_operator_cv_fit=_expand(memory.prompt_operator_cv_fit),
                 prompt_log_base=_expand(memory.prompt_log_base),
                 prompt_log_duration=_expand(memory.prompt_log_duration),
                 prompt_log_residual=_expand(memory.prompt_log_residual),

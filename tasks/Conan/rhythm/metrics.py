@@ -1124,12 +1124,15 @@ def _build_duration_v3_metric_sections(
     if not isinstance(commit_mask, torch.Tensor):
         commit_mask = getattr(unit_batch, "sealed_mask", unit_mask)
     commit_mask = commit_mask.float() * unit_mask
-    total_exec = (public_speech_exec * commit_mask).sum(dim=1)
+    speech_commit_mask = commit_mask
+    if unit_batch is not None and isinstance(getattr(unit_batch, "sep_mask", None), torch.Tensor):
+        speech_commit_mask = commit_mask * (1.0 - unit_batch.sep_mask.float().clamp(0.0, 1.0))
+    total_exec = (public_speech_exec * speech_commit_mask).sum(dim=1)
     visible_units = unit_mask.sum(dim=1).clamp_min(1.0)
     committed_units = commit_mask.sum(dim=1).clamp_min(1.0)
     basis_activation = getattr(execution, "basis_activation", None)
     if isinstance(basis_activation, torch.Tensor):
-        basis_activation_abs_mean = _masked_mean(basis_activation.abs(), commit_mask)
+        basis_activation_abs_mean = _masked_mean(basis_activation.abs(), speech_commit_mask)
     else:
         basis_activation_abs_mean = torch.tensor(0.0, device=device)
     runtime_state = output.get("rhythm_state_next")
@@ -1145,8 +1148,8 @@ def _build_duration_v3_metric_sections(
         "rhythm_metric_visible_units_mean": _safe_mean(visible_units),
         "rhythm_metric_committed_units_mean": _safe_mean(committed_units),
         "rhythm_metric_commit_ratio_mean": _safe_mean(committed_units / visible_units),
-        "rhythm_metric_unit_duration_mean": _masked_mean(public_speech_exec, commit_mask),
-        "rhythm_metric_logstretch_abs_mean": _masked_mean(execution.unit_logstretch.abs(), commit_mask),
+        "rhythm_metric_unit_duration_mean": _masked_mean(public_speech_exec, speech_commit_mask),
+        "rhythm_metric_logstretch_abs_mean": _masked_mean(execution.unit_logstretch.abs(), speech_commit_mask),
         "rhythm_metric_basis_activation_abs_mean": basis_activation_abs_mean,
         "rhythm_metric_frame_plan_present": public_speech_exec.new_tensor(
             1.0 if output.get("rhythm_frame_plan") is not None else 0.0
@@ -1155,6 +1158,7 @@ def _build_duration_v3_metric_sections(
     ref_memory = output.get("rhythm_ref_conditioning")
     if ref_memory is not None and isinstance(getattr(ref_memory, "global_rate", None), torch.Tensor):
         core_metrics["rhythm_metric_global_rate_mean"] = _safe_mean(ref_memory.global_rate)
+        core_metrics["rhythm_metric_global_stretch_mean"] = _safe_mean(ref_memory.global_rate)
     if ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
         core_metrics["rhythm_metric_operator_coeff_abs_mean"] = _safe_mean(ref_memory.operator_coeff.abs())
     target = None
@@ -1166,16 +1170,17 @@ def _build_duration_v3_metric_sections(
         core_metrics["rhythm_metric_exec_speech_l1"] = _masked_l1(
             public_speech_exec,
             target,
-            commit_mask,
+            speech_commit_mask,
         )
-        pred_prefix = torch.cumsum(public_speech_exec * commit_mask, dim=1)
-        tgt_prefix = torch.cumsum(target * commit_mask, dim=1)
-        core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, commit_mask)
+        pred_prefix = torch.cumsum(public_speech_exec * speech_commit_mask, dim=1)
+        tgt_prefix = torch.cumsum(target * speech_commit_mask, dim=1)
+        core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, speech_commit_mask)
     for loss_key in (
         "rhythm_total",
         "rhythm_v3_dur",
         "rhythm_v3_op",
         "rhythm_v3_zero",
+        "rhythm_v3_ortho",
         "rhythm_v3_pref",
         "rhythm_v3_cons",
         "rhythm_v3_stream",

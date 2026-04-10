@@ -17,7 +17,7 @@ from modules.Conan.rhythm.supervision import (
     build_reference_rhythm_conditioning,
     build_source_rhythm_cache,
 )
-from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
+from modules.Conan.rhythm.policy import build_rhythm_hparams_policy, is_duration_operator_mode
 from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
 
 class RhythmConanDatasetMixin:
@@ -43,6 +43,10 @@ class RhythmConanDatasetMixin:
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+    )
+    _RHYTHM_REF_PROMPT_SOURCE_KEYS = (
+        "content_units",
+        "dur_anchor_src",
     )
     _RHYTHM_REF_PHRASE_CACHE_KEYS = (
         "ref_phrase_trace",
@@ -127,11 +131,10 @@ class RhythmConanDatasetMixin:
         "sealed_mask",
         "sep_hint",
         "boundary_confidence",
-        "ref_rhythm_stats",
-        "ref_rhythm_trace",
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+        "unit_duration_tgt",
     )
     _RHYTHM_STREAMING_PREFIX_META_KEYS = (
         "rhythm_stream_prefix_ratio",
@@ -393,6 +396,7 @@ class RhythmConanDatasetMixin:
             "prompt_content_units": ("long", 0),
             "prompt_duration_obs": ("float", 0.0),
             "prompt_unit_mask": ("float", 0.0),
+            "unit_duration_tgt": ("float", 0.0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -460,11 +464,18 @@ class RhythmConanDatasetMixin:
         }
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
-        keys = list(
-            self._RHYTHM_RUNTIME_MINIMAL_KEYS
-            + self._RHYTHM_RUNTIME_REFERENCE_META_KEYS
-            + self._resolve_runtime_target_export_keys()
-        )
+        if self._use_duration_v3_dataset_contract():
+            keys = list(
+                self._RHYTHM_RUNTIME_MINIMAL_KEYS
+                + self._RHYTHM_RUNTIME_REFERENCE_META_KEYS
+            )
+        else:
+            keys = list(
+                self._RHYTHM_RUNTIME_MINIMAL_KEYS
+                + self._RHYTHM_REF_CACHE_KEYS
+                + self._RHYTHM_RUNTIME_REFERENCE_META_KEYS
+                + self._resolve_runtime_target_export_keys()
+            )
         if self._should_export_streaming_prefix_meta():
             keys.extend(self._RHYTHM_STREAMING_PREFIX_META_KEYS)
         if self._should_export_streaming_offline_sidecars():
@@ -478,6 +489,12 @@ class RhythmConanDatasetMixin:
         if self._should_export_rhythm_cache_audit():
             keys.extend(self._RHYTHM_CACHE_AUDIT_KEYS)
         return tuple(dict.fromkeys(keys))
+
+    def _use_duration_v3_dataset_contract(self) -> bool:
+        return bool(
+            self.hparams.get("rhythm_enable_v3", False)
+            or is_duration_operator_mode(self.hparams.get("rhythm_mode", ""))
+        )
 
     def _select_streaming_visible_tokens(self, visible_tokens, *, item_name: str):
         full_tokens = np.asarray(visible_tokens).reshape(-1)
@@ -711,8 +728,10 @@ class RhythmConanDatasetMixin:
         if prompt_item is None:
             return {}
         source_cache = None
-        if all(key in prompt_item for key in self._RHYTHM_SOURCE_CACHE_KEYS):
-            source_cache = {key: prompt_item[key] for key in self._RHYTHM_SOURCE_CACHE_KEYS}
+        if all(key in prompt_item for key in self._RHYTHM_REF_PROMPT_SOURCE_KEYS):
+            source_cache = {key: prompt_item[key] for key in self._RHYTHM_REF_PROMPT_SOURCE_KEYS}
+            if "sep_hint" in prompt_item:
+                source_cache["sep_hint"] = prompt_item["sep_hint"]
         elif target_mode != "cached_only" and "hubert" in prompt_item:
             source_cache = build_source_rhythm_cache(
                 np.asarray(prompt_item["hubert"]),
@@ -741,6 +760,10 @@ class RhythmConanDatasetMixin:
             ref_item if ref_item is not None else item,
             target_mode=target_mode,
         )
+        if self._use_duration_v3_dataset_contract() and prompt_conditioning:
+            include_proxy = bool(self.hparams.get("rhythm_v3_include_proxy_conditioning", False))
+            if not include_proxy:
+                return prompt_conditioning
         if ref_item is not None and all(key in ref_item for key in cache_keys):
             conditioning = {key: ref_item[key] for key in cache_keys}
             conditioning.update(prompt_conditioning)
@@ -788,6 +811,10 @@ class RhythmConanDatasetMixin:
         return self._rhythm_target_builder().build_runtime_rhythm_targets(source_cache, ref_conditioning)
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, sample):
+        if self._use_duration_v3_dataset_contract():
+            return {
+                "unit_duration_tgt": np.asarray(source_cache["dur_anchor_src"], dtype=np.float32),
+            }
         return self._rhythm_target_builder().merge_rhythm_targets(
             item=item,
             source_cache=source_cache,

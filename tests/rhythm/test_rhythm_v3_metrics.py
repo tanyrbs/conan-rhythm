@@ -54,6 +54,7 @@ def _run_adapter():
     ret["rhythm_v3_dur"] = torch.tensor(0.1)
     ret["rhythm_v3_op"] = torch.tensor(0.2)
     ret["rhythm_v3_zero"] = torch.tensor(0.25)
+    ret["rhythm_v3_ortho"] = torch.tensor(0.28)
     ret["rhythm_v3_pref"] = torch.tensor(0.3)
     ret["rhythm_v3_cons"] = torch.tensor(0.35)
     ret["rhythm_v3_stream"] = torch.tensor(0.37)
@@ -81,6 +82,7 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_basis_activation_abs_mean",
         "rhythm_metric_frame_plan_present",
         "rhythm_metric_global_rate_mean",
+        "rhythm_metric_global_stretch_mean",
         "rhythm_metric_operator_coeff_abs_mean",
         "rhythm_metric_commit_frontier_mean",
         "rhythm_metric_rounding_residual_mean",
@@ -91,6 +93,7 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_rhythm_v3_dur",
         "rhythm_metric_rhythm_v3_op",
         "rhythm_metric_rhythm_v3_zero",
+        "rhythm_metric_rhythm_v3_ortho",
         "rhythm_metric_rhythm_v3_pref",
         "rhythm_metric_rhythm_v3_cons",
         "rhythm_metric_rhythm_v3_stream",
@@ -121,3 +124,18 @@ def test_rhythm_v3_metric_path_works_when_version_flag_is_missing():
     assert "rhythm_metric_basis_activation_abs_mean" in metrics
     assert "rhythm_metric_exec_speech_l1" in metrics
     assert "rhythm_metric_pause_duration_mean" not in metrics
+
+
+def test_rhythm_v3_metrics_ignore_separator_units_in_speech_supervision():
+    output = _run_adapter()
+    commit_mask = output["rhythm_execution"].commit_mask > 0.5
+    committed = commit_mask.nonzero(as_tuple=False)
+    assert committed.numel() > 0
+    sep_mask = output["rhythm_unit_batch"].sep_mask.clone()
+    sep_mask[committed[0, 0], committed[0, 1]] = 1.0
+    output["rhythm_unit_batch"].sep_mask = sep_mask
+    target = output["speech_duration_exec"].detach().clone()
+    target[committed[0, 0], committed[0, 1]] = target[committed[0, 0], committed[0, 1]] + 100.0
+    metrics = build_rhythm_metric_dict(output, sample={"unit_duration_tgt": target})
+    assert torch.allclose(metrics["rhythm_metric_exec_speech_l1"], torch.tensor(0.0))
+    assert torch.allclose(metrics["rhythm_metric_prefix_drift_l1"], torch.tensor(0.0))

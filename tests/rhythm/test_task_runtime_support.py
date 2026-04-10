@@ -148,6 +148,47 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.srmdp_notimeline_weight, 0.20)
         self.assertEqual(config.srmdp_memory_role_weight, 0.30)
 
+    def test_build_duration_v3_target_build_config_defaults_consistency_off(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_op": 0.25,
+                "lambda_rhythm_pref": 0.20,
+                "lambda_rhythm_zero": 0.05,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertEqual(config.lambda_dur, 1.0)
+        self.assertEqual(config.lambda_op, 0.25)
+        self.assertEqual(config.lambda_pref, 0.20)
+        self.assertEqual(config.lambda_cons, 0.0)
+        self.assertEqual(config.lambda_zero, 0.05)
+        self.assertEqual(config.lambda_ortho, 0.0)
+        self.assertTrue(config.strict_target_alignment)
+
+    def test_build_duration_v3_target_build_config_respects_consistency_override(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_op": 0.25,
+                "lambda_rhythm_pref": 0.20,
+                "lambda_rhythm_cons": 0.15,
+                "lambda_rhythm_zero": 0.05,
+                "lambda_rhythm_ortho": 0.02,
+                "rhythm_v3_strict_target_alignment": False,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertEqual(config.lambda_cons, 0.15)
+        self.assertEqual(config.lambda_ortho, 0.02)
+        self.assertFalse(config.strict_target_alignment)
+
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:
             mel_losses = {"l1": 1.0}

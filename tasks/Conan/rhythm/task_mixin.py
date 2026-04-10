@@ -262,7 +262,24 @@ class RhythmConanTaskMixin:
 
     def _collect_rhythm_source_cache(self, sample, *, prefix: str = ""):
         if getattr(getattr(self, "model", None), "rhythm_enable_v3", False):
-            return collect_duration_v3_source_cache(sample, prefix=prefix)
+            payload = collect_duration_v3_source_cache(sample, prefix=prefix)
+            if payload is not None:
+                return payload
+            legacy_duration = sample.get(f"{prefix}dur_anchor_src")
+            legacy_content = sample.get(f"{prefix}content_units")
+            if legacy_content is None or legacy_duration is None:
+                return None
+            legacy_sep = sample.get(f"{prefix}sep_hint")
+            legacy_sealed = sample.get(f"{prefix}sealed_mask")
+            unit_mask = (legacy_duration.float() > 0).float() if torch.is_tensor(legacy_duration) else None
+            return {
+                "content_units": legacy_content,
+                "source_duration_obs": legacy_duration,
+                "unit_mask": unit_mask,
+                "sealed_mask": legacy_sealed,
+                "sep_mask": legacy_sep,
+                "unit_anchor_base": sample.get(f"{prefix}unit_anchor_base"),
+            }
         keys = self._LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS + self._LEGACY_RHYTHM_SOURCE_CACHE_OPTIONAL_KEYS
         payload = {}
         for key in keys:

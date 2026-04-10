@@ -89,16 +89,21 @@ class DurationV3LossTargets:
     unit_mask: torch.Tensor
     committed_mask: torch.Tensor
     global_rate: Optional[torch.Tensor] = None
+    prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target_tgt: Optional[torch.Tensor] = None
     prompt_mask: Optional[torch.Tensor] = None
+    prompt_fit_mask: Optional[torch.Tensor] = None
+    prompt_eval_mask: Optional[torch.Tensor] = None
     prompt_operator_fit_pred: Optional[torch.Tensor] = None
+    prompt_operator_cv_fit_pred: Optional[torch.Tensor] = None
     consistency_duration_tgt: Optional[torch.Tensor] = None
     consistency_mask: Optional[torch.Tensor] = None
     lambda_dur: float = 1.0
     lambda_op: float = 0.25
     lambda_pref: float = 0.20
-    lambda_cons: float = 0.10
+    lambda_cons: float = 0.0
     lambda_zero: float = 0.0
+    lambda_ortho: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1199,10 +1204,6 @@ def _build_duration_v3_duration_loss(
     unit_anchor_base = targets.unit_anchor_base.float().clamp_min(1.0e-6)
     pred_logstretch = execution.unit_logstretch.float()
     tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(unit_anchor_base)
-    if targets.global_rate is not None:
-        global_rate = targets.global_rate.float().expand_as(tgt_logstretch)
-        pred_logstretch = pred_logstretch - global_rate
-        tgt_logstretch = tgt_logstretch - global_rate
     return _masked_huber(
         pred_logstretch,
         tgt_logstretch,
@@ -1220,15 +1221,16 @@ def _build_duration_v3_operator_loss(
     zero = pred_speech.new_tensor(0.0)
     operator_loss = zero
     if targets.prompt_random_target_tgt is not None:
-        prompt_pred = targets.prompt_operator_fit_pred
+        prompt_pred = targets.prompt_operator_cv_fit_pred
+        prompt_mask = targets.prompt_eval_mask
+        if prompt_pred is None:
+            prompt_pred = targets.prompt_operator_fit_pred
+        if prompt_mask is None:
+            prompt_mask = targets.prompt_mask
         if prompt_pred is None and float(targets.lambda_op) > 0.0:
             raise ValueError("Duration V3 operator loss requires prompt_operator_fit on rhythm_ref_conditioning.")
         if prompt_pred is not None:
-            prompt_mask = (
-                targets.prompt_mask
-                if targets.prompt_mask is not None
-                else torch.ones_like(targets.prompt_random_target_tgt)
-            )
+            prompt_mask = prompt_mask if prompt_mask is not None else torch.ones_like(targets.prompt_random_target_tgt)
             prompt_delta = F.smooth_l1_loss(
                 prompt_pred.float(),
                 targets.prompt_random_target_tgt.float(),
@@ -1258,6 +1260,29 @@ def _build_duration_v3_zero_loss(
     )
 
 
+def _build_duration_v3_ortho_loss(
+    *,
+    execution,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+    committed_mask: torch.Tensor,
+) -> torch.Tensor:
+    def _masked_cov_identity_loss(phi: torch.Tensor | None, mask: torch.Tensor | None) -> torch.Tensor:
+        if phi is None or mask is None:
+            return pred_speech.new_tensor(0.0)
+        if phi.numel() <= 0 or phi.size(-1) <= 0:
+            return pred_speech.new_tensor(0.0)
+        mask_f = mask.float().unsqueeze(-1)
+        support = mask.float().sum(dim=1, keepdim=True).clamp_min(1.0)
+        cov = torch.matmul((phi.float() * mask_f).transpose(1, 2), phi.float() * mask_f) / support.unsqueeze(-1)
+        eye = torch.eye(phi.size(-1), device=phi.device, dtype=phi.dtype).unsqueeze(0)
+        return ((cov - eye) ** 2).mean()
+
+    prompt_loss = _masked_cov_identity_loss(targets.prompt_basis_activation, targets.prompt_mask)
+    source_loss = _masked_cov_identity_loss(getattr(execution, "basis_activation", None), committed_mask)
+    return prompt_loss + source_loss
+
+
 def _build_duration_v3_stream_losses(
     *,
     pred_speech: torch.Tensor,
@@ -1274,7 +1299,11 @@ def _build_duration_v3_stream_losses(
         batch_weight=None,
     )
     l_cons = pred_speech.new_tensor(0.0)
-    if targets.consistency_duration_tgt is not None and targets.consistency_mask is not None:
+    if (
+        float(targets.lambda_cons) > 0.0
+        and targets.consistency_duration_tgt is not None
+        and targets.consistency_mask is not None
+    ):
         l_cons = _masked_huber(
             pred_speech,
             targets.consistency_duration_tgt.float(),
@@ -1303,6 +1332,12 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
         pred_speech=pred_speech,
         targets=targets,
     )
+    l_ortho = _build_duration_v3_ortho_loss(
+        execution=execution,
+        pred_speech=pred_speech,
+        targets=targets,
+        committed_mask=committed_mask,
+    )
     l_pref, l_cons, l_stream = _build_duration_v3_stream_losses(
         pred_speech=pred_speech,
         targets=targets,
@@ -1311,15 +1346,17 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
     scaled_dur = l_dur * float(targets.lambda_dur)
     scaled_op = l_op * float(targets.lambda_op)
     scaled_zero = l_zero * float(targets.lambda_zero)
+    scaled_ortho = l_ortho * float(targets.lambda_ortho)
     scaled_stream = (l_pref * float(targets.lambda_pref)) + (l_cons * float(targets.lambda_cons))
-    total = scaled_dur + scaled_op + scaled_zero + scaled_stream
+    total = scaled_dur + scaled_op + scaled_zero + scaled_ortho + scaled_stream
     return {
         "rhythm_exec_speech": scaled_dur,
-        "rhythm_exec_stretch": scaled_op + scaled_zero,
+        "rhythm_exec_stretch": scaled_op + scaled_zero + scaled_ortho,
         "rhythm_prefix_state": scaled_stream,
         "rhythm_v3_dur": l_dur.detach(),
         "rhythm_v3_op": l_op.detach(),
         "rhythm_v3_zero": l_zero.detach(),
+        "rhythm_v3_ortho": l_ortho.detach(),
         "rhythm_v3_pref": l_pref.detach(),
         "rhythm_v3_cons": l_cons.detach(),
         "rhythm_v3_stream": l_stream.detach(),

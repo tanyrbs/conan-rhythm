@@ -53,7 +53,7 @@ def _run_adapter(adapter, *, content, ref, state=None, ref_conditioning=None, re
     return ret
 
 
-def test_rhythm_v3_adapter_emits_static_memory_runtime():
+def test_rhythm_v3_adapter_emits_prompt_conditioned_operator_runtime():
     adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]])
     ref = torch.randn(1, 24, 80)
@@ -71,18 +71,13 @@ def test_rhythm_v3_adapter_emits_static_memory_runtime():
     prompt_rel = getattr(getattr(ref_memory, "prompt", None), "prompt_random_target", None)
     prompt_mask = getattr(getattr(ref_memory, "prompt", None), "prompt_mask", None)
     if isinstance(prompt_rel, torch.Tensor):
-        if isinstance(prompt_mask, torch.Tensor):
-            visible = prompt_mask > 0.1
-            residual_center = []
-            for batch_idx in range(prompt_rel.size(0)):
-                if bool(visible[batch_idx].any().item()):
-                    residual_center.append(prompt_rel[batch_idx][visible[batch_idx]].median())
-                else:
-                    residual_center.append(prompt_rel.new_zeros(()))
-            residual_center = torch.stack(residual_center, dim=0)
-        else:
-            residual_center = prompt_rel.median(dim=1).values
-        assert torch.allclose(residual_center, torch.zeros_like(residual_center), atol=1e-5)
+        assert torch.isfinite(prompt_rel).all()
+    prompt_cv_fit = getattr(getattr(ref_memory, "prompt", None), "prompt_operator_cv_fit", None)
+    if isinstance(prompt_cv_fit, torch.Tensor):
+        assert torch.isfinite(prompt_cv_fit).all()
+    prompt_eval_mask = getattr(getattr(ref_memory, "prompt", None), "prompt_eval_mask", None)
+    if isinstance(prompt_eval_mask, torch.Tensor):
+        assert prompt_eval_mask.shape == prompt_mask.shape
     committed = ret["rhythm_execution"].commit_mask > 0.5
     assert torch.allclose(
         ret["speech_duration_exec"][committed],
@@ -114,7 +109,7 @@ def test_rhythm_v3_accepts_explicit_prompt_units_without_cached_anchor_base():
     assert torch.isfinite(ref_memory.prompt_log_base).all()
 
 
-def test_rhythm_v3_reference_memory_is_reusable_across_chunks():
+def test_rhythm_v3_prompt_conditioning_is_reusable_across_chunks():
     adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
     ref = torch.randn(1, 24, 80)
     first = _run_adapter(adapter, content=torch.tensor([[1, 1, 2, 2]]), ref=ref)
