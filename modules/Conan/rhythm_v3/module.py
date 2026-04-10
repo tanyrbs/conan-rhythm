@@ -24,8 +24,6 @@ class SharedCausalBasisEncoder(nn.Module):
         vocab_size: int,
         hidden_size: int,
         basis_rank: int,
-        prompt_trace_dim: int = 5,
-        prompt_stats_dim: int = 6,
         window_left: int = 4,
         window_right: int = 0,
     ) -> None:
@@ -35,7 +33,6 @@ class SharedCausalBasisEncoder(nn.Module):
         kernel_size = self.window_left + self.window_right + 1
         self.unit_embedding = nn.Embedding(vocab_size, hidden_size)
         self.source_adapter = nn.Linear(hidden_size + 1, hidden_size)
-        self.prompt_proxy_adapter = nn.Linear(prompt_trace_dim + prompt_stats_dim, hidden_size)
         self.shared_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, bias=True)
         self.hidden_norm = nn.LayerNorm(hidden_size)
         self.out_proj = nn.Linear(hidden_size, basis_rank)
@@ -78,18 +75,216 @@ class SharedCausalBasisEncoder(nn.Module):
             unit_mask=prompt_mask,
         )
 
-    def encode_prompt_proxy(
+def _resolve_duration_runtime_surface(
+    *,
+    backbone_mode: str | None,
+    warp_mode: str | None,
+    allow_hybrid: bool | None,
+    source_residual_gain: float,
+) -> tuple[str, str, bool, str]:
+    resolved_backbone = str(backbone_mode or "global_only").strip().lower()
+    resolved_warp = str(warp_mode or "none").strip().lower()
+    resolved_allow_hybrid = bool(allow_hybrid) if allow_hybrid is not None else False
+    if resolved_backbone not in {"global_only", "operator"}:
+        raise ValueError(f"Unsupported rhythm_v3 backbone mode: {backbone_mode!r}")
+    if resolved_warp not in {"none", "progress", "detector"}:
+        raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
+    if resolved_backbone == "global_only":
+        if resolved_allow_hybrid:
+            raise ValueError("rhythm_v3_allow_hybrid is only valid when rhythm_v3_backbone='operator'.")
+        canonical = (
+            "progress_only"
+            if resolved_warp == "progress"
+            else "detector_only"
+            if resolved_warp == "detector"
+            else "global_only"
+        )
+        return resolved_backbone, resolved_warp, False, canonical
+    if resolved_warp == "detector":
+        raise ValueError(
+            "Detector bank is a global-only candidate layer. "
+            "Use rhythm_v3_backbone='global_only' with rhythm_v3_warp_mode='detector'."
+        )
+    if resolved_warp == "progress":
+        if not resolved_allow_hybrid:
+            raise ValueError(
+                "Operator + progress warp must be explicit: set rhythm_v3_allow_hybrid=true "
+                "when rhythm_v3_backbone='operator' and rhythm_v3_warp_mode='progress'."
+            )
+        return resolved_backbone, resolved_warp, True, "operator_progress"
+    runtime_mode = "operator_srcres" if float(source_residual_gain) > 0.0 else "operator"
+    return resolved_backbone, resolved_warp, False, runtime_mode
+
+
+class DurationBackbone(nn.Module):
+    backbone_mode = "global_only"
+    warp_mode = "none"
+    allow_hybrid = False
+    use_source_residual = False
+    need_operator = False
+    need_progress = False
+    need_detector = False
+
+    @staticmethod
+    def _global_response(*, ref_memory: ReferenceDurationMemory, unit_mask: torch.Tensor, speech_commit_mask: torch.Tensor) -> torch.Tensor:
+        return ref_memory.global_rate.float().expand(-1, unit_mask.size(1)) * speech_commit_mask.float()
+
+    def forward(
         self,
         *,
-        ref_rhythm_trace: torch.Tensor,
-        ref_rhythm_stats: torch.Tensor,
-        prompt_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        if ref_rhythm_trace.size(1) <= 0:
-            return self.out_proj.weight.new_zeros((ref_rhythm_trace.size(0), 0, self.out_proj.out_features))
-        stats_feat = ref_rhythm_stats.float().unsqueeze(1).expand(-1, ref_rhythm_trace.size(1), -1)
-        hidden = F.silu(self.prompt_proxy_adapter(torch.cat([ref_rhythm_trace.float(), stats_feat], dim=-1)))
-        return self._run_shared(hidden, prompt_mask.float())
+        module,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        unit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        detached_log_anchor: torch.Tensor,
+        basis_activation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+
+class GlobalOnlyBackbone(DurationBackbone):
+    backbone_mode = "global_only"
+    warp_mode = "none"
+    allow_hybrid = False
+    use_source_residual = False
+    need_operator = False
+    need_progress = False
+
+    def forward(
+        self,
+        *,
+        module,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        unit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        detached_log_anchor: torch.Tensor,
+        basis_activation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        del module, source_batch, detached_log_anchor, basis_activation
+        zeros = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        return self._global_response(
+            ref_memory=ref_memory,
+            unit_mask=unit_mask,
+            speech_commit_mask=speech_commit_mask,
+        ), zeros, zeros, zeros
+
+
+class ProgressWarpBackbone(DurationBackbone):
+    backbone_mode = "global_only"
+    warp_mode = "progress"
+    allow_hybrid = False
+    use_source_residual = False
+    need_operator = False
+    need_progress = True
+
+    def forward(
+        self,
+        *,
+        module,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        unit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        detached_log_anchor: torch.Tensor,
+        basis_activation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        del detached_log_anchor, basis_activation
+        zeros = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        progress_response = module._sample_progress_response(
+            ref_memory=ref_memory,
+            source_batch=source_batch,
+            speech_commit_mask=speech_commit_mask,
+        )
+        return self._global_response(
+            ref_memory=ref_memory,
+            unit_mask=unit_mask,
+            speech_commit_mask=speech_commit_mask,
+        ), progress_response, zeros, zeros
+
+
+class DetectorBankBackbone(DurationBackbone):
+    backbone_mode = "global_only"
+    warp_mode = "detector"
+    allow_hybrid = False
+    use_source_residual = False
+    need_operator = False
+    need_progress = False
+    need_detector = True
+
+    def forward(
+        self,
+        *,
+        module,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        unit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        detached_log_anchor: torch.Tensor,
+        basis_activation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        del detached_log_anchor, basis_activation
+        zeros = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        detector_response = module._predict_detector_response(
+            source_batch=source_batch,
+            ref_memory=ref_memory,
+            speech_commit_mask=speech_commit_mask,
+        )
+        return self._global_response(
+            ref_memory=ref_memory,
+            unit_mask=unit_mask,
+            speech_commit_mask=speech_commit_mask,
+        ), detector_response, zeros, zeros
+
+
+class OperatorBackbone(DurationBackbone):
+    backbone_mode = "operator"
+    need_operator = True
+
+    def __init__(self, *, allow_hybrid: bool = False, use_source_residual: bool = False) -> None:
+        super().__init__()
+        self.allow_hybrid = bool(allow_hybrid)
+        self.use_source_residual = bool(use_source_residual)
+        self.warp_mode = "progress" if self.allow_hybrid else "none"
+        self.need_progress = self.allow_hybrid
+
+    def forward(
+        self,
+        *,
+        module,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        unit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        detached_log_anchor: torch.Tensor,
+        basis_activation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        global_response = self._global_response(
+            ref_memory=ref_memory,
+            unit_mask=unit_mask,
+            speech_commit_mask=speech_commit_mask,
+        )
+        local_response = module._predict_local_response(
+            basis_activation=basis_activation,
+            ref_memory=ref_memory,
+        ) * speech_commit_mask.float()
+        progress_response = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        if self.allow_hybrid:
+            progress_response = module._sample_progress_response(
+                ref_memory=ref_memory,
+                source_batch=source_batch,
+                speech_commit_mask=speech_commit_mask,
+            )
+        source_residual_response = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        if self.use_source_residual and module.source_residual_gain > 0.0:
+            centered_source_residual = module._build_centered_source_residual(
+                source_batch=source_batch,
+                detached_log_anchor=detached_log_anchor,
+                speech_commit_mask=speech_commit_mask,
+            )
+            source_residual_response = module.source_residual_gain * centered_source_residual
+        return global_response, progress_response, local_response, source_residual_response
 
 
 class MixedEffectsDurationModule(nn.Module):
@@ -101,28 +296,37 @@ class MixedEffectsDurationModule(nn.Module):
         basis_rank: int = 12,
         response_window_left: int = 4,
         response_window_right: int = 0,
-        trace_bins: int = 24,
         streaming_mode: str = "strict",
         micro_lookahead_units: int | None = None,
         ridge_lambda: float = 1.0,
-        ablation_mode: str = "coarse_operator",
+        backbone_mode: str | None = None,
+        warp_mode: str | None = None,
+        allow_hybrid: bool | None = None,
         source_residual_gain: float = 0.0,
         **unused_kwargs,
     ) -> None:
         super().__init__()
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
-        coarse_support_tau = float(unused_kwargs.pop("coarse_support_tau", 8.0))
-        coarse_bins = int(unused_kwargs.pop("coarse_bins", 4))
+        progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
+        progress_bins = int(unused_kwargs.pop("progress_bins", 4))
         ridge_support_tau = float(unused_kwargs.pop("ridge_support_tau", 8.0))
         operator_holdout_ratio = float(unused_kwargs.pop("operator_holdout_ratio", 0.30))
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
             raise ValueError(f"Unsupported streaming_mode={streaming_mode!r}")
-        self.ablation_mode = str(ablation_mode or "coarse_operator").strip().lower()
-        if self.ablation_mode not in {"global_only", "coarse_only", "operator", "coarse_operator", "operator_srcres"}:
-            raise ValueError(f"Unsupported rhythm_v3 ablation mode: {ablation_mode!r}")
         self.source_residual_gain = float(max(0.0, source_residual_gain))
+        (
+            self.backbone_mode,
+            self.warp_mode,
+            self.allow_hybrid,
+            self.runtime_mode,
+        ) = _resolve_duration_runtime_surface(
+            backbone_mode=backbone_mode,
+            warp_mode=warp_mode,
+            allow_hybrid=allow_hybrid,
+            source_residual_gain=self.source_residual_gain,
+        )
         effective_window_right = int(response_window_right)
         if self.streaming_mode == "strict":
             effective_window_right = 0
@@ -137,21 +341,34 @@ class MixedEffectsDurationModule(nn.Module):
             window_right=effective_window_right,
         )
         self.reference_memory_builder = PromptConditionedOperatorEstimator(
-            trace_bins=trace_bins,
-            coarse_bins=coarse_bins,
+            progress_bins=progress_bins,
             ridge_lambda=ridge_lambda,
             global_shrink_tau=global_shrink_tau,
-            coarse_support_tau=coarse_support_tau,
+            progress_support_tau=progress_support_tau,
             ridge_support_tau=ridge_support_tau,
             holdout_ratio=operator_holdout_ratio,
         )
         self.projector = StreamingDurationProjector()
+        if self.backbone_mode == "global_only" and self.warp_mode == "progress":
+            self.backbone = ProgressWarpBackbone()
+        elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
+            self.backbone = DetectorBankBackbone()
+        elif self.backbone_mode == "operator":
+            self.backbone = OperatorBackbone(
+                allow_hybrid=self.allow_hybrid,
+                use_source_residual=(self.source_residual_gain > 0.0),
+            )
+        else:
+            self.backbone = GlobalOnlyBackbone()
 
-    def _use_coarse_response(self) -> bool:
-        return self.ablation_mode in {"coarse_only", "coarse_operator", "operator_srcres"}
+    def _use_progress_response(self) -> bool:
+        return bool(getattr(self.backbone, "need_progress", False))
 
     def _use_local_operator(self) -> bool:
-        return self.ablation_mode in {"operator", "coarse_operator", "operator_srcres"}
+        return bool(getattr(self.backbone, "need_operator", False))
+
+    def _use_detector_bank(self) -> bool:
+        return bool(getattr(self.backbone, "need_detector", False))
 
     def init_state(self, batch_size: int, device: torch.device) -> DurationRuntimeState:
         return self.projector.init_state(batch_size=batch_size, device=device)
@@ -160,39 +377,19 @@ class MixedEffectsDurationModule(nn.Module):
         self,
         *,
         ref_conditioning=None,
-        ref_rhythm_stats: torch.Tensor | None = None,
-        ref_rhythm_trace: torch.Tensor | None = None,
-        ref_mel: torch.Tensor | None = None,
-        ref_lengths: torch.Tensor | None = None,
     ) -> ReferenceDurationMemory:
-        need_coarse = self._use_coarse_response()
+        need_progress = self._use_progress_response()
+        need_detector = self._use_detector_bank()
         need_operator = self._use_local_operator()
         if ref_conditioning is not None:
             return self.reference_memory_builder(
                 response_encoder=self.response_encoder,
                 ref_conditioning=ref_conditioning,
-                need_coarse=need_coarse,
+                need_progress=need_progress,
+                need_detector=need_detector,
                 need_operator=need_operator,
             )
-        if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
-            return self.reference_memory_builder(
-                response_encoder=self.response_encoder,
-                ref_conditioning={
-                    "ref_rhythm_stats": ref_rhythm_stats,
-                    "ref_rhythm_trace": ref_rhythm_trace,
-                },
-                need_coarse=need_coarse,
-                need_operator=need_operator,
-            )
-        if ref_mel is None:
-            raise ValueError("Either reference conditioning or reference mel must be provided.")
-        return self.reference_memory_builder(
-            response_encoder=self.response_encoder,
-            ref_mel=ref_mel,
-            ref_lengths=ref_lengths,
-            need_coarse=need_coarse,
-            need_operator=need_operator,
-        )
+        raise ValueError("rhythm_v3 now requires explicit prompt-unit conditioning or prebuilt reference memory.")
 
     @staticmethod
     def _freeze_committed_prefix(
@@ -265,25 +462,79 @@ class MixedEffectsDurationModule(nn.Module):
         return (centered_cum / total_mass).clamp(0.0, 1.0) * mask
 
     @staticmethod
-    def _sample_coarse_response(
+    def _sample_progress_response(
         *,
         ref_memory: ReferenceDurationMemory,
         source_batch: SourceUnitBatch,
         speech_commit_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if not isinstance(getattr(ref_memory, "coarse_profile", None), torch.Tensor):
+        if not isinstance(getattr(ref_memory, "progress_profile", None), torch.Tensor):
             return speech_commit_mask.new_zeros(speech_commit_mask.shape)
-        coarse_profile = ref_memory.coarse_profile.float()
-        if coarse_profile.numel() <= 0 or coarse_profile.size(1) <= 0 or source_batch.content_units.size(1) <= 0:
+        progress_profile = ref_memory.progress_profile.float()
+        if progress_profile.numel() <= 0 or progress_profile.size(1) <= 0 or source_batch.content_units.size(1) <= 0:
             return speech_commit_mask.new_zeros(speech_commit_mask.shape)
         progress = MixedEffectsDurationModule._build_prefix_progress(
             unit_anchor_base=source_batch.unit_anchor_base,
             speech_commit_mask=speech_commit_mask,
         )
-        num_bins = int(coarse_profile.size(1))
+        num_bins = int(progress_profile.size(1))
         indices = torch.clamp((progress * float(num_bins)).long(), min=0, max=max(0, num_bins - 1))
-        sampled = coarse_profile.gather(1, indices)
+        sampled = progress_profile.gather(1, indices)
         return sampled * speech_commit_mask.float()
+
+    @staticmethod
+    def _build_detector_features(
+        *,
+        source_batch: SourceUnitBatch,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = speech_commit_mask.float().clamp(0.0, 1.0)
+        progress = MixedEffectsDurationModule._build_prefix_progress(
+            unit_anchor_base=source_batch.unit_anchor_base,
+            speech_commit_mask=speech_commit_mask,
+        )
+        boundary = (
+            source_batch.source_boundary_cue.float() * mask
+            if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+            else torch.zeros_like(progress)
+        )
+        phrase_pos = (
+            source_batch.phrase_group_pos.float() * mask
+            if isinstance(getattr(source_batch, "phrase_group_pos", None), torch.Tensor)
+            else progress
+        )
+        phrase_final = (
+            source_batch.phrase_final_mask.float() * mask
+            if isinstance(getattr(source_batch, "phrase_final_mask", None), torch.Tensor)
+            else torch.zeros_like(progress)
+        )
+        return torch.stack(
+            [
+                2.0 * progress - 1.0,
+                boundary,
+                2.0 * phrase_pos - 1.0,
+                phrase_final,
+            ],
+            dim=-1,
+        ) * mask.unsqueeze(-1)
+
+    def _predict_detector_response(
+        self,
+        *,
+        source_batch: SourceUnitBatch,
+        ref_memory: ReferenceDurationMemory,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if not isinstance(getattr(ref_memory, "detector_coeff", None), torch.Tensor):
+            return speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        detector_features = self._build_detector_features(
+            source_batch=source_batch,
+            speech_commit_mask=speech_commit_mask,
+        )
+        if detector_features.size(1) <= 0:
+            return speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        response = torch.einsum("bud,bd->bu", detector_features.float(), ref_memory.detector_coeff.float())
+        return response * speech_commit_mask.float()
 
     @staticmethod
     def _resolve_speech_commit_mask(
@@ -362,37 +613,40 @@ class MixedEffectsDurationModule(nn.Module):
             unit_mask=unit_mask,
             log_anchor=detached_log_anchor,
         )
-        local_response = self._predict_local_response(
-            basis_activation=basis_activation,
-            ref_memory=ref_memory,
-        )
         speech_commit_mask = self._resolve_speech_commit_mask(
             source_batch=source_batch,
             commit_mask=commit_mask,
         )
-        coarse_response = self._sample_coarse_response(
+        global_response, structure_response, local_response, source_residual_response = self.backbone(
+            module=self,
             ref_memory=ref_memory,
             source_batch=source_batch,
+            unit_mask=unit_mask,
             speech_commit_mask=speech_commit_mask,
+            detached_log_anchor=detached_log_anchor,
+            basis_activation=basis_activation,
         )
-        if not self._use_local_operator():
-            local_response = torch.zeros_like(local_response)
-        if not self._use_coarse_response():
-            coarse_response = torch.zeros_like(coarse_response)
-        source_residual_response = torch.zeros_like(local_response)
-        if self.ablation_mode == "operator_srcres" and self.source_residual_gain > 0.0:
-            centered_source_residual = self._build_centered_source_residual(
-                source_batch=source_batch,
-                detached_log_anchor=detached_log_anchor,
-                speech_commit_mask=speech_commit_mask,
-            )
-            source_residual_response = self.source_residual_gain * centered_source_residual
-        global_stretch = ref_memory.global_rate.float().expand(-1, unit_mask.size(1))
-        unit_logstretch = (global_stretch + coarse_response + local_response + source_residual_response) * speech_commit_mask
+        if self.warp_mode == "progress":
+            progress_response = structure_response
+            detector_response = None
+        elif self.warp_mode == "detector":
+            progress_response = speech_commit_mask.new_zeros(speech_commit_mask.shape)
+            detector_response = structure_response
+        else:
+            progress_response = structure_response
+            detector_response = None
+        detector_term = (
+            detector_response
+            if isinstance(detector_response, torch.Tensor)
+            else speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        )
+        unit_logstretch = global_response + progress_response + detector_term + local_response + source_residual_response
         unit_duration_exec = self._predict_unit_duration(
             source_batch=source_batch,
             unit_logstretch=unit_logstretch,
         )
+        unit_logstretch_raw = unit_logstretch.clone()
+        unit_duration_raw = unit_duration_exec.clone()
         unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
             unit_duration_exec=unit_duration_exec,
             unit_logstretch=unit_logstretch,
@@ -406,9 +660,17 @@ class MixedEffectsDurationModule(nn.Module):
             source_duration_obs=source_batch.source_duration_obs,
             unit_mask=unit_mask,
             sealed_mask=sealed_mask,
+            speech_commit_mask=speech_commit_mask,
             state=state,
-            coarse_response=coarse_response * speech_commit_mask,
+            progress_response=progress_response * speech_commit_mask,
+            detector_response=(
+                None
+                if detector_response is None
+                else detector_response * speech_commit_mask
+            ),
             local_response=local_response * speech_commit_mask,
+            unit_logstretch_raw=unit_logstretch_raw,
+            unit_duration_raw=unit_duration_raw,
         )
 
 

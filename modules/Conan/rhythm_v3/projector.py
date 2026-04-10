@@ -80,6 +80,7 @@ class StreamingDurationProjector(nn.Module):
         *,
         unit_duration_exec: torch.Tensor,
         commit_mask: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
         residual_prev: torch.Tensor,
         committed_units_prev: torch.Tensor | None,
         cached_duration_exec_prev: torch.Tensor | None,
@@ -107,6 +108,8 @@ class StreamingDurationProjector(nn.Module):
                     continue
                 total = max(0.0, float(unit_duration_exec[batch_idx, unit_idx].item()) + carry)
                 frames = float(math.floor(total))
+                if float(speech_commit_mask[batch_idx, unit_idx].item()) > 0.5:
+                    frames = max(1.0, frames)
                 projected[batch_idx, unit_idx] = frames
                 carry = total - frames
             residual_next[batch_idx] = carry
@@ -144,9 +147,13 @@ class StreamingDurationProjector(nn.Module):
         source_duration_obs: torch.Tensor,
         unit_mask: torch.Tensor,
         sealed_mask: torch.Tensor | None,
+        speech_commit_mask: torch.Tensor,
         state: DurationRuntimeState | None,
         coarse_response: torch.Tensor | None = None,
+        detector_response: torch.Tensor | None = None,
         local_response: torch.Tensor | None = None,
+        unit_logstretch_raw: torch.Tensor | None = None,
+        unit_duration_raw: torch.Tensor | None = None,
     ) -> DurationExecution:
         batch_size = unit_duration_exec.size(0)
         device = unit_duration_exec.device
@@ -160,6 +167,7 @@ class StreamingDurationProjector(nn.Module):
         projected_duration_exec, residual_next = self._project_duration_prefix(
             unit_duration_exec=unit_duration_exec,
             commit_mask=commit_mask,
+            speech_commit_mask=speech_commit_mask.float(),
             residual_prev=state.rounding_residual,
             committed_units_prev=state.committed_units,
             cached_duration_exec_prev=state.cached_duration_exec,
@@ -187,6 +195,9 @@ class StreamingDurationProjector(nn.Module):
             commit_mask=commit_mask,
             next_state=next_state,
             coarse_response=coarse_response,
+            detector_response=detector_response,
             local_response=local_response,
+            unit_logstretch_raw=unit_logstretch_raw,
+            unit_duration_raw=unit_duration_raw,
             frame_plan=frame_plan,
         )

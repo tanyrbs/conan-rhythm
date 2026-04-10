@@ -1,50 +1,93 @@
 # Streaming inference notes
 
-This file is a helper note for runtime/eval utilities. It is **not** the maintained training-prep source of truth; use root `README.md` and `docs/rhythm_migration_plan.md` for current training readiness.
+This directory is a **runtime/eval helper surface**, not the authoritative
+training or mechanism document. For the current maintained branch semantics,
+use:
 
-This directory now exposes a small runtime utility layer for the Conan streaming path.
+- `README.md`
+- `docs/rhythm_migration_plan.md`
 
-## What is safe in mainline
+## What this directory currently serves
 
-- Emformer frontend runs in real stateful streaming mode.
-- Acoustic model still recomputes over the emitted prefix.
-- Vocoder wrappers are still stateless by default.
+The maintained inference/runtime helpers are:
 
-So the current mainline is suitable for **streaming-oriented evaluation**, not for claiming **true end-to-end low-latency stateful deployment**.
-
-## New pieces
-
-- `inference/streaming_runtime.py`
-  - resolves `vocoder_left_context_frames` with fallback to legacy `vocoder_stream_context`
-  - reports theoretical latency / recompute multipliers
-  - provides lightweight `PrefixCodeBuffer` and `RollingMelContextBuffer`
+- `inference/Conan.py`
+- `inference/run_voice_conversion.py`
 - `inference/run_streaming_latency_report.py`
-  - prints the theoretical latency report without loading checkpoints
+- `inference/streaming_runtime.py`
 
-## Usage
+They now point at the current `rhythm_v3` mainline, not the old v2 teacher path.
 
-```bash
-python inference/run_streaming_latency_report.py
-python inference/run_streaming_latency_report.py --config egs/conan_emformer_rhythm_v2_student_kd.yaml --duration_seconds 5
-```
+## Current status of streaming
 
-For maintained branch checks, prefer the Rhythm V2 config family:
+The honest runtime status is:
 
-- `egs/conan_emformer_rhythm_v2_teacher_offline.yaml`
-- `egs/conan_emformer_rhythm_v2_student_kd.yaml`
-- `egs/conan_emformer_rhythm_v2_student_retimed.yaml`
+- Emformer frontend runs in real stateful streaming mode
+- rhythm execution is prefix/commit oriented and uses the current `rhythm_v3` runtime
+- acoustic decoding still recomputes over the emitted prefix
+- shipped vocoder wrappers are still stateless by default
 
-Current caveats:
+So this directory is suitable for:
 
-- the latency-report helper is maintained, but the older `run_voice_conversion*.py` runners are legacy helpers rather than branch-quality maintained entrypoints
-- current streaming/eval audio helpers are not the authoritative validation path for stage-3 F0 readiness; use rhythm preflight/probe scripts for that
+- **streaming-oriented evaluation**
+- **latency accounting**
+- **prefix/commit behavior inspection**
+
+It is **not** yet evidence of fully stateful end-to-end low-latency deployment.
+
+## Maintained entrypoints
+
+### `inference/Conan.py`
+
+Current streaming VC helper built on:
+
+- `modules/Conan/Conan.py`
+- `rhythm_v3`
+- explicit prompt-unit extraction for v3 inference
+- prompt-side boundary / phrase sidecars for detector-bank experiments
+- `prepare_rhythm_reference(...)` is now v2-only
+
+### `inference/run_voice_conversion.py`
+
+Batch helper that now imports:
+
+- `from inference.Conan import StreamingVoiceConversion`
+
+This is a convenience runner, not the training-contract authority.
+
+### `inference/run_streaming_latency_report.py`
+
+Latency/recompute report helper.
+
+Current default config:
+
+- `egs/conan_emformer_rhythm_v3.yaml`
+
+## Recommended config for maintained branch checks
+
+For current branch-level runtime checks, prefer:
+
+- `egs/conan_emformer_rhythm_v3.yaml`
+
+Legacy v2 configs may still exist for archive/compatibility checks, but they
+are not the recommended maintained branch runtime surface anymore.
+
+## Legacy note
+
+Legacy helpers remain in this directory, including:
+
+- `inference/Conan_previous.py`
+
+Treat them as compatibility/archive surfaces only.
 
 ## Vocoder capability surface
 
-`tasks/tts/vocoder_infer/base_vocoder.py` now exposes:
+`tasks/tts/vocoder_infer/base_vocoder.py` exposes:
 
 - `supports_native_streaming()`
 - `reset_stream()`
 - `spec2wav_stream()`
 
-The shipped HiFiGAN wrappers explicitly report that native streaming is **not** enabled in mainline. The runtime therefore falls back to bounded left-context recompute instead of pretending the vocoder path is truly stateful.
+The shipped HiFiGAN wrappers still report that native streaming is **not**
+enabled in mainline. The runtime therefore uses bounded left-context recompute
+instead of pretending the vocoder is truly stateful.

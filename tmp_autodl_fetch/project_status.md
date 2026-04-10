@@ -1,10 +1,13 @@
 > **Temporary fetched status note only.**
 > This file is a transient/archive status capture, not a maintained
-> design/handoff document. For current runtime and training semantics, use
-> `README.md`, `docs/rhythm_migration_plan.md`, and
-> `docs/autodl_training_handoff.md`.
+> design/handoff document. For current runtime and training semantics, use:
+>
+> - `README.md`
+> - `docs/rhythm_migration_plan.md`
+>
+> `docs/autodl_training_handoff.md` is legacy v2 operational guidance only.
 
-# Project Status
+# Archive Project Status (legacy v2 snapshot)
 
 更新时间：2026-04-08 UTC
 

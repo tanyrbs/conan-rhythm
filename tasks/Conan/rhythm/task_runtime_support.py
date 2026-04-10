@@ -91,10 +91,17 @@ class RhythmTaskRuntimeSupport:
             lambda_dur=max(0.0, float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0)),
             lambda_op=max(0.0, float(hparams.get("lambda_rhythm_op", 0.25) or 0.0)),
             lambda_pref=max(0.0, float(hparams.get("lambda_rhythm_pref", 0.20) or 0.0)),
+            lambda_base=max(0.0, float(hparams.get("lambda_rhythm_base", 0.0) or 0.0)),
             lambda_cons=max(0.0, float(hparams.get("lambda_rhythm_cons", 0.0) or 0.0)),
             lambda_zero=max(0.0, float(hparams.get("lambda_rhythm_zero", 0.05) or 0.0)),
             lambda_ortho=max(0.0, float(hparams.get("lambda_rhythm_ortho", 0.0) or 0.0)),
             strict_target_alignment=bool(hparams.get("rhythm_v3_strict_target_alignment", True)),
+            baseline_target_mode=str(
+                hparams.get("rhythm_v3_baseline_target_mode", "deglobalized") or "deglobalized"
+            ).strip().lower(),
+            baseline_train_mode=str(
+                hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint"
+            ).strip().lower(),
         )
 
     def build_offline_confidence_outputs(self, confidence) -> dict:

@@ -43,6 +43,9 @@ class RhythmConanDatasetMixin:
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+        "prompt_source_boundary_cue",
+        "prompt_phrase_group_pos",
+        "prompt_phrase_final_mask",
     )
     _RHYTHM_REF_PROMPT_SOURCE_KEYS = (
         "content_units",
@@ -134,6 +137,9 @@ class RhythmConanDatasetMixin:
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+        "prompt_source_boundary_cue",
+        "prompt_phrase_group_pos",
+        "prompt_phrase_final_mask",
         "unit_duration_tgt",
     )
     _RHYTHM_STREAMING_PREFIX_META_KEYS = (
@@ -396,6 +402,9 @@ class RhythmConanDatasetMixin:
             "prompt_content_units": ("long", 0),
             "prompt_duration_obs": ("float", 0.0),
             "prompt_unit_mask": ("float", 0.0),
+            "prompt_source_boundary_cue": ("float", 0.0),
+            "prompt_phrase_group_pos": ("float", 0.0),
+            "prompt_phrase_final_mask": ("float", 0.0),
             "unit_duration_tgt": ("float", 0.0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
@@ -732,6 +741,9 @@ class RhythmConanDatasetMixin:
             source_cache = {key: prompt_item[key] for key in self._RHYTHM_REF_PROMPT_SOURCE_KEYS}
             if "sep_hint" in prompt_item:
                 source_cache["sep_hint"] = prompt_item["sep_hint"]
+            for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
+                if extra_key in prompt_item:
+                    source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode != "cached_only" and "hubert" in prompt_item:
             source_cache = build_source_rhythm_cache(
                 np.asarray(prompt_item["hubert"]),
@@ -752,6 +764,18 @@ class RhythmConanDatasetMixin:
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
             "prompt_unit_mask": prompt_unit_mask,
+            "prompt_source_boundary_cue": np.asarray(
+                source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
+            "prompt_phrase_group_pos": np.asarray(
+                source_cache.get("phrase_group_pos", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
+            "prompt_phrase_final_mask": np.asarray(
+                source_cache.get("phrase_final_mask", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
         }
 
     def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str, item=None):

@@ -1,4 +1,4 @@
-> **Archive snapshot only.**
+> **Archive snapshot only (legacy v2 teacher_offline run).**
 > This file records a historical training/status snapshot and may reflect runs
 > started before the current repository HEAD. It is not the live
 > runtime-contract or architecture document. For the current `rhythm_v3`
@@ -9,7 +9,7 @@
 >
 > `docs/autodl_training_handoff.md` is now legacy v2 operational guidance only.
 
-# Project Status
+# Archive Project Status (legacy v2 snapshot)
 
 鏇存柊鏃堕棿锛?026-04-08 UTC
 

@@ -1170,15 +1170,59 @@ def _build_duration_v3_metric_sections(
             speech_commit_mask,
         )
     coarse_response = getattr(execution, "coarse_response", None)
+    if not isinstance(coarse_response, torch.Tensor):
+        coarse_response = getattr(execution, "progress_response", None)
     if isinstance(coarse_response, torch.Tensor):
-        core_metrics["rhythm_metric_coarse_response_abs_mean"] = _masked_mean(
+        progress_response_abs_mean = _masked_mean(
             coarse_response.float().abs(),
+            speech_commit_mask,
+        )
+        core_metrics["rhythm_metric_progress_response_abs_mean"] = progress_response_abs_mean
+        core_metrics["rhythm_metric_coarse_response_abs_mean"] = progress_response_abs_mean
+    detector_response = getattr(execution, "detector_response", None)
+    if isinstance(detector_response, torch.Tensor):
+        core_metrics["rhythm_metric_detector_response_abs_mean"] = _masked_mean(
+            detector_response.float().abs(),
             speech_commit_mask,
         )
     if ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
         core_metrics["rhythm_metric_operator_coeff_abs_mean"] = _safe_mean(ref_memory.operator_coeff.abs())
-    if ref_memory is not None and isinstance(getattr(ref_memory, "coarse_profile", None), torch.Tensor):
-        core_metrics["rhythm_metric_coarse_profile_abs_mean"] = _safe_mean(ref_memory.coarse_profile.abs())
+    if ref_memory is not None and isinstance(getattr(ref_memory, "detector_coeff", None), torch.Tensor):
+        core_metrics["rhythm_metric_detector_coeff_abs_mean"] = _safe_mean(ref_memory.detector_coeff.abs())
+    prompt_evidence = None if ref_memory is None else getattr(ref_memory, "prompt", None)
+    if prompt_evidence is not None:
+        prompt_operator_support = getattr(prompt_evidence, "prompt_operator_support", None)
+        if isinstance(prompt_operator_support, torch.Tensor):
+            core_metrics["rhythm_metric_operator_support_mean"] = _safe_mean(prompt_operator_support.float())
+        prompt_short_fallback = getattr(prompt_evidence, "prompt_short_fallback", None)
+        if isinstance(prompt_short_fallback, torch.Tensor):
+            core_metrics["rhythm_metric_short_prompt_fallback_rate"] = _safe_mean(prompt_short_fallback.float())
+        prompt_operator_coeff_norm = getattr(prompt_evidence, "prompt_operator_coeff_norm", None)
+        if isinstance(prompt_operator_coeff_norm, torch.Tensor):
+            core_metrics["rhythm_metric_operator_coeff_norm_mean"] = _safe_mean(prompt_operator_coeff_norm.float())
+        prompt_operator_condition_number = getattr(prompt_evidence, "prompt_operator_condition_number", None)
+        if isinstance(prompt_operator_condition_number, torch.Tensor):
+            core_metrics["rhythm_metric_operator_condition_number_mean"] = _safe_mean(
+                prompt_operator_condition_number.float()
+            )
+        prompt_detector_support = getattr(prompt_evidence, "prompt_detector_support", None)
+        if isinstance(prompt_detector_support, torch.Tensor):
+            core_metrics["rhythm_metric_detector_support_mean"] = _safe_mean(prompt_detector_support.float())
+        prompt_detector_coeff_norm = getattr(prompt_evidence, "prompt_detector_coeff_norm", None)
+        if isinstance(prompt_detector_coeff_norm, torch.Tensor):
+            core_metrics["rhythm_metric_detector_coeff_norm_mean"] = _safe_mean(prompt_detector_coeff_norm.float())
+        prompt_detector_condition_number = getattr(prompt_evidence, "prompt_detector_condition_number", None)
+        if isinstance(prompt_detector_condition_number, torch.Tensor):
+            core_metrics["rhythm_metric_detector_condition_number_mean"] = _safe_mean(
+                prompt_detector_condition_number.float()
+            )
+    progress_profile = None if ref_memory is None else getattr(ref_memory, "progress_profile", None)
+    if not isinstance(progress_profile, torch.Tensor) and ref_memory is not None:
+        progress_profile = getattr(ref_memory, "coarse_profile", None)
+    if isinstance(progress_profile, torch.Tensor):
+        progress_profile_abs_mean = _safe_mean(progress_profile.abs())
+        core_metrics["rhythm_metric_progress_profile_abs_mean"] = progress_profile_abs_mean
+        core_metrics["rhythm_metric_coarse_profile_abs_mean"] = progress_profile_abs_mean
     source_residual_gain = _optional_scalar(output.get("rhythm_v3_source_residual_gain"), device)
     if source_residual_gain is not None:
         core_metrics["rhythm_metric_source_residual_gain"] = source_residual_gain
@@ -1198,6 +1242,7 @@ def _build_duration_v3_metric_sections(
         core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, speech_commit_mask)
     for loss_key in (
         "rhythm_total",
+        "rhythm_v3_base",
         "rhythm_v3_dur",
         "rhythm_v3_op",
         "rhythm_v3_zero",

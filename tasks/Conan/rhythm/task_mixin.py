@@ -164,6 +164,17 @@ class RhythmConanTaskMixin:
     def _validate_rhythm_training_hparams():
         validate_rhythm_training_hparams(hparams)
 
+    def _get_rhythm_v3_baseline_module(self):
+        if self.model is None:
+            return None
+        rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
+        if rhythm_frontend is None:
+            return None
+        getter = getattr(rhythm_frontend, "get_baseline_module", None)
+        if callable(getter):
+            return getter()
+        return getattr(rhythm_frontend, "baseline", None)
+
     def _collect_rhythm_gen_params(self):
         if self.model is None or not getattr(self.model, "rhythm_enabled", getattr(self.model, "rhythm_enable_v2", False)):
             return []
@@ -173,6 +184,10 @@ class RhythmConanTaskMixin:
                 if self._should_skip_rhythm_named_param(name):
                     continue
                 params.append(param)
+        if self._should_collect_rhythm_v3_baseline_params():
+            baseline_module = self._get_rhythm_v3_baseline_module()
+            if baseline_module is not None:
+                params.extend(list(baseline_module.parameters()))
         if (
             bool(hparams.get("rhythm_optimize_pause_state", False))
             and getattr(self.model, "rhythm_pause_state", None) is not None
@@ -185,6 +200,31 @@ class RhythmConanTaskMixin:
         if optimize_render_params and getattr(self.model, "rhythm_render_phase_gain", None) is not None:
             params.append(self.model.rhythm_render_phase_gain)
         return self._task_runtime_support().dedup_trainable_params(params)
+
+    @staticmethod
+    def _resolve_rhythm_v3_baseline_train_mode() -> str:
+        return str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
+
+    @classmethod
+    def _is_rhythm_v3_baseline_pretrain_mode(cls) -> bool:
+        return cls._resolve_rhythm_v3_baseline_train_mode() == "pretrain"
+
+    def _collect_rhythm_v3_baseline_only_params(self):
+        if self.model is None or not getattr(self.model, "rhythm_enable_v3", False):
+            return []
+        baseline_module = self._get_rhythm_v3_baseline_module()
+        if baseline_module is None:
+            return []
+        return self._task_runtime_support().dedup_trainable_params(list(baseline_module.parameters()))
+
+    @staticmethod
+    def _should_collect_rhythm_v3_baseline_params() -> bool:
+        baseline_mode = RhythmConanTaskMixin._resolve_rhythm_v3_baseline_train_mode()
+        if baseline_mode != "joint":
+            return False
+        if bool(hparams.get("rhythm_v3_freeze_baseline", False)):
+            return False
+        return True
 
     @staticmethod
     def _should_skip_rhythm_named_param(name: str) -> bool:

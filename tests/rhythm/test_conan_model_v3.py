@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
 import torch
 import torch.nn as nn
 
-from modules.Conan.Conan import Conan
+from modules.Conan.Conan import Conan, _resolve_content_vocab_size
 
 
 class _DummyV3Adapter:
@@ -142,16 +143,18 @@ def test_conan_forward_v3_infer_does_not_short_circuit_acoustic_path():
     assert output["acoustic_called"] == 1.0
 
 
-def test_conan_prepare_rhythm_reference_uses_v3_adapter_entrypoint():
+def test_conan_prepare_rhythm_reference_rejects_v3_proxy_path():
     model = _build_dummy_model()
-    model.rhythm_adapter = mock.Mock()
-    expected = object()
-    model.rhythm_adapter.prepare_reference_conditioning.return_value = expected
     ref = torch.randn(1, 6, 80)
     ref_lengths = torch.tensor([6], dtype=torch.long)
-    result = Conan.prepare_rhythm_reference(model, ref, ref_lengths=ref_lengths)
-    assert result is expected
-    model.rhythm_adapter.prepare_reference_conditioning.assert_called_once_with(
-        ref_mel=ref,
-        ref_lengths=ref_lengths,
-    )
+    with pytest.raises(RuntimeError, match="no longer supports mel-proxy reference preparation"):
+        Conan.prepare_rhythm_reference(model, ref, ref_lengths=ref_lengths)
+
+
+def test_resolve_content_vocab_size_does_not_fall_back_to_embedding_dim():
+    with pytest.raises(ValueError, match="Unable to resolve content vocabulary size"):
+        _resolve_content_vocab_size({"content_embedding_dim": 256})
+
+
+def test_resolve_content_vocab_size_accepts_explicit_unit_count_alias():
+    assert _resolve_content_vocab_size({"n_content_units": 321}) == 321

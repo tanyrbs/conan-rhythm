@@ -15,6 +15,7 @@ from .contracts import (
     move_reference_duration_memory,
     move_source_unit_batch,
 )
+from .hparam_aliases import resolve_progress_bins, resolve_progress_support_tau
 from .module import MixedEffectsDurationModule
 from .unit_frontend import DurationUnitFrontend
 
@@ -28,6 +29,7 @@ class ConanDurationAdapter(nn.Module):
     def __init__(self, hparams, hidden_size: int, *, vocab_size: int) -> None:
         super().__init__()
         self.hparams = hparams
+        self.baseline_train_mode = str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
         self.unit_frontend = DurationUnitFrontend(
             vocab_size=vocab_size,
             silent_token=hparams.get("silent_token", 57),
@@ -36,6 +38,7 @@ class ConanDurationAdapter(nn.Module):
             anchor_hidden_size=int(hparams.get("rhythm_anchor_hidden_size", 128)),
             anchor_min_frames=float(hparams.get("rhythm_anchor_min_frames", 1.0)),
             anchor_max_frames=float(hparams.get("rhythm_anchor_max_frames", 12.0)),
+            phrase_boundary_threshold=float(hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
         streaming_mode = str(hparams.get("rhythm_streaming_mode", "strict") or "strict")
         micro_lookahead_units = hparams.get("rhythm_micro_lookahead_units")
@@ -45,16 +48,22 @@ class ConanDurationAdapter(nn.Module):
             basis_rank=int(hparams.get("rhythm_response_rank", 12)),
             response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
             response_window_right=int(hparams.get("rhythm_response_window_right", 0)),
-            trace_bins=int(hparams.get("rhythm_trace_bins", 24)),
             streaming_mode=streaming_mode,
             micro_lookahead_units=(None if micro_lookahead_units is None else int(micro_lookahead_units)),
             ridge_lambda=float(hparams.get("rhythm_operator_ridge_lambda", 1.0)),
             global_shrink_tau=float(hparams.get("rhythm_global_shrink_tau", 8.0)),
-            coarse_support_tau=float(hparams.get("rhythm_coarse_support_tau", 8.0)),
-            coarse_bins=int(hparams.get("rhythm_coarse_bins", 4)),
+            coarse_support_tau=resolve_progress_support_tau(hparams, default=8.0),
+            coarse_bins=resolve_progress_bins(hparams, default=4),
             ridge_support_tau=float(hparams.get("rhythm_operator_support_tau", 8.0)),
             operator_holdout_ratio=float(hparams.get("rhythm_operator_holdout_ratio", 0.30)),
-            ablation_mode=str(hparams.get("rhythm_v3_ablation", "coarse_operator") or "coarse_operator"),
+            min_operator_support_factor=float(hparams.get("rhythm_operator_min_support_factor", 1.0)),
+            backbone_mode=hparams.get("rhythm_v3_backbone"),
+            warp_mode=hparams.get("rhythm_v3_warp_mode"),
+            allow_hybrid=(
+                None
+                if "rhythm_v3_allow_hybrid" not in hparams
+                else bool(hparams.get("rhythm_v3_allow_hybrid", False))
+            ),
             source_residual_gain=float(hparams.get("rhythm_v3_source_residual_gain", 0.0) or 0.0),
         )
         self.pause_state = nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
@@ -135,11 +144,19 @@ class ConanDurationAdapter(nn.Module):
             enriched["prompt_unit_anchor_base"] = ref_conditioning["prompt_unit_anchor_base"].to(device=device).detach()
         if isinstance(ref_conditioning.get("prompt_log_base"), torch.Tensor):
             enriched["prompt_log_base"] = ref_conditioning["prompt_log_base"].to(device=device).detach()
+        for key in (
+            "prompt_source_boundary_cue",
+            "prompt_phrase_group_pos",
+            "prompt_phrase_final_mask",
+        ):
+            if isinstance(ref_conditioning.get(key), torch.Tensor):
+                enriched[key] = ref_conditioning[key].to(device=device).float()
         if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
-            enriched["prompt_unit_anchor_base"] = self.unit_frontend.baseline(
+            enriched["prompt_unit_anchor_base"] = self.unit_frontend.compute_baseline(
                 prompt_content_units,
                 prompt_unit_mask,
-            ).detach()
+                stop_gradient=True,
+            )
         return enriched
 
     def _validate_training_reference_semantics(
@@ -151,11 +168,12 @@ class ConanDurationAdapter(nn.Module):
     ) -> None:
         if infer:
             return
+        if self.baseline_train_mode == "pretrain":
+            return
         if isinstance(ref_conditioning, ReferenceDurationMemory):
             raise ValueError(
                 "rhythm_v3 mainline training requires explicit prompt units "
-                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
-                "trace proxy should be inference-only."
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask)."
             )
         if isinstance(ref_conditioning, Mapping):
             nested = ref_conditioning.get("rhythm_ref_conditioning")
@@ -174,26 +192,13 @@ class ConanDurationAdapter(nn.Module):
                 return
             raise ValueError(
                 "rhythm_v3 mainline training requires explicit prompt units "
-                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
-                "trace proxy should be inference-only."
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask)."
             )
         if ref_conditioning is None and ref is not None:
             raise ValueError(
                 "rhythm_v3 mainline training requires explicit prompt units "
-                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
-                "trace proxy should be inference-only."
+                "(prompt_content_units / prompt_duration_obs / prompt_unit_mask)."
             )
-
-    def prepare_reference_conditioning(
-        self,
-        *,
-        ref_mel: torch.Tensor,
-        ref_lengths: torch.Tensor | None = None,
-    ) -> ReferenceDurationMemory:
-        return self.module.build_reference_conditioning(
-            ref_mel=ref_mel,
-            ref_lengths=ref_lengths,
-        )
 
     def _attach_runtime_outputs(
         self,
@@ -213,7 +218,11 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_ref_conditioning"] = ref_memory
         ret["speech_duration_exec"] = execution.speech_duration_exec
         ret["commit_frontier"] = execution.commit_frontier
-        ret["rhythm_v3_ablation_mode"] = self.module.ablation_mode
+        ret["rhythm_v3_runtime_mode"] = self.module.runtime_mode
+        ret["rhythm_v3_backbone_mode"] = self.module.backbone_mode
+        ret["rhythm_v3_warp_mode"] = self.module.warp_mode
+        ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
+        ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
@@ -242,7 +251,7 @@ class ConanDurationAdapter(nn.Module):
         speech_state_fn=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         del target, global_steps, rhythm_runtime_overrides, rhythm_offline_source_cache
-        if ref is None and rhythm_ref_conditioning is None:
+        if ref is None and rhythm_ref_conditioning is None and not (not infer and self.baseline_train_mode == "pretrain"):
             return content_embed, tgt_nonpadding, f0, uv
         if content_embed.device != content.device:
             raise ValueError(
@@ -265,14 +274,21 @@ class ConanDurationAdapter(nn.Module):
             ref_conditioning=rhythm_ref_conditioning,
             ref=ref,
         )
+        if ref is None and rhythm_ref_conditioning is None and not infer and self.baseline_train_mode == "pretrain":
+            rhythm_ref_conditioning = {
+                "global_rate": torch.zeros((content.size(0), 1), device=content.device, dtype=torch.float32),
+            }
         rhythm_ref_conditioning = self._prepare_prompt_unit_conditioning(
             ref_conditioning=rhythm_ref_conditioning,
             device=content.device,
         )
+        if ref is not None and rhythm_ref_conditioning is None:
+            raise ValueError(
+                "rhythm_v3 inference requires explicit prompt units. "
+                "Set rhythm_ref_conditioning with prompt_content_units/prompt_duration_obs/prompt_unit_mask."
+            )
         ref_memory = self.module.build_reference_conditioning(
             ref_conditioning=rhythm_ref_conditioning,
-            ref_mel=ref,
-            ref_lengths=ref_lengths,
         )
         ref_memory = move_reference_duration_memory(
             ref_memory,

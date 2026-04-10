@@ -12,6 +12,7 @@ _AUX_REPORTING_KEYS = {
     "rhythm_teacher_aux_loss": "lambda_rhythm_teacher_aux",
 }
 _V3_NATIVE_DIAGNOSTIC_KEYS = (
+    "rhythm_v3_base",
     "rhythm_v3_dur",
     "rhythm_v3_op",
     "rhythm_v3_zero",

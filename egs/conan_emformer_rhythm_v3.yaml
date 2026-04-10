@@ -5,9 +5,9 @@ binarization_args:
   with_rhythm_cache: true
 
 # Duration-only rhythm_v3 bootstrap.
-# This is a runnable starter config for the layered duration mainline
-# (baseline + global stretch + coarse warp + optional local operator),
-# not a teacher/export recipe like the audited v2 stack.
+# This is a runnable starter config for the mechanism-first duration mainline:
+# baseline + speech-only global stretch by default.
+# Progress/detector/operator layers are candidate mechanisms, not the default answer.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
@@ -20,20 +20,31 @@ rhythm_hidden_size: 256
 rhythm_anchor_hidden_size: 128
 rhythm_anchor_min_frames: 1.0
 rhythm_anchor_max_frames: 12.0
+# Maintained baseline contract: frozen table prior + strict causal local trunk only.
+# Slow structure, if used, lives outside baseline via progress/detector candidate layers.
+# Optional scaffold: set rhythm_v3_baseline_train_mode=pretrain and lambda_rhythm_base>0
+# to run baseline-only deglobalized pretraining before joint duration experiments.
+rhythm_v3_baseline_train_mode: joint
+rhythm_v3_freeze_baseline: false
+rhythm_v3_baseline_ckpt: null
+rhythm_baseline_table_prior_path: null
+rhythm_v3_baseline_target_mode: deglobalized
 
 rhythm_response_rank: 12
 rhythm_response_window_left: 4
 rhythm_response_window_right: 0
-rhythm_trace_bins: 24
-rhythm_coarse_bins: 4
+rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
-rhythm_v3_ablation: coarse_operator
+rhythm_v3_backbone: global_only
+rhythm_v3_warp_mode: none
+rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
 rhythm_operator_ridge_lambda: 1.0
 rhythm_global_shrink_tau: 8.0
-rhythm_coarse_support_tau: 8.0
+rhythm_progress_support_tau: 8.0
 rhythm_operator_support_tau: 8.0
 rhythm_operator_holdout_ratio: 0.30
+rhythm_operator_min_support_factor: 1.0
 
 rhythm_force_reference_conditioning: true
 rhythm_apply_mode: infer
@@ -45,10 +56,11 @@ rhythm_streaming_prefix_min_tokens: 8
 rhythm_streaming_prefix_multiple: 4
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_op: 0.25
+lambda_rhythm_op: 0.0
 lambda_rhythm_pref: 0.20
+lambda_rhythm_base: 0.0
 lambda_rhythm_cons: 0.0
-lambda_rhythm_zero: 0.05
+lambda_rhythm_zero: 0.0
 lambda_rhythm_ortho: 0.0
 
 # Keep v3 target building strict by default: do not silently fall back to

@@ -1,111 +1,172 @@
 # Rhythm Migration Plan (2026-04-10)
 
-This file is now the **concise current-mechanism note** for rhythm.
-Historical branch diaries, slot-memory narratives, phrase-pointer controller
-stories, and oversized v2 stage menus were intentionally removed.
+This file is now the **short current-mechanism note** for rhythm.
+Historical slot-memory, pointer/planner, and oversized v2 stage narratives were
+removed on purpose.
 
-## 1. Current mechanism mainline
+## 1. What the current branch actually is
 
-The current rhythm mechanism mainline is **`rhythm_v3`**:
+The maintained code mainline is **`rhythm_v3`**.
 
-> `log d_hat_i = b_i + g_ref + phi_i^T s_ref`
+The honest interpretation of current code is:
+
+> a **duration-only adjudication platform** built around a hard nominal baseline,
+> a speech-only global stretch, and three candidate residual layers:
+> progress warp, detector bank, and local operator.
+
+So the repository should currently be read as:
+
+- **single code mainline**: `rhythm_v3`
+- **single task scope**: speech-unit duration transfer
+- **single legacy bucket**: `rhythm_v2` compatibility/history
+- **not yet a single proved theorem** about shared local bases
+
+## 2. Current code-level decomposition
+
+The maintained execution form is:
+
+> `log d_hat_i = log b_i + g_ref + w_prog(i) + w_det(i) + 1_local * phi_i^T s_ref + 1_srcres * r_src(i)`
 
 with:
 
-- `b_i`: content-conditioned nominal duration baseline
+- `b_i`: nominal duration baseline
 - `g_ref`: speech-only prompt-global stretch
-- `phi_i`: shared causal basis activation
-- `s_ref`: prompt-conditioned operator coefficients
+- `w_prog(i)`: optional progress-indexed warp
+- `w_det(i)`: optional fixed detector-bank response
+- `phi_i^T s_ref`: optional prompt-conditioned local operator
+- `r_src(i)`: optional centered source-residual ablation
 
-This is a **neural mixed-effects / low-rank operator** formulation:
+This matters because the code has already moved beyond the older
+operator-only documentation. The current default example config is
+`global_only`; progress/detector/operator remain candidate residual layers.
 
-- **fixed effect**: content baseline
-- **random intercept**: prompt-global stretch
-- **random slopes**: prompt-conditioned operator over shared bases
+## 3. What is hard, and what is still candidate
 
-## 2. Five maintained parts only
+### Hard maintained invariants
 
-The maintained main path keeps only five necessary parts:
+These are now the real core:
 
-1. **content baseline `B`**
-2. **speech-only global stretch `g_ref`**
-3. **shared causal basis `F`**
-4. **prompt-conditioned operator `s_ref`**
-5. **deterministic projector**
+1. **baseline protocol**
+2. **speech-only global stretch**
+3. **deterministic projector**
+4. **speech-only supervision/reporting**
+5. **explicit prompt-unit training semantics**
 
-Everything else is secondary, diagnostic, ablation-only, or legacy.
+### Candidate residual layers
 
-## 3. What was explicitly removed from the main story
+These remain under adjudication:
 
-The current docs no longer treat these as the core mechanism:
+- **progress warp**
+- **detector bank**
+- **shared-basis local operator**
+- **centered source residual**
 
-- slot memory
-- role codebooks
-- static prompt memory queried at runtime
-- posterior precision as an inference-time control path
-- runtime retrieval weights as the central explanation
-- source residual as a required core variable
-- boundary controller / pause controller as main duration writers
-- reference timeline / pointer traversal as the duration-conditioning story
+So the repository should no longer be described as
+"the shared-basis operator mechanism" without qualification.
 
-If any of these still exist in legacy code or archives, read them as
-compatibility-era surfaces, not as the current mainline claim.
+The preferred runtime control surface is now:
 
-## 4. Scope of the current claim
+- `rhythm_v3_backbone: global_only | operator`
+- `rhythm_v3_warp_mode: none | progress | detector`
+- `rhythm_v3_allow_hybrid: false | true`
 
-The maintained v3 claim is intentionally narrow:
+## 4. Current baseline protocol
+
+Baseline is no longer just a small anchor network. In current code it is a
+protocol object in:
+
+- `modules/Conan/rhythm_v3/unit_frontend.py`
+
+It contains:
+
+1. **optional frozen table prior**
+2. **strict causal local trunk**
+
+Any slow / segment-scale structure is adjudicated outside the baseline,
+through explicit progress/detector candidate layers rather than inside the nominal baseline.
+
+Do not mix old precomputed anchor/log-base artifacts with the current baseline
+contract. Progress-warp sampling is baseline-referenced, so stale baseline caches
+will cause calibration drift even if the runtime interfaces still match.
+
+Preferred progress-warp config names:
+
+- `rhythm_progress_bins`
+- `rhythm_progress_support_tau`
+
+Legacy `rhythm_coarse_bins` / `rhythm_coarse_support_tau` remain as
+compatibility aliases only.
+
+Current lifecycle/config surface:
+
+- `rhythm_v3_baseline_train_mode: joint | frozen | pretrain`
+- `rhythm_v3_freeze_baseline`
+- `rhythm_v3_baseline_ckpt`
+- `rhythm_baseline_table_prior_path`
+- `rhythm_v3_baseline_target_mode: raw | deglobalized`
+- `lambda_rhythm_base`
+
+This is still a **scaffold**, not a completed alternating protocol. The branch
+can now run a baseline-only pretrain stage with deglobalized targets, but it
+does not yet claim the full baseline-0 -> deglobalized baseline-1 -> residual
+audit schedule is finished. Prompt conditioning is not required in this
+baseline-only pretrain mode.
+
+### Baseline separation rule
+
+The branch now enforces a stricter reading:
+
+- operator-side prompt/source baseline features are detached
+- stream-side prefix/consistency supervision rebuilds durations from
+  `sg(unit_anchor_base) * exp(unit_logstretch)`
+- baseline is not allowed to absorb prompt-style transfer through the operator path
+
+## 5. Current public claim boundary
+
+The maintained claim is intentionally narrow:
 
 - **speech-unit duration transfer**
 - **causal / sealed-unit prediction**
-- **prompt-conditioned local duration response**
+- **prompt-conditioned duration adaptation**
 
-The mainline does **not** claim full rhythm/prosody transfer.
-Separator / pause duration is outside the core mechanism and should not be used
-to redefine the mainline story.
+The branch does **not** currently claim:
 
-## 5. Current implementation invariants
+- full rhythm/prosody transfer
+- pause/boundary as the main mechanism
+- runtime pointer traversal as the explanation
+- shared basis as already proven necessary
 
-The current repo implementation commits to the following:
+## 6. Current training semantics
 
-### 5.1 Prompt evidence and training semantics
+### Prompt evidence
 
-- mainline training requires explicit prompt-unit conditioning:
-  - `prompt_content_units`
-  - `prompt_duration_obs`
-  - `prompt_unit_mask`
-- trace/proxy-only conditioning is fallback/inference-side only
-- `ReferenceDurationMemory` should be read as a **prompt summary / operator
-  evidence pack**, not as slot memory
+Mainline training requires:
 
-### 5.2 Baseline separation
+- `prompt_content_units`
+- `prompt_duration_obs`
+- `prompt_unit_mask`
 
-- baseline is content-only
-- operator-side prompt/source baseline features are detached
-- baseline is not allowed to absorb prompt-style transfer through the operator path
+Trace/proxy-only conditioning is removed from the v3 path.
+Inference must pass explicit prompt units (or prebuilt duration memory).
 
-### 5.3 Global/local factorization
+### Supervision
 
-- `g_ref` is estimated from **speech-only** prompt units
-- local response is represented through shared causal bases plus prompt operator coefficients
-- separator units do not define the main duration mechanism
+- v3 main supervision is speech-only
+- separator units are excluded from duration/prefix supervision and reporting
+- holdout prompt self-fit is a diagnostic/probe surface
 
-### 5.4 Supervision/reporting
-
-- v3 main supervision is **speech-only**
-- separator units are excluded from duration/prefix supervision and v3 speech-side metrics
-- holdout operator self-fit is the maintained prompt diagnostic
-
-### 5.5 Consistency semantics
+### Consistency
 
 - `lambda_rhythm_cons` defaults to `0.0`
-- current consistency is diagnostic-only, not a mainline mechanism claim
-- a stronger consistency loss should only be revived after raw short/long prefix
-  views are compared before freeze/projector
+- current consistency is diagnostic-only
+- it should not be elevated again until raw short/long prefix views are compared
+  before freeze/projector
 
-## 6. Current public v3 surface
+## 7. Current compact v3 public surface
 
-The compact public surface is the one in
-`egs/conan_emformer_rhythm_v3.yaml`.
+The compact committed surface is the one in:
+
+- `egs/conan_emformer_rhythm_v3.yaml`
 
 ### Inputs
 
@@ -131,10 +192,10 @@ The compact public surface is the one in
 - `rhythm_v3_pref`
 - `rhythm_v3_zero`
 
-Optional/internal diagnostics such as consistency or orthogonality should not
-be mistaken for the compact public contract.
+Diagnostics like `rhythm_v3_cons` and `rhythm_v3_ortho` may still exist in
+code/tests, but they are not the compact example contract.
 
-## 7. File map for the current story
+## 8. File map for the current story
 
 ### Runtime
 
@@ -142,6 +203,7 @@ be mistaken for the compact public contract.
 - `modules/Conan/rhythm_v3/module.py`
 - `modules/Conan/rhythm_v3/reference_memory.py`
 - `modules/Conan/rhythm_v3/projector.py`
+- `modules/Conan/rhythm_v3/unit_frontend.py`
 
 ### Training surfaces
 
@@ -149,29 +211,56 @@ be mistaken for the compact public contract.
 - `tasks/Conan/rhythm/losses.py`
 - `tasks/Conan/rhythm/metrics.py`
 - `tasks/Conan/rhythm/task_config.py`
-- `tasks/Conan/rhythm/task_runtime_support.py`
+- `tasks/Conan/rhythm/task_mixin.py`
 
-## 8. Legacy status of v2
+### Inference/runtime utilities
 
-`modules/Conan/rhythm/` and the associated teacher/planner/pointer-era docs
-remain in the repository for:
+- `inference/Conan.py`
+- `inference/run_voice_conversion.py`
+- `inference/run_streaming_latency_report.py`
+
+## 9. Readiness reading
+
+### Ready enough for
+
+- one-branch `rhythm_v3` code maintenance
+- local mechanism ablations
+- baseline/global/progress/detector/operator comparative experiments
+- focused streaming-oriented evaluation
+
+### Not ready to over-claim
+
+The project is **not yet ready** to claim that:
+
+- local operator/shared basis is already the final mechanism
+- progress warp or detector bank is unnecessary
+- baseline pretraining/de-style protocol is finished as a standalone stage
+- inference is fully stateful end-to-end streaming deployment
+
+## 10. Legacy status of v2
+
+`modules/Conan/rhythm/` and older v2 teacher/planner/export docs remain only
+for:
 
 - old checkpoints
 - compatibility
 - teacher/export history
 - archival experiments
 
-They should not be read as the current mechanism mainline.
+They are not the authoritative mechanism description for the current branch.
 
-## 9. Documentation policy from now on
+## 11. Documentation rule
 
-When docs disagree, prefer the smallest current v3 surface:
+When docs disagree, prefer the smallest truthful current reading:
 
-- operator, not slot memory
-- speech-unit duration transfer, not full prosody control
-- explicit prompt-unit training semantics
-- speech-only supervision
-- deterministic projector
+- `rhythm_v3` is the only maintained code mainline
+- baseline/global are hard requirements
+- progress/detector/local are candidate residual layers under adjudication
+- speech-unit duration transfer is the scope
+- deterministic projector is part of the execution contract
 
-Older v2 boundary/planner/phrase-bank descriptions may remain in archival docs,
-but they are not authoritative for the current mainline.
+Authoritative current docs:
+
+- `README.md`
+- `docs/rhythm_migration_plan.md`
+- `inference/README.md`

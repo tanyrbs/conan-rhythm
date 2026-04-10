@@ -37,11 +37,14 @@ DEFAULT_MAX_TARGET_POSITIONS = 2000
 
 
 def _resolve_content_vocab_size(hparams) -> int:
-    for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "content_embedding_dim"):
+    for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "n_content_units"):
         value = hparams.get(key, None)
         if value is not None:
             return int(value)
-    return 102
+    raise ValueError(
+        "Unable to resolve content vocabulary size. Set one of: "
+        "content_vocab_size, content_num_units, content_num_embeddings, n_content_units."
+    )
 
 
 def _require_flow_mel():
@@ -357,16 +360,10 @@ class Conan(ConanPitchMixin, FastSpeech):
     ):
         if not getattr(self, "rhythm_enabled", False):
             return None
-        adapter = getattr(self, "rhythm_adapter", None)
-        if adapter is not None and hasattr(adapter, "prepare_reference_conditioning"):
-            return adapter.prepare_reference_conditioning(
-                ref_mel=ref_mel,
-                ref_lengths=ref_lengths,
-            )
         if getattr(self, "rhythm_enable_v3", False):
-            return self.rhythm_module.build_reference_conditioning(
-                ref_mel=ref_mel,
-                ref_lengths=ref_lengths,
+            raise RuntimeError(
+                "rhythm_v3 no longer supports mel-proxy reference preparation. "
+                "Extract explicit prompt units and pass rhythm_ref_conditioning instead."
             )
         return self.rhythm_module.build_reference_conditioning(ref_mel=ref_mel)
 

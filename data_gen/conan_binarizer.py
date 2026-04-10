@@ -692,7 +692,11 @@ class ConanBinarizer(VCBinarizer):
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
         item['hubert'] = content = np.asarray(content[:min_length], dtype=np.int32)
         item['len'] = min_length
-        if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+        with_rhythm_cache = binarization_args.get(
+            'with_rhythm_cache',
+            bool(hparams.get('rhythm_enable_v2', False) or hparams.get('rhythm_enable_v3', False)),
+        )
+        if with_rhythm_cache:
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
             teacher_bundle_override = _resolve_teacher_bundle_override(item, prefix=prefix) if need_teacher_bundle else None
             item.update(
@@ -791,7 +795,11 @@ class EmformerBinarizer(VCBinarizer):
         item['wav'] = wav = wav[:min_length * hparams['hop_size']]
         item['hubert'] = content = np.asarray(content[:min_length], dtype=np.int32)
         item['len'] = min_length
-        if binarization_args.get('with_rhythm_cache', hparams.get('rhythm_enable_v2', False)):
+        with_rhythm_cache = binarization_args.get(
+            'with_rhythm_cache',
+            bool(hparams.get('rhythm_enable_v2', False) or hparams.get('rhythm_enable_v3', False)),
+        )
+        if with_rhythm_cache:
             need_teacher_bundle = bool(hparams.get('rhythm_binarize_teacher_targets', False)) or str(hparams.get('rhythm_binarize_retimed_mel_source', 'guidance') or 'guidance').strip().lower() == 'teacher'
             teacher_bundle_override = _resolve_teacher_bundle_override(item, prefix=prefix) if need_teacher_bundle else None
             item.update(

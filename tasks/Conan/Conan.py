@@ -39,6 +39,14 @@ class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
 
     def build_tts_model(self):
         self.model = Conan(0, hparams)
+        self._configure_rhythm_v3_baseline()
+        if self._is_rhythm_v3_baseline_pretrain_mode() and getattr(self.model, "rhythm_enable_v3", False):
+            baseline_params = self._collect_rhythm_v3_baseline_only_params()
+            self.gen_params = self._freeze_to_trainable_params(
+                baseline_params,
+                stage_name="duration_v3_baseline_pretrain",
+            )
+            return
         stage = detect_rhythm_stage(hparams)
         teacher_only_stage = stage == "teacher_offline" and not getattr(self.model, "rhythm_enable_v3", False)
         if teacher_only_stage:
@@ -55,6 +63,25 @@ class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
             )
         else:
             self.gen_params = [p for p in self.model.parameters() if p.requires_grad]
+
+    def _configure_rhythm_v3_baseline(self) -> None:
+        if self.model is None or not getattr(self.model, "rhythm_enable_v3", False):
+            return
+        frontend = getattr(self.model, "rhythm_unit_frontend", None)
+        if frontend is None:
+            return
+        table_prior_path = hparams.get("rhythm_baseline_table_prior_path")
+        if table_prior_path:
+            frontend.load_table_prior_file(table_prior_path)
+        baseline_ckpt = hparams.get("rhythm_v3_baseline_ckpt")
+        if baseline_ckpt:
+            frontend.load_baseline_checkpoint(baseline_ckpt, strict=True)
+        baseline_mode = self._resolve_rhythm_v3_baseline_train_mode()
+        freeze_baseline = bool(hparams.get("rhythm_v3_freeze_baseline", False))
+        if freeze_baseline or baseline_mode == "frozen":
+            frontend.freeze_baseline()
+            return
+        frontend.unfreeze_baseline()
 
     def _freeze_to_trainable_params(self, params, *, stage_name: str):
         if len(params) <= 0:

@@ -18,6 +18,10 @@ class SourceUnitBatch:
     unit_mask: torch.Tensor
     sealed_mask: torch.Tensor
     sep_mask: torch.Tensor
+    source_boundary_cue: Optional[torch.Tensor] = None
+    phrase_group_index: Optional[torch.Tensor] = None
+    phrase_group_pos: Optional[torch.Tensor] = None
+    phrase_final_mask: Optional[torch.Tensor] = None
 
 
 DURATION_V3_SOURCE_CACHE_REQUIRED_KEYS = (
@@ -30,6 +34,10 @@ DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS = (
     "sealed_mask",
     "sep_mask",
     "unit_anchor_base",
+    "source_boundary_cue",
+    "phrase_group_index",
+    "phrase_group_pos",
+    "phrase_final_mask",
 )
 
 DURATION_V3_SOURCE_CACHE_KEYS = (
@@ -66,8 +74,13 @@ class StructuredDurationOperatorMemory:
 
 
 @dataclass
-class StructuredCoarseDurationMemory:
-    coarse_profile: torch.Tensor
+class StructuredProgressDurationMemory:
+    progress_profile: torch.Tensor
+
+
+@dataclass
+class StructuredDetectorDurationMemory:
+    detector_coeff: torch.Tensor
 
 
 @dataclass
@@ -82,14 +95,22 @@ class PromptConditioningEvidence:
     prompt_log_base: Optional[torch.Tensor] = None
     prompt_log_duration: Optional[torch.Tensor] = None
     prompt_log_residual: Optional[torch.Tensor] = None
-    prompt_coarse_fit: Optional[torch.Tensor] = None
-
+    prompt_progress_fit: Optional[torch.Tensor] = None
+    prompt_operator_support: Optional[torch.Tensor] = None
+    prompt_operator_condition_number: Optional[torch.Tensor] = None
+    prompt_short_fallback: Optional[torch.Tensor] = None
+    prompt_operator_coeff_norm: Optional[torch.Tensor] = None
+    prompt_detector_fit: Optional[torch.Tensor] = None
+    prompt_detector_support: Optional[torch.Tensor] = None
+    prompt_detector_condition_number: Optional[torch.Tensor] = None
+    prompt_detector_coeff_norm: Optional[torch.Tensor] = None
 
 @dataclass
 class ReferenceDurationMemory:
     global_rate: torch.Tensor
     operator: StructuredDurationOperatorMemory
-    coarse: StructuredCoarseDurationMemory | None = None
+    progress: StructuredProgressDurationMemory | None = None
+    detector: StructuredDetectorDurationMemory | None = None
     prompt: Optional[PromptConditioningEvidence] = None
 
     @property
@@ -101,8 +122,12 @@ class ReferenceDurationMemory:
         return self.operator.operator_coeff
 
     @property
-    def coarse_profile(self) -> Optional[torch.Tensor]:
-        return None if self.coarse is None else self.coarse.coarse_profile
+    def progress_profile(self) -> Optional[torch.Tensor]:
+        return None if self.progress is None else self.progress.progress_profile
+
+    @property
+    def detector_coeff(self) -> Optional[torch.Tensor]:
+        return None if self.detector is None else self.detector.detector_coeff
 
     @property
     def prompt_basis_activation(self) -> Optional[torch.Tensor]:
@@ -145,8 +170,40 @@ class ReferenceDurationMemory:
         return None if self.prompt is None else self.prompt.prompt_log_residual
 
     @property
-    def prompt_coarse_fit(self) -> Optional[torch.Tensor]:
-        return None if self.prompt is None else self.prompt.prompt_coarse_fit
+    def prompt_progress_fit(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_progress_fit
+
+    @property
+    def prompt_operator_support(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_operator_support
+
+    @property
+    def prompt_operator_condition_number(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_operator_condition_number
+
+    @property
+    def prompt_short_fallback(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_short_fallback
+
+    @property
+    def prompt_operator_coeff_norm(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_operator_coeff_norm
+
+    @property
+    def prompt_detector_fit(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_detector_fit
+
+    @property
+    def prompt_detector_support(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_detector_support
+
+    @property
+    def prompt_detector_condition_number(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_detector_condition_number
+
+    @property
+    def prompt_detector_coeff_norm(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_detector_coeff_norm
 
 
 @dataclass
@@ -175,8 +232,11 @@ class DurationExecution:
     basis_activation: torch.Tensor
     commit_mask: torch.Tensor
     next_state: DurationRuntimeState
-    coarse_response: Optional[torch.Tensor] = None
+    progress_response: Optional[torch.Tensor] = None
+    detector_response: Optional[torch.Tensor] = None
     local_response: Optional[torch.Tensor] = None
+    unit_logstretch_raw: Optional[torch.Tensor] = None
+    unit_duration_raw: Optional[torch.Tensor] = None
     frame_plan: Optional["RhythmFramePlan"] = None
 
     @property
@@ -230,6 +290,10 @@ def move_source_unit_batch(
             batch.unit_mask,
             batch.sealed_mask,
             batch.sep_mask,
+            batch.source_boundary_cue,
+            batch.phrase_group_index,
+            batch.phrase_group_pos,
+            batch.phrase_final_mask,
         )
     ):
         return batch
@@ -240,6 +304,10 @@ def move_source_unit_batch(
         unit_mask=_move_tensor(batch.unit_mask, device=device),
         sealed_mask=_move_tensor(batch.sealed_mask, device=device),
         sep_mask=_move_tensor(batch.sep_mask, device=device),
+        source_boundary_cue=_move_tensor(batch.source_boundary_cue, device=device),
+        phrase_group_index=_move_tensor(batch.phrase_group_index, device=device),
+        phrase_group_pos=_move_tensor(batch.phrase_group_pos, device=device),
+        phrase_final_mask=_move_tensor(batch.phrase_final_mask, device=device),
     )
 
 
@@ -254,16 +322,29 @@ def move_structured_duration_operator_memory(
     )
 
 
-def move_structured_coarse_duration_memory(
-    coarse: StructuredCoarseDurationMemory | None,
+def move_structured_progress_duration_memory(
+    progress: StructuredProgressDurationMemory | None,
     *,
     device: torch.device,
     dtype: torch.dtype | None = None,
-) -> StructuredCoarseDurationMemory | None:
-    if coarse is None:
+) -> StructuredProgressDurationMemory | None:
+    if progress is None:
         return None
-    return StructuredCoarseDurationMemory(
-        coarse_profile=_move_tensor(coarse.coarse_profile, device=device, dtype=dtype),
+    return StructuredProgressDurationMemory(
+        progress_profile=_move_tensor(progress.progress_profile, device=device, dtype=dtype),
+    )
+
+
+def move_structured_detector_duration_memory(
+    detector: StructuredDetectorDurationMemory | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> StructuredDetectorDurationMemory | None:
+    if detector is None:
+        return None
+    return StructuredDetectorDurationMemory(
+        detector_coeff=_move_tensor(detector.detector_coeff, device=device, dtype=dtype),
     )
 
 
@@ -286,7 +367,15 @@ def move_prompt_conditioning_evidence(
         prompt_log_base=_move_tensor(prompt.prompt_log_base, device=device, dtype=dtype),
         prompt_log_duration=_move_tensor(prompt.prompt_log_duration, device=device, dtype=dtype),
         prompt_log_residual=_move_tensor(prompt.prompt_log_residual, device=device, dtype=dtype),
-        prompt_coarse_fit=_move_tensor(prompt.prompt_coarse_fit, device=device, dtype=dtype),
+        prompt_progress_fit=_move_tensor(prompt.prompt_progress_fit, device=device, dtype=dtype),
+        prompt_operator_support=_move_tensor(prompt.prompt_operator_support, device=device, dtype=dtype),
+        prompt_operator_condition_number=_move_tensor(prompt.prompt_operator_condition_number, device=device, dtype=dtype),
+        prompt_short_fallback=_move_tensor(prompt.prompt_short_fallback, device=device, dtype=dtype),
+        prompt_operator_coeff_norm=_move_tensor(prompt.prompt_operator_coeff_norm, device=device, dtype=dtype),
+        prompt_detector_fit=_move_tensor(prompt.prompt_detector_fit, device=device, dtype=dtype),
+        prompt_detector_support=_move_tensor(prompt.prompt_detector_support, device=device, dtype=dtype),
+        prompt_detector_condition_number=_move_tensor(prompt.prompt_detector_condition_number, device=device, dtype=dtype),
+        prompt_detector_coeff_norm=_move_tensor(prompt.prompt_detector_coeff_norm, device=device, dtype=dtype),
     )
 
 
@@ -302,7 +391,8 @@ def move_reference_duration_memory(
         for value in (
             memory.global_rate,
             memory.operator_coeff,
-            memory.coarse_profile,
+            memory.progress_profile,
+            memory.detector_coeff,
             memory.prompt_basis_activation,
             memory.prompt_random_target,
             memory.prompt_mask,
@@ -313,14 +403,23 @@ def move_reference_duration_memory(
             memory.prompt_log_base,
             memory.prompt_log_duration,
             memory.prompt_log_residual,
-            memory.prompt_coarse_fit,
+            memory.prompt_progress_fit,
+            memory.prompt.prompt_operator_support if memory.prompt is not None else None,
+            memory.prompt.prompt_operator_condition_number if memory.prompt is not None else None,
+            memory.prompt.prompt_short_fallback if memory.prompt is not None else None,
+            memory.prompt.prompt_operator_coeff_norm if memory.prompt is not None else None,
+            memory.prompt.prompt_detector_fit if memory.prompt is not None else None,
+            memory.prompt.prompt_detector_support if memory.prompt is not None else None,
+            memory.prompt.prompt_detector_condition_number if memory.prompt is not None else None,
+            memory.prompt.prompt_detector_coeff_norm if memory.prompt is not None else None,
         )
     ):
         return memory
     return ReferenceDurationMemory(
         global_rate=_move_tensor(memory.global_rate, device=device, dtype=dtype),
         operator=move_structured_duration_operator_memory(memory.operator, device=device, dtype=dtype),
-        coarse=move_structured_coarse_duration_memory(memory.coarse, device=device, dtype=dtype),
+        progress=move_structured_progress_duration_memory(memory.progress, device=device, dtype=dtype),
+        detector=move_structured_detector_duration_memory(memory.detector, device=device, dtype=dtype),
         prompt=move_prompt_conditioning_evidence(memory.prompt, device=device, dtype=dtype),
     )
 
@@ -344,25 +443,46 @@ def validate_structured_duration_operator_memory(
     return operator
 
 
-def validate_structured_coarse_duration_memory(
-    coarse: StructuredCoarseDurationMemory | None,
+def validate_structured_progress_duration_memory(
+    progress: StructuredProgressDurationMemory | None,
     *,
     batch_size: int,
-) -> StructuredCoarseDurationMemory | None:
-    if coarse is None:
+) -> StructuredProgressDurationMemory | None:
+    if progress is None:
         return None
-    profile = coarse.coarse_profile
+    profile = progress.progress_profile
     if not isinstance(profile, torch.Tensor) or profile.dim() != 2:
         raise ValueError(
-            "StructuredCoarseDurationMemory.coarse_profile must have shape [B, M], "
+            "StructuredProgressDurationMemory.progress_profile must have shape [B, M], "
             f"got {getattr(profile, 'shape', None)}"
         )
     if profile.size(0) != batch_size:
         raise ValueError(
-            "StructuredCoarseDurationMemory.coarse_profile batch mismatch: "
+            "StructuredProgressDurationMemory.progress_profile batch mismatch: "
             f"expected {batch_size}, got {tuple(profile.shape)}"
         )
-    return coarse
+    return progress
+
+
+def validate_structured_detector_duration_memory(
+    detector: StructuredDetectorDurationMemory | None,
+    *,
+    batch_size: int,
+) -> StructuredDetectorDurationMemory | None:
+    if detector is None:
+        return None
+    coeff = detector.detector_coeff
+    if not isinstance(coeff, torch.Tensor) or coeff.dim() != 2:
+        raise ValueError(
+            "StructuredDetectorDurationMemory.detector_coeff must have shape [B, D], "
+            f"got {getattr(coeff, 'shape', None)}"
+        )
+    if coeff.size(0) != batch_size:
+        raise ValueError(
+            "StructuredDetectorDurationMemory.detector_coeff batch mismatch: "
+            f"expected {batch_size}, got {tuple(coeff.shape)}"
+        )
+    return detector
 
 
 def validate_prompt_conditioning_evidence(
@@ -398,7 +518,15 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_log_base", prompt.prompt_log_base, dims=2)
     _check_batch("prompt_log_duration", prompt.prompt_log_duration, dims=2)
     _check_batch("prompt_log_residual", prompt.prompt_log_residual, dims=2)
-    _check_batch("prompt_coarse_fit", prompt.prompt_coarse_fit, dims=2)
+    _check_batch("prompt_progress_fit", prompt.prompt_progress_fit, dims=2)
+    _check_batch("prompt_operator_support", prompt.prompt_operator_support, dims=2)
+    _check_batch("prompt_operator_condition_number", prompt.prompt_operator_condition_number, dims=2)
+    _check_batch("prompt_short_fallback", prompt.prompt_short_fallback, dims=2)
+    _check_batch("prompt_operator_coeff_norm", prompt.prompt_operator_coeff_norm, dims=2)
+    _check_batch("prompt_detector_fit", prompt.prompt_detector_fit, dims=2)
+    _check_batch("prompt_detector_support", prompt.prompt_detector_support, dims=2)
+    _check_batch("prompt_detector_condition_number", prompt.prompt_detector_condition_number, dims=2)
+    _check_batch("prompt_detector_coeff_norm", prompt.prompt_detector_coeff_norm, dims=2)
 
     if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
         raise ValueError(
@@ -449,9 +577,10 @@ def validate_prompt_conditioning_evidence(
         ("prompt_log_base", prompt.prompt_log_base),
         ("prompt_log_duration", prompt.prompt_log_duration),
         ("prompt_log_residual", prompt.prompt_log_residual),
-        ("prompt_coarse_fit", prompt.prompt_coarse_fit),
+        ("prompt_progress_fit", prompt.prompt_progress_fit),
         ("prompt_operator_fit", prompt.prompt_operator_fit),
         ("prompt_operator_cv_fit", prompt.prompt_operator_cv_fit),
+        ("prompt_detector_fit", prompt.prompt_detector_fit),
         ("prompt_random_target", prompt.prompt_random_target),
     ):
         if value is not None and prompt.prompt_mask is not None:
@@ -460,6 +589,19 @@ def validate_prompt_conditioning_evidence(
                     f"PromptConditioningEvidence.{name}/prompt_mask shape mismatch: "
                     f"{tuple(value.shape)} vs {tuple(prompt.prompt_mask.shape)}"
                 )
+    for name, value in (
+        ("prompt_operator_support", prompt.prompt_operator_support),
+        ("prompt_operator_condition_number", prompt.prompt_operator_condition_number),
+        ("prompt_short_fallback", prompt.prompt_short_fallback),
+        ("prompt_operator_coeff_norm", prompt.prompt_operator_coeff_norm),
+        ("prompt_detector_support", prompt.prompt_detector_support),
+        ("prompt_detector_condition_number", prompt.prompt_detector_condition_number),
+        ("prompt_detector_coeff_norm", prompt.prompt_detector_coeff_norm),
+    ):
+        if value is not None and value.size(1) != 1:
+            raise ValueError(
+                f"PromptConditioningEvidence.{name} must have shape [B, 1], got {tuple(value.shape)}"
+            )
     return prompt
 
 
@@ -472,7 +614,8 @@ def validate_reference_duration_memory(
         )
     batch_size = int(memory.global_rate.size(0))
     validate_structured_duration_operator_memory(memory.operator, batch_size=batch_size)
-    validate_structured_coarse_duration_memory(memory.coarse, batch_size=batch_size)
+    validate_structured_progress_duration_memory(memory.progress, batch_size=batch_size)
+    validate_structured_detector_duration_memory(memory.detector, batch_size=batch_size)
     validate_prompt_conditioning_evidence(
         memory.prompt,
         batch_size=batch_size,
@@ -507,11 +650,18 @@ def ensure_reference_duration_memory_batch(
         operator=StructuredDurationOperatorMemory(
             operator_coeff=_expand(memory.operator_coeff),
         ),
-        coarse=(
+        progress=(
             None
-            if memory.coarse is None
-            else StructuredCoarseDurationMemory(
-                coarse_profile=_expand(memory.coarse_profile),
+            if memory.progress is None
+            else StructuredProgressDurationMemory(
+                progress_profile=_expand(memory.progress_profile),
+            )
+        ),
+        detector=(
+            None
+            if memory.detector is None
+            else StructuredDetectorDurationMemory(
+                detector_coeff=_expand(memory.detector_coeff),
             )
         ),
         prompt=(
@@ -528,7 +678,15 @@ def ensure_reference_duration_memory_batch(
                 prompt_log_base=_expand(memory.prompt_log_base),
                 prompt_log_duration=_expand(memory.prompt_log_duration),
                 prompt_log_residual=_expand(memory.prompt_log_residual),
-                prompt_coarse_fit=_expand(memory.prompt_coarse_fit),
+                prompt_progress_fit=_expand(memory.prompt_progress_fit),
+                prompt_operator_support=_expand(memory.prompt.prompt_operator_support),
+                prompt_operator_condition_number=_expand(memory.prompt.prompt_operator_condition_number),
+                prompt_short_fallback=_expand(memory.prompt.prompt_short_fallback),
+                prompt_operator_coeff_norm=_expand(memory.prompt.prompt_operator_coeff_norm),
+                prompt_detector_fit=_expand(memory.prompt.prompt_detector_fit),
+                prompt_detector_support=_expand(memory.prompt.prompt_detector_support),
+                prompt_detector_condition_number=_expand(memory.prompt.prompt_detector_condition_number),
+                prompt_detector_coeff_norm=_expand(memory.prompt.prompt_detector_coeff_norm),
             )
         ),
     )

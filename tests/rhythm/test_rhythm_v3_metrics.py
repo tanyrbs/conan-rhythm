@@ -22,6 +22,9 @@ def _build_hparams():
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_max_logstretch": 0.8,
         "rhythm_streaming_mode": "strict",
+        "rhythm_v3_backbone": "operator",
+        "rhythm_v3_warp_mode": "progress",
+        "rhythm_v3_allow_hybrid": True,
         "rhythm_apply_mode": "always",
     }
 
@@ -44,7 +47,11 @@ def _run_adapter():
         tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
         content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
         rhythm_state=None,
-        rhythm_ref_conditioning=None,
+        rhythm_ref_conditioning={
+            "prompt_content_units": torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.long),
+            "prompt_duration_obs": torch.full((1, 6), 3.0, dtype=torch.float32),
+            "prompt_unit_mask": torch.ones((1, 6), dtype=torch.float32),
+        },
         rhythm_apply_override=None,
         rhythm_runtime_overrides=None,
         rhythm_source_cache=None,
@@ -52,6 +59,7 @@ def _run_adapter():
         speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
     )
     ret["rhythm_v3_dur"] = torch.tensor(0.1)
+    ret["rhythm_v3_base"] = torch.tensor(0.05)
     ret["rhythm_v3_op"] = torch.tensor(0.2)
     ret["rhythm_v3_zero"] = torch.tensor(0.25)
     ret["rhythm_v3_ortho"] = torch.tensor(0.28)
@@ -83,10 +91,16 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_frame_plan_present",
         "rhythm_metric_global_rate_mean",
         "rhythm_metric_global_stretch_mean",
+        "rhythm_metric_progress_response_abs_mean",
         "rhythm_metric_coarse_response_abs_mean",
+        "rhythm_metric_progress_profile_abs_mean",
         "rhythm_metric_coarse_profile_abs_mean",
         "rhythm_metric_local_response_abs_mean",
         "rhythm_metric_operator_coeff_abs_mean",
+        "rhythm_metric_operator_support_mean",
+        "rhythm_metric_short_prompt_fallback_rate",
+        "rhythm_metric_operator_coeff_norm_mean",
+        "rhythm_metric_operator_condition_number_mean",
         "rhythm_metric_source_residual_gain",
         "rhythm_metric_commit_frontier_mean",
         "rhythm_metric_rounding_residual_mean",
@@ -94,6 +108,7 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_exec_speech_l1",
         "rhythm_metric_prefix_drift_l1",
         "rhythm_metric_rhythm_total",
+        "rhythm_metric_rhythm_v3_base",
         "rhythm_metric_rhythm_v3_dur",
         "rhythm_metric_rhythm_v3_op",
         "rhythm_metric_rhythm_v3_zero",
@@ -158,14 +173,17 @@ def test_rhythm_v3_global_only_metrics_report_zero_local_response():
         sample={"unit_duration_tgt": output["speech_duration_exec"].detach()},
     )
     assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
+    assert torch.allclose(metrics["rhythm_metric_progress_response_abs_mean"], torch.tensor(0.0))
     assert torch.allclose(metrics["rhythm_metric_coarse_response_abs_mean"], torch.tensor(0.0))
 
 
-def test_rhythm_v3_coarse_only_metrics_keep_local_response_zero():
+def test_rhythm_v3_progress_only_metrics_keep_local_response_zero():
     adapter = ConanDurationAdapter(
         {
             **_build_hparams(),
-            "rhythm_v3_ablation": "coarse_only",
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "progress",
+            "rhythm_v3_allow_hybrid": False,
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
@@ -190,7 +208,7 @@ def test_rhythm_v3_coarse_only_metrics_keep_local_response_zero():
         rhythm_state=None,
         rhythm_ref_conditioning={
             "global_rate": torch.tensor([[0.1]], dtype=torch.float32),
-            "coarse_profile": torch.tensor([[0.10, 0.20, 0.15, 0.05]], dtype=torch.float32),
+            "progress_profile": torch.tensor([[0.10, 0.20, 0.15, 0.05]], dtype=torch.float32),
             "operator_coeff": torch.full((1, 4), 9.0, dtype=torch.float32),
         },
         rhythm_apply_override=None,
@@ -201,4 +219,52 @@ def test_rhythm_v3_coarse_only_metrics_keep_local_response_zero():
     )
     metrics = build_rhythm_metric_dict(ret, sample={"unit_duration_tgt": ret["speech_duration_exec"].detach()})
     assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
+    assert float(metrics["rhythm_metric_progress_response_abs_mean"].item()) > 0.0
     assert float(metrics["rhythm_metric_coarse_response_abs_mean"].item()) > 0.0
+    assert float(metrics["rhythm_metric_progress_profile_abs_mean"].item()) > 0.0
+
+
+def test_rhythm_v3_detector_only_metrics_report_detector_response():
+    adapter = ConanDurationAdapter(
+        {
+            **_build_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "detector",
+            "rhythm_v3_allow_hybrid": False,
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+        },
+        hidden_size=32,
+        vocab_size=128,
+    )
+    content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]])
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=True,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning={
+            "global_rate": torch.tensor([[0.1]], dtype=torch.float32),
+            "detector_coeff": torch.tensor([[0.10, 0.25, 0.05, -0.10]], dtype=torch.float32),
+            "operator_coeff": torch.full((1, 4), 9.0, dtype=torch.float32),
+        },
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    metrics = build_rhythm_metric_dict(ret, sample={"unit_duration_tgt": ret["speech_duration_exec"].detach()})
+    assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
+    assert float(metrics["rhythm_metric_detector_response_abs_mean"].item()) > 0.0
+    assert float(metrics["rhythm_metric_detector_coeff_abs_mean"].item()) > 0.0

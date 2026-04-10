@@ -82,10 +82,13 @@ class DurationV3TargetBuildConfig:
     lambda_dur: float
     lambda_op: float
     lambda_pref: float
+    lambda_base: float = 0.0
     lambda_cons: float = 0.0
     lambda_zero: float = 0.0
     lambda_ortho: float = 0.0
     strict_target_alignment: bool = True
+    baseline_target_mode: str = "deglobalized"
+    baseline_train_mode: str = "joint"
 
 
 @dataclass(frozen=True)
@@ -849,15 +852,22 @@ def build_duration_v3_loss_targets(
     unit_anchor_base = getattr(unit_batch, "unit_anchor_base", None)
     if unit_anchor_base is None:
         return None
+    baseline_pretrain_only = (str(config.baseline_train_mode or "joint").strip().lower() == "pretrain")
+    baseline_duration_tgt, baseline_mask, baseline_global_tgt = _build_duration_v3_baseline_targets(
+        unit_duration_tgt=unit_duration_tgt,
+        unit_anchor_base=unit_anchor_base.float().detach(),
+        speech_mask=speech_mask.float(),
+        baseline_target_mode=str(config.baseline_target_mode or "deglobalized").strip().lower(),
+    )
     prompt_targets = _resolve_duration_v3_prompt_targets(
         ref_memory=output.get("rhythm_ref_conditioning"),
-        lambda_op=float(config.lambda_op),
-        lambda_zero=float(config.lambda_zero),
-        lambda_ortho=float(config.lambda_ortho),
+        lambda_op=(0.0 if baseline_pretrain_only else float(config.lambda_op)),
+        lambda_zero=(0.0 if baseline_pretrain_only else float(config.lambda_zero)),
+        lambda_ortho=(0.0 if baseline_pretrain_only else float(config.lambda_ortho)),
     )
     consistency_duration_tgt = None
     consistency_mask = None
-    if float(config.lambda_cons) > 0.0:
+    if float(config.lambda_cons) > 0.0 and not baseline_pretrain_only:
         consistency_duration_tgt, consistency_mask = _build_duration_v3_consistency_targets(
             state_prev=output.get("rhythm_state_prev"),
             unit_mask=unit_mask,
@@ -868,6 +878,9 @@ def build_duration_v3_loss_targets(
         unit_anchor_base=unit_anchor_base.float().detach(),
         unit_mask=unit_mask,
         committed_mask=committed_mask.float(),
+        baseline_duration_tgt=baseline_duration_tgt,
+        baseline_mask=baseline_mask,
+        baseline_global_tgt=baseline_global_tgt,
         global_rate=prompt_targets["global_rate"],
         prompt_basis_activation=prompt_targets["prompt_basis_activation"],
         prompt_random_target_tgt=prompt_targets["prompt_random_target_tgt"],
@@ -881,10 +894,48 @@ def build_duration_v3_loss_targets(
         lambda_dur=float(config.lambda_dur),
         lambda_op=float(config.lambda_op),
         lambda_pref=float(config.lambda_pref),
+        lambda_base=float(config.lambda_base),
         lambda_cons=float(config.lambda_cons),
         lambda_zero=float(config.lambda_zero),
         lambda_ortho=float(config.lambda_ortho),
+        baseline_pretrain_only=baseline_pretrain_only,
     )
+
+
+def _masked_duration_v3_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    batch_size = values.size(0)
+    median = values.new_zeros((batch_size, 1))
+    for batch_idx in range(batch_size):
+        valid = mask[batch_idx] > 0.5
+        if bool(valid.any().item()):
+            median[batch_idx, 0] = values[batch_idx][valid].median()
+    return median
+
+
+def _build_duration_v3_baseline_targets(
+    *,
+    unit_duration_tgt: torch.Tensor,
+    unit_anchor_base: torch.Tensor,
+    speech_mask: torch.Tensor,
+    baseline_target_mode: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    normalized_mode = str(baseline_target_mode or "deglobalized").strip().lower()
+    if normalized_mode not in {"raw", "deglobalized"}:
+        raise ValueError("rhythm_v3_baseline_target_mode must be one of: raw, deglobalized")
+    baseline_mask = speech_mask.float()
+    baseline_global_tgt = unit_duration_tgt.new_zeros((unit_duration_tgt.size(0), 1), dtype=torch.float32)
+    if normalized_mode == "deglobalized":
+        log_residual = (
+            torch.log(unit_duration_tgt.float().clamp_min(1.0e-6))
+            - torch.log(unit_anchor_base.float().clamp_min(1.0e-6))
+        ) * baseline_mask
+        baseline_global_tgt = _masked_duration_v3_median(log_residual, baseline_mask).detach()
+    baseline_log_target = (
+        torch.log(unit_duration_tgt.float().clamp_min(1.0e-6))
+        - baseline_global_tgt
+    ) * baseline_mask
+    baseline_duration_tgt = torch.exp(baseline_log_target) * baseline_mask
+    return baseline_duration_tgt.detach(), baseline_mask.detach(), baseline_global_tgt.detach()
 
 
 def _resolve_duration_v3_target(

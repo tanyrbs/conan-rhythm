@@ -11,6 +11,9 @@ def _minimal_v3_hparams():
     return {
         "rhythm_enable_v2": False,
         "rhythm_enable_v3": True,
+        "rhythm_v3_backbone": "operator",
+        "rhythm_v3_warp_mode": "progress",
+        "rhythm_v3_allow_hybrid": True,
         "rhythm_response_rank": 4,
         "lambda_rhythm_dur": 1.0,
         "lambda_rhythm_op": 0.25,
@@ -69,6 +72,64 @@ def test_validate_rhythm_training_hparams_rejects_invalid_v3_values(bad_key, bad
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_train_mode():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_baseline_train_mode"] = "alternating"
+    with pytest.raises(ValueError, match="rhythm_v3_baseline_train_mode must be one of"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_frozen_baseline_lifecycle_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_baseline_train_mode": "frozen",
+            "rhythm_v3_baseline_ckpt": "baseline.ckpt",
+            "rhythm_baseline_table_prior_path": "prior.pt",
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_accepts_baseline_pretrain_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_baseline_train_mode": "pretrain",
+            "rhythm_v3_baseline_target_mode": "deglobalized",
+            "lambda_rhythm_base": 1.0,
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_base",
+                "rhythm_v3_dur",
+                "rhythm_v3_op",
+                "rhythm_v3_pref",
+                "rhythm_v3_zero",
+            ],
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_rejects_pretrain_without_baseline_loss():
+    with pytest.raises(ValueError, match="requires lambda_rhythm_base > 0"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_baseline_train_mode": "pretrain",
+                "lambda_rhythm_base": 0.0,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_target_mode():
+    with pytest.raises(ValueError, match="rhythm_v3_baseline_target_mode must be one of"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_baseline_target_mode": "teacher_defined",
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "deprecated_key,new_key",
     [
@@ -92,6 +153,8 @@ def test_validate_rhythm_training_hparams_rejects_removed_v3_hparam_aliases(depr
         "rhythm_role_codebook_size",
         "rhythm_anti_pos_bins",
         "rhythm_anti_pos_grl_scale",
+        "rhythm_baseline_struct_enable",
+        "rhythm_baseline_struct_scale_init",
     ],
 )
 def test_validate_rhythm_training_hparams_rejects_removed_v3_surface_keys(removed_key):
@@ -156,6 +219,20 @@ def test_validate_rhythm_training_hparams_requires_consistency_loss_surface_when
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_requires_baseline_loss_surface_when_enabled():
+    hparams = _minimal_v3_hparams()
+    hparams["lambda_rhythm_base"] = 0.10
+    hparams["rhythm_public_losses"] = [
+        "rhythm_total",
+        "rhythm_v3_dur",
+        "rhythm_v3_op",
+        "rhythm_v3_pref",
+        "rhythm_v3_zero",
+    ]
+    with pytest.raises(ValueError, match="rhythm_v3_base"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_accepts_compact_example_public_surface():
     validate_rhythm_training_hparams(
         {
@@ -185,11 +262,13 @@ def test_validate_rhythm_training_hparams_accepts_compact_example_public_surface
     )
 
 
-def test_validate_rhythm_training_hparams_accepts_global_only_ablation_when_operator_losses_are_disabled():
+def test_validate_rhythm_training_hparams_accepts_global_only_surface_when_operator_losses_are_disabled():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_ablation": "global_only",
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
@@ -197,11 +276,13 @@ def test_validate_rhythm_training_hparams_accepts_global_only_ablation_when_oper
     )
 
 
-def test_validate_rhythm_training_hparams_accepts_coarse_only_ablation_when_operator_losses_are_disabled():
+def test_validate_rhythm_training_hparams_accepts_progress_surface_when_operator_losses_are_disabled():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_ablation": "coarse_only",
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "progress",
+            "rhythm_v3_allow_hybrid": False,
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
@@ -209,27 +290,73 @@ def test_validate_rhythm_training_hparams_accepts_coarse_only_ablation_when_oper
     )
 
 
-def test_validate_rhythm_training_hparams_accepts_coarse_operator_ablation():
+def test_validate_rhythm_training_hparams_accepts_detector_surface_when_operator_losses_are_disabled():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_ablation": "coarse_operator",
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "detector",
+            "rhythm_v3_allow_hybrid": False,
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
         }
     )
 
 
-def test_validate_rhythm_training_hparams_rejects_unknown_v3_ablation():
-    with pytest.raises(ValueError, match="rhythm_v3_ablation must be one of"):
+def test_validate_rhythm_training_hparams_accepts_operator_progress_surface():
+    validate_rhythm_training_hparams(_minimal_v3_hparams())
+
+
+def test_validate_rhythm_training_hparams_accepts_detector_candidate_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "detector",
+            "rhythm_v3_allow_hybrid": False,
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_accepts_progress_alias_hparams():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "progress",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_progress_bins": 4,
+            "rhythm_progress_support_tau": 8.0,
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_rejects_conflicting_progress_and_coarse_alias_values():
+    with pytest.raises(ValueError, match="Do not set both rhythm_progress_bins and legacy rhythm_coarse_bins"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_v3_ablation": "slot_memory",
+                "rhythm_v3_backbone": "global_only",
+                "rhythm_v3_warp_mode": "progress",
+                "rhythm_v3_allow_hybrid": False,
+                "rhythm_progress_bins": 8,
+                "rhythm_coarse_bins": 4,
+                "lambda_rhythm_op": 0.0,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
             }
         )
 
 
-def test_validate_rhythm_training_hparams_rejects_global_only_with_operator_loss_budget():
-    with pytest.raises(ValueError, match="lambda_rhythm_op must be 0"):
+def test_validate_rhythm_training_hparams_rejects_removed_legacy_ablation_surface():
+    with pytest.raises(ValueError, match="rhythm_v3_ablation has been removed"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
@@ -238,31 +365,84 @@ def test_validate_rhythm_training_hparams_rejects_global_only_with_operator_loss
         )
 
 
-def test_validate_rhythm_training_hparams_rejects_coarse_only_with_operator_loss_budget():
-    with pytest.raises(ValueError, match="lambda_rhythm_op must be 0"):
+def test_validate_rhythm_training_hparams_rejects_operator_detector_combo():
+    with pytest.raises(ValueError, match="only valid with rhythm_v3_backbone='global_only'"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_v3_ablation": "coarse_only",
+                "rhythm_v3_backbone": "operator",
+                "rhythm_v3_warp_mode": "detector",
+                "rhythm_v3_allow_hybrid": False,
             }
         )
 
 
-def test_validate_rhythm_training_hparams_rejects_source_residual_gain_outside_srcres_ablation():
-    with pytest.raises(ValueError, match="only valid when rhythm_v3_ablation='operator_srcres'"):
+def test_validate_rhythm_training_hparams_rejects_operator_progress_without_explicit_hybrid_enable():
+    with pytest.raises(ValueError, match="requires rhythm_v3_allow_hybrid=true"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "operator",
+                "rhythm_v3_warp_mode": "progress",
+                "rhythm_v3_allow_hybrid": False,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_removed_proxy_infer_surface():
+    with pytest.raises(ValueError, match="rhythm_v3_allow_proxy_infer"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_allow_proxy_infer": True,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_global_only_with_operator_loss_budget():
+    with pytest.raises(ValueError, match="runtime mode is 'global_only'"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "global_only",
+                "rhythm_v3_warp_mode": "none",
+                "rhythm_v3_allow_hybrid": False,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_progress_only_with_operator_loss_budget():
+    with pytest.raises(ValueError, match="runtime mode is 'progress_only'"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "global_only",
+                "rhythm_v3_warp_mode": "progress",
+                "rhythm_v3_allow_hybrid": False,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_source_residual_gain_outside_srcres_runtime():
+    with pytest.raises(ValueError, match="requires rhythm_v3_backbone='operator'"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "global_only",
+                "rhythm_v3_warp_mode": "none",
+                "rhythm_v3_allow_hybrid": False,
                 "rhythm_v3_source_residual_gain": 0.5,
             }
         )
 
 
-def test_validate_rhythm_training_hparams_accepts_operator_srcres_ablation():
+def test_validate_rhythm_training_hparams_accepts_operator_srcres_surface():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_ablation": "operator_srcres",
+            "rhythm_v3_backbone": "operator",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_source_residual_gain": 0.5,
         }
     )
@@ -333,7 +513,7 @@ def test_validate_rhythm_training_hparams_micro_lookahead_requires_positive_look
 
 
 def test_validate_rhythm_training_hparams_rejects_non_positive_coarse_bins():
-    with pytest.raises(ValueError, match="rhythm_coarse_bins must be > 0"):
+    with pytest.raises(ValueError, match="rhythm_progress_bins / rhythm_coarse_bins must be > 0"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),

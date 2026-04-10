@@ -15,6 +15,7 @@ from tasks.Conan.rhythm.loss_routing import (
     update_public_loss_aliases,
 )
 from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
+from tasks.Conan.rhythm.losses import DurationV3LossTargets
 from tasks.Conan.rhythm.targets import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
 
 
@@ -37,6 +38,9 @@ def _build_hparams():
         "rhythm_max_logstretch": 0.8,
         "rhythm_phrase_dim": 12,
         "rhythm_max_pause_frames": 4.0,
+        "rhythm_v3_backbone": "operator",
+        "rhythm_v3_warp_mode": "progress",
+        "rhythm_v3_allow_hybrid": True,
         "rhythm_apply_mode": "always",
     }
 
@@ -98,6 +102,7 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
         "rhythm_exec_speech",
         "rhythm_exec_stretch",
         "rhythm_prefix_state",
+        "rhythm_v3_base",
         "rhythm_v3_dur",
         "rhythm_v3_op",
         "rhythm_v3_ortho",
@@ -181,6 +186,7 @@ def test_rhythm_v3_public_aliases_do_not_reintroduce_legacy_rhythm_surface():
         "rhythm_exec_speech": torch.tensor(1.0),
         "rhythm_exec_stretch": torch.tensor(2.0),
         "rhythm_prefix_state": torch.tensor(3.0),
+        "rhythm_v3_base": torch.tensor(0.05),
         "rhythm_v3_dur": torch.tensor(0.1),
         "rhythm_v3_op": torch.tensor(0.2),
         "rhythm_v3_pref": torch.tensor(0.3),
@@ -536,3 +542,110 @@ def test_rhythm_v3_loss_builder_ignores_separator_units_in_supervision():
     masked_losses = build_rhythm_loss_dict(ret["rhythm_execution"], masked_targets)
     assert torch.allclose(masked_losses["rhythm_v3_dur"], baseline_losses["rhythm_v3_dur"])
     assert torch.allclose(masked_losses["rhythm_v3_pref"], baseline_losses["rhythm_v3_pref"])
+
+
+def test_rhythm_v3_prefix_uses_sg_baseline_and_consistency_prefers_raw_duration_when_available():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "unit_duration_raw": torch.full((1, 2), 2.0, dtype=torch.float32),
+            "speech_duration_exec": torch.full((1, 2), 7.0, dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.full((1, 2), 2.0, dtype=torch.float32),
+        unit_anchor_base=torch.full((1, 2), 2.0, dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        consistency_duration_tgt=torch.full((1, 2), 2.0, dtype=torch.float32),
+        consistency_mask=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.20,
+        lambda_cons=0.10,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    assert torch.allclose(losses["rhythm_v3_pref"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_v3_cons"], torch.tensor(0.0))
+
+
+def test_rhythm_v3_baseline_targets_can_be_deglobalized():
+    unit_mask = torch.ones((1, 3), dtype=torch.float32)
+    output = {
+        "rhythm_execution": type("DummyExec", (), {"commit_mask": unit_mask})(),
+        "rhythm_unit_batch": type(
+            "DummyBatch",
+            (),
+            {
+                "unit_mask": unit_mask,
+                "sep_mask": torch.zeros((1, 3), dtype=torch.float32),
+                "unit_anchor_base": torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+            },
+        )(),
+        "rhythm_ref_conditioning": type(
+            "DummyRef",
+            (),
+            {
+                "global_rate": torch.zeros((1, 1)),
+                "prompt_basis_activation": None,
+                "prompt_random_target": None,
+                "prompt_mask": None,
+                "prompt_fit_mask": None,
+                "prompt_eval_mask": None,
+                "prompt_operator_fit": None,
+                "prompt_operator_cv_fit": None,
+            },
+        )(),
+    }
+    targets = build_duration_v3_loss_targets(
+        sample={"unit_duration_tgt": torch.tensor([[4.0, 4.0, 4.0]], dtype=torch.float32)},
+        output=output,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.0,
+            lambda_pref=0.0,
+            lambda_base=1.0,
+            baseline_target_mode="deglobalized",
+        ),
+    )
+    assert targets is not None
+    assert torch.allclose(targets.baseline_global_tgt, torch.full((1, 1), torch.log(torch.tensor(2.0))))
+    assert torch.allclose(targets.baseline_duration_tgt, torch.full((1, 3), 2.0))
+
+
+def test_rhythm_v3_baseline_pretrain_routes_total_to_baseline_only():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.full((1, 2), 3.0, dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.full((1, 2), 3.0, dtype=torch.float32),
+        unit_anchor_base=torch.full((1, 2), 2.0, dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        baseline_duration_tgt=torch.full((1, 2), 2.0, dtype=torch.float32),
+        baseline_mask=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.25,
+        lambda_pref=0.20,
+        lambda_base=1.0,
+        lambda_zero=0.05,
+        lambda_ortho=0.01,
+        baseline_pretrain_only=True,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    assert torch.allclose(losses["rhythm_total"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_exec_speech"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_exec_stretch"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_prefix_state"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_v3_base"], torch.tensor(0.0))
