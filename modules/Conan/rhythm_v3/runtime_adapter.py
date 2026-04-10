@@ -16,6 +16,11 @@ from .contracts import (
 from .module import StreamingDurationModule
 from .unit_frontend import DurationUnitFrontend
 
+_PROMPT_UNIT_REQUIRED_KEYS = (
+    "prompt_content_units",
+    "prompt_duration_obs",
+)
+
 
 class ConanDurationAdapter(nn.Module):
     def __init__(self, hparams, hidden_size: int, *, vocab_size: int) -> None:
@@ -86,6 +91,47 @@ class ConanDurationAdapter(nn.Module):
             mark_last_open=bool(infer) or bool(self.hparams.get("rhythm_streaming_prefix_train", False)),
         )
 
+    @staticmethod
+    def _resolve_prompt_unit_mask(
+        *,
+        prompt_duration_obs: torch.Tensor,
+        prompt_unit_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if isinstance(prompt_unit_mask, torch.Tensor):
+            return prompt_unit_mask.float().clamp(0.0, 1.0)
+        return prompt_duration_obs.float().gt(0.0).float()
+
+    def _prepare_prompt_unit_conditioning(
+        self,
+        *,
+        ref_conditioning,
+        device: torch.device,
+    ):
+        if not isinstance(ref_conditioning, dict):
+            return ref_conditioning
+        if any(key not in ref_conditioning for key in _PROMPT_UNIT_REQUIRED_KEYS):
+            return ref_conditioning
+        prompt_content_units = ref_conditioning["prompt_content_units"].to(device=device).long()
+        prompt_duration_obs = ref_conditioning["prompt_duration_obs"].to(device=device)
+        prompt_unit_mask = self._resolve_prompt_unit_mask(
+            prompt_duration_obs=prompt_duration_obs,
+            prompt_unit_mask=ref_conditioning.get("prompt_unit_mask"),
+        )
+        enriched = dict(ref_conditioning)
+        enriched["prompt_content_units"] = prompt_content_units
+        enriched["prompt_duration_obs"] = prompt_duration_obs
+        enriched["prompt_unit_mask"] = prompt_unit_mask
+        if isinstance(enriched.get("prompt_unit_anchor_base"), torch.Tensor):
+            enriched["prompt_unit_anchor_base"] = enriched["prompt_unit_anchor_base"].to(device=device)
+        if isinstance(enriched.get("prompt_log_base"), torch.Tensor):
+            enriched["prompt_log_base"] = enriched["prompt_log_base"].to(device=device)
+        if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
+            enriched["prompt_unit_anchor_base"] = self.unit_frontend.anchor_net(
+                prompt_content_units,
+                prompt_unit_mask,
+            )
+        return enriched
+
     def _attach_runtime_outputs(
         self,
         *,
@@ -149,6 +195,10 @@ class ConanDurationAdapter(nn.Module):
         )
         source_batch = move_source_unit_batch(source_batch, device=content.device)
         rhythm_state_prev = move_duration_runtime_state(rhythm_state, device=content.device)
+        rhythm_ref_conditioning = self._prepare_prompt_unit_conditioning(
+            ref_conditioning=rhythm_ref_conditioning,
+            device=content.device,
+        )
         ref_memory = self.module.build_reference_conditioning(
             ref_conditioning=rhythm_ref_conditioning,
             ref_mel=ref,

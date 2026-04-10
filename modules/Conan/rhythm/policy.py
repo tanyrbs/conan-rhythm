@@ -58,6 +58,10 @@ _RETIMED_TARGET_MODE_ALIASES = {
     "online_only": "online",
     "mixed": "hybrid",
 }
+_DURATION_OPERATOR_MODE = "duration_operator"
+_DEPRECATED_DURATION_OPERATOR_MODE_ALIASES = {
+    "duration_ref_memory",
+}
 
 
 def parse_optional_bool(value):
@@ -73,6 +77,19 @@ def parse_optional_bool(value):
     if text in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Unsupported optional bool value: {value}")
+
+
+def normalize_rhythm_mode(value) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in _DEPRECATED_DURATION_OPERATOR_MODE_ALIASES:
+        raise ValueError(
+            "rhythm_mode='duration_ref_memory' has been removed. Use rhythm_mode='duration_operator'."
+        )
+    return mode
+
+
+def is_duration_operator_mode(value) -> bool:
+    return normalize_rhythm_mode(value) == _DURATION_OPERATOR_MODE
 
 
 def use_strict_mainline(hparams: Mapping[str, Any]) -> bool:

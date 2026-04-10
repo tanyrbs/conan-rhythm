@@ -39,6 +39,11 @@ class RhythmConanDatasetMixin:
         "ref_rhythm_stats",
         "ref_rhythm_trace",
     )
+    _RHYTHM_REF_PROMPT_UNIT_KEYS = (
+        "prompt_content_units",
+        "prompt_duration_obs",
+        "prompt_unit_mask",
+    )
     _RHYTHM_REF_PHRASE_CACHE_KEYS = (
         "ref_phrase_trace",
         "planner_ref_phrase_trace",
@@ -124,6 +129,9 @@ class RhythmConanDatasetMixin:
         "boundary_confidence",
         "ref_rhythm_stats",
         "ref_rhythm_trace",
+        "prompt_content_units",
+        "prompt_duration_obs",
+        "prompt_unit_mask",
     )
     _RHYTHM_STREAMING_PREFIX_META_KEYS = (
         "rhythm_stream_prefix_ratio",
@@ -382,6 +390,9 @@ class RhythmConanDatasetMixin:
             "rhythm_offline_phrase_final_mask": ("float", 0.0),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
+            "prompt_content_units": ("long", 0),
+            "prompt_duration_obs": ("float", 0.0),
+            "prompt_unit_mask": ("float", 0.0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -696,10 +707,43 @@ class RhythmConanDatasetMixin:
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
 
-    def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str):
+    def _build_reference_prompt_unit_conditioning(self, prompt_item, *, target_mode: str):
+        if prompt_item is None:
+            return {}
+        source_cache = None
+        if all(key in prompt_item for key in self._RHYTHM_SOURCE_CACHE_KEYS):
+            source_cache = {key: prompt_item[key] for key in self._RHYTHM_SOURCE_CACHE_KEYS}
+        elif target_mode != "cached_only" and "hubert" in prompt_item:
+            source_cache = build_source_rhythm_cache(
+                np.asarray(prompt_item["hubert"]),
+                silent_token=self.hparams.get("silent_token", 57),
+                separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
+                tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+                phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+            )
+        if source_cache is None:
+            return {}
+        prompt_content_units = np.asarray(source_cache["content_units"], dtype=np.int64)
+        prompt_duration_obs = np.asarray(source_cache["dur_anchor_src"], dtype=np.float32)
+        sep_hint = np.asarray(source_cache.get("sep_hint", np.zeros_like(prompt_content_units)), dtype=np.float32)
+        prompt_unit_mask = (prompt_duration_obs > 0).astype(np.float32)
+        if sep_hint.shape == prompt_unit_mask.shape:
+            prompt_unit_mask = prompt_unit_mask * (1.0 - sep_hint.clip(0.0, 1.0))
+        return {
+            "prompt_content_units": prompt_content_units,
+            "prompt_duration_obs": prompt_duration_obs,
+            "prompt_unit_mask": prompt_unit_mask,
+        }
+
+    def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str, item=None):
         cache_keys = self._RHYTHM_REF_CACHE_KEYS
+        prompt_conditioning = self._build_reference_prompt_unit_conditioning(
+            ref_item if ref_item is not None else item,
+            target_mode=target_mode,
+        )
         if ref_item is not None and all(key in ref_item for key in cache_keys):
             conditioning = {key: ref_item[key] for key in cache_keys}
+            conditioning.update(prompt_conditioning)
             for debug_key in (
                 self._RHYTHM_REF_DEBUG_CACHE_KEYS
                 + self._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS
@@ -736,6 +780,7 @@ class RhythmConanDatasetMixin:
             slow_topk=int(self.hparams.get("rhythm_slow_topk", 6)),
             selector_cell_size=int(self.hparams.get("rhythm_selector_cell_size", 3)),
         )
+        conditioning.update(prompt_conditioning)
         self._validate_reference_conditioning_shapes(conditioning, item_name="<runtime-ref-conditioning>")
         return conditioning
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
-from modules.Conan.rhythm.policy import resolve_apply_override
+from modules.Conan.rhythm.policy import is_duration_operator_mode, resolve_apply_override
 from modules.Conan.rhythm.stages import detect_rhythm_stage, resolve_teacher_as_main
 from modules.Conan.rhythm_v3.reference_memory import normalize_duration_v3_conditioning
 from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
@@ -60,7 +60,7 @@ def resolve_task_runtime_state(
     rhythm_enabled = bool(
         hparams.get("rhythm_enable_v2", False)
         or hparams.get("rhythm_enable_v3", False)
-        or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_operator"
+        or is_duration_operator_mode(hparams.get("rhythm_mode", ""))
     )
     effective_global_step = 200000 if test else int(global_step)
     use_reference = (

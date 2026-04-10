@@ -32,8 +32,6 @@ def _build_hparams():
         "rhythm_max_logstretch": 0.8,
         "rhythm_phrase_dim": 12,
         "rhythm_max_pause_frames": 4.0,
-        "rhythm_anti_pos_bins": 4,
-        "rhythm_anti_pos_grl_scale": 1.0,
         "rhythm_apply_mode": "always",
     }
 
@@ -71,29 +69,27 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
         output=ret,
         config=DurationV3TargetBuildConfig(
             lambda_dur=1.0,
-            lambda_mem=0.0,
+            lambda_op=0.0,
             lambda_pref=0.20,
             lambda_cons=0.10,
-            lambda_anti=0.0,
-            anti_pos_bins=4,
+            lambda_zero=0.0,
         ),
     )
     assert targets is not None
     ref_memory = ret["rhythm_ref_conditioning"]
-    assert torch.allclose(targets.prompt_rel_stretch_tgt, ref_memory.prompt_rel_stretch)
+    assert torch.allclose(targets.prompt_random_target_tgt, ref_memory.prompt_random_target)
     assert torch.allclose(targets.prompt_mask, ref_memory.prompt_mask)
-    assert torch.allclose(targets.prompt_reconstruction_pred, ref_memory.prompt_reconstruction)
+    assert torch.allclose(targets.prompt_operator_fit_pred, ref_memory.prompt_operator_fit)
     losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
     expected_keys = {
         "rhythm_exec_speech",
         "rhythm_exec_stretch",
         "rhythm_prefix_state",
         "rhythm_v3_dur",
-        "rhythm_v3_mem",
+        "rhythm_v3_op",
         "rhythm_v3_pref",
         "rhythm_v3_cons",
         "rhythm_v3_stream",
-        "rhythm_v3_anti",
         "rhythm_v3_zero",
         "rhythm_is_v3_bundle",
         "rhythm_total",
@@ -140,11 +136,10 @@ def test_rhythm_v3_loss_routing_keeps_single_trainable_total():
         output=ret,
         config=DurationV3TargetBuildConfig(
             lambda_dur=1.0,
-            lambda_mem=0.0,
+            lambda_op=0.0,
             lambda_pref=0.20,
             lambda_cons=0.10,
-            lambda_anti=0.0,
-            anti_pos_bins=4,
+            lambda_zero=0.0,
         ),
     )
     losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
@@ -174,11 +169,11 @@ def test_rhythm_v3_public_aliases_do_not_reintroduce_legacy_rhythm_surface():
         "rhythm_exec_stretch": torch.tensor(2.0),
         "rhythm_prefix_state": torch.tensor(3.0),
         "rhythm_v3_dur": torch.tensor(0.1),
-        "rhythm_v3_mem": torch.tensor(0.2),
+        "rhythm_v3_op": torch.tensor(0.2),
         "rhythm_v3_pref": torch.tensor(0.3),
         "rhythm_v3_cons": torch.tensor(0.4),
         "rhythm_v3_stream": torch.tensor(0.5),
-        "rhythm_v3_anti": torch.tensor(0.6),
+        "rhythm_v3_zero": torch.tensor(0.6),
         "rhythm_is_v3_bundle": torch.tensor(1.0),
         "rhythm_total": torch.tensor(6.0),
     }
@@ -204,11 +199,10 @@ def test_rhythm_v3_targets_require_explicit_duration_target_by_default():
             output=ret,
             config=DurationV3TargetBuildConfig(
                 lambda_dur=1.0,
-                lambda_mem=0.25,
+                lambda_op=0.25,
                 lambda_pref=0.20,
                 lambda_cons=0.10,
-                lambda_anti=0.05,
-                anti_pos_bins=4,
+                lambda_zero=0.05,
             ),
         )
 
@@ -225,11 +219,10 @@ def test_rhythm_v3_targets_require_prompt_targets_when_memory_loss_enabled():
             output=ret,
             config=DurationV3TargetBuildConfig(
                 lambda_dur=1.0,
-                lambda_mem=0.25,
+                lambda_op=0.25,
                 lambda_pref=0.20,
                 lambda_cons=0.10,
-                lambda_anti=0.05,
-                anti_pos_bins=4,
+                lambda_zero=0.05,
             ),
         )
 
@@ -246,10 +239,9 @@ def test_rhythm_v3_targets_reject_missing_unit_duration_target_even_with_executo
             output=ret,
             config=DurationV3TargetBuildConfig(
                 lambda_dur=1.0,
-                lambda_mem=0.0,
+                lambda_op=0.0,
                 lambda_pref=0.20,
                 lambda_cons=0.10,
-                lambda_anti=0.05,
-                anti_pos_bins=4,
+                lambda_zero=0.05,
             ),
         )

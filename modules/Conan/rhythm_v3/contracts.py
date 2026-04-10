@@ -321,6 +321,18 @@ def validate_prompt_conditioning_evidence(
             "PromptConditioningEvidence.prompt_basis_activation operator-rank mismatch: "
             f"expected last dim {operator_rank}, got {tuple(prompt.prompt_basis_activation.shape)}"
         )
+    if prompt.prompt_basis_activation is not None and prompt.prompt_mask is not None:
+        if tuple(prompt.prompt_basis_activation.shape[:2]) != tuple(prompt.prompt_mask.shape):
+            raise ValueError(
+                "PromptConditioningEvidence.prompt_basis_activation/prompt_mask shape mismatch: "
+                f"{tuple(prompt.prompt_basis_activation.shape[:2])} vs {tuple(prompt.prompt_mask.shape)}"
+            )
+    if prompt.prompt_basis_activation is not None and prompt.prompt_random_target is not None:
+        if tuple(prompt.prompt_basis_activation.shape[:2]) != tuple(prompt.prompt_random_target.shape):
+            raise ValueError(
+                "PromptConditioningEvidence.prompt_basis_activation/prompt_random_target shape mismatch: "
+                f"{tuple(prompt.prompt_basis_activation.shape[:2])} vs {tuple(prompt.prompt_random_target.shape)}"
+            )
     if prompt.prompt_random_target is not None and prompt.prompt_mask is not None:
         if tuple(prompt.prompt_random_target.shape) != tuple(prompt.prompt_mask.shape):
             raise ValueError(

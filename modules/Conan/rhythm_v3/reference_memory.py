@@ -98,8 +98,6 @@ def _collect_nested_v3_memory(source: Mapping[str, Any]) -> dict[str, Any] | Non
 def _collect_prompt_unit_conditioning(source: Mapping[str, Any]) -> dict[str, Any] | None:
     if any(key not in source for key in _V3_PROMPT_UNIT_REQUIRED_FIELDS):
         return None
-    if source.get("prompt_unit_anchor_base") is None and source.get("prompt_log_base") is None:
-        return None
     normalized = {key: source[key] for key in _V3_PROMPT_UNIT_REQUIRED_FIELDS}
     for key in _V3_PROMPT_UNIT_OPTIONAL_FIELDS:
         value = source.get(key)

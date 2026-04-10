@@ -199,7 +199,12 @@ class RhythmDatasetSampleAssembler:
                 sample["rhythm_pair_is_identity"].cpu().numpy(),
                 dtype=np.float32,
             )
-        ref_conditioning = self.owner._get_reference_rhythm_conditioning(rhythm_ref_item, sample, target_mode=target_mode)
+        ref_conditioning = self.owner._get_reference_rhythm_conditioning(
+            rhythm_ref_item,
+            sample,
+            target_mode=target_mode,
+            item=item,
+        )
         rhythm_runtime_fields.update(source_cache)
         rhythm_runtime_fields.update(ref_conditioning)
         rhythm_runtime_fields.update(

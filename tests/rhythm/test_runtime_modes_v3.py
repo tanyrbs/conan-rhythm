@@ -15,9 +15,9 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
         "global_rate": torch.tensor([[0.25]], dtype=torch.float32),
         "operator_coeff": torch.randn(1, 4),
         "prompt_basis_activation": torch.randn(1, 6, 4),
-        "prompt_rel_stretch": torch.randn(1, 6),
+        "prompt_random_target": torch.randn(1, 6),
         "prompt_mask": torch.ones(1, 6),
-        "prompt_reconstruction": torch.randn(1, 6),
+        "prompt_operator_fit": torch.randn(1, 6),
         "ref_rhythm_stats": torch.randn(1, 6),
         "ref_rhythm_trace": torch.randn(1, 8, 5),
         "planner_ref_stats": torch.randn(1, 2),
@@ -32,12 +32,31 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
         explicit=sample["rhythm_ref_conditioning"],
     )
     assert set(("global_rate", "operator_coeff")).issubset(conditioning.keys())
-    assert "prompt_rel_stretch" in conditioning
+    assert "prompt_random_target" in conditioning
     assert "prompt_mask" in conditioning
-    assert "prompt_reconstruction" in conditioning
+    assert "prompt_operator_fit" in conditioning
     assert "planner_ref_stats" not in conditioning
     assert "selector_meta_scores" not in conditioning
     assert "ref_phrase_valid" not in conditioning
+
+
+def test_build_duration_v3_ref_conditioning_accepts_explicit_prompt_units_without_anchor_base():
+    sample = {
+        "rhythm_ref_conditioning": {
+            "prompt_content_units": torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[3.0, 4.0, 2.0, 0.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "ref_rhythm_stats": torch.randn(1, 6),
+            "ref_rhythm_trace": torch.randn(1, 8, 5),
+        }
+    }
+    conditioning = build_duration_v3_ref_conditioning(
+        sample,
+        explicit=sample["rhythm_ref_conditioning"],
+    )
+    assert "prompt_content_units" in conditioning
+    assert "prompt_duration_obs" in conditioning
+    assert "prompt_unit_mask" in conditioning
 
 
 def test_build_legacy_v2_ref_conditioning_keeps_planner_sidecars():
@@ -74,11 +93,11 @@ def test_build_rhythm_ref_conditioning_dispatches_by_backend():
     assert "planner_ref_stats" not in conditioning
 
 
-def test_resolve_task_runtime_state_supports_duration_ref_memory_alias():
+def test_resolve_task_runtime_state_supports_duration_operator_mode():
     runtime_state = resolve_task_runtime_state(
         {
             "rhythm_enable_v2": False,
-            "rhythm_mode": "duration_ref_memory",
+            "rhythm_mode": "duration_operator",
             "random_speaker_steps": 0,
             "rhythm_optimize_module_only": True,
             "rhythm_fastpath_disable_acoustic_when_module_only": True,

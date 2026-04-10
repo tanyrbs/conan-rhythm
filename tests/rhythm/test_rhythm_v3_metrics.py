@@ -21,8 +21,6 @@ def _build_hparams():
         "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_max_logstretch": 0.8,
-        "rhythm_anti_pos_bins": 4,
-        "rhythm_anti_pos_grl_scale": 1.0,
         "rhythm_streaming_mode": "strict",
         "rhythm_apply_mode": "always",
     }
@@ -54,12 +52,12 @@ def _run_adapter():
         speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
     )
     ret["rhythm_v3_dur"] = torch.tensor(0.1)
-    ret["rhythm_v3_mem"] = torch.tensor(0.2)
+    ret["rhythm_v3_op"] = torch.tensor(0.2)
+    ret["rhythm_v3_zero"] = torch.tensor(0.25)
     ret["rhythm_v3_pref"] = torch.tensor(0.3)
     ret["rhythm_v3_cons"] = torch.tensor(0.35)
     ret["rhythm_v3_stream"] = torch.tensor(0.37)
-    ret["rhythm_v3_anti"] = torch.tensor(0.4)
-    ret["rhythm_total"] = torch.tensor(1.35)
+    ret["rhythm_total"] = torch.tensor(1.47)
     return ret
 
 
@@ -91,11 +89,11 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_prefix_drift_l1",
         "rhythm_metric_rhythm_total",
         "rhythm_metric_rhythm_v3_dur",
-        "rhythm_metric_rhythm_v3_mem",
+        "rhythm_metric_rhythm_v3_op",
+        "rhythm_metric_rhythm_v3_zero",
         "rhythm_metric_rhythm_v3_pref",
         "rhythm_metric_rhythm_v3_cons",
         "rhythm_metric_rhythm_v3_stream",
-        "rhythm_metric_rhythm_v3_anti",
     ):
         assert key in metrics
         assert torch.isfinite(metrics[key]).all()

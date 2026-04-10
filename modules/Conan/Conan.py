@@ -12,6 +12,7 @@ from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
 from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from modules.Conan.rhythm.factory import resolve_content_vocab_size
+from modules.Conan.rhythm.policy import is_duration_operator_mode
 from modules.commons.conv import ConvBlocks, CausalFM
 from modules.commons.nar_tts_modules import PitchPredictor
 from modules.commons.transformer import SinusoidalPositionalEmbedding
@@ -112,7 +113,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         self.rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
         self.rhythm_enable_v3 = bool(
             hparams.get("rhythm_enable_v3", False)
-            or str(hparams.get("rhythm_mode", "") or "").strip().lower() == "duration_operator"
+            or is_duration_operator_mode(hparams.get("rhythm_mode", ""))
         )
         if self.rhythm_enable_v2 and self.rhythm_enable_v3:
             raise ValueError("Enable only one rhythm runtime backend at a time: rhythm_enable_v2 or rhythm_enable_v3.")

@@ -21,8 +21,6 @@ def _build_hparams():
         "rhythm_trace_bins": 8,
         "rhythm_ref_coverage_floor": 0.05,
         "rhythm_max_logstretch": 0.8,
-        "rhythm_anti_pos_bins": 4,
-        "rhythm_anti_pos_grl_scale": 1.0,
         "rhythm_streaming_mode": "strict",
         "rhythm_apply_mode": "always",
     }
@@ -70,7 +68,7 @@ def test_rhythm_v3_adapter_emits_static_memory_runtime():
     assert torch.all(ret["speech_duration_exec"] >= 0.0)
     assert torch.all(ret["rhythm_execution"].commit_mask >= 0.0)
     assert torch.allclose(ret["speech_duration_exec"], ret["rhythm_state_next"].cached_duration_exec)
-    prompt_rel = getattr(getattr(ref_memory, "prompt", None), "prompt_rel_stretch", None)
+    prompt_rel = getattr(getattr(ref_memory, "prompt", None), "prompt_random_target", None)
     prompt_mask = getattr(getattr(ref_memory, "prompt", None), "prompt_mask", None)
     if isinstance(prompt_rel, torch.Tensor):
         if isinstance(prompt_mask, torch.Tensor):
@@ -95,6 +93,25 @@ def test_rhythm_v3_adapter_emits_static_memory_runtime():
     assert "blank_duration_exec" not in ret
     assert "rhythm_render_slot_index" not in ret
     assert "rhythm_render_phase_features" not in ret
+
+
+def test_rhythm_v3_accepts_explicit_prompt_units_without_cached_anchor_base():
+    adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long)
+    ret = _run_adapter(
+        adapter,
+        content=content,
+        ref=None,
+        ref_conditioning={
+            "prompt_content_units": torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[3.0, 4.0, 2.0, 0.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+        },
+    )
+    ref_memory = ret["rhythm_ref_conditioning"]
+    assert ref_memory.operator_coeff.shape == (1, 4)
+    assert ref_memory.prompt_log_base is not None
+    assert torch.isfinite(ref_memory.prompt_log_base).all()
 
 
 def test_rhythm_v3_reference_memory_is_reusable_across_chunks():
