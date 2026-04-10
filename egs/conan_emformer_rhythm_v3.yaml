@@ -5,8 +5,9 @@ binarization_args:
   with_rhythm_cache: true
 
 # Duration-only rhythm_v3 bootstrap.
-# This is a runnable starter config for the prompt-conditioned duration operator
-# path, not a teacher/export recipe like the audited v2 stack.
+# This is a runnable starter config for the layered duration mainline
+# (baseline + global stretch + coarse warp + optional local operator),
+# not a teacher/export recipe like the audited v2 stack.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
@@ -24,9 +25,13 @@ rhythm_response_rank: 12
 rhythm_response_window_left: 4
 rhythm_response_window_right: 0
 rhythm_trace_bins: 24
+rhythm_coarse_bins: 4
 rhythm_streaming_mode: strict
+rhythm_v3_ablation: coarse_operator
+rhythm_v3_source_residual_gain: 0.0
 rhythm_operator_ridge_lambda: 1.0
 rhythm_global_shrink_tau: 8.0
+rhythm_coarse_support_tau: 8.0
 rhythm_operator_support_tau: 8.0
 rhythm_operator_holdout_ratio: 0.30
 

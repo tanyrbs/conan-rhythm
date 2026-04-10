@@ -12,12 +12,14 @@ from modules.Conan.rhythm.reference_encoder import ReferenceRhythmEncoder
 from .contracts import (
     PromptConditioningEvidence,
     ReferenceDurationMemory,
+    StructuredCoarseDurationMemory,
     StructuredDurationOperatorMemory,
     validate_reference_duration_memory,
 )
 
 _V3_MEMORY_REQUIRED_FIELDS = ("global_rate", "operator_coeff")
 _V3_MEMORY_OPTIONAL_FIELDS = (
+    "coarse_profile",
     "prompt_basis_activation",
     "prompt_operator_fit",
     "prompt_operator_cv_fit",
@@ -28,6 +30,7 @@ _V3_MEMORY_OPTIONAL_FIELDS = (
     "prompt_log_base",
     "prompt_log_duration",
     "prompt_log_residual",
+    "prompt_coarse_fit",
 )
 _V3_PROMPT_UNIT_REQUIRED_FIELDS = (
     "prompt_content_units",
@@ -49,6 +52,7 @@ _V3_NESTED_PROMPT_FIELDS = (
     "prompt_log_base",
     "prompt_log_duration",
     "prompt_log_residual",
+    "prompt_coarse_fit",
 )
 
 
@@ -98,6 +102,10 @@ def _collect_nested_v3_memory(source: Mapping[str, Any]) -> dict[str, Any] | Non
         "global_rate": global_rate,
         "operator_coeff": operator_coeff,
     }
+    coarse = source.get("coarse")
+    coarse_profile = _lookup_mapping_or_attr(coarse, "coarse_profile")
+    if coarse_profile is not None:
+        normalized["coarse_profile"] = coarse_profile
     prompt = source.get("prompt")
     if prompt is None:
         return normalized
@@ -119,30 +127,7 @@ def _collect_prompt_unit_conditioning(source: Mapping[str, Any]) -> dict[str, An
     return normalized
 
 
-def normalize_duration_v3_conditioning(source: Any) -> ReferenceDurationMemory | dict[str, Any] | None:
-    if source is None or isinstance(source, ReferenceDurationMemory):
-        return source
-    if not isinstance(source, Mapping):
-        raise TypeError(f"Unsupported reference conditioning type: {type(source)!r}")
-
-    nested = source.get("rhythm_ref_conditioning")
-    if nested is not None and nested is not source:
-        normalized_nested = normalize_duration_v3_conditioning(nested)
-        if normalized_nested is not None:
-            return normalized_nested
-
-    normalized_v3 = _collect_flat_v3_memory(source)
-    if normalized_v3 is not None:
-        return normalized_v3
-
-    normalized_nested_v3 = _collect_nested_v3_memory(source)
-    if normalized_nested_v3 is not None:
-        return normalized_nested_v3
-
-    prompt_units = _collect_prompt_unit_conditioning(source)
-    if prompt_units is not None:
-        return prompt_units
-
+def _collect_proxy_conditioning(source: Mapping[str, Any]) -> dict[str, Any] | None:
     ref_stats = source.get("ref_rhythm_stats")
     ref_trace = source.get("ref_rhythm_trace")
     if ref_stats is None or ref_trace is None:
@@ -158,22 +143,58 @@ def normalize_duration_v3_conditioning(source: Any) -> ReferenceDurationMemory |
     return normalized
 
 
+def normalize_duration_v3_conditioning(source: Any) -> ReferenceDurationMemory | dict[str, Any] | None:
+    if source is None or isinstance(source, ReferenceDurationMemory):
+        return source
+    if not isinstance(source, Mapping):
+        raise TypeError(f"Unsupported reference conditioning type: {type(source)!r}")
+
+    prompt_units = _collect_prompt_unit_conditioning(source)
+    normalized_v3 = _collect_flat_v3_memory(source)
+    normalized_nested_v3 = _collect_nested_v3_memory(source)
+    if prompt_units is not None:
+        if normalized_v3 is not None or normalized_nested_v3 is not None:
+            raise ValueError(
+                "Ambiguous rhythm_v3 conditioning: prompt-unit evidence cannot be mixed with "
+                "prebuilt operator memory."
+            )
+        return prompt_units
+
+    if normalized_v3 is not None:
+        return normalized_v3
+
+    if normalized_nested_v3 is not None:
+        return normalized_nested_v3
+
+    nested = source.get("rhythm_ref_conditioning")
+    if nested is not None and nested is not source:
+        normalized_nested = normalize_duration_v3_conditioning(nested)
+        if normalized_nested is not None:
+            return normalized_nested
+
+    return _collect_proxy_conditioning(source)
+
+
 class PromptConditionedOperatorEstimator(nn.Module):
     def __init__(
         self,
         *,
         trace_bins: int = 24,
+        coarse_bins: int = 4,
         ridge_lambda: float = 1.0,
         speech_threshold: float = 0.10,
         global_shrink_tau: float = 8.0,
+        coarse_support_tau: float = 8.0,
         ridge_support_tau: float = 8.0,
         holdout_ratio: float = 0.30,
     ) -> None:
         super().__init__()
         self.reference_encoder = ReferenceRhythmEncoder(trace_bins=trace_bins)
+        self.coarse_bins = int(max(1, coarse_bins))
         self.ridge_lambda = float(max(1.0e-4, ridge_lambda))
         self.speech_threshold = float(max(0.0, min(1.0, speech_threshold)))
         self.global_shrink_tau = float(max(0.0, global_shrink_tau))
+        self.coarse_support_tau = float(max(0.0, coarse_support_tau))
         self.ridge_support_tau = float(max(0.0, ridge_support_tau))
         self.holdout_ratio = float(max(0.0, min(0.95, holdout_ratio)))
 
@@ -198,6 +219,80 @@ class PromptConditionedOperatorEstimator(nn.Module):
         support = support.float().clamp_min(0.0)
         conf = support / (support + float(tau))
         return value * conf
+
+    @staticmethod
+    def _build_progress_from_log_base(
+        *,
+        prompt_log_base: torch.Tensor,
+        prompt_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = prompt_mask.float().clamp(0.0, 1.0)
+        if prompt_log_base.numel() <= 0:
+            return prompt_log_base.new_zeros(prompt_log_base.shape)
+        mass = torch.exp(prompt_log_base.float()).clamp_min(1.0e-6) * mask
+        total_mass = mass.sum(dim=1, keepdim=True)
+        fallback_mass = mask
+        use_fallback = total_mass <= 1.0e-6
+        mass = torch.where(use_fallback, fallback_mass, mass)
+        total_mass = mass.sum(dim=1, keepdim=True).clamp_min(1.0)
+        centered_cum = torch.cumsum(mass, dim=1) - (0.5 * mass)
+        progress = (centered_cum / total_mass).clamp(0.0, 1.0)
+        return progress * mask
+
+    def _build_prompt_coarse_components(
+        self,
+        *,
+        prompt_random_target: torch.Tensor,
+        prompt_log_base: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        need_coarse: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        prompt_mask = prompt_mask.float().clamp(0.0, 1.0)
+        zero_fit = torch.zeros_like(prompt_random_target.float()) * prompt_mask
+        if not need_coarse or prompt_random_target.size(1) <= 0:
+            return None, zero_fit
+        batch_size, num_units = prompt_random_target.shape
+        coarse_profile = prompt_random_target.new_zeros((batch_size, self.coarse_bins))
+        coarse_fit = prompt_random_target.new_zeros((batch_size, num_units))
+        progress = self._build_progress_from_log_base(
+            prompt_log_base=prompt_log_base,
+            prompt_mask=prompt_mask,
+        )
+        for batch_idx in range(batch_size):
+            visible = prompt_mask[batch_idx] > 0.5
+            if not bool(visible.any().item()):
+                continue
+            progress_b = progress[batch_idx]
+            target_b = prompt_random_target[batch_idx].float()
+            for bin_idx in range(self.coarse_bins):
+                lo = float(bin_idx) / float(self.coarse_bins)
+                hi = float(bin_idx + 1) / float(self.coarse_bins)
+                in_bin = visible & (progress_b >= lo)
+                if bin_idx + 1 < self.coarse_bins:
+                    in_bin = in_bin & (progress_b < hi)
+                if not bool(in_bin.any().item()):
+                    continue
+                stat = target_b[in_bin].median()
+                support = target_b.new_tensor([[float(in_bin.float().sum().item())]])
+                shrunk = self._support_shrink(
+                    stat.reshape(1, 1),
+                    support,
+                    self.coarse_support_tau,
+                )[0, 0]
+                coarse_profile[batch_idx, bin_idx] = shrunk
+                coarse_fit[batch_idx, in_bin] = shrunk
+        return coarse_profile, coarse_fit * prompt_mask
+
+    @staticmethod
+    def _zero_operator_coeff(
+        *,
+        batch_size: int,
+        response_encoder,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        operator_rank = int(getattr(getattr(response_encoder, "out_proj", None), "out_features", 0))
+        return torch.zeros((batch_size, operator_rank), device=device, dtype=dtype)
 
     def _build_proxy_prompt_mask(self, ref_rhythm_trace: torch.Tensor) -> torch.Tensor:
         if ref_rhythm_trace.size(1) <= 0:
@@ -397,6 +492,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_log_base: torch.Tensor | None,
         prompt_unit_mask: torch.Tensor | None,
         response_encoder,
+        need_coarse: bool = True,
+        need_operator: bool = True,
     ) -> ReferenceDurationMemory:
         summary = self._build_prompt_summary_from_units(
             prompt_duration_obs=prompt_duration_obs,
@@ -404,41 +501,64 @@ class PromptConditionedOperatorEstimator(nn.Module):
             prompt_log_base=prompt_log_base,
             prompt_unit_mask=prompt_unit_mask,
         )
-        prompt_basis_activation = response_encoder.encode_prompt_units(
-            content_units=prompt_content_units.long(),
-            log_anchor_base=summary.prompt_log_base.detach(),
-            prompt_mask=summary.prompt_mask,
-        )
-        operator_coeff = self._solve_operator_coeff(
-            prompt_basis_activation=prompt_basis_activation,
+        coarse_profile, prompt_coarse_fit = self._build_prompt_coarse_components(
             prompt_random_target=summary.prompt_random_target,
+            prompt_log_base=summary.prompt_log_base,
             prompt_mask=summary.prompt_mask,
+            need_coarse=need_coarse,
         )
-        diagnostics = self._build_prompt_operator_diagnostics(
-            prompt_basis_activation=prompt_basis_activation,
-            prompt_random_target=summary.prompt_random_target,
-            prompt_mask=summary.prompt_mask,
+        prompt_local_target = (summary.prompt_random_target - prompt_coarse_fit) * summary.prompt_mask
+        prompt_basis_activation = None
+        operator_coeff = self._zero_operator_coeff(
+            batch_size=summary.prompt_mask.size(0),
+            response_encoder=response_encoder,
+            device=summary.prompt_mask.device,
+            dtype=summary.prompt_mask.dtype,
         )
-        prompt_operator_fit = self._build_prompt_operator_fit(
-            prompt_basis_activation=prompt_basis_activation,
-            operator_coeff=operator_coeff,
-            prompt_mask=summary.prompt_mask,
-        )
+        diagnostics = None
+        prompt_operator_fit = None
+        if need_operator:
+            prompt_basis_activation = response_encoder.encode_prompt_units(
+                content_units=prompt_content_units.long(),
+                log_anchor_base=summary.prompt_log_base.detach(),
+                prompt_mask=summary.prompt_mask,
+            )
+            operator_coeff = self._solve_operator_coeff(
+                prompt_basis_activation=prompt_basis_activation,
+                prompt_random_target=prompt_local_target,
+                prompt_mask=summary.prompt_mask,
+            )
+            diagnostics = self._build_prompt_operator_diagnostics(
+                prompt_basis_activation=prompt_basis_activation,
+                prompt_random_target=prompt_local_target,
+                prompt_mask=summary.prompt_mask,
+            )
+            prompt_operator_fit = self._build_prompt_operator_fit(
+                prompt_basis_activation=prompt_basis_activation,
+                operator_coeff=operator_coeff,
+                prompt_mask=summary.prompt_mask,
+            )
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
                 global_rate=summary.global_rate,
                 operator=StructuredDurationOperatorMemory(operator_coeff=operator_coeff),
+                coarse=(
+                    None
+                    if coarse_profile is None
+                    else StructuredCoarseDurationMemory(coarse_profile=coarse_profile)
+                ),
                 prompt=PromptConditioningEvidence(
                     prompt_basis_activation=prompt_basis_activation,
-                    prompt_random_target=summary.prompt_random_target,
+                    prompt_random_target=prompt_local_target,
                     prompt_mask=summary.prompt_mask,
-                    prompt_fit_mask=diagnostics.fit_mask,
-                    prompt_eval_mask=diagnostics.eval_mask,
+                    prompt_fit_mask=None if diagnostics is None else diagnostics.fit_mask,
+                    prompt_eval_mask=None if diagnostics is None else diagnostics.eval_mask,
                     prompt_operator_fit=prompt_operator_fit,
-                    prompt_operator_cv_fit=diagnostics.operator_cv_fit,
+                    prompt_operator_cv_fit=None if diagnostics is None else diagnostics.operator_cv_fit,
                     prompt_log_base=summary.prompt_log_base,
                     prompt_log_duration=summary.prompt_log_duration,
                     prompt_log_residual=summary.prompt_log_residual,
+                    prompt_coarse_fit=prompt_coarse_fit,
                 ),
             )
         )
@@ -449,43 +569,68 @@ class PromptConditionedOperatorEstimator(nn.Module):
         ref_rhythm_stats: torch.Tensor,
         ref_rhythm_trace: torch.Tensor,
         response_encoder,
+        need_coarse: bool = True,
+        need_operator: bool = True,
     ) -> ReferenceDurationMemory:
         summary = self._build_prompt_summary_from_proxy(ref_rhythm_trace=ref_rhythm_trace)
-        prompt_basis_activation = response_encoder.encode_prompt_proxy(
-            ref_rhythm_trace=ref_rhythm_trace.float(),
-            ref_rhythm_stats=ref_rhythm_stats.float(),
-            prompt_mask=summary.prompt_mask.float(),
-        )
-        operator_coeff = self._solve_operator_coeff(
-            prompt_basis_activation=prompt_basis_activation,
+        coarse_profile, prompt_coarse_fit = self._build_prompt_coarse_components(
             prompt_random_target=summary.prompt_random_target,
+            prompt_log_base=summary.prompt_log_base,
             prompt_mask=summary.prompt_mask,
+            need_coarse=need_coarse,
         )
-        diagnostics = self._build_prompt_operator_diagnostics(
-            prompt_basis_activation=prompt_basis_activation,
-            prompt_random_target=summary.prompt_random_target,
-            prompt_mask=summary.prompt_mask,
+        prompt_local_target = (summary.prompt_random_target - prompt_coarse_fit) * summary.prompt_mask
+        prompt_basis_activation = None
+        operator_coeff = self._zero_operator_coeff(
+            batch_size=summary.prompt_mask.size(0),
+            response_encoder=response_encoder,
+            device=summary.prompt_mask.device,
+            dtype=summary.prompt_mask.dtype,
         )
-        prompt_operator_fit = self._build_prompt_operator_fit(
-            prompt_basis_activation=prompt_basis_activation,
-            operator_coeff=operator_coeff,
-            prompt_mask=summary.prompt_mask,
-        )
+        diagnostics = None
+        prompt_operator_fit = None
+        if need_operator:
+            prompt_basis_activation = response_encoder.encode_prompt_proxy(
+                ref_rhythm_trace=ref_rhythm_trace.float(),
+                ref_rhythm_stats=ref_rhythm_stats.float(),
+                prompt_mask=summary.prompt_mask.float(),
+            )
+            operator_coeff = self._solve_operator_coeff(
+                prompt_basis_activation=prompt_basis_activation,
+                prompt_random_target=prompt_local_target,
+                prompt_mask=summary.prompt_mask,
+            )
+            diagnostics = self._build_prompt_operator_diagnostics(
+                prompt_basis_activation=prompt_basis_activation,
+                prompt_random_target=prompt_local_target,
+                prompt_mask=summary.prompt_mask,
+            )
+            prompt_operator_fit = self._build_prompt_operator_fit(
+                prompt_basis_activation=prompt_basis_activation,
+                operator_coeff=operator_coeff,
+                prompt_mask=summary.prompt_mask,
+            )
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
                 global_rate=summary.global_rate,
                 operator=StructuredDurationOperatorMemory(operator_coeff=operator_coeff),
+                coarse=(
+                    None
+                    if coarse_profile is None
+                    else StructuredCoarseDurationMemory(coarse_profile=coarse_profile)
+                ),
                 prompt=PromptConditioningEvidence(
                     prompt_basis_activation=prompt_basis_activation,
-                    prompt_random_target=summary.prompt_random_target,
+                    prompt_random_target=prompt_local_target,
                     prompt_mask=summary.prompt_mask,
-                    prompt_fit_mask=diagnostics.fit_mask,
-                    prompt_eval_mask=diagnostics.eval_mask,
+                    prompt_fit_mask=None if diagnostics is None else diagnostics.fit_mask,
+                    prompt_eval_mask=None if diagnostics is None else diagnostics.eval_mask,
                     prompt_operator_fit=prompt_operator_fit,
-                    prompt_operator_cv_fit=diagnostics.operator_cv_fit,
+                    prompt_operator_cv_fit=None if diagnostics is None else diagnostics.operator_cv_fit,
                     prompt_log_base=summary.prompt_log_base,
                     prompt_log_duration=summary.prompt_log_duration,
                     prompt_log_residual=summary.prompt_log_residual,
+                    prompt_coarse_fit=prompt_coarse_fit,
                 ),
             )
         )
@@ -511,6 +656,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
             "prompt_log_base": _detach_float(ref_conditioning.get("prompt_log_base")),
             "prompt_log_duration": _detach_float(ref_conditioning.get("prompt_log_duration")),
             "prompt_log_residual": _detach_float(ref_conditioning.get("prompt_log_residual")),
+            "prompt_coarse_fit": _detach_float(ref_conditioning.get("prompt_coarse_fit")),
         }
         prompt = (
             None
@@ -523,6 +669,13 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 operator=StructuredDurationOperatorMemory(
                     operator_coeff=ref_conditioning["operator_coeff"].float().detach(),
                 ),
+                coarse=(
+                    None
+                    if ref_conditioning.get("coarse_profile") is None
+                    else StructuredCoarseDurationMemory(
+                        coarse_profile=ref_conditioning["coarse_profile"].float().detach(),
+                    )
+                ),
                 prompt=prompt,
             )
         )
@@ -532,6 +685,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         ref_conditioning,
         *,
         response_encoder,
+        need_coarse: bool = True,
+        need_operator: bool = True,
     ) -> ReferenceDurationMemory:
         normalized = normalize_duration_v3_conditioning(ref_conditioning)
         if isinstance(normalized, ReferenceDurationMemory):
@@ -548,6 +703,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 prompt_log_base=normalized.get("prompt_log_base"),
                 prompt_unit_mask=normalized.get("prompt_unit_mask"),
                 response_encoder=response_encoder,
+                need_coarse=need_coarse,
+                need_operator=need_operator,
             )
         ref_rhythm_stats = normalized.get("ref_rhythm_stats")
         ref_rhythm_trace = normalized.get("ref_rhythm_trace")
@@ -560,7 +717,10 @@ class PromptConditionedOperatorEstimator(nn.Module):
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             response_encoder=response_encoder,
+            need_coarse=need_coarse,
+            need_operator=need_operator,
         )
+
     def forward(
         self,
         *,
@@ -568,11 +728,15 @@ class PromptConditionedOperatorEstimator(nn.Module):
         ref_conditioning=None,
         ref_mel: torch.Tensor | None = None,
         ref_lengths: torch.Tensor | None = None,
+        need_coarse: bool = True,
+        need_operator: bool = True,
     ) -> ReferenceDurationMemory:
         if ref_conditioning is not None:
             return self.from_conditioning(
                 ref_conditioning,
                 response_encoder=response_encoder,
+                need_coarse=need_coarse,
+                need_operator=need_operator,
             )
         if ref_mel is None:
             raise ValueError("Either ref_conditioning or ref_mel must be provided.")
@@ -581,6 +745,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
             ref_rhythm_stats=ref_rhythm_stats,
             ref_rhythm_trace=ref_rhythm_trace,
             response_encoder=response_encoder,
+            need_coarse=need_coarse,
+            need_operator=need_operator,
         )
 
 

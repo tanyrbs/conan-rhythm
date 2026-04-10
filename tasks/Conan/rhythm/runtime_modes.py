@@ -57,11 +57,12 @@ def resolve_task_runtime_state(
     has_f0: bool,
     has_uv: bool,
 ) -> TaskRuntimeState:
-    rhythm_enabled = bool(
-        hparams.get("rhythm_enable_v2", False)
-        or hparams.get("rhythm_enable_v3", False)
+    rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
+    rhythm_enable_v3 = bool(
+        hparams.get("rhythm_enable_v3", False)
         or is_duration_operator_mode(hparams.get("rhythm_mode", ""))
     )
+    rhythm_enabled = bool(rhythm_enable_v2 or rhythm_enable_v3)
     effective_global_step = 200000 if test else int(global_step)
     use_reference = (
         test
@@ -111,6 +112,19 @@ def resolve_task_runtime_state(
     disable_source_pitch_supervision = bool(
         disable_source_pitch_supervision or disable_acoustic_train_path
     )
+    if rhythm_enable_v3 and not rhythm_enable_v2:
+        return TaskRuntimeState(
+            effective_global_step=effective_global_step,
+            stage="duration_v3",
+            teacher_as_main=False,
+            use_reference=use_reference,
+            rhythm_apply_override=rhythm_apply_override,
+            apply_rhythm_render=bool(apply_rhythm_render),
+            retimed_stage_active=retimed_stage_active,
+            disable_source_pitch_supervision=disable_source_pitch_supervision,
+            disable_acoustic_train_path=disable_acoustic_train_path,
+            module_only_objective=module_only_objective,
+        )
     stage = detect_rhythm_stage(hparams)
     teacher_as_main = resolve_teacher_as_main(hparams, stage=stage, infer=bool(infer))
     return TaskRuntimeState(

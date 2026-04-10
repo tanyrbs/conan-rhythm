@@ -140,3 +140,18 @@ def test_conan_forward_v3_infer_does_not_short_circuit_acoustic_path():
             )
     assert output["rhythm_version"] == "v3"
     assert output["acoustic_called"] == 1.0
+
+
+def test_conan_prepare_rhythm_reference_uses_v3_adapter_entrypoint():
+    model = _build_dummy_model()
+    model.rhythm_adapter = mock.Mock()
+    expected = object()
+    model.rhythm_adapter.prepare_reference_conditioning.return_value = expected
+    ref = torch.randn(1, 6, 80)
+    ref_lengths = torch.tensor([6], dtype=torch.long)
+    result = Conan.prepare_rhythm_reference(model, ref, ref_lengths=ref_lengths)
+    assert result is expected
+    model.rhythm_adapter.prepare_reference_conditioning.assert_called_once_with(
+        ref_mel=ref,
+        ref_lengths=ref_lengths,
+    )

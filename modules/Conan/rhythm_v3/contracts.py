@@ -66,6 +66,11 @@ class StructuredDurationOperatorMemory:
 
 
 @dataclass
+class StructuredCoarseDurationMemory:
+    coarse_profile: torch.Tensor
+
+
+@dataclass
 class PromptConditioningEvidence:
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target: Optional[torch.Tensor] = None
@@ -77,12 +82,14 @@ class PromptConditioningEvidence:
     prompt_log_base: Optional[torch.Tensor] = None
     prompt_log_duration: Optional[torch.Tensor] = None
     prompt_log_residual: Optional[torch.Tensor] = None
+    prompt_coarse_fit: Optional[torch.Tensor] = None
 
 
 @dataclass
 class ReferenceDurationMemory:
     global_rate: torch.Tensor
     operator: StructuredDurationOperatorMemory
+    coarse: StructuredCoarseDurationMemory | None = None
     prompt: Optional[PromptConditioningEvidence] = None
 
     @property
@@ -92,6 +99,10 @@ class ReferenceDurationMemory:
     @property
     def operator_coeff(self) -> torch.Tensor:
         return self.operator.operator_coeff
+
+    @property
+    def coarse_profile(self) -> Optional[torch.Tensor]:
+        return None if self.coarse is None else self.coarse.coarse_profile
 
     @property
     def prompt_basis_activation(self) -> Optional[torch.Tensor]:
@@ -133,6 +144,10 @@ class ReferenceDurationMemory:
     def prompt_log_residual(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_log_residual
 
+    @property
+    def prompt_coarse_fit(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_coarse_fit
+
 
 @dataclass
 class DurationRuntimeState:
@@ -160,6 +175,8 @@ class DurationExecution:
     basis_activation: torch.Tensor
     commit_mask: torch.Tensor
     next_state: DurationRuntimeState
+    coarse_response: Optional[torch.Tensor] = None
+    local_response: Optional[torch.Tensor] = None
     frame_plan: Optional["RhythmFramePlan"] = None
 
     @property
@@ -237,6 +254,19 @@ def move_structured_duration_operator_memory(
     )
 
 
+def move_structured_coarse_duration_memory(
+    coarse: StructuredCoarseDurationMemory | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> StructuredCoarseDurationMemory | None:
+    if coarse is None:
+        return None
+    return StructuredCoarseDurationMemory(
+        coarse_profile=_move_tensor(coarse.coarse_profile, device=device, dtype=dtype),
+    )
+
+
 def move_prompt_conditioning_evidence(
     prompt: PromptConditioningEvidence | None,
     *,
@@ -256,6 +286,7 @@ def move_prompt_conditioning_evidence(
         prompt_log_base=_move_tensor(prompt.prompt_log_base, device=device, dtype=dtype),
         prompt_log_duration=_move_tensor(prompt.prompt_log_duration, device=device, dtype=dtype),
         prompt_log_residual=_move_tensor(prompt.prompt_log_residual, device=device, dtype=dtype),
+        prompt_coarse_fit=_move_tensor(prompt.prompt_coarse_fit, device=device, dtype=dtype),
     )
 
 
@@ -271,6 +302,7 @@ def move_reference_duration_memory(
         for value in (
             memory.global_rate,
             memory.operator_coeff,
+            memory.coarse_profile,
             memory.prompt_basis_activation,
             memory.prompt_random_target,
             memory.prompt_mask,
@@ -281,12 +313,14 @@ def move_reference_duration_memory(
             memory.prompt_log_base,
             memory.prompt_log_duration,
             memory.prompt_log_residual,
+            memory.prompt_coarse_fit,
         )
     ):
         return memory
     return ReferenceDurationMemory(
         global_rate=_move_tensor(memory.global_rate, device=device, dtype=dtype),
         operator=move_structured_duration_operator_memory(memory.operator, device=device, dtype=dtype),
+        coarse=move_structured_coarse_duration_memory(memory.coarse, device=device, dtype=dtype),
         prompt=move_prompt_conditioning_evidence(memory.prompt, device=device, dtype=dtype),
     )
 
@@ -308,6 +342,27 @@ def validate_structured_duration_operator_memory(
             f"expected {batch_size}, got {tuple(coeff.shape)}"
         )
     return operator
+
+
+def validate_structured_coarse_duration_memory(
+    coarse: StructuredCoarseDurationMemory | None,
+    *,
+    batch_size: int,
+) -> StructuredCoarseDurationMemory | None:
+    if coarse is None:
+        return None
+    profile = coarse.coarse_profile
+    if not isinstance(profile, torch.Tensor) or profile.dim() != 2:
+        raise ValueError(
+            "StructuredCoarseDurationMemory.coarse_profile must have shape [B, M], "
+            f"got {getattr(profile, 'shape', None)}"
+        )
+    if profile.size(0) != batch_size:
+        raise ValueError(
+            "StructuredCoarseDurationMemory.coarse_profile batch mismatch: "
+            f"expected {batch_size}, got {tuple(profile.shape)}"
+        )
+    return coarse
 
 
 def validate_prompt_conditioning_evidence(
@@ -343,6 +398,7 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_log_base", prompt.prompt_log_base, dims=2)
     _check_batch("prompt_log_duration", prompt.prompt_log_duration, dims=2)
     _check_batch("prompt_log_residual", prompt.prompt_log_residual, dims=2)
+    _check_batch("prompt_coarse_fit", prompt.prompt_coarse_fit, dims=2)
 
     if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
         raise ValueError(
@@ -393,6 +449,7 @@ def validate_prompt_conditioning_evidence(
         ("prompt_log_base", prompt.prompt_log_base),
         ("prompt_log_duration", prompt.prompt_log_duration),
         ("prompt_log_residual", prompt.prompt_log_residual),
+        ("prompt_coarse_fit", prompt.prompt_coarse_fit),
         ("prompt_operator_fit", prompt.prompt_operator_fit),
         ("prompt_operator_cv_fit", prompt.prompt_operator_cv_fit),
         ("prompt_random_target", prompt.prompt_random_target),
@@ -415,6 +472,7 @@ def validate_reference_duration_memory(
         )
     batch_size = int(memory.global_rate.size(0))
     validate_structured_duration_operator_memory(memory.operator, batch_size=batch_size)
+    validate_structured_coarse_duration_memory(memory.coarse, batch_size=batch_size)
     validate_prompt_conditioning_evidence(
         memory.prompt,
         batch_size=batch_size,
@@ -449,6 +507,13 @@ def ensure_reference_duration_memory_batch(
         operator=StructuredDurationOperatorMemory(
             operator_coeff=_expand(memory.operator_coeff),
         ),
+        coarse=(
+            None
+            if memory.coarse is None
+            else StructuredCoarseDurationMemory(
+                coarse_profile=_expand(memory.coarse_profile),
+            )
+        ),
         prompt=(
             None
             if memory.prompt is None
@@ -463,6 +528,7 @@ def ensure_reference_duration_memory_batch(
                 prompt_log_base=_expand(memory.prompt_log_base),
                 prompt_log_duration=_expand(memory.prompt_log_duration),
                 prompt_log_residual=_expand(memory.prompt_log_residual),
+                prompt_coarse_fit=_expand(memory.prompt_coarse_fit),
             )
         ),
     )

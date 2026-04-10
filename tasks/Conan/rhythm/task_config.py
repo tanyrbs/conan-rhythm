@@ -109,6 +109,11 @@ def validate_rhythm_training_hparams(hparams) -> None:
                 raise ValueError(f"{removed_key} has been removed from rhythm_v3.")
         if int(hparams.get("rhythm_response_rank", 12) or 0) <= 0:
             raise ValueError("rhythm_response_rank must be > 0 for rhythm_v3.")
+        ablation_mode = str(hparams.get("rhythm_v3_ablation", "coarse_operator") or "coarse_operator").strip().lower()
+        if ablation_mode not in {"global_only", "coarse_only", "operator", "coarse_operator", "operator_srcres"}:
+            raise ValueError(
+                "rhythm_v3_ablation must be one of: global_only, coarse_only, operator, coarse_operator, operator_srcres"
+            )
         for key in (
             "lambda_rhythm_dur",
             "lambda_rhythm_op",
@@ -117,14 +122,32 @@ def validate_rhythm_training_hparams(hparams) -> None:
             "lambda_rhythm_zero",
             "lambda_rhythm_ortho",
             "rhythm_global_shrink_tau",
+            "rhythm_coarse_support_tau",
             "rhythm_operator_support_tau",
             "rhythm_operator_holdout_ratio",
         ):
             if float(hparams.get(key, 0.0) or 0.0) < 0.0:
                 raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
+        if int(hparams.get("rhythm_coarse_bins", 4) or 0) <= 0:
+            raise ValueError("rhythm_coarse_bins must be > 0 for rhythm_v3.")
         holdout_ratio = float(hparams.get("rhythm_operator_holdout_ratio", 0.30) or 0.0)
         if holdout_ratio >= 1.0:
             raise ValueError("rhythm_operator_holdout_ratio must be < 1 for rhythm_v3.")
+        source_residual_gain = float(hparams.get("rhythm_v3_source_residual_gain", 0.0) or 0.0)
+        if source_residual_gain < 0.0:
+            raise ValueError("rhythm_v3_source_residual_gain must be >= 0 for rhythm_v3.")
+        if ablation_mode in {"global_only", "coarse_only"}:
+            for key in ("lambda_rhythm_op", "lambda_rhythm_zero", "lambda_rhythm_ortho"):
+                if float(hparams.get(key, 0.0) or 0.0) > 0.0:
+                    raise ValueError(f"{key} must be 0 when rhythm_v3_ablation='{ablation_mode}'.")
+            if source_residual_gain > 0.0:
+                raise ValueError(
+                    f"rhythm_v3_source_residual_gain must be 0 when rhythm_v3_ablation='{ablation_mode}'."
+                )
+        elif ablation_mode != "operator_srcres" and source_residual_gain > 0.0:
+            raise ValueError(
+                "rhythm_v3_source_residual_gain is only valid when rhythm_v3_ablation='operator_srcres'."
+            )
         public_inputs = _normalize_public_surface(hparams.get("rhythm_public_inputs"), key="rhythm_public_inputs")
         public_outputs = _normalize_public_surface(hparams.get("rhythm_public_outputs"), key="rhythm_public_outputs")
         public_losses = _normalize_public_surface(hparams.get("rhythm_public_losses"), key="rhythm_public_losses")

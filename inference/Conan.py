@@ -211,7 +211,7 @@ class StreamingVoiceConversion:
                     or getattr(self.model, "rhythm_enable_v3", False)
                 ),
             ):
-                rhythm_ref_conditioning = self.model.rhythm_module.encode_reference(
+                rhythm_ref_conditioning = self.model.prepare_rhythm_reference(
                     ref_mel_batch,
                     ref_lengths=torch.tensor([ref_mel_batch.size(1)], device=ref_mel_batch.device),
                 )

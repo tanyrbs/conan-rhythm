@@ -1159,8 +1159,29 @@ def _build_duration_v3_metric_sections(
     if ref_memory is not None and isinstance(getattr(ref_memory, "global_rate", None), torch.Tensor):
         core_metrics["rhythm_metric_global_rate_mean"] = _safe_mean(ref_memory.global_rate)
         core_metrics["rhythm_metric_global_stretch_mean"] = _safe_mean(ref_memory.global_rate)
+    local_response = getattr(execution, "local_response", None)
+    if not isinstance(local_response, torch.Tensor):
+        if ref_memory is not None and isinstance(getattr(ref_memory, "global_rate", None), torch.Tensor):
+            global_rate = ref_memory.global_rate.float().expand(-1, public_speech_exec.size(1))
+            local_response = execution.unit_logstretch.float() - (global_rate * speech_commit_mask)
+    if isinstance(local_response, torch.Tensor):
+        core_metrics["rhythm_metric_local_response_abs_mean"] = _masked_mean(
+            local_response.float().abs(),
+            speech_commit_mask,
+        )
+    coarse_response = getattr(execution, "coarse_response", None)
+    if isinstance(coarse_response, torch.Tensor):
+        core_metrics["rhythm_metric_coarse_response_abs_mean"] = _masked_mean(
+            coarse_response.float().abs(),
+            speech_commit_mask,
+        )
     if ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
         core_metrics["rhythm_metric_operator_coeff_abs_mean"] = _safe_mean(ref_memory.operator_coeff.abs())
+    if ref_memory is not None and isinstance(getattr(ref_memory, "coarse_profile", None), torch.Tensor):
+        core_metrics["rhythm_metric_coarse_profile_abs_mean"] = _safe_mean(ref_memory.coarse_profile.abs())
+    source_residual_gain = _optional_scalar(output.get("rhythm_v3_source_residual_gain"), device)
+    if source_residual_gain is not None:
+        core_metrics["rhythm_metric_source_residual_gain"] = source_residual_gain
     target = None
     if sample is not None:
         value = sample.get("unit_duration_tgt")

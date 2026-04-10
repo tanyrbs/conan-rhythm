@@ -352,6 +352,42 @@ def test_rhythm_v3_training_rejects_proxy_built_reference_memory_without_prompt_
         )
 
 
+def test_rhythm_v3_training_rejects_prompt_backed_reference_memory_even_with_prompt_logs():
+    adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2]], dtype=torch.long)
+    prompt_memory = ReferenceDurationMemory(
+        global_rate=torch.zeros((1, 1)),
+        operator=StructuredDurationOperatorMemory(operator_coeff=torch.zeros((1, 4))),
+        prompt=PromptConditioningEvidence(
+            prompt_basis_activation=torch.zeros((1, 3, 4)),
+            prompt_random_target=torch.zeros((1, 3)),
+            prompt_mask=torch.ones((1, 3)),
+            prompt_log_duration=torch.zeros((1, 3)),
+        ),
+    )
+    with pytest.raises(ValueError, match="prompt_content_units / prompt_duration_obs / prompt_unit_mask"):
+        adapter(
+            ret={},
+            content=content,
+            ref=None,
+            target=None,
+            f0=None,
+            uv=None,
+            infer=False,
+            global_steps=0,
+            content_embed=torch.randn(content.size(0), content.size(1), 32),
+            tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+            content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+            rhythm_state=None,
+            rhythm_ref_conditioning=prompt_memory,
+            rhythm_apply_override=None,
+            rhythm_runtime_overrides=None,
+            rhythm_source_cache=None,
+            rhythm_offline_source_cache=None,
+            speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+        )
+
+
 def test_rhythm_v3_consistency_targets_tolerate_shorter_cached_prefix_state():
     unit_mask = torch.ones((1, 5), dtype=torch.float32)
     output = {

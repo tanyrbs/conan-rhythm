@@ -145,6 +145,8 @@ class StreamingDurationProjector(nn.Module):
         unit_mask: torch.Tensor,
         sealed_mask: torch.Tensor | None,
         state: DurationRuntimeState | None,
+        coarse_response: torch.Tensor | None = None,
+        local_response: torch.Tensor | None = None,
     ) -> DurationExecution:
         batch_size = unit_duration_exec.size(0)
         device = unit_duration_exec.device
@@ -184,5 +186,7 @@ class StreamingDurationProjector(nn.Module):
             basis_activation=basis_activation,
             commit_mask=commit_mask,
             next_state=next_state,
+            coarse_response=coarse_response,
+            local_response=local_response,
             frame_plan=frame_plan,
         )

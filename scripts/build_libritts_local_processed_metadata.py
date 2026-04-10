@@ -104,7 +104,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build processed metadata from a local LibriTTS tree.")
     parser.add_argument("--raw_root", required=True)
     parser.add_argument("--processed_data_dir", required=True)
-    parser.add_argument("--config", default="egs/conan_emformer_rhythm_v2_teacher_offline.yaml")
+    parser.add_argument("--config", default="egs/conan_emformer_rhythm_v3.yaml")
     parser.add_argument(
         "--emformer_ckpt",
         default="checkpoints/Emformer/model_ckpt_steps_700000.ckpt",

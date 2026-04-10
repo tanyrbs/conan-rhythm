@@ -9,9 +9,7 @@ from modules.Conan.acoustic_runtime import (
 )
 from modules.Conan.pitch_mixin import ConanPitchMixin
 from modules.Conan.prosody_util import ProsodyAligner, LocalStyleAdaptor
-from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
-from modules.Conan.rhythm.factory import resolve_content_vocab_size
 from modules.Conan.rhythm.policy import is_duration_operator_mode
 from modules.commons.conv import ConvBlocks, CausalFM
 from modules.commons.nar_tts_modules import PitchPredictor
@@ -36,6 +34,14 @@ Flow_DECODERS = {
 
 DEFAULT_MAX_SOURCE_POSITIONS = 2000
 DEFAULT_MAX_TARGET_POSITIONS = 2000
+
+
+def _resolve_content_vocab_size(hparams) -> int:
+    for key in ("content_vocab_size", "content_num_units", "content_num_embeddings", "content_embedding_dim"):
+        value = hparams.get(key, None)
+        if value is not None:
+            return int(value)
+    return 102
 
 
 def _require_flow_mel():
@@ -82,7 +88,7 @@ class Conan(ConanPitchMixin, FastSpeech):
 
         hidden_size = hparams["hidden_size"]
         kernel_size = hparams["kernel_size"]
-        content_vocab_size = resolve_content_vocab_size(hparams)
+        content_vocab_size = _resolve_content_vocab_size(hparams)
         self._init_content_backbone(
             hidden_size=hidden_size,
             kernel_size=kernel_size,
@@ -125,9 +131,11 @@ class Conan(ConanPitchMixin, FastSpeech):
             self.rhythm_adapter = ConanDurationAdapter(
                 hparams,
                 hidden_size,
-                vocab_size=resolve_content_vocab_size(hparams),
+                vocab_size=_resolve_content_vocab_size(hparams),
             )
         else:
+            from modules.Conan.rhythm.runtime_adapter import ConanRhythmAdapter
+
             self.rhythm_adapter = ConanRhythmAdapter(hparams, hidden_size)
         self.rhythm_unit_frontend = self.rhythm_adapter.unit_frontend
         self.rhythm_module = self.rhythm_adapter.module
@@ -339,7 +347,28 @@ class Conan(ConanPitchMixin, FastSpeech):
             x=global_z_e_x, mask=(in_nonpadding == 0)
         )  # (B, C, T) -> (B, C, 1)
         spk_embed = global_z_e_x
-        return spk_embed    
+        return spk_embed
+
+    def prepare_rhythm_reference(
+        self,
+        ref_mel: torch.Tensor,
+        *,
+        ref_lengths: torch.Tensor | None = None,
+    ):
+        if not getattr(self, "rhythm_enabled", False):
+            return None
+        adapter = getattr(self, "rhythm_adapter", None)
+        if adapter is not None and hasattr(adapter, "prepare_reference_conditioning"):
+            return adapter.prepare_reference_conditioning(
+                ref_mel=ref_mel,
+                ref_lengths=ref_lengths,
+            )
+        if getattr(self, "rhythm_enable_v3", False):
+            return self.rhythm_module.build_reference_conditioning(
+                ref_mel=ref_mel,
+                ref_lengths=ref_lengths,
+            )
+        return self.rhythm_module.build_reference_conditioning(ref_mel=ref_mel)
 
     def temporal_avg_pool(self, x, mask=None):
         len_ = (~mask).sum(dim=-1).unsqueeze(-1)

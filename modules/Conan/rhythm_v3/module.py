@@ -105,16 +105,24 @@ class MixedEffectsDurationModule(nn.Module):
         streaming_mode: str = "strict",
         micro_lookahead_units: int | None = None,
         ridge_lambda: float = 1.0,
+        ablation_mode: str = "coarse_operator",
+        source_residual_gain: float = 0.0,
         **unused_kwargs,
     ) -> None:
         super().__init__()
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
+        coarse_support_tau = float(unused_kwargs.pop("coarse_support_tau", 8.0))
+        coarse_bins = int(unused_kwargs.pop("coarse_bins", 4))
         ridge_support_tau = float(unused_kwargs.pop("ridge_support_tau", 8.0))
         operator_holdout_ratio = float(unused_kwargs.pop("operator_holdout_ratio", 0.30))
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
             raise ValueError(f"Unsupported streaming_mode={streaming_mode!r}")
+        self.ablation_mode = str(ablation_mode or "coarse_operator").strip().lower()
+        if self.ablation_mode not in {"global_only", "coarse_only", "operator", "coarse_operator", "operator_srcres"}:
+            raise ValueError(f"Unsupported rhythm_v3 ablation mode: {ablation_mode!r}")
+        self.source_residual_gain = float(max(0.0, source_residual_gain))
         effective_window_right = int(response_window_right)
         if self.streaming_mode == "strict":
             effective_window_right = 0
@@ -130,12 +138,20 @@ class MixedEffectsDurationModule(nn.Module):
         )
         self.reference_memory_builder = PromptConditionedOperatorEstimator(
             trace_bins=trace_bins,
+            coarse_bins=coarse_bins,
             ridge_lambda=ridge_lambda,
             global_shrink_tau=global_shrink_tau,
+            coarse_support_tau=coarse_support_tau,
             ridge_support_tau=ridge_support_tau,
             holdout_ratio=operator_holdout_ratio,
         )
         self.projector = StreamingDurationProjector()
+
+    def _use_coarse_response(self) -> bool:
+        return self.ablation_mode in {"coarse_only", "coarse_operator", "operator_srcres"}
+
+    def _use_local_operator(self) -> bool:
+        return self.ablation_mode in {"operator", "coarse_operator", "operator_srcres"}
 
     def init_state(self, batch_size: int, device: torch.device) -> DurationRuntimeState:
         return self.projector.init_state(batch_size=batch_size, device=device)
@@ -149,10 +165,14 @@ class MixedEffectsDurationModule(nn.Module):
         ref_mel: torch.Tensor | None = None,
         ref_lengths: torch.Tensor | None = None,
     ) -> ReferenceDurationMemory:
+        need_coarse = self._use_coarse_response()
+        need_operator = self._use_local_operator()
         if ref_conditioning is not None:
             return self.reference_memory_builder(
                 response_encoder=self.response_encoder,
                 ref_conditioning=ref_conditioning,
+                need_coarse=need_coarse,
+                need_operator=need_operator,
             )
         if ref_rhythm_stats is not None and ref_rhythm_trace is not None:
             return self.reference_memory_builder(
@@ -161,6 +181,8 @@ class MixedEffectsDurationModule(nn.Module):
                     "ref_rhythm_stats": ref_rhythm_stats,
                     "ref_rhythm_trace": ref_rhythm_trace,
                 },
+                need_coarse=need_coarse,
+                need_operator=need_operator,
             )
         if ref_mel is None:
             raise ValueError("Either reference conditioning or reference mel must be provided.")
@@ -168,6 +190,8 @@ class MixedEffectsDurationModule(nn.Module):
             response_encoder=self.response_encoder,
             ref_mel=ref_mel,
             ref_lengths=ref_lengths,
+            need_coarse=need_coarse,
+            need_operator=need_operator,
         )
 
     @staticmethod
@@ -202,6 +226,10 @@ class MixedEffectsDurationModule(nn.Module):
         unit_mask: torch.Tensor,
         log_anchor: torch.Tensor,
     ) -> torch.Tensor:
+        if not self._use_local_operator():
+            batch_size, num_units = source_batch.content_units.shape
+            basis_rank = int(self.response_encoder.out_proj.out_features)
+            return log_anchor.new_zeros((batch_size, num_units, basis_rank))
         return self.response_encoder.encode_source(
             content_units=source_batch.content_units,
             log_anchor_base=log_anchor,
@@ -217,6 +245,72 @@ class MixedEffectsDurationModule(nn.Module):
         if basis_activation.size(1) <= 0:
             return basis_activation.new_zeros((basis_activation.size(0), 0))
         return torch.einsum("buk,bk->bu", basis_activation.float(), ref_memory.operator_coeff.float())
+
+    @staticmethod
+    def _build_prefix_progress(
+        *,
+        unit_anchor_base: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = speech_commit_mask.float().clamp(0.0, 1.0)
+        if unit_anchor_base.numel() <= 0:
+            return unit_anchor_base.new_zeros(unit_anchor_base.shape)
+        mass = unit_anchor_base.float().detach().clamp_min(1.0e-6) * mask
+        total_mass = mass.sum(dim=1, keepdim=True)
+        fallback_mass = mask
+        use_fallback = total_mass <= 1.0e-6
+        mass = torch.where(use_fallback, fallback_mass, mass)
+        total_mass = mass.sum(dim=1, keepdim=True).clamp_min(1.0)
+        centered_cum = torch.cumsum(mass, dim=1) - (0.5 * mass)
+        return (centered_cum / total_mass).clamp(0.0, 1.0) * mask
+
+    @staticmethod
+    def _sample_coarse_response(
+        *,
+        ref_memory: ReferenceDurationMemory,
+        source_batch: SourceUnitBatch,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if not isinstance(getattr(ref_memory, "coarse_profile", None), torch.Tensor):
+            return speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        coarse_profile = ref_memory.coarse_profile.float()
+        if coarse_profile.numel() <= 0 or coarse_profile.size(1) <= 0 or source_batch.content_units.size(1) <= 0:
+            return speech_commit_mask.new_zeros(speech_commit_mask.shape)
+        progress = MixedEffectsDurationModule._build_prefix_progress(
+            unit_anchor_base=source_batch.unit_anchor_base,
+            speech_commit_mask=speech_commit_mask,
+        )
+        num_bins = int(coarse_profile.size(1))
+        indices = torch.clamp((progress * float(num_bins)).long(), min=0, max=max(0, num_bins - 1))
+        sampled = coarse_profile.gather(1, indices)
+        return sampled * speech_commit_mask.float()
+
+    @staticmethod
+    def _resolve_speech_commit_mask(
+        *,
+        source_batch: SourceUnitBatch,
+        commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        speech_commit_mask = commit_mask.float()
+        if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor):
+            speech_commit_mask = speech_commit_mask * (1.0 - source_batch.sep_mask.float().clamp(0.0, 1.0))
+        return speech_commit_mask
+
+    @staticmethod
+    def _build_centered_source_residual(
+        *,
+        source_batch: SourceUnitBatch,
+        detached_log_anchor: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        raw_source_residual = (
+            torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-6))
+            - detached_log_anchor.float()
+        ) * speech_commit_mask.float()
+        prefix_sum = torch.cumsum(raw_source_residual, dim=1)
+        prefix_den = torch.cumsum(speech_commit_mask.float(), dim=1).clamp_min(1.0)
+        prefix_mean = (prefix_sum / prefix_den).detach()
+        return (raw_source_residual - prefix_mean) * speech_commit_mask.float()
 
     @staticmethod
     def _resolve_runtime_state(
@@ -272,8 +366,29 @@ class MixedEffectsDurationModule(nn.Module):
             basis_activation=basis_activation,
             ref_memory=ref_memory,
         )
+        speech_commit_mask = self._resolve_speech_commit_mask(
+            source_batch=source_batch,
+            commit_mask=commit_mask,
+        )
+        coarse_response = self._sample_coarse_response(
+            ref_memory=ref_memory,
+            source_batch=source_batch,
+            speech_commit_mask=speech_commit_mask,
+        )
+        if not self._use_local_operator():
+            local_response = torch.zeros_like(local_response)
+        if not self._use_coarse_response():
+            coarse_response = torch.zeros_like(coarse_response)
+        source_residual_response = torch.zeros_like(local_response)
+        if self.ablation_mode == "operator_srcres" and self.source_residual_gain > 0.0:
+            centered_source_residual = self._build_centered_source_residual(
+                source_batch=source_batch,
+                detached_log_anchor=detached_log_anchor,
+                speech_commit_mask=speech_commit_mask,
+            )
+            source_residual_response = self.source_residual_gain * centered_source_residual
         global_stretch = ref_memory.global_rate.float().expand(-1, unit_mask.size(1))
-        unit_logstretch = (global_stretch + local_response) * commit_mask
+        unit_logstretch = (global_stretch + coarse_response + local_response + source_residual_response) * speech_commit_mask
         unit_duration_exec = self._predict_unit_duration(
             source_batch=source_batch,
             unit_logstretch=unit_logstretch,
@@ -287,11 +402,13 @@ class MixedEffectsDurationModule(nn.Module):
         return self.projector.finalize_execution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=unit_duration_exec,
-            basis_activation=basis_activation * commit_mask.unsqueeze(-1),
+            basis_activation=basis_activation * speech_commit_mask.unsqueeze(-1),
             source_duration_obs=source_batch.source_duration_obs,
             unit_mask=unit_mask,
             sealed_mask=sealed_mask,
             state=state,
+            coarse_response=coarse_response * speech_commit_mask,
+            local_response=local_response * speech_commit_mask,
         )
 
 

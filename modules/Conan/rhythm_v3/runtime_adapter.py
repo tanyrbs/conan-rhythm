@@ -50,8 +50,12 @@ class ConanDurationAdapter(nn.Module):
             micro_lookahead_units=(None if micro_lookahead_units is None else int(micro_lookahead_units)),
             ridge_lambda=float(hparams.get("rhythm_operator_ridge_lambda", 1.0)),
             global_shrink_tau=float(hparams.get("rhythm_global_shrink_tau", 8.0)),
+            coarse_support_tau=float(hparams.get("rhythm_coarse_support_tau", 8.0)),
+            coarse_bins=int(hparams.get("rhythm_coarse_bins", 4)),
             ridge_support_tau=float(hparams.get("rhythm_operator_support_tau", 8.0)),
             operator_holdout_ratio=float(hparams.get("rhythm_operator_holdout_ratio", 0.30)),
+            ablation_mode=str(hparams.get("rhythm_v3_ablation", "coarse_operator") or "coarse_operator"),
+            source_residual_gain=float(hparams.get("rhythm_v3_source_residual_gain", 0.0) or 0.0),
         )
         self.pause_state = nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
         self.render_phase_mlp = None
@@ -122,14 +126,15 @@ class ConanDurationAdapter(nn.Module):
             prompt_duration_obs=prompt_duration_obs,
             prompt_unit_mask=ref_conditioning.get("prompt_unit_mask"),
         )
-        enriched = dict(ref_conditioning)
-        enriched["prompt_content_units"] = prompt_content_units
-        enriched["prompt_duration_obs"] = prompt_duration_obs
-        enriched["prompt_unit_mask"] = prompt_unit_mask
-        if isinstance(enriched.get("prompt_unit_anchor_base"), torch.Tensor):
-            enriched["prompt_unit_anchor_base"] = enriched["prompt_unit_anchor_base"].to(device=device).detach()
-        if isinstance(enriched.get("prompt_log_base"), torch.Tensor):
-            enriched["prompt_log_base"] = enriched["prompt_log_base"].to(device=device).detach()
+        enriched = {
+            "prompt_content_units": prompt_content_units,
+            "prompt_duration_obs": prompt_duration_obs,
+            "prompt_unit_mask": prompt_unit_mask,
+        }
+        if isinstance(ref_conditioning.get("prompt_unit_anchor_base"), torch.Tensor):
+            enriched["prompt_unit_anchor_base"] = ref_conditioning["prompt_unit_anchor_base"].to(device=device).detach()
+        if isinstance(ref_conditioning.get("prompt_log_base"), torch.Tensor):
+            enriched["prompt_log_base"] = ref_conditioning["prompt_log_base"].to(device=device).detach()
         if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
             enriched["prompt_unit_anchor_base"] = self.unit_frontend.baseline(
                 prompt_content_units,
@@ -144,13 +149,9 @@ class ConanDurationAdapter(nn.Module):
         ref_conditioning,
         ref,
     ) -> None:
-        if infer or bool(self.hparams.get("rhythm_v3_allow_proxy_training", False)):
+        if infer:
             return
         if isinstance(ref_conditioning, ReferenceDurationMemory):
-            prompt_log_duration = getattr(ref_conditioning, "prompt_log_duration", None)
-            prompt_mask = getattr(ref_conditioning, "prompt_mask", None)
-            if isinstance(prompt_log_duration, torch.Tensor) and isinstance(prompt_mask, torch.Tensor):
-                return
             raise ValueError(
                 "rhythm_v3 mainline training requires explicit prompt units "
                 "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
@@ -165,7 +166,10 @@ class ConanDurationAdapter(nn.Module):
                     ref=ref,
                 )
                 return
-            has_prompt_units = all(key in ref_conditioning for key in _PROMPT_UNIT_REQUIRED_KEYS)
+            has_prompt_units = all(
+                isinstance(ref_conditioning.get(key), torch.Tensor)
+                for key in (*_PROMPT_UNIT_REQUIRED_KEYS, "prompt_unit_mask")
+            )
             if has_prompt_units:
                 return
             raise ValueError(
@@ -179,6 +183,17 @@ class ConanDurationAdapter(nn.Module):
                 "(prompt_content_units / prompt_duration_obs / prompt_unit_mask); "
                 "trace proxy should be inference-only."
             )
+
+    def prepare_reference_conditioning(
+        self,
+        *,
+        ref_mel: torch.Tensor,
+        ref_lengths: torch.Tensor | None = None,
+    ) -> ReferenceDurationMemory:
+        return self.module.build_reference_conditioning(
+            ref_mel=ref_mel,
+            ref_lengths=ref_lengths,
+        )
 
     def _attach_runtime_outputs(
         self,
@@ -198,6 +213,8 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_ref_conditioning"] = ref_memory
         ret["speech_duration_exec"] = execution.speech_duration_exec
         ret["commit_frontier"] = execution.commit_frontier
+        ret["rhythm_v3_ablation_mode"] = self.module.ablation_mode
+        ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
 

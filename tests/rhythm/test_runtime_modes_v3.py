@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from tasks.Conan.rhythm.runtime_modes import (
@@ -14,6 +15,7 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
     rhythm_ref_conditioning = {
         "global_rate": torch.tensor([[0.25]], dtype=torch.float32),
         "operator_coeff": torch.randn(1, 4),
+        "coarse_profile": torch.tensor([[0.0, 0.1, -0.1, 0.05]], dtype=torch.float32),
         "prompt_basis_activation": torch.randn(1, 6, 4),
         "prompt_random_target": torch.randn(1, 6),
         "prompt_mask": torch.ones(1, 6),
@@ -32,6 +34,7 @@ def test_build_duration_v3_ref_conditioning_normalizes_rhythm_ref_conditioning_o
         explicit=sample["rhythm_ref_conditioning"],
     )
     assert set(("global_rate", "operator_coeff")).issubset(conditioning.keys())
+    assert "coarse_profile" in conditioning
     assert "prompt_random_target" in conditioning
     assert "prompt_mask" in conditioning
     assert "prompt_operator_fit" in conditioning
@@ -57,6 +60,25 @@ def test_build_duration_v3_ref_conditioning_accepts_explicit_prompt_units_withou
     assert "prompt_content_units" in conditioning
     assert "prompt_duration_obs" in conditioning
     assert "prompt_unit_mask" in conditioning
+    assert "ref_rhythm_stats" not in conditioning
+    assert "ref_rhythm_trace" not in conditioning
+
+
+def test_build_duration_v3_ref_conditioning_rejects_mixed_prompt_units_and_prebuilt_operator():
+    sample = {
+        "rhythm_ref_conditioning": {
+            "prompt_content_units": torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[3.0, 4.0, 2.0, 0.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "global_rate": torch.zeros((1, 1), dtype=torch.float32),
+            "operator_coeff": torch.zeros((1, 4), dtype=torch.float32),
+        }
+    }
+    with pytest.raises(ValueError, match="prompt-unit evidence cannot be mixed"):
+        build_duration_v3_ref_conditioning(
+            sample,
+            explicit=sample["rhythm_ref_conditioning"],
+        )
 
 
 def test_build_legacy_v2_ref_conditioning_keeps_planner_sidecars():
@@ -110,6 +132,8 @@ def test_resolve_task_runtime_state_supports_duration_operator_mode():
         has_f0=False,
         has_uv=False,
     )
+    assert runtime_state.stage == "duration_v3"
+    assert runtime_state.teacher_as_main is False
     assert runtime_state.module_only_objective is True
     assert runtime_state.disable_acoustic_train_path is True
 

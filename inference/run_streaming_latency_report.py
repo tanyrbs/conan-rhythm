@@ -23,7 +23,7 @@ def main():
     )
     parser.add_argument(
         "--config",
-        default="egs/conan_emformer_rhythm_v2_student_kd.yaml",
+        default="egs/conan_emformer_rhythm_v3.yaml",
         help="Config YAML to inspect.",
     )
     parser.add_argument("--exp_name", default="", help="Optional exp name if config is omitted.")
