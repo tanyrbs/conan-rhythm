@@ -15,7 +15,8 @@ def test_run_voice_conversion_uses_current_streaming_inference():
 def test_streaming_inference_extracts_prompt_units_for_v3_by_default():
     source = (ROOT / "inference" / "Conan.py").read_text(encoding="utf-8")
     assert "def _extract_prompt_unit_conditioning" in source
-    assert "rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(ref_mel_batch)" in source
+    assert "rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(" in source
+    assert "prepared_spk_embed=prepared_spk_embed" in source
     assert '"prompt_content_units"' in source
     assert '"prompt_duration_obs"' in source
     assert '"prompt_unit_mask"' in source

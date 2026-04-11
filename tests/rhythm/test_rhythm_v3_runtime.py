@@ -735,13 +735,145 @@ def test_rhythm_v3_projector_committed_speech_units_keep_at_least_one_frame():
         hidden_size=32,
         vocab_size=128,
     )
-    projected, residual = adapter.module.projector._project_duration_prefix(
+    projected, residual, prefix_offset = adapter.module.projector._project_duration_prefix(
         unit_duration_exec=torch.tensor([[0.20, 0.20]], dtype=torch.float32),
+        source_duration_obs=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
         speech_commit_mask=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
         residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+        prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
         committed_units_prev=torch.zeros((1,), dtype=torch.long),
         cached_duration_exec_prev=None,
+        budget_pos=24,
+        budget_neg=24,
     )
     assert torch.all(projected >= 1.0)
     assert float(residual[0, 0].item()) < 0.0
+    assert float(prefix_offset[0, 0].item()) == -2.0
+
+
+def test_rhythm_v3_projector_applies_prefix_unit_budget_clamp():
+    adapter = ConanDurationAdapter(
+        {
+            **_build_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_prefix_budget_pos": 1,
+            "rhythm_v3_prefix_budget_neg": 1,
+        },
+        hidden_size=32,
+        vocab_size=128,
+    )
+    projected, residual, prefix_offset = adapter.module.projector._project_duration_prefix(
+        unit_duration_exec=torch.tensor([[20.0, 20.0, 20.0]], dtype=torch.float32),
+        source_duration_obs=torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+        commit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        speech_commit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+        prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+        committed_units_prev=torch.zeros((1,), dtype=torch.long),
+        cached_duration_exec_prev=None,
+        budget_pos=1,
+        budget_neg=1,
+    )
+    assert torch.equal(projected, torch.tensor([[3.0, 2.0, 2.0]], dtype=torch.float32))
+    assert float(prefix_offset[0, 0].item()) == 1.0
+    assert float(residual[0, 0].item()) >= 0.0
+
+
+def test_rhythm_v3_frame_plan_uses_real_source_timeline_for_explicit_silence_runs():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    ret = {}
+    content = torch.tensor([[1, 57, 2]], dtype=torch.long)
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=True,
+        global_steps=0,
+        content_embed=torch.randn(1, 3, 32),
+        tgt_nonpadding=torch.ones(1, 3, 1),
+        content_lengths=torch.tensor([3], dtype=torch.long),
+        ref_lengths=None,
+        rhythm_state=None,
+        rhythm_ref_conditioning={
+            "prompt_content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+        },
+        rhythm_apply_override=False,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache={
+            "content_units": content,
+            "source_duration_obs": torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+            "unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "sealed_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "sep_mask": torch.zeros((1, 3), dtype=torch.float32),
+            "source_silence_mask": torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+            "unit_anchor_base": torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+        },
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    plan = ret["rhythm_frame_plan"]
+    total = plan.total_mask[0] > 0.5
+    unit_index = plan.frame_unit_index[0, total]
+    src_index = plan.frame_src_index[0, total]
+    silence_src = src_index[unit_index == 1]
+    assert torch.equal(silence_src, torch.tensor([2, 3], dtype=torch.long))
+    assert torch.allclose(ret["rhythm_execution"].unit_logstretch[0, 1], torch.tensor(0.0))
+
+
+def test_rhythm_v3_render_keeps_raw_open_tail_after_committed_prefix():
+    adapter = ConanDurationAdapter(
+        {
+            **_build_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_apply_mode": "always",
+        },
+        hidden_size=32,
+        vocab_size=128,
+    )
+    ret = {}
+    content = torch.tensor([[1, 57, 2, 3]], dtype=torch.long)
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=True,
+        global_steps=0,
+        content_embed=torch.randn(1, 4, 32),
+        tgt_nonpadding=torch.ones(1, 4, 1),
+        content_lengths=torch.tensor([4], dtype=torch.long),
+        ref_lengths=None,
+        rhythm_state=None,
+        rhythm_ref_conditioning={"global_rate": torch.zeros((1, 1), dtype=torch.float32)},
+        rhythm_apply_override=True,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache={
+            "content_units": content,
+            "source_duration_obs": torch.tensor([[2.0, 1.0, 2.0, 4.0]], dtype=torch.float32),
+            "unit_mask": torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32),
+            "sealed_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "sep_mask": torch.zeros((1, 4), dtype=torch.float32),
+            "source_silence_mask": torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+            "unit_anchor_base": torch.tensor([[2.0, 1.0, 2.0, 4.0]], dtype=torch.float32),
+        },
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    rendered = ret["content"]
+    assert rendered.shape[1] >= 4
+    assert torch.equal(rendered[0, -4:], torch.tensor([3, 3, 3, 3], dtype=torch.long))
+    assert int(ret["rhythm_render_unit_index"][0, -1].item()) == 3

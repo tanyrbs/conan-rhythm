@@ -15,21 +15,26 @@ Use:
 
 In that default path, the writer is:
 
-> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + delta_i`
+> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + b_hat + delta_i`
 
 where:
 
 - `a_i`: source-unit anchor from observed duration when sealed, with frontend fallback only when needed
 - `g_ref`: speech-only prompt global log-rate
 - `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
-- `delta_i`: small learned residual from a causal source query against a static prompt summary
+- `b_hat`: prompt/speaker-level scalar global bias
+- `delta_i`: small learned speech-run residual from a causal source query against a static prompt summary
 
 The maintained explanation is:
 
 - **source-anchored duration writing**
 - **static prompt summary memory**
+- **explicit speaker-conditioned global bias**
 - **strict-causal prefix-rate correction**
 - **carry-only integer projection**
+- **explicit silence-run frontend that materializes speech vs. pause runs**
+- **paired-target supervision drawn from dedicated target data instead of prompt sidecars**
+- **runtime enforces prefix unit-budget clamping while retaining raw open tail tokens**
 
 ## What the default v3 path does
 
@@ -40,15 +45,19 @@ The maintained explanation is:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+- optional `prompt_valid_mask`
+- optional `prompt_speech_mask`
+- optional `prompt_spk_embed`
 
 It produces:
 
 - `global_rate`
 - `summary_state`
+- `spk_embed`
 - diagnostic slot statistics (`role_value`, `role_var`, `role_coverage`)
 
 The diagnostic slot statistics remain useful for losses and observability, while
-runtime uses the prompt summary as a static conditioning object.
+runtime now directly uses `summary_state + spk_embed` as static conditioning.
 
 ### Source side
 
@@ -61,7 +70,9 @@ The streaming writer uses:
 
 For the maintained `prompt_summary + source_observed` path, committed speech
 units use source-observed duration as the anchor and keep only a strict-causal
-local-rate EMA in runtime state.
+local-rate EMA in runtime state. `sep_mask` is not treated as a speech mask in
+the canonical path; the maintained v3 frontend now materializes explicit
+silence runs and exports `source_silence_mask` directly.
 
 ### Projector
 
@@ -69,6 +80,8 @@ The projector stays deterministic:
 
 - integer frame projection
 - residual carry
+- explicit prefix unit-budget clamp that keeps `O_p = Σ(q_i - n_i)` within configured bounds
+- runtime keeps the raw uncommitted open tail appended to the retimed prefix so downstream code still sees unreleased units
 
 ## Supported but non-default v3 modes
 
@@ -85,8 +98,13 @@ recommended maintained default reading of the branch.
 
 ## Current training contract
 
-Mainline v3 training expects explicit prompt-unit conditioning and unit-level
-source supervision.
+Mainline v3 training expects explicit prompt-unit conditioning plus a
+separate paired-target supervision chain. Canonical paired training projects
+the target run lattice onto the source run lattice, fills `unit_duration_tgt`
+and optional `unit_confidence_tgt`, and keeps that signal strictly apart from
+prompt-side diagnostics. Source-self fallback is disabled by default and
+becomes available only with the explicit `rhythm_v3_allow_source_self_target_fallback`
+escape hatch.
 
 Required public inputs:
 
@@ -96,6 +114,12 @@ Required public inputs:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+
+Optional prompt sidecars used by the maintained default:
+
+- `prompt_valid_mask`
+- `prompt_speech_mask`
+- `prompt_spk_embed`
 
 Required public outputs:
 
@@ -108,6 +132,7 @@ Compact public losses:
 
 - `rhythm_total`
 - `rhythm_v3_dur`
+- `rhythm_v3_bias`
 - `rhythm_v3_summary`
 - `rhythm_v3_pref`
 - `rhythm_v3_cons`
@@ -115,7 +140,8 @@ Compact public losses:
 Recommended default weights in `egs/conan_emformer_rhythm_v3.yaml` currently keep:
 
 - duration loss on
-- prompt-summary reconstruction on
+- explicit bias loss on
+- prompt-summary residual self-fit disabled by default (`lambda_rhythm_summary=0`)
 - prefix consistency off by default
 - cross-prefix consistency on
 
@@ -217,7 +243,7 @@ py -3 -B -m pytest -q ^
   tests/rhythm/test_runtime_validation_alignment.py
 ```
 
-Current local result for the list above: **212 passed**.
+Current local result for the list above: **216 passed**.
 
 ## License
 

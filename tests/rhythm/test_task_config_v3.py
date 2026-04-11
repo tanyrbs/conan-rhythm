@@ -16,6 +16,7 @@ def _minimal_v3_hparams():
         "rhythm_v3_allow_hybrid": True,
         "rhythm_response_rank": 4,
         "lambda_rhythm_dur": 1.0,
+        "lambda_rhythm_bias": 0.0,
         "lambda_rhythm_op": 0.25,
         "lambda_rhythm_pref": 0.20,
         "lambda_rhythm_cons": 0.0,
@@ -170,6 +171,7 @@ def test_validate_rhythm_training_hparams_accepts_prompt_summary_backbone_surfac
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_bias": 0.20,
             "rhythm_role_dim": 48,
             "rhythm_num_role_slots": 12,
             "lambda_rhythm_op": 0.25,
@@ -187,6 +189,7 @@ def test_validate_rhythm_training_hparams_accepts_prompt_summary_public_surface_
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_bias": 0.20,
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_summary": 0.25,
             "lambda_rhythm_zero": 0.0,
@@ -194,6 +197,7 @@ def test_validate_rhythm_training_hparams_accepts_prompt_summary_public_surface_
             "rhythm_public_losses": [
                 "rhythm_total",
                 "rhythm_v3_dur",
+                "rhythm_v3_bias",
                 "rhythm_v3_summary",
                 "rhythm_v3_pref",
             ],
@@ -278,6 +282,7 @@ def test_validate_rhythm_training_hparams_requires_summary_surface_for_prompt_su
         "rhythm_v3_warp_mode": "none",
         "rhythm_v3_allow_hybrid": False,
         "rhythm_v3_anchor_mode": "source_observed",
+        "lambda_rhythm_bias": 0.20,
         "lambda_rhythm_op": 0.0,
         "lambda_rhythm_summary": 0.25,
         "lambda_rhythm_zero": 0.0,
@@ -314,17 +319,65 @@ def test_validate_rhythm_training_hparams_accepts_role_memory_legacy_alias_surfa
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_bias": 0.20,
             "lambda_rhythm_mem": 0.25,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
             "rhythm_public_losses": [
                 "rhythm_total",
                 "rhythm_v3_dur",
+                "rhythm_v3_bias",
                 "rhythm_v3_mem",
                 "rhythm_v3_pref",
             ],
         }
     )
+
+
+def test_validate_rhythm_training_hparams_allows_prompt_summary_public_losses_without_summary_when_disabled():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_bias": 0.20,
+            "lambda_rhythm_summary": 0.0,
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_dur",
+                "rhythm_v3_bias",
+                "rhythm_v3_pref",
+            ],
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_requires_bias_surface_for_prompt_summary_public_losses():
+    hparams = {
+        **_minimal_v3_hparams(),
+        "rhythm_v3_backbone": "prompt_summary",
+        "rhythm_v3_warp_mode": "none",
+        "rhythm_v3_allow_hybrid": False,
+        "rhythm_v3_anchor_mode": "source_observed",
+        "lambda_rhythm_bias": 0.20,
+        "lambda_rhythm_op": 0.0,
+        "lambda_rhythm_summary": 0.25,
+        "lambda_rhythm_zero": 0.0,
+        "lambda_rhythm_ortho": 0.0,
+        "rhythm_public_losses": [
+            "rhythm_total",
+            "rhythm_v3_dur",
+            "rhythm_v3_summary",
+            "rhythm_v3_pref",
+        ],
+    }
+    with pytest.raises(ValueError, match="rhythm_v3_bias"):
+        validate_rhythm_training_hparams(hparams)
 
 
 def test_validate_rhythm_training_hparams_accepts_compact_example_public_surface():

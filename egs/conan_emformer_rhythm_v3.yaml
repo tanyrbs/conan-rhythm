@@ -4,15 +4,15 @@ mel_losses: "l1:1.0"
 binarization_args:
   with_rhythm_cache: true
 
-# Duration-only rhythm_v3 bootstrap.
 # Recommended maintained mainline:
-# prompt-summary residual mainline + source-observed anchor + single duration writer + carry-only projector.
+# explicit silence-run frontend + paired target projection + source-observed anchor
+# + prompt-summary writer + speech-only carry projector + prefix unit-budget clamp.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, prompt_content_units, prompt_duration_obs, prompt_unit_mask]
 rhythm_public_outputs: [speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_summary, rhythm_v3_pref, rhythm_v3_cons]
+rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_bias, rhythm_v3_pref, rhythm_v3_cons]
 
 content_vocab_size: 102
 rhythm_hidden_size: 256
@@ -60,9 +60,15 @@ rhythm_streaming_prefix_min_ratio: 0.50
 rhythm_streaming_prefix_max_ratio: 0.95
 rhythm_streaming_prefix_min_tokens: 8
 rhythm_streaming_prefix_multiple: 4
+rhythm_v3_emit_silence_runs: true
+rhythm_v3_prefix_budget_pos: 24
+rhythm_v3_prefix_budget_neg: 24
 rhythm_prompt_dropout: 0.20
 rhythm_prompt_truncation: 0.50
-pseudo_source_duration_perturbation: true
+pseudo_source_duration_perturbation: false
+# Canonical paired training should not silently fall back to source-self
+# duration targets. Only enable this for bootstrap/pretrain.
+rhythm_v3_allow_source_self_target_fallback: false
 rhythm_pseudo_source_global_scale_min: 0.85
 rhythm_pseudo_source_global_scale_max: 1.15
 rhythm_pseudo_source_local_span_prob: 0.20
@@ -72,7 +78,9 @@ rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.0
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_summary: 0.10
+lambda_rhythm_bias: 0.20
+lambda_rhythm_summary: 0.0
+# canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
 lambda_rhythm_pref: 0.0
 lambda_rhythm_base: 0.0
 lambda_rhythm_cons: 0.10

@@ -69,11 +69,13 @@ def _cached_frontend(
     silent_token: int | None,
     separator_aware: bool,
     tail_open_units: int,
+    emit_silence_runs: bool,
 ) -> RhythmUnitFrontend:
     return RhythmUnitFrontend(
         silent_token=silent_token,
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
+        emit_silence_runs=emit_silence_runs,
     )
 
 
@@ -100,12 +102,14 @@ def build_source_rhythm_cache(
     silent_token: int | None = None,
     separator_aware: bool = True,
     tail_open_units: int = 1,
+    emit_silence_runs: bool = False,
     phrase_boundary_threshold: float = 0.55,
 ) -> dict[str, np.ndarray]:
     frontend = _cached_frontend(
         silent_token=silent_token,
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
+        emit_silence_runs=emit_silence_runs,
     )
     batch = frontend.from_token_lists(
         [_as_token_list(content_tokens)],
@@ -114,6 +118,7 @@ def build_source_rhythm_cache(
     source_cache = {
         "content_units": batch.content_units[0].cpu().numpy().astype(np.int64),
         "dur_anchor_src": batch.dur_anchor_src[0].cpu().numpy().astype(np.int64),
+        "source_silence_mask": batch.silence_mask[0].cpu().numpy().astype(np.float32),
         "open_run_mask": batch.open_run_mask[0].cpu().numpy().astype(np.int64),
         "sealed_mask": batch.sealed_mask[0].cpu().numpy().astype(np.int64),
         "sep_hint": batch.sep_hint[0].cpu().numpy().astype(np.int64),
@@ -446,6 +451,7 @@ def build_item_rhythm_bundle(
     silent_token: int | None = None,
     separator_aware: bool = True,
     tail_open_units: int = 1,
+    emit_silence_runs: bool = False,
     trace_bins: int = 24,
     trace_horizon: float = 0.35,
     trace_smooth_kernel: int = 5,
@@ -467,6 +473,7 @@ def build_item_rhythm_bundle(
         silent_token=silent_token,
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
+        emit_silence_runs=emit_silence_runs,
         phrase_boundary_threshold=source_phrase_threshold,
     )
     conditioning = build_reference_rhythm_conditioning(

@@ -1125,8 +1125,8 @@ def _build_duration_v3_metric_sections(
         commit_mask = getattr(unit_batch, "sealed_mask", unit_mask)
     commit_mask = commit_mask.float() * unit_mask
     speech_commit_mask = commit_mask
-    if unit_batch is not None and isinstance(getattr(unit_batch, "sep_mask", None), torch.Tensor):
-        speech_commit_mask = commit_mask * (1.0 - unit_batch.sep_mask.float().clamp(0.0, 1.0))
+    if unit_batch is not None and isinstance(getattr(unit_batch, "source_silence_mask", None), torch.Tensor):
+        speech_commit_mask = commit_mask * (1.0 - unit_batch.source_silence_mask.float().clamp(0.0, 1.0))
     total_exec = (public_speech_exec * speech_commit_mask).sum(dim=1)
     visible_units = unit_mask.sum(dim=1).clamp_min(1.0)
     committed_units = commit_mask.sum(dim=1).clamp_min(1.0)
@@ -1261,6 +1261,7 @@ def _build_duration_v3_metric_sections(
         "rhythm_total",
         "rhythm_v3_base",
         "rhythm_v3_dur",
+        "rhythm_v3_bias",
         "rhythm_v3_summary",
         "rhythm_v3_mem",
         "rhythm_v3_op",

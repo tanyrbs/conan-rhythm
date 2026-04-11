@@ -14,6 +14,7 @@ _AUX_REPORTING_KEYS = {
 _V3_NATIVE_DIAGNOSTIC_KEYS = (
     "rhythm_v3_base",
     "rhythm_v3_dur",
+    "rhythm_v3_bias",
     "rhythm_v3_summary",
     "rhythm_v3_mem",
     "rhythm_v3_op",

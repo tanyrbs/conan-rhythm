@@ -88,6 +88,7 @@ class DurationV3LossTargets:
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
     committed_mask: torch.Tensor
+    unit_confidence_tgt: Optional[torch.Tensor] = None
     prediction_anchor: Optional[torch.Tensor] = None
     baseline_duration_tgt: Optional[torch.Tensor] = None
     baseline_mask: Optional[torch.Tensor] = None
@@ -95,6 +96,8 @@ class DurationV3LossTargets:
     global_rate: Optional[torch.Tensor] = None
     global_shift_tgt: Optional[torch.Tensor] = None
     residual_logstretch_tgt: Optional[torch.Tensor] = None
+    global_bias_tgt: Optional[torch.Tensor] = None
+    local_residual_tgt: Optional[torch.Tensor] = None
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target_tgt: Optional[torch.Tensor] = None
     prompt_mask: Optional[torch.Tensor] = None
@@ -110,9 +113,11 @@ class DurationV3LossTargets:
     prompt_log_residual: Optional[torch.Tensor] = None
     consistency_duration_tgt: Optional[torch.Tensor] = None
     consistency_mask: Optional[torch.Tensor] = None
+    consistency_local_residual_tgt: Optional[torch.Tensor] = None
     lambda_dur: float = 1.0
     lambda_op: float = 0.25
     lambda_pref: float = 0.20
+    lambda_bias: float = 0.0
     lambda_base: float = 0.0
     lambda_cons: float = 0.0
     lambda_zero: float = 0.0
@@ -195,6 +200,29 @@ def _masked_huber(
     reduce_dims = tuple(range(1, loss.dim()))
     masked_loss = (loss * mask).sum(dim=reduce_dims)
     masked_denom = mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
+
+
+def _weighted_masked_huber(
+    pred: torch.Tensor,
+    tgt: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    weight: Optional[torch.Tensor] = None,
+    beta: float = 1.0,
+    batch_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    base_mask = mask.float()
+    if weight is None:
+        eff_weight = base_mask
+    else:
+        eff_weight = weight.float() * base_mask
+    loss = F.smooth_l1_loss(pred.float(), tgt.float(), beta=beta, reduction="none")
+    while eff_weight.dim() < loss.dim():
+        eff_weight = eff_weight.unsqueeze(-1)
+    reduce_dims = tuple(range(1, loss.dim()))
+    masked_loss = (loss * eff_weight).sum(dim=reduce_dims)
+    masked_denom = eff_weight.sum(dim=reduce_dims).clamp_min(1.0)
     return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
 
 
@@ -1219,16 +1247,16 @@ def _build_duration_v3_duration_loss(
     targets: DurationV3LossTargets,
     committed_mask: torch.Tensor,
 ) -> torch.Tensor:
-    pred_residual = getattr(execution, "local_response", None)
+    pred_residual = getattr(execution, "local_residual", getattr(execution, "local_response", None))
     if (
         isinstance(pred_residual, torch.Tensor)
-        and isinstance(targets.residual_logstretch_tgt, torch.Tensor)
-        and isinstance(targets.prompt_log_residual, torch.Tensor)
+        and isinstance(targets.local_residual_tgt, torch.Tensor)
     ):
-        return _masked_huber(
+        return _weighted_masked_huber(
             pred_residual.float(),
-            targets.residual_logstretch_tgt.float(),
+            targets.local_residual_tgt.float(),
             committed_mask,
+            weight=targets.unit_confidence_tgt,
             beta=0.25,
             batch_weight=None,
         )
@@ -1397,20 +1425,14 @@ def _build_duration_v3_stream_losses(
         and targets.consistency_mask is not None
     ):
         if (
-            isinstance(getattr(execution, "local_response", None), torch.Tensor)
-            and isinstance(targets.prediction_anchor, torch.Tensor)
-            and isinstance(targets.global_shift_tgt, torch.Tensor)
-            and isinstance(targets.prompt_log_residual, torch.Tensor)
+            isinstance(getattr(execution, "local_residual", getattr(execution, "local_response", None)), torch.Tensor)
+            and isinstance(targets.consistency_local_residual_tgt, torch.Tensor)
         ):
-            cons_residual_tgt = (
-                torch.log(targets.consistency_duration_tgt.float().clamp_min(1.0e-6))
-                - torch.log(targets.prediction_anchor.float().clamp_min(1.0e-6))
-                - targets.global_shift_tgt.float()
-            )
-            l_cons = _masked_huber(
-                execution.local_response.float(),
-                cons_residual_tgt,
+            l_cons = _weighted_masked_huber(
+                getattr(execution, "local_residual", getattr(execution, "local_response", None)).float(),
+                targets.consistency_local_residual_tgt.float(),
                 targets.consistency_mask.float(),
+                weight=targets.unit_confidence_tgt,
                 beta=0.25,
                 batch_weight=None,
             )
@@ -1426,6 +1448,24 @@ def _build_duration_v3_stream_losses(
                 batch_weight=None,
             )
     return l_pref, l_cons, l_pref + l_cons
+
+
+def _build_duration_v3_bias_loss(
+    *,
+    execution,
+    pred_speech: torch.Tensor,
+    targets: DurationV3LossTargets,
+) -> torch.Tensor:
+    if not isinstance(getattr(execution, "global_bias_scalar", None), torch.Tensor):
+        return pred_speech.new_tensor(0.0)
+    if not isinstance(targets.global_bias_tgt, torch.Tensor):
+        return pred_speech.new_tensor(0.0)
+    return F.smooth_l1_loss(
+        execution.global_bias_scalar.float().reshape(targets.global_bias_tgt.shape),
+        targets.global_bias_tgt.float(),
+        beta=0.25,
+        reduction="mean",
+    )
 
 
 def _rebuild_duration_v3_sgbase_prediction(
@@ -1460,6 +1500,11 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
         pred_speech=pred_speech,
         targets=targets,
     )
+    l_bias = _build_duration_v3_bias_loss(
+        execution=execution,
+        pred_speech=pred_speech,
+        targets=targets,
+    )
     l_op = _build_duration_v3_operator_loss(
         pred_speech=pred_speech,
         targets=targets,
@@ -1483,6 +1528,7 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
     pretrain_only = bool(targets.baseline_pretrain_only)
     scaled_dur = pred_speech.new_tensor(0.0) if pretrain_only else l_dur * float(targets.lambda_dur)
     scaled_op = pred_speech.new_tensor(0.0) if pretrain_only else l_op * float(targets.lambda_op)
+    scaled_bias = pred_speech.new_tensor(0.0) if pretrain_only else l_bias * float(targets.lambda_bias)
     scaled_zero = pred_speech.new_tensor(0.0) if pretrain_only else l_zero * float(targets.lambda_zero)
     scaled_ortho = pred_speech.new_tensor(0.0) if pretrain_only else l_ortho * float(targets.lambda_ortho)
     scaled_stream = (
@@ -1491,13 +1537,14 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
         else (l_pref * float(targets.lambda_pref)) + (l_cons * float(targets.lambda_cons))
     )
     scaled_base = l_base * float(targets.lambda_base)
-    total = scaled_dur + scaled_op + scaled_zero + scaled_ortho + scaled_stream + scaled_base
+    total = scaled_dur + scaled_op + scaled_bias + scaled_zero + scaled_ortho + scaled_stream + scaled_base
     loss_dict = {
         "rhythm_exec_speech": scaled_dur,
-        "rhythm_exec_stretch": scaled_op + scaled_zero + scaled_ortho,
+        "rhythm_exec_stretch": scaled_op + scaled_bias + scaled_zero + scaled_ortho,
         "rhythm_prefix_state": scaled_stream,
         "rhythm_v3_base": l_base.detach(),
         "rhythm_v3_dur": l_dur.detach(),
+        "rhythm_v3_bias": l_bias.detach(),
         "rhythm_v3_op": l_op.detach(),
         "rhythm_v3_summary": l_op.detach(),
         "rhythm_v3_zero": l_zero.detach(),

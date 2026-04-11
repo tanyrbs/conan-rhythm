@@ -152,11 +152,19 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         if source_residual_gain > 0.0
         else "operator"
     )
+    lambda_bias = float(
+        hparams.get(
+            "lambda_rhythm_bias",
+            0.20 if runtime_mode == "prompt_summary" else 0.0,
+        )
+        or 0.0
+    )
     for key in (
         "lambda_rhythm_dur",
         "lambda_rhythm_op",
         "lambda_rhythm_mem",
         "lambda_rhythm_summary",
+        "lambda_rhythm_bias",
         "lambda_rhythm_pref",
         "lambda_rhythm_base",
         "lambda_rhythm_cons",
@@ -191,6 +199,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError(
                 f"rhythm_v3_source_residual_gain must be 0 when rhythm_v3 runtime mode is '{runtime_mode}'."
             )
+    if runtime_mode != "prompt_summary" and lambda_bias > 0.0:
+        raise ValueError("lambda_rhythm_bias is only valid when rhythm_v3_backbone='prompt_summary'.")
     if runtime_mode == "prompt_summary":
         if float(hparams.get("lambda_rhythm_zero", 0.0) or 0.0) > 0.0:
             raise ValueError("lambda_rhythm_zero must be 0 when rhythm_v3_backbone='prompt_summary'.")
@@ -228,7 +238,12 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     )
     if public_losses is not None:
         if runtime_mode == "prompt_summary":
-            if not any(key in public_losses for key in ("rhythm_v3_summary", "rhythm_v3_mem", "rhythm_v3_op")):
+            lambda_summary = max(
+                float(hparams.get("lambda_rhythm_op", 0.0) or 0.0),
+                float(hparams.get("lambda_rhythm_mem", 0.0) or 0.0),
+                float(hparams.get("lambda_rhythm_summary", 0.0) or 0.0),
+            )
+            if lambda_summary > 0.0 and not any(key in public_losses for key in ("rhythm_v3_summary", "rhythm_v3_mem", "rhythm_v3_op")):
                 raise ValueError(
                     "rhythm_public_losses must include rhythm_v3_summary "
                     "(legacy aliases: rhythm_v3_mem / rhythm_v3_op) when rhythm_v3_backbone='prompt_summary'."
@@ -240,6 +255,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 raise ValueError("rhythm_public_losses must include rhythm_v3_zero when lambda_rhythm_zero > 0.")
         if float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) > 0.0 and "rhythm_v3_base" not in public_losses:
             raise ValueError("rhythm_public_losses must include rhythm_v3_base when lambda_rhythm_base > 0.")
+        if lambda_bias > 0.0 and "rhythm_v3_bias" not in public_losses:
+            raise ValueError("rhythm_public_losses must include rhythm_v3_bias when lambda_rhythm_bias > 0.")
         if float(hparams.get("lambda_rhythm_cons", 0.0) or 0.0) > 0.0 and "rhythm_v3_cons" not in public_losses:
             raise ValueError("rhythm_public_losses must include rhythm_v3_cons when lambda_rhythm_cons > 0.")
         if float(hparams.get("lambda_rhythm_ortho", 0.0) or 0.0) > 0.0 and "rhythm_v3_ortho" not in public_losses:

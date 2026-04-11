@@ -22,13 +22,20 @@ mainline:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+- `prompt_valid_mask`
+- `prompt_speech_mask`
+- `prompt_spk_embed` when available
 
 The maintained v3 inference story is:
 
 - prompt distilled into static summary conditioning
+- speaker embedding passed explicitly into the duration writer
 - source-observed sealed-unit anchors
 - strict-causal prefix-rate state
 - deterministic carry-only projection
+- runtime enforces the prefix unit-budget clamp so retimed counts stay within configured drift bounds
+- raw uncommitted open-tail units are kept intact and appended after the retimed prefix before the main model consumes them
+- `rhythm_v3_emit_silence_runs` exposes `source_silence_mask` so the runtime can distinguish speech runs from intentional pauses
 
 ## What this directory currently serves
 

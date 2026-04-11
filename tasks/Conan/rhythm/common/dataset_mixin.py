@@ -16,6 +16,12 @@ from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
 
 
 class CommonRhythmDatasetMixin:
+    def _should_emit_explicit_silence_runs(self) -> bool:
+        resolver = getattr(self, "_should_emit_duration_v3_silence_runs", None)
+        if callable(resolver):
+            return bool(resolver())
+        return False
+
     def _rhythm_policy(self):
         policy = getattr(self, "_cached_rhythm_policy", None)
         if policy is None:
@@ -162,12 +168,14 @@ class CommonRhythmDatasetMixin:
             "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
             "boundary_confidence": ("float", 0.0),
+            "source_silence_mask": ("float", 0.0),
             "source_boundary_cue": ("float", 0.0),
             "phrase_group_index": ("long", 0),
             "phrase_group_pos": ("float", 0.0),
             "phrase_final_mask": ("float", 0.0),
             "rhythm_offline_content_units": ("long", 0),
             "rhythm_offline_dur_anchor_src": ("long", 0),
+            "rhythm_offline_source_silence_mask": ("float", 0.0),
             "rhythm_offline_open_run_mask": ("long", 0),
             "rhythm_offline_sealed_mask": ("float", 0.0),
             "rhythm_offline_sep_hint": ("long", 0),
@@ -181,10 +189,13 @@ class CommonRhythmDatasetMixin:
             "prompt_content_units": ("long", 0),
             "prompt_duration_obs": ("float", 0.0),
             "prompt_unit_mask": ("float", 0.0),
+            "prompt_valid_mask": ("float", 0.0),
+            "prompt_speech_mask": ("float", 0.0),
             "prompt_source_boundary_cue": ("float", 0.0),
             "prompt_phrase_group_pos": ("float", 0.0),
             "prompt_phrase_final_mask": ("float", 0.0),
             "unit_duration_tgt": ("float", 0.0),
+            "unit_confidence_tgt": ("float", 0.0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -362,15 +373,23 @@ class CommonRhythmDatasetMixin:
         full_units = np.asarray(cache["content_units"]).reshape(-1)
         full_durations = np.asarray(cache["dur_anchor_src"]).reshape(-1)
         full_sep = np.asarray(cache["sep_hint"]).reshape(-1)
+        full_silence = (
+            np.asarray(item["source_silence_mask"], dtype=np.float32).reshape(-1)
+            if "source_silence_mask" in item
+            else None
+        )
         out_units = []
         out_durations = []
+        out_silence = []
         out_sep = []
-        for unit_id, duration, sep_flag in zip(full_units, full_durations, full_sep):
+        silence_iter = full_silence if full_silence is not None else np.zeros_like(full_durations, dtype=np.float32)
+        for unit_id, duration, sep_flag, silence_flag in zip(full_units, full_durations, full_sep, silence_iter):
             if remaining <= 0:
                 break
             take = int(min(int(duration), remaining))
             out_units.append(int(unit_id))
             out_durations.append(take)
+            out_silence.append(float(silence_flag))
             out_sep.append(int(sep_flag) if take == int(duration) else 0)
             remaining -= take
         if remaining > 0:
@@ -402,6 +421,8 @@ class CommonRhythmDatasetMixin:
             "sep_hint": np.asarray(out_sep, dtype=np.int64),
             "boundary_confidence": boundary_confidence,
         }
+        if full_silence is not None:
+            adapted["source_silence_mask"] = np.asarray(out_silence, dtype=np.float32)
         if self._should_export_rhythm_debug_sidecars():
             full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
             adapted.update({
@@ -486,8 +507,12 @@ class CommonRhythmDatasetMixin:
         cache_keys = self._RHYTHM_SOURCE_CACHE_KEYS
         full_tokens = np.asarray(item["hubert"])
         visible_tokens = np.asarray(visible_tokens)
-        if all(key in item for key in cache_keys):
+        explicit_silence = self._should_emit_explicit_silence_runs()
+        has_source_silence_cache = "source_silence_mask" in item
+        if all(key in item for key in cache_keys) and (not explicit_silence or has_source_silence_cache):
             cache = {key: item[key] for key in cache_keys}
+            if has_source_silence_cache:
+                cache["source_silence_mask"] = item["source_silence_mask"]
             self._validate_source_cache_shapes(
                 cache,
                 item_name=str(item.get("item_name", "<unknown-item>")),
@@ -505,12 +530,18 @@ class CommonRhythmDatasetMixin:
             if int(full_tokens.shape[0]) == int(visible_tokens.shape[0]):
                 return cache
         if target_mode == "cached_only":
+            if explicit_silence and not has_source_silence_cache:
+                raise RuntimeError(
+                    "rhythm_v3 cached_only with explicit silence-run frontend requires source_silence_mask in the cached source bundle. "
+                    "Re-binarize with explicit silence runs enabled."
+                )
             return self._adapt_source_cache_to_visible_prefix(item=item, visible_tokens=visible_tokens)
         return build_source_rhythm_cache(
             visible_tokens,
             silent_token=self.hparams.get("silent_token", 57),
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+            emit_silence_runs=explicit_silence,
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
 
@@ -524,6 +555,19 @@ class CommonRhythmDatasetMixin:
         return self._materialize_rhythm_cache_compat(
             raw_ref_item,
             item_name=str(raw_ref_item.get("item_name", "<unknown-ref-item>")),
+        )
+
+    def _resolve_paired_target_rhythm_item(self, *, sample, item, target_mode: str):
+        del item, target_mode
+        if "paired_target_item_id" not in sample:
+            sample.pop("_raw_paired_target_item", None)
+            return None
+        raw_paired_target_item = sample.pop("_raw_paired_target_item", None)
+        if raw_paired_target_item is None:
+            raw_paired_target_item = self._get_item(int(sample["paired_target_item_id"]))
+        return self._materialize_rhythm_cache_compat(
+            raw_paired_target_item,
+            item_name=str(raw_paired_target_item.get("item_name", "<unknown-paired-target-item>")),
         )
 
     def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str, item=None):
@@ -542,9 +586,21 @@ class CommonRhythmDatasetMixin:
             prompt_conditioning=prompt_conditioning,
         )
 
-    def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, sample):
+    def _build_paired_target_rhythm_conditioning(self, paired_target_item, sample, *, target_mode: str, item=None):
+        del sample, item
+        if not self._use_duration_v3_dataset_contract():
+            return {}
+        builder = getattr(self, "_build_paired_target_projection_conditioning", None)
+        if not callable(builder):
+            return {}
+        return builder(
+            paired_target_item,
+            target_mode=target_mode,
+        )
+
+    def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, paired_target_conditioning, sample):
         if self._use_duration_v3_dataset_contract():
-            return self._merge_duration_v3_rhythm_targets(item, source_cache, ref_conditioning, sample)
+            return self._merge_duration_v3_rhythm_targets(item, source_cache, paired_target_conditioning, sample)
         return self._merge_legacy_rhythm_targets(item, source_cache, ref_conditioning, sample)
 
     def __getitem__(self, index):

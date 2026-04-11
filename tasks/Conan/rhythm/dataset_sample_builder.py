@@ -45,6 +45,8 @@ class RhythmDatasetSampleAssembler:
             "prompt_source_boundary_cue",
             "prompt_phrase_group_pos",
             "prompt_phrase_final_mask",
+            "source_silence_mask",
+            "rhythm_offline_source_silence_mask",
             "slow_rhythm_summary",
             "planner_slow_rhythm_summary",
             "selector_meta_scores",
@@ -236,22 +238,49 @@ class RhythmDatasetSampleAssembler:
                 sample["rhythm_pair_is_identity"].cpu().numpy(),
                 dtype=np.float32,
             )
+        resolve_paired_target_item = getattr(self.owner, "_resolve_paired_target_rhythm_item", None)
+        paired_target_item = None
+        if callable(resolve_paired_target_item):
+            paired_target_item = resolve_paired_target_item(
+                sample=sample,
+                item=item,
+                target_mode=target_mode,
+            )
         ref_conditioning = self._build_reference_conditioning(
             rhythm_ref_item=rhythm_ref_item,
             sample=sample,
             item=item,
             target_mode=target_mode,
         )
+        build_paired_target_conditioning = getattr(self.owner, "_build_paired_target_rhythm_conditioning", None)
+        paired_target_conditioning = {}
+        if callable(build_paired_target_conditioning):
+            paired_target_conditioning = build_paired_target_conditioning(
+                paired_target_item,
+                sample,
+                target_mode=target_mode,
+                item=item,
+            )
         rhythm_runtime_fields.update(source_cache)
         rhythm_runtime_fields.update(ref_conditioning)
-        rhythm_runtime_fields.update(
-            self.owner._merge_rhythm_targets(
+        try:
+            merged_targets = self.owner._merge_rhythm_targets(
+                item,
+                target_source_cache,
+                ref_conditioning,
+                paired_target_conditioning,
+                sample,
+            )
+        except TypeError as exc:
+            if "positional arguments" not in str(exc):
+                raise
+            merged_targets = self.owner._merge_rhythm_targets(
                 item,
                 target_source_cache,
                 ref_conditioning,
                 sample,
             )
-        )
+        rhythm_runtime_fields.update(merged_targets)
 
         for key in optional_rhythm_keys:
             if key in rhythm_runtime_fields:
@@ -262,4 +291,5 @@ class RhythmDatasetSampleAssembler:
                 continue
             sample[key] = self._tensorize_optional_value(key, value)
         sample.pop("ref_item_id", None)
+        sample.pop("paired_target_item_id", None)
         return sample

@@ -30,6 +30,8 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+        "prompt_valid_mask",
+        "prompt_speech_mask",
         "prompt_source_boundary_cue",
         "prompt_phrase_group_pos",
         "prompt_phrase_final_mask",
@@ -37,6 +39,7 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
     _RHYTHM_REF_PROMPT_SOURCE_KEYS = (
         "content_units",
         "dur_anchor_src",
+        "source_silence_mask",
     )
     _RHYTHM_REF_PHRASE_CACHE_KEYS = (
         "ref_phrase_trace",
@@ -121,13 +124,17 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
         "sealed_mask",
         "sep_hint",
         "boundary_confidence",
+        "source_silence_mask",
         "prompt_content_units",
         "prompt_duration_obs",
         "prompt_unit_mask",
+        "prompt_valid_mask",
+        "prompt_speech_mask",
         "prompt_source_boundary_cue",
         "prompt_phrase_group_pos",
         "prompt_phrase_final_mask",
         "unit_duration_tgt",
+        "unit_confidence_tgt",
     )
     _RHYTHM_STREAMING_PREFIX_META_KEYS = (
         "rhythm_stream_prefix_ratio",
@@ -143,6 +150,7 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
     _RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS = (
         "rhythm_offline_content_units",
         "rhythm_offline_dur_anchor_src",
+        "rhythm_offline_source_silence_mask",
         "rhythm_offline_open_run_mask",
         "rhythm_offline_sealed_mask",
         "rhythm_offline_sep_hint",

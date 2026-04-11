@@ -256,6 +256,110 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertTrue(np.all(conditioning["prompt_duration_obs"][zeroed] == 0.0))
         self.assertTrue(np.all(conditioning["prompt_source_boundary_cue"][zeroed] == 0.0))
 
+    def test_prompt_summary_conditioning_runtime_prompt_no_longer_embeds_paired_target_sidecars(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_prompt_truncation": 2.0,
+                "rhythm_prompt_dropout": 0.5,
+                "rhythm_augmentation_deterministic": True,
+                "seed": 5,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_b",
+            "content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 2.0, 4.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        self.assertNotIn("prompt_target_duration_obs", conditioning)
+        self.assertNotIn("prompt_target_speech_mask", conditioning)
+        self.assertGreaterEqual(float(np.asarray(conditioning["prompt_unit_mask"]).sum()), 1.0)
+
+    def test_duration_v3_target_merge_projects_explicit_paired_target_runs_onto_source_lattice(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_allow_source_self_target_fallback": False,
+            }
+        )
+        source_cache = {
+            "content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([2.0, 1.0, 2.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        paired_target_conditioning = {
+            "paired_target_content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "paired_target_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "paired_target_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "paired_target_speech_mask": np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+            "paired_target_item_name": np.asarray(["paired_ref"], dtype=object),
+        }
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_a"},
+            source_cache=source_cache,
+            paired_target_conditioning=paired_target_conditioning,
+            sample={},
+        )
+        self.assertTrue(np.allclose(merged["unit_duration_tgt"], np.asarray([3.0, 1.0, 1.0], dtype=np.float32)))
+        self.assertEqual(merged["unit_confidence_tgt"].shape, (3,))
+        self.assertGreater(float(merged["unit_confidence_tgt"][0]), 0.5)
+        self.assertGreater(float(merged["unit_confidence_tgt"][2]), 0.5)
+
+    def test_duration_v3_target_merge_rejects_self_paired_target_projection_without_explicit_fallback(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_allow_source_self_target_fallback": False,
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_self"},
+                source_cache={
+                    "content_units": np.asarray([1, 2], dtype=np.int64),
+                    "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                },
+                paired_target_conditioning={
+                    "paired_target_content_units": np.asarray([1, 2], dtype=np.int64),
+                    "paired_target_duration_obs": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "paired_target_valid_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                    "paired_target_speech_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                    "paired_target_item_name": np.asarray(["src_self"], dtype=object),
+                },
+                sample={},
+            )
+
+    def test_duration_v3_target_merge_no_longer_auto_falls_back_to_source_self(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_stage": "bootstrap_pretrain",
+                "rhythm_v3_allow_source_self_target_fallback": False,
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_b"},
+                source_cache={
+                    "content_units": np.asarray([1, 2], dtype=np.int64),
+                    "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                },
+                paired_target_conditioning={},
+                sample={},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

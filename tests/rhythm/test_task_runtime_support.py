@@ -164,6 +164,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.lambda_dur, 1.0)
         self.assertEqual(config.lambda_op, 0.25)
         self.assertEqual(config.lambda_pref, 0.20)
+        self.assertEqual(config.lambda_bias, 0.0)
         self.assertEqual(config.lambda_cons, 0.0)
         self.assertEqual(config.lambda_zero, 0.05)
         self.assertEqual(config.lambda_ortho, 0.0)
@@ -188,6 +189,39 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(config.lambda_cons, 0.15)
         self.assertEqual(config.lambda_ortho, 0.02)
         self.assertFalse(config.strict_target_alignment)
+
+    def test_build_duration_v3_target_build_config_defaults_prompt_summary_bias_on(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_v3_backbone": "prompt_summary",
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_summary": 0.10,
+                "lambda_rhythm_pref": 0.0,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertEqual(config.lambda_bias, 0.20)
+
+    def test_build_duration_v3_target_build_config_disables_prompt_summary_aux_by_default(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_v3_backbone": "prompt_summary",
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_pref": 0.0,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertEqual(config.lambda_op, 0.0)
 
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:

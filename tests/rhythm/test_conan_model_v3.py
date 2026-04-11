@@ -15,6 +15,7 @@ class _DummyV3Adapter:
         *,
         ret,
         content,
+        spk_embed,
         ref,
         target,
         f0,
@@ -34,6 +35,7 @@ class _DummyV3Adapter:
         ref_lengths=None,
     ):
         del (
+            spk_embed,
             ref,
             target,
             f0,

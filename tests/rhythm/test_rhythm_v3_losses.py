@@ -8,6 +8,7 @@ from modules.Conan.rhythm_v3.contracts import (
     ReferenceDurationMemory,
     StructuredDurationOperatorMemory,
 )
+from modules.Conan.rhythm_v3.contracts import move_source_unit_batch
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from tasks.Conan.rhythm.loss_routing import (
     compute_reporting_total_loss,
@@ -54,6 +55,7 @@ def _build_prompt_summary_hparams():
             "rhythm_v3_anchor_mode": "source_observed",
             "rhythm_role_dim": 32,
             "rhythm_num_role_slots": 8,
+            "lambda_rhythm_bias": 0.20,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
         }
@@ -120,6 +122,7 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
         "rhythm_prefix_state",
         "rhythm_v3_base",
         "rhythm_v3_dur",
+        "rhythm_v3_bias",
         "rhythm_v3_op",
         "rhythm_v3_summary",
         "rhythm_v3_ortho",
@@ -183,7 +186,10 @@ def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_lo
     )
     assert targets is not None
     unit_batch = ret["rhythm_unit_batch"]
-    speech_mask = unit_batch.unit_mask.float() * (1.0 - unit_batch.sep_mask.float())
+    silence_mask = getattr(unit_batch, "source_silence_mask", None)
+    speech_mask = unit_batch.unit_mask.float()
+    if isinstance(silence_mask, torch.Tensor):
+        speech_mask = speech_mask * (1.0 - silence_mask.float())
     assert torch.allclose(
         targets.prediction_anchor,
         torch.where(
@@ -196,6 +202,8 @@ def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_lo
     assert targets.prompt_role_value is not None
     assert targets.prompt_role_var is not None
     losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
+    assert "rhythm_v3_bias" in losses
+    assert torch.isfinite(losses["rhythm_v3_bias"]).all()
     assert "rhythm_v3_summary" in losses
     assert torch.allclose(losses["rhythm_v3_summary"], losses["rhythm_v3_op"])
     assert "rhythm_v3_mem" in losses
@@ -268,6 +276,7 @@ def test_rhythm_v3_public_aliases_do_not_reintroduce_legacy_rhythm_surface():
         "rhythm_prefix_state": torch.tensor(3.0),
         "rhythm_v3_base": torch.tensor(0.05),
         "rhythm_v3_dur": torch.tensor(0.1),
+        "rhythm_v3_bias": torch.tensor(0.12),
         "rhythm_v3_op": torch.tensor(0.2),
         "rhythm_v3_pref": torch.tensor(0.3),
         "rhythm_v3_cons": torch.tensor(0.4),
@@ -566,7 +575,7 @@ def test_rhythm_v3_consistency_targets_are_skipped_when_loss_is_disabled():
     assert targets.consistency_mask is None
 
 
-def test_rhythm_v3_loss_builder_ignores_separator_units_in_supervision():
+def test_rhythm_v3_loss_builder_ignores_silence_units_in_supervision():
     adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]])
     ret = {}
@@ -592,9 +601,9 @@ def test_rhythm_v3_loss_builder_ignores_separator_units_in_supervision():
     )
     committed = (ret["rhythm_execution"].commit_mask > 0.5).nonzero(as_tuple=False)
     assert committed.numel() > 0
-    sep_mask = ret["rhythm_unit_batch"].sep_mask.clone()
-    sep_mask[committed[0, 0], committed[0, 1]] = 1.0
-    ret["rhythm_unit_batch"].sep_mask = sep_mask
+    silence_mask = ret["rhythm_unit_batch"].unit_mask.new_zeros(ret["rhythm_unit_batch"].unit_mask.shape)
+    silence_mask[committed[0, 0], committed[0, 1]] = 1.0
+    ret["rhythm_unit_batch"].source_silence_mask = silence_mask
     baseline_target = ret["speech_duration_exec"].detach().clone()
     baseline_targets = build_duration_v3_loss_targets(
         sample={"unit_duration_tgt": baseline_target},
@@ -654,6 +663,59 @@ def test_rhythm_v3_prefix_uses_sg_baseline_and_consistency_prefers_raw_duration_
     losses = build_rhythm_loss_dict(execution, targets)
     assert torch.allclose(losses["rhythm_v3_pref"], torch.tensor(0.0))
     assert torch.allclose(losses["rhythm_v3_cons"], torch.tensor(0.0))
+
+
+def test_prompt_summary_runtime_uses_learned_source_rate_init_without_history():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    adapter.module.duration_head.src_rate_init.data.fill_(1.2345)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    source_rate_seq = ret["rhythm_execution"].source_rate_seq
+    assert source_rate_seq is not None
+    assert torch.allclose(source_rate_seq[0, 0], source_rate_seq.new_tensor(1.2345), atol=1e-4)
+
+
+def test_prompt_summary_runtime_accepts_reference_memory_without_role_sidecars():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long)
+    source_batch = move_source_unit_batch(
+        adapter._build_source_batch(
+            content=content,
+            content_lengths=torch.full((1,), int(content.size(1)), dtype=torch.long),
+            rhythm_source_cache=None,
+            infer=False,
+        ),
+        device=content.device,
+    )
+    ref_memory = adapter.module.build_reference_conditioning(ref_conditioning=_build_prompt_conditioning())
+    ref_memory.role = None
+    execution = adapter.module(
+        source_batch=source_batch,
+        ref_memory=ref_memory,
+        state=None,
+    )
+    assert execution.global_bias_scalar is not None
+    assert execution.source_rate_seq is not None
 
 
 def test_rhythm_v3_baseline_targets_can_be_deglobalized():

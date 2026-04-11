@@ -24,6 +24,7 @@ class RhythmUnitBatch:
         content_units: torch.Tensor,
         dur_anchor_src: torch.Tensor,
         unit_mask: torch.Tensor,
+        silence_mask: torch.Tensor,
         open_run_mask: torch.Tensor,
         sealed_mask: torch.Tensor,
         sep_hint: torch.Tensor,
@@ -32,6 +33,7 @@ class RhythmUnitBatch:
         self.content_units = content_units
         self.dur_anchor_src = dur_anchor_src
         self.unit_mask = unit_mask
+        self.silence_mask = silence_mask
         self.open_run_mask = open_run_mask
         self.sealed_mask = sealed_mask
         self.sep_hint = sep_hint
@@ -47,14 +49,17 @@ class RhythmUnitFrontend:
         silent_token: int | None = None,
         separator_aware: bool = True,
         tail_open_units: int = 1,
+        emit_silence_runs: bool = False,
     ) -> None:
         self.silent_token = silent_token
         self.separator_aware = bool(separator_aware)
         self.tail_open_units = max(1, int(tail_open_units))
+        self.emit_silence_runs = bool(emit_silence_runs)
         self.unitizer = StreamingRunLengthUnitizer(
             silent_token=silent_token,
             separator_aware=separator_aware,
             tail_open_units=tail_open_units,
+            emit_silence_runs=emit_silence_runs,
         )
 
     @staticmethod
@@ -71,6 +76,7 @@ class RhythmUnitFrontend:
         return StreamingUnitizerRowState(
             units=row.units.to(device=device, dtype=torch.long),
             durations=row.durations.to(device=device, dtype=torch.long),
+            silence_mask=row.silence_mask.to(device=device, dtype=torch.long),
             sep_hint=row.sep_hint.to(device=device, dtype=torch.long),
             last_token=int(row.last_token),
             pending_separator=bool(row.pending_separator),
@@ -79,6 +85,7 @@ class RhythmUnitFrontend:
     def _batch_from_compressed(self, compressed_list: list, *, device: torch.device | None = None) -> RhythmUnitBatch:
         unit_list = [torch.tensor(item.units, dtype=torch.long) for item in compressed_list]
         dur_list = [torch.tensor(item.durations, dtype=torch.long) for item in compressed_list]
+        silence_list = [torch.tensor(item.silence_mask, dtype=torch.long) for item in compressed_list]
         open_list = [torch.tensor(item.open_run_mask, dtype=torch.long) for item in compressed_list]
         sealed_list = [torch.tensor(item.sealed_mask, dtype=torch.long) for item in compressed_list]
         sep_list = [torch.tensor(item.sep_hint, dtype=torch.long) for item in compressed_list]
@@ -86,6 +93,7 @@ class RhythmUnitFrontend:
         return self._batch_from_tensors(
             unit_list=unit_list,
             dur_list=dur_list,
+            silence_list=silence_list,
             open_list=open_list,
             sealed_list=sealed_list,
             sep_list=sep_list,
@@ -102,17 +110,19 @@ class RhythmUnitFrontend:
     ) -> RhythmUnitBatch:
         unit_list: list[torch.Tensor] = []
         dur_list: list[torch.Tensor] = []
+        silence_list: list[torch.Tensor] = []
         open_list: list[torch.Tensor] = []
         sealed_list: list[torch.Tensor] = []
         sep_list: list[torch.Tensor] = []
         boundary_list: list[torch.Tensor] = []
         for row in row_states:
-            units, durations, open_run_mask, sealed_mask, sep_hint, boundary_confidence = self.unitizer._export_row_tensors(
+            units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence = self.unitizer._export_row_tensors(
                 row,
                 mark_last_open=mark_last_open,
             )
             unit_list.append(units)
             dur_list.append(durations)
+            silence_list.append(silence_mask)
             open_list.append(open_run_mask)
             sealed_list.append(sealed_mask)
             sep_list.append(sep_hint)
@@ -120,6 +130,7 @@ class RhythmUnitFrontend:
         return self._batch_from_tensors(
             unit_list=unit_list,
             dur_list=dur_list,
+            silence_list=silence_list,
             open_list=open_list,
             sealed_list=sealed_list,
             sep_list=sep_list,
@@ -132,6 +143,7 @@ class RhythmUnitFrontend:
         *,
         unit_list: list[torch.Tensor],
         dur_list: list[torch.Tensor],
+        silence_list: list[torch.Tensor],
         open_list: list[torch.Tensor],
         sealed_list: list[torch.Tensor],
         sep_list: list[torch.Tensor],
@@ -141,6 +153,7 @@ class RhythmUnitFrontend:
         mask_list = [torch.ones_like(unit_tensor, dtype=torch.float32) for unit_tensor in unit_list]
         content_units = self._pad(unit_list, pad_value=0, dtype=torch.long)
         dur_anchor_src = self._pad(dur_list, pad_value=0, dtype=torch.long)
+        silence_mask = self._pad(silence_list, pad_value=0, dtype=torch.long)
         open_run_mask = self._pad(open_list, pad_value=0, dtype=torch.long)
         sealed_mask = self._pad(sealed_list, pad_value=0, dtype=torch.long)
         sep_hint = self._pad(sep_list, pad_value=0, dtype=torch.long)
@@ -150,6 +163,7 @@ class RhythmUnitFrontend:
         if device is not None:
             content_units = content_units.to(device)
             dur_anchor_src = dur_anchor_src.to(device)
+            silence_mask = silence_mask.to(device)
             open_run_mask = open_run_mask.to(device)
             sealed_mask = sealed_mask.to(device)
             sep_hint = sep_hint.to(device)
@@ -160,6 +174,7 @@ class RhythmUnitFrontend:
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
+            silence_mask=silence_mask.float() * unit_mask,
             open_run_mask=open_run_mask,
             sealed_mask=sealed_mask.float(),
             sep_hint=sep_hint,
@@ -236,6 +251,7 @@ class RhythmUnitFrontend:
         content_units: torch.Tensor,
         dur_anchor_src: torch.Tensor,
         unit_mask: torch.Tensor | None = None,
+        silence_mask: torch.Tensor | None = None,
         open_run_mask: torch.Tensor | None = None,
         sealed_mask: torch.Tensor | None = None,
         sep_hint: torch.Tensor | None = None,
@@ -247,6 +263,10 @@ class RhythmUnitFrontend:
             unit_mask = dur_anchor_src.gt(0).float()
         else:
             unit_mask = unit_mask.float()
+        if silence_mask is None:
+            silence_mask = torch.zeros_like(unit_mask)
+        else:
+            silence_mask = silence_mask.float() * unit_mask
         if open_run_mask is None and sealed_mask is None:
             open_run_mask, sealed_mask = self._rebuild_open_and_sealed_from_cache(unit_mask=unit_mask)
         elif open_run_mask is None:
@@ -273,6 +293,7 @@ class RhythmUnitFrontend:
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
             unit_mask=unit_mask,
+            silence_mask=silence_mask,
             open_run_mask=open_run_mask.long(),
             sealed_mask=sealed_mask,
             sep_hint=sep_hint.long(),
@@ -520,6 +541,7 @@ class DurationUnitFrontend(nn.Module):
         silent_token: int | None = None,
         separator_aware: bool = True,
         tail_open_units: int = 1,
+        emit_silence_runs: bool = False,
         anchor_hidden_size: int = 128,
         anchor_min_frames: float = 1.0,
         anchor_max_frames: float = 12.0,
@@ -531,6 +553,7 @@ class DurationUnitFrontend(nn.Module):
             silent_token=silent_token,
             separator_aware=separator_aware,
             tail_open_units=tail_open_units,
+            emit_silence_runs=emit_silence_runs,
         )
         self.baseline = ProtocolDurationBaseline(
             vocab_size=vocab_size,
@@ -646,6 +669,7 @@ class DurationUnitFrontend(nn.Module):
             unit_mask=unit_mask,
             sealed_mask=base_batch.sealed_mask.float() * unit_mask,
             sep_mask=sep_mask,
+            source_silence_mask=base_batch.silence_mask.float() * unit_mask,
             source_boundary_cue=resolved_boundary,
             phrase_group_index=resolved_phrase_index,
             phrase_group_pos=resolved_phrase_pos,
@@ -741,6 +765,7 @@ class DurationUnitFrontend(nn.Module):
         sealed_mask: torch.Tensor | None = None,
         sep_mask: torch.Tensor | None = None,
         unit_anchor_base: torch.Tensor | None = None,
+        source_silence_mask: torch.Tensor | None = None,
         source_boundary_cue: torch.Tensor | None = None,
         phrase_group_index: torch.Tensor | None = None,
         phrase_group_pos: torch.Tensor | None = None,
@@ -753,6 +778,7 @@ class DurationUnitFrontend(nn.Module):
             sealed_mask=sealed_mask,
             sep_mask=sep_mask,
             unit_anchor_base=unit_anchor_base,
+            source_silence_mask=source_silence_mask,
             source_boundary_cue=source_boundary_cue,
             phrase_group_index=phrase_group_index,
             phrase_group_pos=phrase_group_pos,
@@ -762,10 +788,11 @@ class DurationUnitFrontend(nn.Module):
             content_units=content_units,
             dur_anchor_src=source_duration_obs,
             unit_mask=unit_mask,
+            silence_mask=source_silence_mask,
             sealed_mask=sealed_mask,
             sep_hint=sep_mask,
         )
-        return self._convert_batch(
+        batch = self._convert_batch(
             base_batch,
             unit_anchor_base=unit_anchor_base,
             source_boundary_cue=source_boundary_cue,
@@ -773,6 +800,9 @@ class DurationUnitFrontend(nn.Module):
             phrase_group_pos=phrase_group_pos,
             phrase_final_mask=phrase_final_mask,
         )
+        if isinstance(source_silence_mask, torch.Tensor):
+            batch.source_silence_mask = source_silence_mask.float() * batch.unit_mask.float()
+        return batch
 
     def init_stream_state(self, batch_size: int, *, device: torch.device | None = None):
         return self.base_frontend.init_stream_state(batch_size=batch_size, device=device)

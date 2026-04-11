@@ -18,6 +18,7 @@ class SourceUnitBatch:
     unit_mask: torch.Tensor
     sealed_mask: torch.Tensor
     sep_mask: torch.Tensor
+    source_silence_mask: Optional[torch.Tensor] = None
     source_boundary_cue: Optional[torch.Tensor] = None
     phrase_group_index: Optional[torch.Tensor] = None
     phrase_group_pos: Optional[torch.Tensor] = None
@@ -34,6 +35,7 @@ DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS = (
     "sealed_mask",
     "sep_mask",
     "unit_anchor_base",
+    "source_silence_mask",
     "source_boundary_cue",
     "phrase_group_index",
     "phrase_group_pos",
@@ -122,6 +124,10 @@ class ReferenceDurationMemory:
     detector: StructuredDetectorDurationMemory | None = None
     role: StructuredRoleDurationMemory | None = None
     prompt: Optional[PromptConditioningEvidence] = None
+    summary_state: Optional[torch.Tensor] = None
+    spk_embed: Optional[torch.Tensor] = None
+    prompt_valid_mask: Optional[torch.Tensor] = None
+    prompt_speech_mask: Optional[torch.Tensor] = None
 
     @property
     def global_stretch(self) -> torch.Tensor:
@@ -129,7 +135,15 @@ class ReferenceDurationMemory:
 
     @property
     def operator_coeff(self) -> torch.Tensor:
-        return self.operator.operator_coeff
+        if self.operator is not None:
+            return self.operator.operator_coeff
+        if isinstance(self.summary_state, torch.Tensor):
+            return self.summary_state
+        raise ValueError("ReferenceDurationMemory has neither operator_coeff nor summary_state.")
+
+    @property
+    def summary_vector(self) -> Optional[torch.Tensor]:
+        return self.summary_state
 
     @property
     def progress_profile(self) -> Optional[torch.Tensor]:
@@ -173,7 +187,13 @@ class ReferenceDurationMemory:
 
     @property
     def prompt_mask(self) -> Optional[torch.Tensor]:
+        if isinstance(self.prompt_valid_mask, torch.Tensor):
+            return self.prompt_valid_mask
         return None if self.prompt is None else self.prompt.prompt_mask
+
+    @property
+    def prompt_speech(self) -> Optional[torch.Tensor]:
+        return self.prompt_speech_mask
 
     @property
     def prompt_operator_fit(self) -> Optional[torch.Tensor]:
@@ -260,6 +280,7 @@ class ReferenceDurationMemory:
 class DurationRuntimeState:
     committed_units: torch.Tensor
     rounding_residual: torch.Tensor
+    prefix_unit_offset: torch.Tensor
     cached_duration_exec: Optional[torch.Tensor] = None
     local_rate_ema: Optional[torch.Tensor] = None
     since_last_boundary: Optional[torch.Tensor] = None
@@ -270,11 +291,11 @@ class DurationRuntimeState:
 
     @property
     def clock_delta(self) -> torch.Tensor:
-        return self.rounding_residual.new_zeros(self.rounding_residual.shape)
+        return self.prefix_unit_offset.float()
 
     @property
     def backlog(self) -> torch.Tensor:
-        return self.rounding_residual.new_zeros(self.rounding_residual.shape)
+        return self.prefix_unit_offset.float().clamp_min(0.0)
 
 
 @dataclass
@@ -294,6 +315,11 @@ class DurationExecution:
     unit_logstretch_raw: Optional[torch.Tensor] = None
     unit_duration_raw: Optional[torch.Tensor] = None
     frame_plan: Optional["RhythmFramePlan"] = None
+    global_bias_scalar: Optional[torch.Tensor] = None
+    global_shift_analytic: Optional[torch.Tensor] = None
+    local_residual: Optional[torch.Tensor] = None
+    source_rate_seq: Optional[torch.Tensor] = None
+    prefix_unit_offset: Optional[torch.Tensor] = None
 
     @property
     def speech_duration_exec(self) -> torch.Tensor:
@@ -322,6 +348,10 @@ class DurationExecution:
     @property
     def summary_conf_unit(self) -> Optional[torch.Tensor]:
         return self.role_conf_unit
+
+    @property
+    def global_bias(self) -> Optional[torch.Tensor]:
+        return self.global_bias_scalar
 
 
 def _move_tensor(value, *, device: torch.device, dtype: torch.dtype | None = None):
@@ -362,6 +392,7 @@ def move_source_unit_batch(
             batch.unit_mask,
             batch.sealed_mask,
             batch.sep_mask,
+            batch.source_silence_mask,
             batch.source_boundary_cue,
             batch.phrase_group_index,
             batch.phrase_group_pos,
@@ -376,6 +407,7 @@ def move_source_unit_batch(
         unit_mask=_move_tensor(batch.unit_mask, device=device),
         sealed_mask=_move_tensor(batch.sealed_mask, device=device),
         sep_mask=_move_tensor(batch.sep_mask, device=device),
+        source_silence_mask=_move_tensor(batch.source_silence_mask, device=device),
         source_boundary_cue=_move_tensor(batch.source_boundary_cue, device=device),
         phrase_group_index=_move_tensor(batch.phrase_group_index, device=device),
         phrase_group_pos=_move_tensor(batch.phrase_group_pos, device=device),
@@ -479,6 +511,10 @@ def move_reference_duration_memory(
         _tensor_on_device_dtype(value, device=device, dtype=dtype)
         for value in (
             memory.global_rate,
+            memory.summary_state,
+            memory.spk_embed,
+            memory.prompt_valid_mask,
+            memory.prompt_speech_mask,
             memory.operator_coeff,
             memory.progress_profile,
             memory.detector_coeff,
@@ -516,6 +552,10 @@ def move_reference_duration_memory(
         detector=move_structured_detector_duration_memory(memory.detector, device=device, dtype=dtype),
         role=move_structured_role_duration_memory(memory.role, device=device, dtype=dtype),
         prompt=move_prompt_conditioning_evidence(memory.prompt, device=device, dtype=dtype),
+        summary_state=_move_tensor(memory.summary_state, device=device, dtype=dtype),
+        spk_embed=_move_tensor(memory.spk_embed, device=device, dtype=dtype),
+        prompt_valid_mask=_move_tensor(memory.prompt_valid_mask, device=device, dtype=dtype),
+        prompt_speech_mask=_move_tensor(memory.prompt_speech_mask, device=device, dtype=dtype),
     )
 
 
@@ -744,6 +784,38 @@ def validate_reference_duration_memory(
             f"ReferenceDurationMemory.global_rate must have shape [B, 1], got {getattr(memory.global_rate, 'shape', None)}"
         )
     batch_size = int(memory.global_rate.size(0))
+    if memory.summary_state is not None:
+        if not isinstance(memory.summary_state, torch.Tensor) or memory.summary_state.dim() != 2:
+            raise ValueError(
+                f"ReferenceDurationMemory.summary_state must have shape [B, D], got {getattr(memory.summary_state, 'shape', None)}"
+            )
+        if memory.summary_state.size(0) != batch_size:
+            raise ValueError(
+                f"ReferenceDurationMemory.summary_state batch mismatch: expected {batch_size}, got {tuple(memory.summary_state.shape)}"
+            )
+    if memory.spk_embed is not None:
+        if not isinstance(memory.spk_embed, torch.Tensor) or memory.spk_embed.dim() != 2:
+            raise ValueError(
+                f"ReferenceDurationMemory.spk_embed must have shape [B, H], got {getattr(memory.spk_embed, 'shape', None)}"
+            )
+        if memory.spk_embed.size(0) != batch_size:
+            raise ValueError(
+                f"ReferenceDurationMemory.spk_embed batch mismatch: expected {batch_size}, got {tuple(memory.spk_embed.shape)}"
+            )
+    for name, value in (
+        ("prompt_valid_mask", memory.prompt_valid_mask),
+        ("prompt_speech_mask", memory.prompt_speech_mask),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, torch.Tensor) or value.dim() != 2:
+            raise ValueError(
+                f"ReferenceDurationMemory.{name} must have shape [B, T], got {getattr(value, 'shape', None)}"
+            )
+        if value.size(0) != batch_size:
+            raise ValueError(
+                f"ReferenceDurationMemory.{name} batch mismatch: expected {batch_size}, got {tuple(value.shape)}"
+            )
     validate_structured_duration_operator_memory(memory.operator, batch_size=batch_size)
     validate_structured_progress_duration_memory(memory.progress, batch_size=batch_size)
     validate_structured_detector_duration_memory(memory.detector, batch_size=batch_size)
@@ -832,6 +904,10 @@ def ensure_reference_duration_memory_batch(
                 prompt_role_fit=_expand(memory.prompt.prompt_role_fit),
             )
         ),
+        summary_state=_expand(memory.summary_state),
+        spk_embed=_expand(memory.spk_embed),
+        prompt_valid_mask=_expand(memory.prompt_valid_mask),
+        prompt_speech_mask=_expand(memory.prompt_speech_mask),
     )
     return validate_reference_duration_memory(expanded)
 
@@ -847,6 +923,7 @@ def move_duration_runtime_state(
         state,
         committed_units=_move_tensor(state.committed_units, device=device),
         rounding_residual=_move_tensor(state.rounding_residual, device=device),
+        prefix_unit_offset=_move_tensor(state.prefix_unit_offset, device=device),
         cached_duration_exec=_move_tensor(state.cached_duration_exec, device=device),
         local_rate_ema=_move_tensor(state.local_rate_ema, device=device),
         since_last_boundary=_move_tensor(state.since_last_boundary, device=device),
@@ -865,7 +942,7 @@ def ensure_duration_runtime_state_batch(
         raise ValueError(
             f"DurationRuntimeState batch mismatch: source_batch={batch_size}, state_batch={current_batch}."
         )
-    for name in ("committed_units", "rounding_residual", "cached_duration_exec", "local_rate_ema", "since_last_boundary"):
+    for name in ("committed_units", "rounding_residual", "prefix_unit_offset", "cached_duration_exec", "local_rate_ema", "since_last_boundary"):
         value = getattr(state, name)
         if value is None or not isinstance(value, torch.Tensor):
             continue
@@ -876,6 +953,10 @@ def ensure_duration_runtime_state_batch(
     if state.rounding_residual.dim() != 2 or state.rounding_residual.size(1) != 1:
         raise ValueError(
             f"DurationRuntimeState.rounding_residual must be rank-2 [B, 1], got shape={tuple(state.rounding_residual.shape)}."
+        )
+    if state.prefix_unit_offset.dim() != 2 or state.prefix_unit_offset.size(1) != 1:
+        raise ValueError(
+            f"DurationRuntimeState.prefix_unit_offset must be rank-2 [B, 1], got shape={tuple(state.prefix_unit_offset.shape)}."
         )
     for name in ("local_rate_ema", "since_last_boundary"):
         value = getattr(state, name)

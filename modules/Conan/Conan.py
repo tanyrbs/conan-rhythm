@@ -228,6 +228,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         *,
         ret,
         content,
+        spk_embed,
         ref,
         target,
         f0,
@@ -248,6 +249,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         return self.rhythm_adapter(
             ret=ret,
             content=content,
+            spk_embed=spk_embed,
             ref=ref,
             target=target,
             f0=f0,
@@ -294,6 +296,7 @@ class Conan(ConanPitchMixin, FastSpeech):
         content_embed, tgt_nonpadding, f0, uv = self._run_rhythm_stage(
             ret=ret,
             content=content,
+            spk_embed=spk_embed,
             ref=ref,
             target=target,
             f0=f0,

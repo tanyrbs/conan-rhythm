@@ -340,6 +340,8 @@ class MixedEffectsDurationModule(nn.Module):
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
         ridge_support_tau = float(unused_kwargs.pop("ridge_support_tau", 8.0))
         operator_holdout_ratio = float(unused_kwargs.pop("operator_holdout_ratio", 0.30))
+        prefix_budget_pos = int(unused_kwargs.pop("prefix_budget_pos", unused_kwargs.pop("unit_budget_pos", 24)))
+        prefix_budget_neg = int(unused_kwargs.pop("prefix_budget_neg", unused_kwargs.pop("unit_budget_neg", 24)))
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
@@ -362,22 +364,28 @@ class MixedEffectsDurationModule(nn.Module):
         elif micro_lookahead_units is not None:
             effective_window_right = max(0, int(micro_lookahead_units))
 
-        self.response_encoder = SharedCausalBasisEncoder(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            basis_rank=basis_rank,
-            window_left=response_window_left,
-            window_right=effective_window_right,
+        self.response_encoder = None
+        self.reference_memory_builder = None
+        if self.backbone_mode != "prompt_summary":
+            self.response_encoder = SharedCausalBasisEncoder(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                basis_rank=basis_rank,
+                window_left=response_window_left,
+                window_right=effective_window_right,
+            )
+            self.reference_memory_builder = PromptConditionedOperatorEstimator(
+                progress_bins=progress_bins,
+                ridge_lambda=ridge_lambda,
+                global_shrink_tau=global_shrink_tau,
+                progress_support_tau=progress_support_tau,
+                ridge_support_tau=ridge_support_tau,
+                holdout_ratio=operator_holdout_ratio,
+            )
+        self.projector = StreamingDurationProjector(
+            prefix_budget_pos=prefix_budget_pos,
+            prefix_budget_neg=prefix_budget_neg,
         )
-        self.reference_memory_builder = PromptConditionedOperatorEstimator(
-            progress_bins=progress_bins,
-            ridge_lambda=ridge_lambda,
-            global_shrink_tau=global_shrink_tau,
-            progress_support_tau=progress_support_tau,
-            ridge_support_tau=ridge_support_tau,
-            holdout_ratio=operator_holdout_ratio,
-        )
-        self.projector = StreamingDurationProjector()
         self.summary_codebook = None
         self.role_codebook = None
         self.prompt_memory_encoder = None
@@ -398,6 +406,7 @@ class MixedEffectsDurationModule(nn.Module):
                 vocab_size=vocab_size,
                 dim=summary_dim,
                 num_slots=summary_slots,
+                spk_dim=hidden_size,
                 max_logstretch=max_logstretch,
                 codebook=self.summary_codebook,
             )
@@ -450,6 +459,9 @@ class MixedEffectsDurationModule(nn.Module):
                 prompt_content_units=prompt_content_units,
                 prompt_duration_obs=prompt_duration_obs,
                 prompt_mask=prompt_mask,
+                prompt_valid_mask=ref_conditioning.get("prompt_valid_mask"),
+                prompt_speech_mask=ref_conditioning.get("prompt_speech_mask"),
+                prompt_spk_embed=ref_conditioning.get("prompt_spk_embed"),
                 prompt_edge_cue=None,
             )
         need_progress = self._use_progress_response()
@@ -497,9 +509,9 @@ class MixedEffectsDurationModule(nn.Module):
         unit_mask: torch.Tensor,
         log_anchor: torch.Tensor,
     ) -> torch.Tensor:
-        if not self._use_local_operator():
+        if not self._use_local_operator() or self.response_encoder is None:
             batch_size, num_units = source_batch.content_units.shape
-            basis_rank = int(self.response_encoder.out_proj.out_features)
+            basis_rank = int(self.duration_head.query_dim if self.duration_head is not None else 1)
             return log_anchor.new_zeros((batch_size, num_units, basis_rank))
         return self.response_encoder.encode_source(
             content_units=source_batch.content_units,
@@ -617,8 +629,8 @@ class MixedEffectsDurationModule(nn.Module):
         commit_mask: torch.Tensor,
     ) -> torch.Tensor:
         speech_commit_mask = commit_mask.float()
-        if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor):
-            speech_commit_mask = speech_commit_mask * (1.0 - source_batch.sep_mask.float().clamp(0.0, 1.0))
+        if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
+            speech_commit_mask = speech_commit_mask * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))
         return speech_commit_mask
 
     @staticmethod
@@ -758,48 +770,53 @@ class MixedEffectsDurationModule(nn.Module):
         if self.backbone_mode == "prompt_summary":
             if self.duration_head is None:
                 raise RuntimeError("prompt_summary backbone is missing StreamingDurationHead.")
-            if ref_memory.role is None:
-                raise ValueError("rhythm_v3 prompt_summary backbone requires summary prompt statistics.")
             local_rate_ema = (
                 state.local_rate_ema.float()
                 if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
-                else unit_mask.new_zeros((batch_size, 1))
+                else None
             )
             role_plan = self.duration_head(
                 content_units=source_batch.content_units,
                 log_anchor=torch.log(prediction_anchor.clamp_min(1.0e-4)),
                 unit_mask=unit_mask,
                 sealed_mask=sealed_mask,
-                sep_hint=(
-                    source_batch.sep_mask.float()
-                    if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor)
-                    else unit_mask.new_zeros(unit_mask.shape)
-                ),
+                sep_hint=(source_batch.sep_mask.float() if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor) else unit_mask.new_zeros(unit_mask.shape)),
                 edge_cue=unit_mask.new_zeros(unit_mask.shape),
                 global_rate=ref_memory.global_rate,
+                summary_state=ref_memory.summary_state,
+                spk_embed=ref_memory.spk_embed,
                 role_value=ref_memory.role_value,
                 role_var=ref_memory.role_var,
                 role_coverage=ref_memory.role_coverage,
                 local_rate_ema=local_rate_ema,
+                silence_mask=getattr(source_batch, "source_silence_mask", None),
             )
             unit_logstretch = role_plan["unit_logstretch"] * speech_commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
                 prediction_anchor=prediction_anchor,
                 unit_logstretch=unit_logstretch,
             )
+            silence_mask = getattr(source_batch, "source_silence_mask", None)
+            if isinstance(silence_mask, torch.Tensor):
+                silence_mask = silence_mask.float().clamp(0.0, 1.0) * unit_mask.float()
+                unit_duration_exec = torch.where(
+                    silence_mask > 0.5,
+                    source_batch.source_duration_obs.float(),
+                    unit_duration_exec,
+                )
             unit_logstretch_raw = unit_logstretch.clone()
             unit_duration_raw = unit_duration_exec.clone()
             unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
                 unit_duration_exec=unit_duration_exec,
                 unit_logstretch=unit_logstretch,
-                unit_anchor_base=prediction_anchor,
+                unit_anchor_base=source_batch.source_duration_obs.float().clamp_min(1.0e-4),
                 state=state,
             )
             execution = self.projector.finalize_execution(
                 unit_logstretch=unit_logstretch,
                 unit_duration_exec=unit_duration_exec,
                 basis_activation=basis_activation * 0.0,
-                source_duration_obs=prediction_anchor,
+                source_duration_obs=source_batch.source_duration_obs.float(),
                 unit_mask=unit_mask,
                 sealed_mask=sealed_mask,
                 speech_commit_mask=speech_commit_mask,
@@ -813,6 +830,10 @@ class MixedEffectsDurationModule(nn.Module):
                 role_conf_unit=role_plan["role_conf_unit"] * unit_mask,
                 unit_logstretch_raw=unit_logstretch_raw,
                 unit_duration_raw=unit_duration_raw,
+                global_bias_scalar=role_plan.get("global_bias_scalar"),
+                global_shift_analytic=role_plan.get("unit_global_shift_analytic"),
+                local_residual=role_plan.get("unit_residual_logstretch"),
+                source_rate_seq=role_plan.get("source_rate_seq"),
             )
             execution.next_state = self._update_prompt_summary_state(
                 final_rate_ema=role_plan["local_rate_final"],
@@ -852,14 +873,14 @@ class MixedEffectsDurationModule(nn.Module):
         unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
             unit_duration_exec=unit_duration_exec,
             unit_logstretch=unit_logstretch,
-            unit_anchor_base=prediction_anchor,
+            unit_anchor_base=source_batch.source_duration_obs.float().clamp_min(1.0e-4),
             state=state,
         )
         return self.projector.finalize_execution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=unit_duration_exec,
             basis_activation=basis_activation * speech_commit_mask.unsqueeze(-1),
-            source_duration_obs=prediction_anchor,
+            source_duration_obs=source_batch.source_duration_obs.float(),
             unit_mask=unit_mask,
             sealed_mask=sealed_mask,
             speech_commit_mask=speech_commit_mask,

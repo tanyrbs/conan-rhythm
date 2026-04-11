@@ -56,6 +56,14 @@ def _normalize_ref_entry(ref_entry: Any) -> dict[str, Any]:
         raise RuntimeError(f"Pair manifest ref entry is missing ref_item_name/ref/item_name: {ref_entry!r}")
     normalized = dict(ref_entry)
     normalized["ref_item_name"] = str(ref_name)
+    paired_target_name = (
+        ref_entry.get("target_item_name")
+        or ref_entry.get("paired_target_item_name")
+        or ref_entry.get("target")
+        or ref_entry.get("paired_target")
+    )
+    if paired_target_name:
+        normalized["target_item_name"] = str(paired_target_name)
     return normalized
 
 
@@ -119,6 +127,11 @@ def _normalize_manifest_entries(raw_entries: Any) -> list[dict[str, Any]]:
                 {
                     "source_item_name": source_name,
                     "ref_item_name": str(ref_entry["ref_item_name"]),
+                    "target_item_name": (
+                        None
+                        if not ref_entry.get("target_item_name")
+                        else str(ref_entry["target_item_name"])
+                    ),
                     "group_id": group_id,
                     "pair_rank": int(ref_entry.get("pair_rank", rank)),
                     "pair_label": None if pair_label in {None, ""} else str(pair_label),

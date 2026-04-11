@@ -94,12 +94,14 @@ class BaseSpeechDataset(BaseDataset):
         for entry in raw_entries:
             source_name = entry["source_item_name"]
             ref_name = entry["ref_item_name"]
+            target_name = entry.get("target_item_name")
             src_local = item_name_to_local.get(source_name)
             ref_local = item_name_to_local.get(ref_name)
-            if src_local is None or ref_local is None:
+            target_local = None if target_name in {None, ""} else item_name_to_local.get(str(target_name))
+            if src_local is None or ref_local is None or (target_name not in {None, ""} and target_local is None):
                 if strict:
                     raise RuntimeError(
-                        f"Pair manifest entry ({source_name!r}, {ref_name!r}) is missing from split '{self.prefix}' "
+                        f"Pair manifest entry ({source_name!r}, {ref_name!r}, target={target_name!r}) is missing from split '{self.prefix}' "
                         "after filtering. Rebuild the manifest or relax rhythm_pair_manifest_strict."
                     )
                 continue
@@ -113,6 +115,7 @@ class BaseSpeechDataset(BaseDataset):
                 {
                     "src_local": int(src_local),
                     "ref_local": int(ref_local),
+                    "target_local": (None if target_local is None else int(target_local)),
                     "group_id": int(numeric_group),
                     "pair_rank": int(entry.get("pair_rank", 0)),
                     "is_identity": bool(src_local == ref_local),
@@ -196,11 +199,17 @@ class BaseSpeechDataset(BaseDataset):
         spk_id = int(item['spk_id'])
         if pair_entry is not None:
             ref_local = int(pair_entry["ref_local"])
+            paired_target_local = pair_entry.get("target_local")
         else:
             cand_locals = self.spk2indices[spk_id]
             ref_local = self._sample_reference_local_index(cand_locals, item_local)
+            paired_target_local = None
         ref_item = item if ref_local == item_local else self._get_item(ref_local)
         ref_spec = self._mel_to_tensor(ref_item['mel'], max_frames=hparams['max_frames'])
+        paired_target_item = None
+        if paired_target_local is not None:
+            paired_target_local = int(paired_target_local)
+            paired_target_item = item if paired_target_local == item_local else self._get_item(paired_target_local)
 
         sample = {
             'id': index,
@@ -212,6 +221,9 @@ class BaseSpeechDataset(BaseDataset):
             '_raw_item': item,
             '_raw_ref_item': ref_item,
         }
+        if paired_target_item is not None:
+            sample['paired_target_item_id'] = paired_target_local
+            sample['_raw_paired_target_item'] = paired_target_item
         if pair_entry is not None:
             sample['rhythm_pair_group_id'] = torch.tensor([int(pair_entry["group_id"])], dtype=torch.long)
             sample['rhythm_pair_rank'] = torch.tensor([int(pair_entry["pair_rank"])], dtype=torch.long)

@@ -262,6 +262,8 @@ class RhythmDatasetCacheContract:
             key: int(np.asarray(cache[key]).reshape(-1).shape[0])
             for key in self.owner._RHYTHM_SOURCE_CACHE_KEYS
         }
+        if "source_silence_mask" in cache:
+            lengths["source_silence_mask"] = int(np.asarray(cache["source_silence_mask"]).reshape(-1).shape[0])
         if len(set(lengths.values())) != 1:
             raise RuntimeError(
                 f"Rhythm source cache shape mismatch in {item_name}: {lengths}. Re-binarize the dataset."

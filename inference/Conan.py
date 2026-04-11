@@ -144,7 +144,11 @@ class StreamingVoiceConversion:
             spk_embed = spk_embed.unsqueeze(1)
         return spk_embed
 
-    def _extract_prompt_unit_conditioning(self, ref_mel_batch: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _extract_prompt_unit_conditioning(
+        self,
+        ref_mel_batch: torch.Tensor,
+        prepared_spk_embed: torch.Tensor | None = None,
+    ) -> Dict[str, torch.Tensor]:
         with torch.no_grad():
             ref_lengths = torch.tensor([ref_mel_batch.size(1)], dtype=torch.long, device=ref_mel_batch.device)
             codes, _, _ = self.emformer.emformer.infer(ref_mel_batch, ref_lengths, None)
@@ -162,17 +166,34 @@ class StreamingVoiceConversion:
             silent_token=self.hparams.get("silent_token", 57),
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+            emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
         prompt_content_units = torch.tensor(cache["content_units"], device=self.device, dtype=torch.long).unsqueeze(0)
         prompt_duration_obs = torch.tensor(cache["dur_anchor_src"], device=self.device, dtype=torch.float32).unsqueeze(0)
-        prompt_sep = torch.tensor(cache.get("sep_hint"), device=self.device, dtype=torch.float32).unsqueeze(0)
-        prompt_unit_mask = (prompt_duration_obs > 0).float() * (1.0 - prompt_sep.clamp(0.0, 1.0))
-        return {
+        prompt_valid_mask = (prompt_duration_obs > 0).float()
+        prompt_silence = cache.get("source_silence_mask")
+        if prompt_silence is not None:
+            prompt_silence_mask = torch.tensor(prompt_silence, device=self.device, dtype=torch.float32).unsqueeze(0)
+            prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clamp(0.0, 1.0))
+        else:
+            prompt_speech_mask = prompt_valid_mask
+        out = {
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
-            "prompt_unit_mask": prompt_unit_mask,
+            "prompt_unit_mask": prompt_valid_mask,
+            "prompt_valid_mask": prompt_valid_mask,
+            "prompt_speech_mask": prompt_speech_mask,
         }
+        if prepared_spk_embed is not None:
+            prompt_spk = prepared_spk_embed
+            if prompt_spk.dim() == 3 and prompt_spk.size(-1) == 1:
+                prompt_spk = prompt_spk.squeeze(-1)
+            elif prompt_spk.dim() == 3 and prompt_spk.size(1) == 1:
+                prompt_spk = prompt_spk.squeeze(1)
+            if prompt_spk.dim() == 2:
+                out["prompt_spk_embed"] = prompt_spk.detach()
+        return out
 
     def _render_vocoder_chunk(
         self,
@@ -242,7 +263,10 @@ class StreamingVoiceConversion:
                 ),
             ):
                 if getattr(self.model, "rhythm_enable_v3", False):
-                    rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(ref_mel_batch)
+                    rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(
+                        ref_mel_batch,
+                        prepared_spk_embed=prepared_spk_embed,
+                    )
                 else:
                     rhythm_ref_conditioning = self.model.prepare_rhythm_reference(
                         ref_mel_batch,

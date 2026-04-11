@@ -4,6 +4,7 @@ from ..common.task_runtime_support import CommonTaskRuntimeSupport
 from utils.commons.hparams import hparams
 
 from .targets import DurationV3TargetBuildConfig
+from .task_config import is_duration_v3_prompt_summary_backbone
 
 
 class DurationV3TaskRuntimeSupportMixin:
@@ -11,14 +12,18 @@ class DurationV3TaskRuntimeSupportMixin:
         lambda_summary = hparams.get("lambda_rhythm_summary", None)
         lambda_mem = hparams.get("lambda_rhythm_mem", None)
         lambda_op = hparams.get("lambda_rhythm_op", 0.25)
+        if is_duration_v3_prompt_summary_backbone(hparams.get("rhythm_v3_backbone", "global_only")):
+            lambda_op = 0.0
         if lambda_summary is not None:
             lambda_op = lambda_summary
         elif lambda_mem is not None:
             lambda_op = lambda_mem
+        default_lambda_bias = 0.20 if is_duration_v3_prompt_summary_backbone(hparams.get("rhythm_v3_backbone", "global_only")) else 0.0
         return DurationV3TargetBuildConfig(
             lambda_dur=max(0.0, float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0)),
             lambda_op=max(0.0, float(lambda_op or 0.0)),
             lambda_pref=max(0.0, float(hparams.get("lambda_rhythm_pref", 0.20) or 0.0)),
+            lambda_bias=max(0.0, float(hparams.get("lambda_rhythm_bias", default_lambda_bias) or 0.0)),
             lambda_base=max(0.0, float(hparams.get("lambda_rhythm_base", 0.0) or 0.0)),
             lambda_cons=max(0.0, float(hparams.get("lambda_rhythm_cons", 0.0) or 0.0)),
             lambda_zero=max(0.0, float(hparams.get("lambda_rhythm_zero", 0.05) or 0.0)),

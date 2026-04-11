@@ -11,10 +11,13 @@ The maintained default is:
 - explicit prompt units
 - source-observed duration anchors for sealed speech units
 - speech-only prompt global-rate estimation
+- prompt/speaker-level scalar global bias
 - strict-causal source prefix-rate EMA
 - static prompt summary memory
 - single duration writer
 - deterministic projector with residual carry
+- explicit silence-run frontend that exports `source_silence_mask`
+- paired-target supervision is built from a dedicated target item/sequence, keeping training signals off the prompt-conditioning chain
 
 Recommended config:
 
@@ -23,18 +26,21 @@ Recommended config:
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
 
+Canonical training intentionally keeps the prompt-summary auxiliary loss disabled (`lambda_rhythm_summary=0`) so the maintained path focuses on duration/bias supervision plus the optional prefix consistency term.
+
 ## 2. Default prompt-summary formula
 
 For the maintained default path, the runtime reading is:
 
-> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + delta_i`
+> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + b_hat + delta_i`
 
 where:
 
 - `a_i`: source-observed duration for sealed speech units, with frontend fallback only when needed
 - `g_ref`: speech-only global prompt log-rate
 - `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
-- `delta_i`: learned residual from a causal source query against a static prompt summary
+- `b_hat`: prompt/speaker-level scalar global bias
+- `delta_i`: learned speech-run residual from a causal source query against a static prompt summary
 
 In other words:
 
@@ -69,18 +75,29 @@ The maintained v3 path requires explicit prompt-unit conditioning:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+- optional `prompt_valid_mask`
+- optional `prompt_speech_mask`
+- optional `prompt_spk_embed`
 
 The prompt encoder produces:
 
 - `global_rate`
 - `summary_state`
+- `spk_embed`
 - diagnostic slot statistics:
   - `role_value`
   - `role_var`
   - `role_coverage`
 
 Those statistics remain useful for losses and observability. Runtime only needs
-static prompt conditioning rather than a prompt-time evolution story.
+static prompt conditioning rather than a prompt-time evolution story, and the
+writer now consumes `summary_state` directly instead of treating it as a pure
+diagnostic sidecar.
+
+Paired-target supervision is kept separate: the canonical path pulls `unit_duration_tgt`
+from an explicit paired target item or `paired_target_*` inputs instead of recycling
+the prompt diagnostics, and it only accepts a source-self fallback when
+`rhythm_v3_allow_source_self_target_fallback` is intentionally enabled.
 
 ## 6. Source-side/runtime contract
 
@@ -95,7 +112,9 @@ For the default path:
 
 - source-observed durations anchor committed speech units
 - strict-causal local-rate state is the key streaming rate state
-- separator units are excluded from speech-duration supervision and reporting
+- `sep_mask` is not the canonical speech mask
+- `source_silence_mask` gates speech-only supervision and rate tracking
+- the maintained v3 frontend now materializes explicit silence runs instead of collapsing silence into separator-only markers
 
 ## 7. Projector contract
 
@@ -103,6 +122,8 @@ The maintained projector story is narrow:
 
 - deterministic projection to integer frames
 - residual carry
+- explicit prefix unit-budget clamp so the cumulative `O_p = Σ(q_i - n_i)` stays within configured bounds
+- raw uncommitted open-tail units are retained and concatenated after the retimed prefix for downstream processing
 
 ## 8. Task/data split now in code
 
@@ -199,4 +220,4 @@ Validated locally after the real task-layer split and mixin cleanup:
   - `tests/rhythm/test_reference_bootstrap_runtime.py`
   - `tests/rhythm/test_runtime_validation_alignment.py`
 
-Result: **212 passed**.
+Result: **216 passed**.
