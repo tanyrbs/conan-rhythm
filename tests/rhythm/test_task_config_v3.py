@@ -73,6 +73,30 @@ def test_validate_rhythm_training_hparams_rejects_invalid_v3_values(bad_key, bad
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_negative_silence_coarse_weight():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_silence_coarse_weight"] = -0.1
+    with pytest.raises(ValueError, match="rhythm_v3_silence_coarse_weight"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_negative_silence_max_logstretch():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_silence_max_logstretch"] = -0.1
+    with pytest.raises(ValueError, match="rhythm_v3_silence_max_logstretch"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_positive_silence_settings():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_silence_coarse_weight": 0.5,
+            "rhythm_v3_silence_max_logstretch": 0.45,
+        }
+    )
+
+
 def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_train_mode():
     hparams = _minimal_v3_hparams()
     hparams["rhythm_v3_baseline_train_mode"] = "alternating"

@@ -127,6 +127,7 @@ def build_pseudo_source_duration_context(
     unit_mask: torch.Tensor,
     sep_hint: torch.Tensor,
     *,
+    silence_mask: torch.Tensor | None = None,
     global_scale_range: tuple[float, float] = (0.85, 1.15),
     local_span_prob: float = 0.20,
     local_span_scale: tuple[float, float] = (0.7, 1.3),
@@ -136,6 +137,11 @@ def build_pseudo_source_duration_context(
 ) -> torch.Tensor:
     dur = gt_dur.float().clone()
     mask = unit_mask.float().clamp(0.0, 1.0)
+    speech_mask = (
+        mask
+        if silence_mask is None
+        else mask * (1.0 - silence_mask.float().clamp(0.0, 1.0))
+    )
     sep = sep_hint.float().clamp(0.0, 1.0)
     if dur.numel() <= 0:
         return dur
@@ -154,21 +160,30 @@ def build_pseudo_source_duration_context(
     for batch_idx in range(int(dur.size(0))):
         if float(torch.rand((1,), generator=generator, device=dur.device).item()) >= local_prob:
             continue
-        valid_units = int(mask[batch_idx].sum().item())
+        valid_units = int(speech_mask[batch_idx].sum().item())
         if valid_units <= 1:
             continue
-        span_start_max = max(valid_units - 1, 1)
-        span_start = int(torch.randint(0, span_start_max, (1,), generator=generator, device=dur.device).item())
-        span_len = int(torch.randint(2, min(8, valid_units - span_start) + 1, (1,), generator=generator, device=dur.device).item())
-        span_end = min(valid_units, span_start + span_len)
+        speech_indices = torch.nonzero(speech_mask[batch_idx] > 0.5, as_tuple=False).reshape(-1)
+        span_start_max = max(int(speech_indices.numel()) - 1, 1)
+        span_start_idx = int(torch.randint(0, span_start_max, (1,), generator=generator, device=dur.device).item())
+        span_len = int(
+            torch.randint(
+                2,
+                min(8, int(speech_indices.numel()) - span_start_idx) + 1,
+                (1,),
+                generator=generator,
+                device=dur.device,
+            ).item()
+        )
+        span_tokens = speech_indices[span_start_idx : span_start_idx + span_len]
         local_scale = float(torch.empty((1,), device=dur.device, dtype=dur.dtype).uniform_(span_lo, span_hi, generator=generator).item())
-        dur[batch_idx, span_start:span_end] = dur[batch_idx, span_start:span_end] * local_scale
+        dur[batch_idx, span_tokens] = dur[batch_idx, span_tokens] * local_scale
 
     mask_prob = float(max(0.0, min(1.0, mask_prob)))
     if mask_prob > 0.0:
         sample_mask = torch.rand(dur.shape, generator=generator, device=dur.device) < mask_prob
-        sample_mask = sample_mask & (mask > 0.5)
-        mean_dur = (dur * mask).sum(dim=1, keepdim=True) / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        sample_mask = sample_mask & (speech_mask > 0.5)
+        mean_dur = (dur * speech_mask).sum(dim=1, keepdim=True) / speech_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
         dur = torch.where(sample_mask, mean_dur.expand_as(dur), dur)
 
     flatten_prob = float(max(0.0, min(1.0, flatten_boundary_prob)))
@@ -176,7 +191,7 @@ def build_pseudo_source_duration_context(
         boundary_gate = (
             torch.rand((dur.size(0), 1), generator=generator, device=dur.device) < flatten_prob
         ).float()
-        dur = torch.where(sep > 0.5, dur * (1.0 - 0.10 * boundary_gate), dur)
+        dur = torch.where((sep > 0.5) & (speech_mask > 0.5), dur * (1.0 - 0.10 * boundary_gate), dur)
 
     return dur.clamp_min(1.0e-4) * mask
 
@@ -961,6 +976,7 @@ def build_duration_v3_loss_targets(
     residual_logstretch_tgt = None
     global_bias_tgt = None
     local_residual_tgt = None
+    prefix_duration_tgt = None
     consistency_local_residual_tgt = None
     consistency_logstretch_tgt = None
     state_prev = output.get("rhythm_state_prev")
@@ -991,17 +1007,30 @@ def build_duration_v3_loss_targets(
             weight=unit_confidence_tgt,
         )
         coarse_logstretch_tgt = (global_shift_tgt + coarse_correction_tgt) * committed_mask.float()
+        prefix_duration_tgt = unit_duration_tgt.float() * committed_speech_mask.float()
         if bool((committed_silence_mask > 0.5).any().item()):
-            silence_logstretch_tgt = full_logstretch_tgt.clamp(
+            silence_coarse_tgt = coarse_logstretch_tgt.clamp(
                 min=-float(config.silence_logstretch_max),
                 max=float(config.silence_logstretch_max),
             ) * committed_silence_mask.float()
             coarse_logstretch_tgt = (
                 coarse_logstretch_tgt * committed_speech_mask.float()
-                + silence_logstretch_tgt
+                + silence_coarse_tgt
             )
             coarse_correction_tgt = (
                 (coarse_logstretch_tgt - global_shift_tgt) * committed_mask.float()
+            )
+            prefix_duration_tgt = (
+                prefix_duration_tgt
+                + (
+                    prediction_anchor.float()
+                    * torch.exp(coarse_logstretch_tgt.float())
+                    * committed_silence_mask.float()
+                )
+            )
+        else:
+            prefix_duration_tgt = prefix_duration_tgt + (
+                unit_duration_tgt.float() * committed_silence_mask.float()
             )
         global_bias_tgt = _masked_duration_v3_median(
             coarse_correction_tgt,
@@ -1009,6 +1038,7 @@ def build_duration_v3_loss_targets(
             weight=unit_confidence_tgt,
         )
         local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
+        prefix_duration_tgt = prefix_duration_tgt.detach()
     consistency_duration_tgt = None
     consistency_mask = None
     if float(config.lambda_cons) > 0.0 and not baseline_pretrain_only:
@@ -1026,7 +1056,15 @@ def build_duration_v3_loss_targets(
                 torch.log(consistency_duration_tgt.float().clamp_min(1.0e-6))
                 - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
             ) * consistency_mask.float()
-            consistency_logstretch_tgt = consistency_full
+            consistency_logstretch_tgt = consistency_full * (consistency_mask.float() * speech_mask.float())
+            if isinstance(coarse_logstretch_tgt, torch.Tensor):
+                consistency_logstretch_tgt = consistency_logstretch_tgt + (
+                    coarse_logstretch_tgt.float().clamp(
+                        min=-float(config.silence_logstretch_max),
+                        max=float(config.silence_logstretch_max),
+                    )
+                    * (consistency_mask.float() * silence_mask.float())
+                )
             consistency_local_residual_tgt = (
                 consistency_full
                 - (
@@ -1057,6 +1095,7 @@ def build_duration_v3_loss_targets(
         residual_logstretch_tgt=residual_logstretch_tgt,
         global_bias_tgt=global_bias_tgt,
         local_residual_tgt=local_residual_tgt,
+        prefix_duration_tgt=prefix_duration_tgt,
         prompt_basis_activation=prompt_targets["prompt_basis_activation"],
         prompt_random_target_tgt=prompt_targets["prompt_random_target_tgt"],
         prompt_mask=prompt_targets["prompt_mask"],

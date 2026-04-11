@@ -186,3 +186,24 @@ def test_resolve_task_runtime_state_keeps_infer_path_out_of_acoustic_short_circu
     )
     assert runtime_state.module_only_objective is True
     assert runtime_state.disable_acoustic_train_path is False
+
+
+def test_resolve_task_runtime_state_accepts_silence_coarse_config():
+    runtime_state = resolve_task_runtime_state(
+        {
+            "rhythm_enable_v3": True,
+            "random_speaker_steps": 0,
+            "rhythm_optimize_module_only": True,
+            "rhythm_fastpath_disable_acoustic_when_module_only": True,
+            "rhythm_apply_mode": "never",
+            "rhythm_v3_silence_coarse_weight": 0.45,
+            "rhythm_v3_silence_max_logstretch": 0.3,
+        },
+        global_step=0,
+        infer=False,
+        test=False,
+        explicit_apply_override=False,
+        has_f0=False,
+        has_uv=False,
+    )
+    assert runtime_state.stage == "duration_v3"

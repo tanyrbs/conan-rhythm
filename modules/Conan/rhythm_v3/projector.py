@@ -91,7 +91,7 @@ class StreamingDurationProjector(nn.Module):
         source_duration_obs: torch.Tensor,
         commit_mask: torch.Tensor,
         speech_commit_mask: torch.Tensor,
-        coarse_only_commit_mask: torch.Tensor | None,
+        coarse_only_commit_mask: torch.Tensor | None = None,
         residual_prev: torch.Tensor,
         prefix_unit_offset_prev: torch.Tensor,
         committed_units_prev: torch.Tensor | None,

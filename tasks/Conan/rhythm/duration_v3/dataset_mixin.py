@@ -20,7 +20,13 @@ def _as_float32_1d(value) -> np.ndarray:
 def _resolve_run_silence_mask(*, size: int, silence_mask=None) -> np.ndarray:
     if silence_mask is None:
         return np.zeros((size,), dtype=np.float32)
-    return _as_float32_1d(silence_mask)[:size]
+    silence = _as_float32_1d(silence_mask)
+    if silence.shape[0] == size:
+        return silence
+    out = np.zeros((size,), dtype=np.float32)
+    limit = min(size, silence.shape[0])
+    out[:limit] = silence[:limit]
+    return out
 
 
 def _expand_run_sequence(
@@ -249,11 +255,16 @@ class DurationV3DatasetMixin:
             source_cache.get("sep_hint", np.zeros_like(source_duration, dtype=np.float32)),
             dtype=np.float32,
         ).reshape(1, -1)
+        source_silence = np.asarray(
+            source_cache.get("source_silence_mask", np.zeros_like(source_duration, dtype=np.float32)),
+            dtype=np.float32,
+        ).reshape(1, -1)
         generator = self._make_item_generator(item_name=item_name, salt="pseudo_source_duration")
         perturbed = build_pseudo_source_duration_context(
             torch.from_numpy(source_duration),
             torch.from_numpy(unit_mask),
             torch.from_numpy(sep_hint),
+            silence_mask=torch.from_numpy(source_silence),
             global_scale_range=(
                 float(self.hparams.get("rhythm_pseudo_source_global_scale_min", 0.85)),
                 float(self.hparams.get("rhythm_pseudo_source_global_scale_max", 1.15)),
@@ -306,6 +317,10 @@ class DurationV3DatasetMixin:
         if dropout > 0.0:
             drop = torch.rand(keep.shape, generator=generator, device=keep.device) < float(max(0.0, min(1.0, dropout)))
             keep = keep & ~drop
+        speech_valid = (torch.from_numpy(prompt_speech_mask).reshape(1, -1) > 0.5) & valid
+        if not bool((keep & speech_valid).any().item()) and bool(speech_valid.any().item()):
+            first_speech = int(torch.nonzero(speech_valid[0], as_tuple=False)[0].item())
+            keep[:, first_speech] = True
         if not bool(keep.any().item()):
             first_valid = int(torch.nonzero(valid[0], as_tuple=False)[0].item())
             keep[:, first_valid] = True
@@ -349,15 +364,31 @@ class DurationV3DatasetMixin:
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             )
         elif has_cached_prompt_source and target_mode != "cached_only":
-            source_cache = {
-                "content_units": prompt_item["content_units"],
-                "dur_anchor_src": prompt_item["dur_anchor_src"],
-            }
-            if "sep_hint" in prompt_item:
-                source_cache["sep_hint"] = prompt_item["sep_hint"]
-            for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
-                if extra_key in prompt_item:
-                    source_cache[extra_key] = prompt_item[extra_key]
+            if explicit_silence:
+                if "hubert" in prompt_item:
+                    source_cache = build_source_rhythm_cache(
+                        np.asarray(prompt_item["hubert"]),
+                        silent_token=self.hparams.get("silent_token", 57),
+                        separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
+                        tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+                        emit_silence_runs=True,
+                        phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                    )
+                else:
+                    raise RuntimeError(
+                        "explicit silence-run frontend requires source_silence_mask in prompt/reference caches. "
+                        "Rebuild the cache or provide raw hubert."
+                    )
+            else:
+                source_cache = {
+                    "content_units": prompt_item["content_units"],
+                    "dur_anchor_src": prompt_item["dur_anchor_src"],
+                }
+                if "sep_hint" in prompt_item:
+                    source_cache["sep_hint"] = prompt_item["sep_hint"]
+                for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
+                    if extra_key in prompt_item:
+                        source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode == "cached_only" and explicit_silence and has_cached_prompt_source and not has_prompt_silence:
             raise RuntimeError(
                 "rhythm_v3 cached_only with explicit silence-run frontend requires source_silence_mask in prompt/reference caches. "
@@ -447,10 +478,26 @@ class DurationV3DatasetMixin:
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             )
         elif has_cached_target_source and target_mode != "cached_only":
-            source_cache = {
-                "content_units": paired_target_item["content_units"],
-                "dur_anchor_src": paired_target_item["dur_anchor_src"],
-            }
+            if explicit_silence:
+                if isinstance(paired_target_item, dict) and "hubert" in paired_target_item:
+                    source_cache = build_source_rhythm_cache(
+                        np.asarray(paired_target_item["hubert"]),
+                        silent_token=self.hparams.get("silent_token", 57),
+                        separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
+                        tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+                        emit_silence_runs=True,
+                        phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                    )
+                else:
+                    raise RuntimeError(
+                        "explicit silence-run frontend requires source_silence_mask in cached paired-target sources. "
+                        "Rebuild the cache or provide raw hubert."
+                    )
+            else:
+                source_cache = {
+                    "content_units": paired_target_item["content_units"],
+                    "dur_anchor_src": paired_target_item["dur_anchor_src"],
+                }
         elif target_mode == "cached_only" and explicit_silence and has_cached_target_source and not has_target_silence:
             raise RuntimeError(
                 "rhythm_v3 cached_only paired-target supervision with explicit silence-run frontend requires "

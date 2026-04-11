@@ -7,7 +7,7 @@ binarization_args:
 # Recommended maintained mainline:
 # explicit silence-run frontend + paired target projection + source-observed anchor
 # + unit-run stretch writer (analytic rate gap + prefix coarse + local residual)
-# + speech-only carry projector + prefix unit-budget clamp.
+# + coarse-only silence control + prefix unit-budget clamp.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
@@ -66,6 +66,7 @@ rhythm_v3_prefix_budget_pos: 24
 rhythm_v3_prefix_budget_neg: 24
 rhythm_prompt_dropout: 0.20
 rhythm_prompt_truncation: 0.50
+rhythm_v3_summary_pool_speech_only: true
 pseudo_source_duration_perturbation: false
 # Canonical paired training should not silently fall back to source-self
 # duration targets. Only enable this for bootstrap/pretrain.
@@ -77,12 +78,14 @@ rhythm_pseudo_source_local_scale_min: 0.70
 rhythm_pseudo_source_local_scale_max: 1.30
 rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.0
+rhythm_v3_silence_coarse_weight: 0.25
+rhythm_v3_silence_max_logstretch: 0.25
 
 lambda_rhythm_dur: 1.0
 lambda_rhythm_bias: 0.20  # prefix-coarse supervision (compat metric still exports global_bias_scalar)
 lambda_rhythm_summary: 0.0
 # canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
-lambda_rhythm_pref: 0.0
+lambda_rhythm_pref: 0.10
 lambda_rhythm_base: 0.0
 lambda_rhythm_cons: 0.10
 lambda_rhythm_zero: 0.0

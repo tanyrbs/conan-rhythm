@@ -740,6 +740,7 @@ def test_rhythm_v3_projector_committed_speech_units_keep_at_least_one_frame():
         source_duration_obs=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
         speech_commit_mask=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        coarse_only_commit_mask=None,
         residual_prev=torch.zeros((1, 1), dtype=torch.float32),
         prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
         committed_units_prev=torch.zeros((1,), dtype=torch.long),
@@ -770,6 +771,7 @@ def test_rhythm_v3_projector_applies_prefix_unit_budget_clamp():
         source_duration_obs=torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
         speech_commit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        coarse_only_commit_mask=None,
         residual_prev=torch.zeros((1, 1), dtype=torch.float32),
         prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
         committed_units_prev=torch.zeros((1,), dtype=torch.long),
@@ -827,7 +829,12 @@ def test_rhythm_v3_frame_plan_uses_real_source_timeline_for_explicit_silence_run
     src_index = plan.frame_src_index[0, total]
     silence_src = src_index[unit_index == 1]
     assert torch.equal(silence_src, torch.tensor([2, 3], dtype=torch.long))
-    assert torch.allclose(ret["rhythm_execution"].unit_logstretch[0, 1], torch.tensor(0.0))
+    expected = ret["rhythm_execution"].coarse_logstretch[0, 1].clamp(
+        min=-float(adapter.hparams.get("rhythm_v3_silence_max_logstretch", 0.35)),
+        max=float(adapter.hparams.get("rhythm_v3_silence_max_logstretch", 0.35)),
+    )
+    assert torch.allclose(ret["rhythm_execution"].local_residual[0, 1], torch.tensor(0.0))
+    assert torch.allclose(ret["rhythm_execution"].unit_logstretch[0, 1], expected)
 
 
 def test_rhythm_v3_render_keeps_raw_open_tail_after_committed_prefix():

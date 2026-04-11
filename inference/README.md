@@ -34,10 +34,13 @@ The maintained v3 inference story is:
 - analytic source/ref rate gap corrected by a small prefix-coarse branch
 - bounded local speech-run residual on top of that coarse term
 - strict-causal prefix-rate state
+- incremental unit-run source-cache updates via `rhythm_unit_frontend.step_content_tensor()` instead of recompressing the full prefix every chunk
 - deterministic carry-only projection
 - runtime enforces the prefix unit-budget clamp so retimed counts stay within configured drift bounds
 - raw uncommitted open-tail units are kept intact and appended after the retimed prefix before the main model consumes them
 - `rhythm_v3_emit_silence_runs` exposes `source_silence_mask` so the runtime can distinguish speech runs from intentional pauses
+
+Silence-like runs remain in the emitted sequence, but they no longer rely on a separate pause planner or on a full local residual. Instead their log-stretch prediction is clipped around the coarse bias term, and the silence contribution to loss is down-weighted via `rhythm_v3_silence_coarse_weight` while the clip range is governed by `rhythm_v3_silence_max_logstretch`. Global rate statistics (`g_ref` / `g_src`) remain speech-only, so the coarse-only policy keeps speech and silence aligned without overfitting noisy pause labels.
 
 ## What this directory currently serves
 

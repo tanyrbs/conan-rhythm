@@ -262,11 +262,13 @@ class PromptDurationMemoryEncoder(nn.Module):
         num_slots: int,
         operator_rank: int,
         coverage_floor: float = 0.05,
+        summary_pool_speech_only: bool = True,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
         del operator_rank
         self.coverage_floor = float(max(1.0e-4, coverage_floor))
+        self.summary_pool_speech_only = bool(summary_pool_speech_only)
         self.summary_dim = int(max(8, dim))
         self.prompt_unit_emb = nn.Embedding(vocab_size, self.summary_dim)
         self.prompt_in_proj = nn.Linear(self.summary_dim + 2, self.summary_dim)
@@ -333,8 +335,9 @@ class PromptDurationMemoryEncoder(nn.Module):
             valid_mask=valid_mask,
             speech_mask=speech_mask,
         )
-        mean = _masked_mean(hidden, valid_mask)
-        std = _masked_std(hidden, valid_mask, mean)
+        summary_mask = speech_mask if self.summary_pool_speech_only else valid_mask
+        mean = _masked_mean(hidden, summary_mask)
+        std = _masked_std(hidden, summary_mask, mean)
         summary_state = torch.tanh(self.summary_proj(torch.cat([mean, std], dim=-1)))
 
         support_raw = valid_mask.sum(dim=1, keepdim=True)

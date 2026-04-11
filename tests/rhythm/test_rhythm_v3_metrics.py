@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
+from tasks.Conan.rhythm.common.targets_impl import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
 
 
 def _build_hparams():
@@ -158,6 +161,46 @@ def test_rhythm_v3_metrics_ignore_silence_units_in_speech_supervision():
     metrics = build_rhythm_metric_dict(output, sample={"unit_duration_tgt": target})
     assert torch.allclose(metrics["rhythm_metric_exec_speech_l1"], torch.tensor(0.0))
     assert torch.allclose(metrics["rhythm_metric_prefix_drift_l1"], torch.tensor(0.0))
+
+
+def test_duration_v3_loss_targets_clip_silence_only_coarse():
+    unit_mask = torch.ones((1, 3))
+    sample = {"unit_duration_tgt": torch.tensor([[5.0, 3.0, 25.0]])}
+    unit_batch = SimpleNamespace(
+        unit_mask=unit_mask,
+        unit_anchor_base=torch.ones((1, 3)),
+        source_silence_mask=torch.tensor([[0.0, 0.0, 1.0]]),
+    )
+    execution = SimpleNamespace(commit_mask=unit_mask.clone())
+    output = {
+        "rhythm_execution": execution,
+        "rhythm_unit_batch": unit_batch,
+        "rhythm_ref_conditioning": SimpleNamespace(global_rate=torch.tensor([[0.2]])),
+        "rhythm_v3_source_rate_init": torch.tensor([0.1]),
+    }
+    config = DurationV3TargetBuildConfig(
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        silence_coarse_weight=0.75,
+        silence_logstretch_max=0.25,
+    )
+    targets = build_duration_v3_loss_targets(sample=sample, output=output, config=config)
+    assert targets is not None
+    full_logstretch = (
+        torch.log(sample["unit_duration_tgt"])
+        - torch.log(targets.prediction_anchor.float().clamp_min(1.0e-6))
+    )
+    clipped_logstretch = full_logstretch.clamp(
+        min=-float(config.silence_logstretch_max),
+        max=float(config.silence_logstretch_max),
+    )
+    silence_idx = 2
+    assert torch.allclose(
+        targets.coarse_logstretch_tgt[0, silence_idx],
+        clipped_logstretch[0, silence_idx],
+    )
+    assert torch.allclose(targets.local_residual_tgt[0, silence_idx], torch.tensor(0.0))
 
 
 def test_rhythm_v3_global_only_metrics_report_zero_local_response():

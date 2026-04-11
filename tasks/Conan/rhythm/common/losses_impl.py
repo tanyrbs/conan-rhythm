@@ -105,6 +105,7 @@ class DurationV3LossTargets:
     residual_logstretch_tgt: Optional[torch.Tensor] = None
     global_bias_tgt: Optional[torch.Tensor] = None
     local_residual_tgt: Optional[torch.Tensor] = None
+    prefix_duration_tgt: Optional[torch.Tensor] = None
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target_tgt: Optional[torch.Tensor] = None
     prompt_mask: Optional[torch.Tensor] = None
@@ -1435,7 +1436,12 @@ def _build_duration_v3_stream_losses(
     silence_scale = float(max(0.0, targets.silence_coarse_weight))
     prefix_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
     pred_prefix = torch.cumsum(pred_speech * prefix_weight, dim=1)
-    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * prefix_weight, dim=1)
+    tgt_prefix_surface = (
+        targets.prefix_duration_tgt.float()
+        if isinstance(targets.prefix_duration_tgt, torch.Tensor)
+        else targets.unit_duration_tgt.float()
+    )
+    tgt_prefix = torch.cumsum(tgt_prefix_surface * prefix_weight, dim=1)
     l_pref = _masked_huber(
         pred_prefix,
         tgt_prefix,

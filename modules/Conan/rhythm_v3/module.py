@@ -334,6 +334,7 @@ class MixedEffectsDurationModule(nn.Module):
         summary_dim = int(unused_kwargs.pop("summary_dim", unused_kwargs.pop("role_dim", hidden_size)))
         summary_slots = int(unused_kwargs.pop("num_summary_slots", unused_kwargs.pop("num_role_slots", max(4, basis_rank))))
         summary_cov_floor = float(unused_kwargs.pop("summary_cov_floor", unused_kwargs.pop("role_cov_floor", 0.05)))
+        summary_pool_speech_only = bool(unused_kwargs.pop("summary_pool_speech_only", True))
         max_logstretch = float(unused_kwargs.pop("max_logstretch", 1.2))
         max_silence_logstretch = float(unused_kwargs.pop("max_silence_logstretch", 0.35))
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
@@ -401,6 +402,7 @@ class MixedEffectsDurationModule(nn.Module):
                 num_slots=summary_slots,
                 operator_rank=basis_rank,
                 coverage_floor=summary_cov_floor,
+                summary_pool_speech_only=summary_pool_speech_only,
                 codebook=self.summary_codebook,
             )
             self.duration_head = StreamingDurationHead(

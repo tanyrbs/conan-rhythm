@@ -10,6 +10,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from modules.Conan.Conan import Conan
+from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
 from modules.Emformer.emformer import EmformerDistillModel
 from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
 from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
@@ -247,6 +248,9 @@ class StreamingVoiceConversion:
         num_chunks = 0
         state = None
         rhythm_state = None
+        rhythm_source_cache = None
+        rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
+        rhythm_unitizer_state = None
         decoder_cache = None
         rhythm_ref_conditioning = None
         last_mel_out = None
@@ -300,6 +304,23 @@ class StreamingVoiceConversion:
 
             new_codes = chunk_out[:, :emit]
             all_codes = code_buffer.append(new_codes)
+            if rhythm_frontend is not None:
+                if rhythm_unitizer_state is None:
+                    rhythm_unitizer_state = rhythm_frontend.init_stream_state(
+                        batch_size=1,
+                        device=self.device,
+                    )
+                unit_batch, rhythm_unitizer_state = rhythm_frontend.step_content_tensor(
+                    new_codes,
+                    state=rhythm_unitizer_state,
+                    content_lengths=torch.tensor([new_codes.size(1)], dtype=torch.long, device=self.device),
+                    mark_last_open=True,
+                )
+                rhythm_source_cache = {
+                    key: value
+                    for key, value in export_duration_v3_source_cache(unit_batch).items()
+                    if value is not None
+                }
 
             with torch.no_grad():
                 out = self.model(
@@ -314,6 +335,7 @@ class StreamingVoiceConversion:
                     content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
                     rhythm_state=rhythm_state,
                     rhythm_ref_conditioning=rhythm_ref_conditioning,
+                    rhythm_source_cache=rhythm_source_cache,
                     decoder_cache=decoder_cache,
                 )
                 rhythm_state = out.get("rhythm_state_next", rhythm_state)

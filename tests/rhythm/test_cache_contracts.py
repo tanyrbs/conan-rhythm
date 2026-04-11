@@ -243,6 +243,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             "item_name": "prompt_a",
             "content_units": np.asarray([1, 2, 3, 4], dtype=np.int64),
             "dur_anchor_src": np.asarray([3.0, 4.0, 2.0, 5.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
             "sep_hint": np.asarray([0, 0, 0, 0], dtype=np.int64),
             "source_boundary_cue": np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
             "phrase_group_pos": np.asarray([0.0, 0.1, 0.2, 0.3], dtype=np.float32),
@@ -252,6 +253,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         mask = conditioning["prompt_unit_mask"]
         self.assertGreaterEqual(float(mask.sum()), 1.0)
         self.assertLessEqual(float(mask.sum()), 2.0)
+        self.assertGreaterEqual(float(np.asarray(conditioning["prompt_speech_mask"]).sum()), 1.0)
         zeroed = mask <= 0.0
         self.assertTrue(np.all(conditioning["prompt_duration_obs"][zeroed] == 0.0))
         self.assertTrue(np.all(conditioning["prompt_source_boundary_cue"][zeroed] == 0.0))
