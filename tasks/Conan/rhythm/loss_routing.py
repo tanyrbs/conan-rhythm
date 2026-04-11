@@ -14,6 +14,7 @@ _AUX_REPORTING_KEYS = {
 _V3_NATIVE_DIAGNOSTIC_KEYS = (
     "rhythm_v3_base",
     "rhythm_v3_dur",
+    "rhythm_v3_summary",
     "rhythm_v3_mem",
     "rhythm_v3_op",
     "rhythm_v3_zero",
@@ -301,12 +302,21 @@ def update_public_loss_aliases(losses, *, mel_loss_names):
             break
     zero = torch.tensor(0.0, device=device or "cpu")
     if _is_duration_v3_loss_bundle(losses):
+        summary_value = losses.get("rhythm_v3_summary")
         mem_value = losses.get("rhythm_v3_mem")
         op_value = losses.get("rhythm_v3_op")
-        if not isinstance(mem_value, torch.Tensor) and isinstance(op_value, torch.Tensor):
-            losses["rhythm_v3_mem"] = op_value.detach()
-        elif isinstance(mem_value, torch.Tensor) and not isinstance(op_value, torch.Tensor):
-            losses["rhythm_v3_op"] = mem_value.detach()
+        canonical = None
+        for value in (summary_value, mem_value, op_value):
+            if isinstance(value, torch.Tensor):
+                canonical = value.detach()
+                break
+        if canonical is not None:
+            if not isinstance(summary_value, torch.Tensor):
+                losses["rhythm_v3_summary"] = canonical
+            if not isinstance(mem_value, torch.Tensor):
+                losses["rhythm_v3_mem"] = canonical
+            if not isinstance(op_value, torch.Tensor):
+                losses["rhythm_v3_op"] = canonical
         pitch_value = losses.get("pitch")
         if not isinstance(pitch_value, torch.Tensor):
             pitch_value = zero

@@ -20,6 +20,16 @@ from .reference_memory import PromptConditionedOperatorEstimator
 from .role_memory import PromptDurationMemoryEncoder, SharedRoleCodebook, StreamingDurationHead
 
 
+_PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory"}
+
+
+def _normalize_prompt_summary_backbone(backbone_mode: str | None) -> str:
+    normalized = str(backbone_mode or "global_only").strip().lower()
+    if normalized == "role_memory":
+        return "prompt_summary"
+    return normalized
+
+
 class SharedCausalBasisEncoder(nn.Module):
     def __init__(
         self,
@@ -85,21 +95,25 @@ def _resolve_duration_runtime_surface(
     allow_hybrid: bool | None,
     source_residual_gain: float,
 ) -> tuple[str, str, bool, str]:
-    resolved_backbone = str(backbone_mode or "global_only").strip().lower()
+    resolved_backbone = _normalize_prompt_summary_backbone(backbone_mode)
     resolved_warp = str(warp_mode or "none").strip().lower()
     resolved_allow_hybrid = bool(allow_hybrid) if allow_hybrid is not None else False
-    if resolved_backbone not in {"global_only", "operator", "role_memory"}:
-        raise ValueError(f"Unsupported rhythm_v3 backbone mode: {backbone_mode!r}")
+    if resolved_backbone not in {"global_only", "operator", "prompt_summary"}:
+        raise ValueError(
+            "Unsupported rhythm_v3 backbone mode: "
+            f"{backbone_mode!r}. Supported values are global_only, operator, prompt_summary "
+            "(legacy alias: role_memory)."
+        )
     if resolved_warp not in {"none", "progress", "detector"}:
         raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
-    if resolved_backbone == "role_memory":
+    if resolved_backbone == "prompt_summary":
         if resolved_warp != "none":
-            raise ValueError("rhythm_v3_backbone='role_memory' only supports rhythm_v3_warp_mode='none'.")
+            raise ValueError("rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory') only supports rhythm_v3_warp_mode='none'.")
         if resolved_allow_hybrid:
-            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='role_memory'.")
+            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory').")
         if float(source_residual_gain) > 0.0:
-            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='role_memory'.")
-        return resolved_backbone, resolved_warp, False, "role_memory"
+            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory').")
+        return resolved_backbone, resolved_warp, False, "prompt_summary"
     if resolved_backbone == "global_only":
         if resolved_allow_hybrid:
             raise ValueError("rhythm_v3_allow_hybrid is only valid when rhythm_v3_backbone='operator'.")
@@ -367,7 +381,7 @@ class MixedEffectsDurationModule(nn.Module):
         self.role_codebook = None
         self.prompt_memory_encoder = None
         self.duration_head = None
-        if self.backbone_mode == "role_memory":
+        if self.backbone_mode == "prompt_summary":
             self.role_codebook = SharedRoleCodebook(num_slots=role_slots, dim=role_dim)
             self.prompt_memory_encoder = PromptDurationMemoryEncoder(
                 vocab_size=vocab_size,
@@ -413,11 +427,11 @@ class MixedEffectsDurationModule(nn.Module):
         *,
         ref_conditioning=None,
     ) -> ReferenceDurationMemory:
-        if self.backbone_mode == "role_memory":
+        if self.backbone_mode == "prompt_summary":
             if isinstance(ref_conditioning, ReferenceDurationMemory):
                 return ref_conditioning
             if not isinstance(ref_conditioning, dict):
-                raise ValueError("rhythm_v3 role_memory backbone requires explicit prompt-unit conditioning.")
+                raise ValueError("rhythm_v3 prompt_summary backbone requires explicit prompt-unit conditioning.")
             prompt_content_units = ref_conditioning.get("prompt_content_units")
             prompt_duration_obs = ref_conditioning.get("prompt_duration_obs")
             prompt_mask = ref_conditioning.get("prompt_unit_mask")
@@ -427,7 +441,7 @@ class MixedEffectsDurationModule(nn.Module):
                 and isinstance(prompt_mask, torch.Tensor)
             ):
                 raise ValueError(
-                    "rhythm_v3 role_memory backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
+                    "rhythm_v3 prompt_summary backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
                 )
             prompt_edge_cue = ref_conditioning.get("prompt_source_boundary_cue")
             return self.prompt_memory_encoder(
@@ -641,23 +655,37 @@ class MixedEffectsDurationModule(nn.Module):
         return unit_mask, sealed_mask, commit_mask
 
     @staticmethod
-    def _build_role_memory_edge_cue(
+    def _build_causal_source_rate_context(
         *,
         source_batch: SourceUnitBatch,
-        sealed_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        edge = (
-            source_batch.source_boundary_cue.float()
-            if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
-            else sealed_mask.new_zeros(sealed_mask.shape)
-        )
-        sep = (
-            source_batch.sep_mask.float()
-            if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor)
-            else sealed_mask.new_zeros(sealed_mask.shape)
-        )
-        edge = edge.clamp(0.0, 1.0) * sealed_mask.float()
-        return torch.where(sep > 0.5, torch.ones_like(edge), edge)
+        speech_commit_mask: torch.Tensor,
+        state: DurationRuntimeState,
+        decay: float = 0.95,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        observed_log = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4))
+        context = observed_log.new_zeros(observed_log.shape)
+        final_rate = observed_log.new_zeros((observed_log.size(0), 1))
+        if state.local_rate_ema is None:
+            prev_rate = final_rate.new_zeros(final_rate.shape)
+        else:
+            prev_rate = state.local_rate_ema.float()
+        has_history = state.committed_units.long() > 0
+        decay = float(max(0.0, min(0.999, decay)))
+        for batch_idx in range(int(observed_log.size(0))):
+            ema = float(prev_rate[batch_idx, 0].item()) if bool(has_history[batch_idx].item()) else None
+            for unit_idx in range(int(observed_log.size(1))):
+                is_speech = float(speech_commit_mask[batch_idx, unit_idx].item()) > 0.5
+                obs = float(observed_log[batch_idx, unit_idx].item())
+                if ema is None:
+                    context[batch_idx, unit_idx] = obs if is_speech else 0.0
+                else:
+                    context[batch_idx, unit_idx] = ema
+                if is_speech:
+                    ema = obs if ema is None else ((decay * ema) + ((1.0 - decay) * obs))
+            if ema is None:
+                ema = float(prev_rate[batch_idx, 0].item()) if bool(has_history[batch_idx].item()) else 0.0
+            final_rate[batch_idx, 0] = ema
+        return context, final_rate
 
     def _resolve_prediction_anchor(
         self,
@@ -665,7 +693,7 @@ class MixedEffectsDurationModule(nn.Module):
         source_batch: SourceUnitBatch,
         speech_commit_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if self.backbone_mode == "role_memory":
+        if self.backbone_mode == "prompt_summary":
             observed = source_batch.source_duration_obs.float().clamp_min(1.0e-4)
             baseline = source_batch.unit_anchor_base.float().clamp_min(1.0e-4)
             speech_mask = speech_commit_mask.float()
@@ -674,36 +702,16 @@ class MixedEffectsDurationModule(nn.Module):
         return source_batch.unit_anchor_base.float()
 
     @staticmethod
-    def _update_role_memory_state(
+    def _update_prompt_summary_state(
         *,
-        state: DurationRuntimeState,
-        source_batch: SourceUnitBatch,
-        speech_commit_mask: torch.Tensor,
-        edge_cue: torch.Tensor,
+        final_rate_ema: torch.Tensor,
         next_state: DurationRuntimeState,
     ) -> DurationRuntimeState:
-        if state.local_rate_ema is None:
-            local_rate_prev = speech_commit_mask.new_zeros((speech_commit_mask.size(0), 1))
-        else:
-            local_rate_prev = state.local_rate_ema.float()
-        if state.since_last_boundary is None:
-            since_prev = speech_commit_mask.new_zeros((speech_commit_mask.size(0), 1))
-        else:
-            since_prev = state.since_last_boundary.float()
-        support = speech_commit_mask.float().sum(dim=1, keepdim=True)
-        observed_log = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4)) * speech_commit_mask.float()
-        mean_log = observed_log.sum(dim=1, keepdim=True) / support.clamp_min(1.0)
-        local_rate_ema = torch.where(
-            support > 0.0,
-            0.95 * local_rate_prev + 0.05 * mean_log,
-            local_rate_prev,
-        )
-        boundary_hit = (edge_cue.float() * speech_commit_mask.float()).amax(dim=1, keepdim=True) > 0.5
-        since_last_boundary = torch.where(boundary_hit, torch.zeros_like(since_prev), since_prev + support)
+        zeros = final_rate_ema.new_zeros(final_rate_ema.shape)
         return replace(
             next_state,
-            local_rate_ema=local_rate_ema.detach(),
-            since_last_boundary=since_last_boundary.detach(),
+            local_rate_ema=final_rate_ema.detach(),
+            since_last_boundary=zeros.detach(),
         )
 
     @staticmethod
@@ -745,19 +753,15 @@ class MixedEffectsDurationModule(nn.Module):
             source_batch=source_batch,
             speech_commit_mask=speech_commit_mask,
         )
-        if self.backbone_mode == "role_memory":
+        if self.backbone_mode == "prompt_summary":
             if self.duration_head is None:
-                raise RuntimeError("role_memory backbone is missing StreamingDurationHead.")
+                raise RuntimeError("prompt_summary backbone is missing StreamingDurationHead.")
             if ref_memory.role is None:
-                raise ValueError("rhythm_v3 role_memory backbone requires role prompt statistics.")
-            local_rate_ema = (
-                state.local_rate_ema.float()
-                if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
-                else unit_mask.new_zeros((batch_size, 1))
-            )
-            edge_cue = self._build_role_memory_edge_cue(
+                raise ValueError("rhythm_v3 prompt_summary backbone requires summary prompt statistics.")
+            source_rate_context, final_rate_ema = self._build_causal_source_rate_context(
                 source_batch=source_batch,
-                sealed_mask=sealed_mask,
+                speech_commit_mask=speech_commit_mask,
+                state=state,
             )
             role_plan = self.duration_head(
                 content_units=source_batch.content_units,
@@ -769,12 +773,13 @@ class MixedEffectsDurationModule(nn.Module):
                     if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor)
                     else unit_mask.new_zeros(unit_mask.shape)
                 ),
-                edge_cue=edge_cue,
+                edge_cue=unit_mask.new_zeros(unit_mask.shape),
                 global_rate=ref_memory.global_rate,
                 role_value=ref_memory.role_value,
                 role_var=ref_memory.role_var,
                 role_coverage=ref_memory.role_coverage,
-                local_rate_ema=local_rate_ema,
+                local_rate_ema=source_rate_context,
+                summary_state=ref_memory.operator_coeff,
             )
             unit_logstretch = role_plan["unit_logstretch"] * speech_commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
@@ -808,11 +813,8 @@ class MixedEffectsDurationModule(nn.Module):
                 unit_logstretch_raw=unit_logstretch_raw,
                 unit_duration_raw=unit_duration_raw,
             )
-            execution.next_state = self._update_role_memory_state(
-                state=state,
-                source_batch=source_batch,
-                speech_commit_mask=speech_commit_mask,
-                edge_cue=edge_cue,
+            execution.next_state = self._update_prompt_summary_state(
+                final_rate_ema=final_rate_ema,
                 next_state=execution.next_state,
             )
             return execution

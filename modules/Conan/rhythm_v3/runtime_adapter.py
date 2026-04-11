@@ -229,11 +229,18 @@ class ConanDurationAdapter(nn.Module):
         ret["commit_frontier"] = execution.commit_frontier
         ret["rhythm_v3_runtime_mode"] = self.module.runtime_mode
         ret["rhythm_v3_backbone_mode"] = self.module.backbone_mode
+        if self.module.runtime_mode == "prompt_summary":
+            ret["rhythm_v3_runtime_mode_legacy"] = "role_memory"
+        if self.module.backbone_mode == "prompt_summary":
+            ret["rhythm_v3_backbone_mode_legacy"] = "role_memory"
         ret["rhythm_v3_warp_mode"] = self.module.warp_mode
         ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
+        if ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
+            ret["rhythm_v3_summary_state_dim"] = float(ref_memory.operator_coeff.size(1))
         if ref_memory is not None and isinstance(getattr(ref_memory, "role_value", None), torch.Tensor):
+            ret["rhythm_v3_summary_channels"] = float(ref_memory.role_value.size(1))
             ret["rhythm_v3_role_slots"] = float(ref_memory.role_value.size(1))
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan

@@ -6,13 +6,13 @@ binarization_args:
 
 # Duration-only rhythm_v3 bootstrap.
 # Recommended maintained mainline:
-# static prompt memory + source-observed anchor + single duration writer + carry-only projector.
+# prompt-summary residual mainline + source-observed anchor + single duration writer + carry-only projector.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, prompt_content_units, prompt_duration_obs, prompt_unit_mask]
 rhythm_public_outputs: [speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_mem, rhythm_v3_pref, rhythm_v3_cons]
+rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_summary, rhythm_v3_pref, rhythm_v3_cons]
 
 content_vocab_size: 102
 rhythm_hidden_size: 256
@@ -34,13 +34,13 @@ rhythm_response_window_left: 4
 rhythm_response_window_right: 0
 rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
-rhythm_v3_backbone: role_memory
+rhythm_v3_backbone: prompt_summary
 rhythm_v3_warp_mode: none
 rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
 rhythm_v3_anchor_mode: source_observed
 rhythm_role_dim: 64
-rhythm_num_role_slots: 12
+rhythm_num_role_slots: 1
 rhythm_prompt_cov_floor: 0.05
 rhythm_operator_ridge_lambda: 1.0
 rhythm_global_shrink_tau: 8.0
@@ -69,8 +69,8 @@ rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.15
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_mem: 0.25
-lambda_rhythm_pref: 0.20
+lambda_rhythm_summary: 0.0
+lambda_rhythm_pref: 0.0
 lambda_rhythm_base: 0.0
 lambda_rhythm_cons: 0.10
 lambda_rhythm_zero: 0.0

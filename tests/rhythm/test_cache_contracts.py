@@ -204,11 +204,11 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertIn(("planner_ref_phrase_trace",), groups)
         self.assertIn(("ref_phrase_boundary_strength",), groups)
 
-    def test_role_memory_training_source_cache_uses_pseudo_source_duration_context(self) -> None:
+    def test_prompt_summary_training_source_cache_uses_pseudo_source_duration_context(self) -> None:
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_backbone": "prompt_summary",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "pseudo_source_duration_perturbation": True,
                 "rhythm_augmentation_deterministic": True,
@@ -227,11 +227,11 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertTrue(np.all(perturbed["dur_anchor_src"] > 0.0))
         self.assertTrue(np.allclose(source_cache["dur_anchor_src"], np.asarray([3.0, 4.0, 5.0], dtype=np.float32)))
 
-    def test_role_memory_prompt_unit_conditioning_supports_truncation_and_dropout(self) -> None:
+    def test_prompt_summary_prompt_unit_conditioning_supports_truncation_and_dropout(self) -> None:
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_backbone": "prompt_summary",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_prompt_truncation": 2.0,
                 "rhythm_prompt_dropout": 0.5,

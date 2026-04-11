@@ -87,9 +87,12 @@ class RhythmTaskRuntimeSupport:
         )
 
     def build_duration_v3_target_build_config(self) -> DurationV3TargetBuildConfig:
+        lambda_summary = hparams.get("lambda_rhythm_summary", None)
         lambda_mem = hparams.get("lambda_rhythm_mem", None)
         lambda_op = hparams.get("lambda_rhythm_op", 0.25)
-        if lambda_mem is not None:
+        if lambda_summary is not None:
+            lambda_op = lambda_summary
+        elif lambda_mem is not None:
             lambda_op = lambda_mem
         return DurationV3TargetBuildConfig(
             lambda_dur=max(0.0, float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0)),

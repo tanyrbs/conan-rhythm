@@ -44,11 +44,11 @@ def _build_hparams():
     }
 
 
-def _build_role_memory_hparams():
+def _build_prompt_summary_hparams():
     hparams = _build_hparams()
     hparams.update(
         {
-            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -139,8 +139,8 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
     assert torch.equal(losses["rhythm_is_v3_bundle"], torch.tensor(1.0, device=losses["rhythm_is_v3_bundle"].device))
 
 
-def test_rhythm_v3_role_memory_targets_use_source_anchor_and_prompt_memory_loss():
-    adapter = ConanDurationAdapter(_build_role_memory_hparams(), hidden_size=32, vocab_size=128)
+def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_loss():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]], dtype=torch.long)
     ret = {}
     adapter(
@@ -274,6 +274,8 @@ def test_rhythm_v3_public_aliases_do_not_reintroduce_legacy_rhythm_surface():
         "rhythm_total": torch.tensor(6.0),
     }
     update_public_loss_aliases(losses, mel_loss_names=())
+    assert "rhythm_v3_summary" in losses
+    assert torch.allclose(losses["rhythm_v3_summary"], losses["rhythm_v3_op"])
     for legacy_key in (
         "L_exec_speech",
         "L_exec_stretch",

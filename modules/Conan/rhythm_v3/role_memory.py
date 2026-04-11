@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +23,27 @@ def _masked_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return median
 
 
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask_f = mask.float()
+    denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+    return (values * mask_f.unsqueeze(-1)).sum(dim=1) / denom
+
+
+def _masked_std(values: torch.Tensor, mask: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
+    mask_f = mask.float()
+    denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+    diff2 = ((values - mean.unsqueeze(1)) ** 2) * mask_f.unsqueeze(-1)
+    return torch.sqrt(diff2.sum(dim=1) / denom.clamp_min(1.0e-6) + 1.0e-6)
+
+
 class SharedRoleCodebook(nn.Module):
+    """Compatibility stub kept so old imports/configs do not break.
+
+    The latest mainline no longer relies on slot codebooks for duration writing,
+    but some construction sites still instantiate this object. The tensor remains
+    trainable in case downstream experiments want to reuse it.
+    """
+
     def __init__(self, *, num_slots: int, dim: int) -> None:
         super().__init__()
         self.num_slots = int(max(1, num_slots))
@@ -33,7 +51,14 @@ class SharedRoleCodebook(nn.Module):
         self.role_key = nn.Parameter(torch.randn(self.num_slots, self.dim) * 0.02)
 
 
-class CausalRoleQueryEncoder(nn.Module):
+class CausalStretchQueryEncoder(nn.Module):
+    """Small causal content encoder for summary-conditioned residual stretch.
+
+    This intentionally avoids boundary/event features. The only dynamic source-side
+    scalar is the centered log-anchor, which keeps the model focused on "source as
+    anchor, reference as residual style".
+    """
+
     def __init__(
         self,
         *,
@@ -44,7 +69,7 @@ class CausalRoleQueryEncoder(nn.Module):
         super().__init__()
         self.dim = int(max(8, dim))
         self.unit_emb = nn.Embedding(int(vocab_size), self.dim)
-        self.proj_aux = nn.Linear(4, self.dim)
+        self.proj_aux = nn.Linear(1, self.dim)
         self.conv1 = nn.Conv1d(self.dim, self.dim, kernel_size=kernel_size)
         self.conv2 = nn.Conv1d(self.dim, self.dim, kernel_size=kernel_size)
         self.norm = nn.LayerNorm(self.dim)
@@ -61,48 +86,35 @@ class CausalRoleQueryEncoder(nn.Module):
         self,
         *,
         unit_ids: torch.Tensor,
-        log_anchor: torch.Tensor,
-        edge_cue: torch.Tensor,
-        sep_hint: torch.Tensor,
-        local_rate: torch.Tensor,
+        scalar_feat: torch.Tensor,
+        mask: torch.Tensor,
     ) -> torch.Tensor:
-        aux = torch.stack(
-            [
-                log_anchor.float(),
-                edge_cue.float(),
-                sep_hint.float(),
-                local_rate.float(),
-            ],
-            dim=-1,
-        )
-        hidden = self.unit_emb(unit_ids.long()) + self.proj_aux(aux)
+        hidden = self.unit_emb(unit_ids.long()) + self.proj_aux(scalar_feat.float().unsqueeze(-1))
         hidden = F.gelu(self._causal_conv(hidden, self.conv1))
         hidden = F.gelu(self._causal_conv(hidden, self.conv2))
-        return self.norm(hidden)
+        return self.norm(hidden) * mask.unsqueeze(-1).float()
 
-    def encode_prompt(
-        self,
-        *,
-        unit_ids: torch.Tensor,
-        logdur: torch.Tensor,
-        mask: torch.Tensor,
-        edge_cue: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if edge_cue is None:
-            edge_cue = torch.zeros_like(logdur)
-        sep_hint = torch.zeros_like(logdur)
-        local_rate = torch.zeros_like(logdur)
-        hidden = self.forward(
-            unit_ids=unit_ids,
-            log_anchor=logdur,
-            edge_cue=edge_cue,
-            sep_hint=sep_hint,
-            local_rate=local_rate,
-        )
-        return hidden * mask.unsqueeze(-1).float()
+
+class CausalRoleQueryEncoder(CausalStretchQueryEncoder):
+    """Backward-compatible alias for legacy imports."""
 
 
 class PromptDurationMemoryEncoder(nn.Module):
+    """Reference-side summary encoder.
+
+    The implementation keeps the old class name for compatibility, but the actual
+    mechanism is now the simplified source-anchored summary model discussed in the
+    latest design iteration:
+
+      1) compute speech-only global prompt rate
+      2) center prompt log-duration by that rate
+      3) build a compact summary vector with masked statistics pooling
+      4) keep only a scalar residual probe surface for diagnostics / optional loss
+
+    `operator_coeff` is repurposed as the compact prompt summary vector. This keeps
+    the public contract stable without forcing slot memories or local bases back in.
+    """
+
     def __init__(
         self,
         *,
@@ -114,10 +126,15 @@ class PromptDurationMemoryEncoder(nn.Module):
         codebook: SharedRoleCodebook | None = None,
     ) -> None:
         super().__init__()
+        del num_slots, operator_rank, codebook
         self.coverage_floor = float(max(1.0e-4, coverage_floor))
-        self.role_encoder = CausalRoleQueryEncoder(vocab_size=vocab_size, dim=dim)
-        self.codebook = codebook if codebook is not None else SharedRoleCodebook(num_slots=num_slots, dim=dim)
-        self.operator_rank = int(max(1, operator_rank))
+        self.summary_dim = int(max(8, dim))
+        self.prompt_encoder = CausalStretchQueryEncoder(vocab_size=vocab_size, dim=self.summary_dim)
+        self.summary_proj = nn.Sequential(
+            nn.Linear(self.summary_dim * 2, self.summary_dim),
+            nn.GELU(),
+            nn.Linear(self.summary_dim, self.summary_dim),
+        )
 
     def forward(
         self,
@@ -127,40 +144,40 @@ class PromptDurationMemoryEncoder(nn.Module):
         prompt_mask: torch.Tensor,
         prompt_edge_cue: torch.Tensor | None = None,
     ) -> ReferenceDurationMemory:
+        del prompt_edge_cue
         mask = prompt_mask.float().clamp(0.0, 1.0)
         logdur = torch.log(prompt_duration_obs.float().clamp_min(1.0e-4)) * mask
-        hidden = self.role_encoder.encode_prompt(
-            unit_ids=prompt_content_units.long(),
-            logdur=logdur,
-            mask=mask,
-            edge_cue=prompt_edge_cue,
-        )
-        score = torch.einsum("btd,md->btm", hidden, self.codebook.role_key)
-        score = score / math.sqrt(float(max(1, self.codebook.dim)))
-        score = score.masked_fill(mask.unsqueeze(-1) <= 0.0, -1.0e4)
-        attn = F.softmax(score, dim=-1) * mask.unsqueeze(-1)
-
-        support = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
         global_rate = _masked_median(logdur, mask)
         ref_residual = (logdur - global_rate) * mask
 
-        coverage = attn.sum(dim=1).clamp_min(1.0e-6)
-        role_value = torch.einsum("btm,bt->bm", attn, ref_residual) / coverage
-        diff2 = (ref_residual.unsqueeze(-1) - role_value.unsqueeze(1)) ** 2
-        role_var = (attn * diff2).sum(dim=1) / coverage
-        role_cov = (coverage / support).clamp_min(self.coverage_floor)
-        prompt_role_fit = torch.einsum("btm,bm->bt", attn, role_value) * mask
+        hidden = self.prompt_encoder(
+            unit_ids=prompt_content_units.long(),
+            scalar_feat=ref_residual,
+            mask=mask,
+        )
+        mean = _masked_mean(hidden, mask)
+        std = _masked_std(hidden, mask, mean)
+        summary_state = torch.tanh(self.summary_proj(torch.cat([mean, std], dim=-1)))
 
-        batch_size = int(prompt_content_units.size(0))
-        zero_operator = prompt_duration_obs.new_zeros((batch_size, self.operator_rank))
+        support_raw = mask.sum(dim=1, keepdim=True)
+        support = support_raw.clamp_min(1.0)
+        summary_state = torch.where(support_raw > 0.0, summary_state, torch.zeros_like(summary_state))
+        coverage = (support_raw / float(max(1, mask.size(1)))).clamp_min(self.coverage_floor)
+        residual_mean = (ref_residual * mask).sum(dim=1, keepdim=True) / support
+        residual_var = (((ref_residual - residual_mean) ** 2) * mask).sum(dim=1, keepdim=True) / support
+        residual_var = residual_var.clamp_min(1.0e-4)
+
+        attn = (mask / support).unsqueeze(-1)
+        prompt_role_fit = residual_mean.expand_as(ref_residual) * mask
+
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
                 global_rate=global_rate,
-                operator=StructuredDurationOperatorMemory(operator_coeff=zero_operator),
+                operator=StructuredDurationOperatorMemory(operator_coeff=summary_state),
                 role=StructuredRoleDurationMemory(
-                    role_value=role_value,
-                    role_var=role_var.clamp_min(1.0e-4),
-                    role_coverage=role_cov,
+                    role_value=residual_mean,
+                    role_var=residual_var,
+                    role_coverage=coverage,
                 ),
                 prompt=PromptConditioningEvidence(
                     prompt_mask=mask,
@@ -168,12 +185,23 @@ class PromptDurationMemoryEncoder(nn.Module):
                     prompt_log_residual=ref_residual,
                     prompt_role_attn=attn,
                     prompt_role_fit=prompt_role_fit,
+                    prompt_operator_coeff_norm=summary_state.norm(dim=-1, keepdim=True),
                 ),
             )
         )
 
 
 class StreamingDurationHead(nn.Module):
+    """Single-head source-anchored residual stretch writer.
+
+    Final prediction form:
+        logstretch = (g_ref - g_src_prefix) + residual(source_window, ref_summary)
+
+    The head keeps the old role-memory method signature so the rest of the codebase
+    does not need a broad rewrite, but internally it is a compact summary model with
+    no slots, no pointer, and no boundary features.
+    """
+
     def __init__(
         self,
         *,
@@ -184,19 +212,16 @@ class StreamingDurationHead(nn.Module):
         codebook: SharedRoleCodebook | None = None,
     ) -> None:
         super().__init__()
+        del num_slots, codebook
         self.max_logstretch = float(max(0.1, max_logstretch))
-        self.query_encoder = CausalRoleQueryEncoder(vocab_size=vocab_size, dim=dim)
-        self.codebook = codebook if codebook is not None else SharedRoleCodebook(num_slots=num_slots, dim=dim)
-        self.prior_head = nn.Sequential(
-            nn.Linear(dim + 3, dim),
-            nn.GELU(),
-            nn.Linear(dim, 1),
-        )
+        self.dim = int(max(8, dim))
+        self.query_encoder = CausalStretchQueryEncoder(vocab_size=vocab_size, dim=self.dim)
         self.residual_head = nn.Sequential(
-            nn.Linear(dim + 4, dim),
+            nn.Linear((2 * self.dim) + 3, self.dim),
             nn.GELU(),
-            nn.Linear(dim, 1),
+            nn.Linear(self.dim, 1),
         )
+        self.residual_scale = 0.35
 
     def forward(
         self,
@@ -212,57 +237,53 @@ class StreamingDurationHead(nn.Module):
         role_var: torch.Tensor,
         role_coverage: torch.Tensor,
         local_rate_ema: torch.Tensor,
+        summary_state: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        del edge_cue
         mask = unit_mask.float().clamp(0.0, 1.0)
-        local_rate = local_rate_ema.float().expand_as(log_anchor)
+        speech_mask = mask * (1.0 - sep_hint.float().clamp(0.0, 1.0))
+        if local_rate_ema.dim() == 2 and local_rate_ema.size(1) == 1:
+            local_rate = local_rate_ema.float().expand_as(log_anchor)
+        else:
+            local_rate = local_rate_ema.float()
+            if tuple(local_rate.shape) != tuple(log_anchor.shape):
+                raise ValueError(
+                    f"StreamingDurationHead.local_rate_ema must be [B,1] or [B,U], got {tuple(local_rate.shape)}"
+                )
+        centered_anchor = (log_anchor.float() - local_rate) * speech_mask
         query = self.query_encoder(
             unit_ids=content_units,
-            log_anchor=log_anchor,
-            edge_cue=edge_cue,
-            sep_hint=sep_hint,
-            local_rate=local_rate,
-        ) * mask.unsqueeze(-1)
-        score = torch.einsum("bud,md->bum", query, self.codebook.role_key)
-        score = score / math.sqrt(float(max(1, self.codebook.dim)))
-        score = score + torch.log(role_coverage.float().clamp_min(1.0e-4)).unsqueeze(1)
-        score = score.masked_fill(mask.unsqueeze(-1) <= 0.0, -1.0e4)
-        attn = F.softmax(score, dim=-1) * mask.unsqueeze(-1)
-
-        role_value_unit = torch.einsum("bum,bm->bu", attn, role_value.float())
-        role_var_unit = torch.einsum("bum,bm->bu", attn, role_var.float()).clamp_min(1.0e-4)
-        role_cov_unit = torch.einsum("bum,bm->bu", attn, role_coverage.float()).clamp_min(1.0e-4)
-        role_conf = role_cov_unit / (role_cov_unit + role_var_unit)
-
-        global_shift = (global_rate.float() - local_rate_ema.float()).expand_as(role_value_unit)
-        prior_input = torch.cat(
-            [
-                query,
-                global_shift.unsqueeze(-1),
-                (role_conf * role_value_unit).unsqueeze(-1),
-                role_var_unit.log().unsqueeze(-1),
-            ],
-            dim=-1,
+            scalar_feat=centered_anchor,
+            mask=mask,
         )
-        prior = self.prior_head(prior_input).squeeze(-1)
+
+        summary = summary_state.float().unsqueeze(1).expand(-1, log_anchor.size(1), -1)
+        global_shift = global_rate.float().expand_as(log_anchor) - local_rate
+        summary_mean = role_value.float().expand_as(log_anchor)
+        summary_conf = (role_coverage.float() / (1.0 + role_var.float().sqrt())).expand_as(log_anchor)
+
         residual_input = torch.cat(
             [
                 query,
+                summary,
                 global_shift.unsqueeze(-1),
-                role_value_unit.unsqueeze(-1),
-                role_conf.unsqueeze(-1),
-                role_var_unit.log().unsqueeze(-1),
+                summary_mean.unsqueeze(-1),
+                summary_conf.unsqueeze(-1),
             ],
             dim=-1,
         )
-        residual = 0.25 * torch.tanh(self.residual_head(residual_input).squeeze(-1))
-        pred = (prior + residual).clamp(min=-self.max_logstretch, max=self.max_logstretch)
-        pred = pred * sealed_mask.float() * (1.0 - sep_hint.float().clamp(0.0, 1.0))
+        residual = self.residual_scale * torch.tanh(self.residual_head(residual_input).squeeze(-1))
+        pred = (global_shift + residual).clamp(min=-self.max_logstretch, max=self.max_logstretch)
+        pred = pred * sealed_mask.float() * speech_mask
+
+        attn = mask.unsqueeze(-1)
+        role_var_unit = role_var.float().expand_as(log_anchor).clamp_min(1.0e-4)
         return {
             "unit_logstretch": pred,
             "role_attn_unit": attn,
-            "role_value_unit": role_value_unit * mask,
+            "role_value_unit": summary_mean * mask,
             "role_var_unit": role_var_unit * mask,
-            "role_conf_unit": role_conf * mask,
+            "role_conf_unit": summary_conf * mask,
             "role_query_unit": query,
-            "local_response": residual * mask,
+            "local_response": residual * speech_mask,
         }

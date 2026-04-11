@@ -162,11 +162,11 @@ def test_validate_rhythm_training_hparams_rejects_removed_v3_surface_keys(remove
         validate_rhythm_training_hparams(hparams)
 
 
-def test_validate_rhythm_training_hparams_accepts_role_memory_backbone_surface():
+def test_validate_rhythm_training_hparams_accepts_prompt_summary_backbone_surface():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -179,34 +179,34 @@ def test_validate_rhythm_training_hparams_accepts_role_memory_backbone_surface()
     )
 
 
-def test_validate_rhythm_training_hparams_accepts_role_memory_mem_public_surface_without_zero():
+def test_validate_rhythm_training_hparams_accepts_prompt_summary_public_surface_without_zero():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
-            "lambda_rhythm_mem": 0.25,
+            "lambda_rhythm_summary": 0.25,
             "lambda_rhythm_zero": 0.0,
             "lambda_rhythm_ortho": 0.0,
             "rhythm_public_losses": [
                 "rhythm_total",
                 "rhythm_v3_dur",
-                "rhythm_v3_mem",
+                "rhythm_v3_summary",
                 "rhythm_v3_pref",
             ],
         }
     )
 
 
-def test_validate_rhythm_training_hparams_rejects_role_memory_without_source_anchor():
+def test_validate_rhythm_training_hparams_rejects_prompt_summary_without_source_anchor():
     with pytest.raises(ValueError, match="requires rhythm_v3_anchor_mode='source_observed'"):
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_v3_backbone": "role_memory",
+                "rhythm_v3_backbone": "prompt_summary",
                 "rhythm_v3_warp_mode": "none",
                 "rhythm_v3_allow_hybrid": False,
                 "rhythm_v3_anchor_mode": "baseline",
@@ -271,15 +271,15 @@ def test_validate_rhythm_training_hparams_requires_consistency_loss_surface_when
         validate_rhythm_training_hparams(hparams)
 
 
-def test_validate_rhythm_training_hparams_requires_mem_surface_for_role_memory_public_losses():
+def test_validate_rhythm_training_hparams_requires_summary_surface_for_prompt_summary_public_losses():
     hparams = {
         **_minimal_v3_hparams(),
-        "rhythm_v3_backbone": "role_memory",
+        "rhythm_v3_backbone": "prompt_summary",
         "rhythm_v3_warp_mode": "none",
         "rhythm_v3_allow_hybrid": False,
         "rhythm_v3_anchor_mode": "source_observed",
         "lambda_rhythm_op": 0.0,
-        "lambda_rhythm_mem": 0.25,
+        "lambda_rhythm_summary": 0.25,
         "lambda_rhythm_zero": 0.0,
         "lambda_rhythm_ortho": 0.0,
         "rhythm_public_losses": [
@@ -288,7 +288,7 @@ def test_validate_rhythm_training_hparams_requires_mem_surface_for_role_memory_p
             "rhythm_v3_pref",
         ],
     }
-    with pytest.raises(ValueError, match="rhythm_v3_mem"):
+    with pytest.raises(ValueError, match="rhythm_v3_summary"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -304,6 +304,27 @@ def test_validate_rhythm_training_hparams_requires_baseline_loss_surface_when_en
     ]
     with pytest.raises(ValueError, match="rhythm_v3_base"):
         validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_role_memory_legacy_alias_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_mem": 0.25,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_dur",
+                "rhythm_v3_mem",
+                "rhythm_v3_pref",
+            ],
+        }
+    )
 
 
 def test_validate_rhythm_training_hparams_accepts_compact_example_public_surface():

@@ -28,11 +28,11 @@ def _build_hparams():
     }
 
 
-def _build_role_memory_hparams():
+def _build_prompt_summary_hparams():
     hparams = _build_hparams()
     hparams.update(
         {
-            "rhythm_v3_backbone": "role_memory",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -126,13 +126,14 @@ def test_rhythm_v3_adapter_emits_prompt_conditioned_operator_runtime():
     assert "rhythm_render_phase_features" not in ret
 
 
-def test_rhythm_v3_role_memory_runtime_uses_static_prompt_memory_and_source_anchor():
-    adapter = ConanDurationAdapter(_build_role_memory_hparams(), hidden_size=32, vocab_size=128)
+def test_rhythm_v3_prompt_summary_runtime_uses_static_prompt_memory_and_source_anchor():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]], dtype=torch.long)
     ret = _run_adapter(adapter, content=content, ref=None, ref_conditioning=_build_prompt_conditioning())
     ref_memory = ret["rhythm_ref_conditioning"]
     execution = ret["rhythm_execution"]
-    assert ret["rhythm_v3_runtime_mode"] == "role_memory"
+    assert ret["rhythm_v3_runtime_mode"] == "prompt_summary"
+    assert ret["rhythm_v3_runtime_mode_legacy"] == "role_memory"
     assert ref_memory.role_value is not None
     assert ref_memory.role_var is not None
     assert ref_memory.role_coverage is not None

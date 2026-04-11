@@ -1261,6 +1261,7 @@ def _build_duration_v3_metric_sections(
         "rhythm_total",
         "rhythm_v3_base",
         "rhythm_v3_dur",
+        "rhythm_v3_summary",
         "rhythm_v3_mem",
         "rhythm_v3_op",
         "rhythm_v3_zero",

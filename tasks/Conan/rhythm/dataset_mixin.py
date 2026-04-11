@@ -572,7 +572,7 @@ class RhythmConanDatasetMixin:
             return False
         if str(self.prefix).lower() != "train":
             return False
-        if str(self.hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() != "role_memory":
+        if str(self.hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() not in {"role_memory", "prompt_summary"}:
             return False
         if str(self.hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower() != "source_observed":
             return False
