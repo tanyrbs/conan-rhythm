@@ -12,6 +12,20 @@ from .targets import (
 )
 from .task_config import validate_rhythm_v2_training_hparams
 from .task_runtime_support import RhythmV2TaskRuntimeSupport
+from importlib import import_module
+
+
+def __getattr__(name: str):
+    if name == "RhythmV2DatasetMixin":
+        module = import_module(".dataset_mixin", __name__)
+        value = getattr(module, name)
+    elif name == "RhythmV2TaskMixin":
+        module = import_module(".task_mixin", __name__)
+        value = getattr(module, name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 __all__ = [
     "DistillConfidenceBundle",
@@ -19,6 +33,8 @@ __all__ = [
     "RhythmSampleKeyBundle",
     "RhythmTargetBuildConfig",
     "RhythmV2TaskRuntimeSupport",
+    "RhythmV2DatasetMixin",
+    "RhythmV2TaskMixin",
     "build_identity_rhythm_loss_targets",
     "build_legacy_v2_ref_conditioning",
     "build_rhythm_loss_dict",

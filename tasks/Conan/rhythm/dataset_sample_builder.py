@@ -153,10 +153,18 @@ class RhythmDatasetSampleAssembler:
         optional_rhythm_keys = self.owner._resolve_optional_sample_keys()
         rhythm_runtime_fields = {}
         target_source_cache = self.owner._get_source_rhythm_cache(item, stream_visible_tokens, target_mode=target_mode)
-        source_cache = self.owner._maybe_build_duration_v3_training_source_cache(
-            target_source_cache,
-            item_name=item_name,
+        maybe_build_duration_v3_training_source_cache = getattr(
+            self.owner,
+            "_maybe_build_duration_v3_training_source_cache",
+            None,
         )
+        if callable(maybe_build_duration_v3_training_source_cache):
+            source_cache = maybe_build_duration_v3_training_source_cache(
+                target_source_cache,
+                item_name=item_name,
+            )
+        else:
+            source_cache = target_source_cache
         stream_units = int(np.asarray(source_cache["dur_anchor_src"]).reshape(-1).shape[0])
         offline_units = stream_units
         if int(stream_visible_tokens.shape[0]) < int(full_visible_tokens.shape[0]):

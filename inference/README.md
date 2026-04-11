@@ -1,76 +1,70 @@
 # Streaming inference notes
 
-This directory is a **runtime/eval helper surface**, not the authoritative
-training or mechanism document. For the current maintained branch semantics,
-use:
+This directory is a runtime/eval helper surface for the maintained
+**`rhythm_v3`** branch.
+
+Authoritative current docs:
 
 - `README.md`
 - `docs/rhythm_migration_plan.md`
 
+## Current maintained inference path
+
+The maintained default inference path is the same as the maintained training
+mainline:
+
+- `rhythm_v3_backbone: prompt_summary`
+- `rhythm_v3_warp_mode: none`
+- `rhythm_v3_anchor_mode: source_observed`
+
+`inference/Conan.py` now prepares explicit prompt-unit conditioning for v3:
+
+- `prompt_content_units`
+- `prompt_duration_obs`
+- `prompt_unit_mask`
+
+The maintained v3 inference story is:
+
+- prompt distilled into static summary conditioning
+- source-observed sealed-unit anchors
+- strict-causal prefix-rate state
+- deterministic carry-only projection
+
 ## What this directory currently serves
 
-The maintained inference/runtime helpers are:
+Maintained helpers:
 
 - `inference/Conan.py`
 - `inference/run_voice_conversion.py`
 - `inference/run_streaming_latency_report.py`
 - `inference/streaming_runtime.py`
 
-They now point at the current `rhythm_v3` mainline, not the old v2 teacher path.
+These are suitable for:
 
-## Current status of streaming
+- streaming-oriented evaluation
+- latency accounting
+- prefix/commit behavior inspection
 
-The honest runtime status is:
+## Current streaming status
+
+The honest current status is:
 
 - Emformer frontend runs in real stateful streaming mode
 - rhythm execution is prefix/commit oriented and uses the current `rhythm_v3` runtime
 - acoustic decoding still recomputes over the emitted prefix
 - shipped vocoder wrappers are still stateless by default
 
-So this directory is suitable for:
+So this directory is useful for streaming evaluation, but it is **not** yet a
+claim of fully stateful end-to-end low-latency deployment.
 
-- **streaming-oriented evaluation**
-- **latency accounting**
-- **prefix/commit behavior inspection**
+## Recommended config
 
-It is **not** yet evidence of fully stateful end-to-end low-latency deployment.
-
-## Maintained entrypoints
-
-### `inference/Conan.py`
-
-Current streaming VC helper built on:
-
-- `modules/Conan/Conan.py`
-- `rhythm_v3`
-- explicit prompt-unit extraction for v3 inference
-- prompt-side boundary / phrase sidecars for detector-bank experiments
-- `prepare_rhythm_reference(...)` is now v2-only
-
-### `inference/run_voice_conversion.py`
-
-Batch helper that now imports:
-
-- `from inference.Conan import StreamingVoiceConversion`
-
-This is a convenience runner, not the training-contract authority.
-
-### `inference/run_streaming_latency_report.py`
-
-Latency/recompute report helper.
-
-Current default config:
-
-- `egs/conan_emformer_rhythm_v3.yaml`
-
-## Recommended config for maintained branch checks
-
-For current branch-level runtime checks, prefer:
+For maintained branch checks, use:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
 
 Legacy v2 configs may still exist for archive/compatibility checks, but they
-are not the recommended maintained branch runtime surface anymore.
+are not the recommended runtime surface for the current branch.
 
 ## Legacy note
 
@@ -78,7 +72,7 @@ Legacy helpers remain in this directory, including:
 
 - `inference/Conan_previous.py`
 
-Treat them as compatibility/archive surfaces only.
+Treat them as archive/compatibility surfaces only.
 
 ## Vocoder capability surface
 
@@ -89,5 +83,5 @@ Treat them as compatibility/archive surfaces only.
 - `spec2wav_stream()`
 
 The shipped HiFiGAN wrappers still report that native streaming is **not**
-enabled in mainline. The runtime therefore uses bounded left-context recompute
+enabled in the mainline. Runtime therefore uses bounded left-context recompute
 instead of pretending the vocoder is truly stateful.
