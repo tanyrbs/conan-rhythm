@@ -91,6 +91,8 @@ class DurationV3TargetBuildConfig:
     anchor_mode: str = "baseline"
     baseline_target_mode: str = "deglobalized"
     baseline_train_mode: str = "joint"
+    silence_coarse_weight: float = 0.25
+    silence_logstretch_max: float = 0.35
 
     @property
     def lambda_mem(self) -> float:
@@ -904,11 +906,15 @@ def build_duration_v3_loss_targets(
     if execution is None or unit_batch is None:
         return None
     unit_mask = unit_batch.unit_mask.float()
-    speech_mask = unit_mask
-    silence_mask = getattr(unit_batch, "source_silence_mask", None)
-    if isinstance(silence_mask, torch.Tensor):
-        speech_mask = unit_mask * (1.0 - silence_mask.float().clamp(0.0, 1.0))
-    committed_mask = getattr(execution, "commit_mask", getattr(unit_batch, "sealed_mask", unit_mask)).float() * speech_mask
+    silence_mask = (
+        getattr(unit_batch, "source_silence_mask", None).float().clamp(0.0, 1.0) * unit_mask
+        if isinstance(getattr(unit_batch, "source_silence_mask", None), torch.Tensor)
+        else unit_mask.new_zeros(unit_mask.shape)
+    )
+    speech_mask = unit_mask * (1.0 - silence_mask)
+    committed_mask = getattr(execution, "commit_mask", getattr(unit_batch, "sealed_mask", unit_mask)).float() * unit_mask
+    committed_speech_mask = committed_mask * speech_mask
+    committed_silence_mask = committed_mask * silence_mask
     unit_duration_tgt = _resolve_duration_v3_target(
         sample=sample,
         unit_mask=unit_mask,
@@ -920,7 +926,7 @@ def build_duration_v3_loss_targets(
     prediction_anchor = _resolve_duration_v3_prediction_anchor(
         unit_batch=unit_batch,
         unit_mask=unit_mask,
-        speech_mask=speech_mask,
+        speech_mask=unit_mask,
         anchor_mode=str(config.anchor_mode or "baseline").strip().lower(),
     )
     baseline_pretrain_only = (str(config.baseline_train_mode or "joint").strip().lower() == "pretrain")
@@ -966,7 +972,7 @@ def build_duration_v3_loss_targets(
         log_anchor = torch.log(prediction_anchor.float().clamp_min(1.0e-6))
         local_rate_seq_tgt = _build_duration_v3_causal_local_rate_seq(
             log_anchor=log_anchor,
-            speech_mask=committed_mask.float(),
+            speech_mask=committed_speech_mask.float(),
             init_local_rate=init_local_rate,
             default_init_rate=default_init_rate,
             decay=0.95,
@@ -980,16 +986,29 @@ def build_duration_v3_loss_targets(
         coarse_residual_tgt = residual_logstretch_tgt.detach()
         coarse_correction_tgt = _build_duration_v3_prefix_median_seq(
             values=coarse_residual_tgt,
-            mask=committed_mask.float(),
+            update_mask=committed_speech_mask.float(),
+            output_mask=committed_mask.float(),
             weight=unit_confidence_tgt,
         )
         coarse_logstretch_tgt = (global_shift_tgt + coarse_correction_tgt) * committed_mask.float()
+        if bool((committed_silence_mask > 0.5).any().item()):
+            silence_logstretch_tgt = full_logstretch_tgt.clamp(
+                min=-float(config.silence_logstretch_max),
+                max=float(config.silence_logstretch_max),
+            ) * committed_silence_mask.float()
+            coarse_logstretch_tgt = (
+                coarse_logstretch_tgt * committed_speech_mask.float()
+                + silence_logstretch_tgt
+            )
+            coarse_correction_tgt = (
+                (coarse_logstretch_tgt - global_shift_tgt) * committed_mask.float()
+            )
         global_bias_tgt = _masked_duration_v3_median(
             coarse_correction_tgt,
-            committed_mask.float(),
+            committed_speech_mask.float(),
             weight=unit_confidence_tgt,
         )
-        local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_mask.float()
+        local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
     consistency_duration_tgt = None
     consistency_mask = None
     if float(config.lambda_cons) > 0.0 and not baseline_pretrain_only:
@@ -1015,10 +1034,15 @@ def build_duration_v3_loss_targets(
                     if isinstance(coarse_logstretch_tgt, torch.Tensor)
                     else global_shift_tgt.float()
                 )
-            ) * consistency_mask.float()
+            ) * (consistency_mask.float() * speech_mask.float())
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
         unit_anchor_base=unit_anchor_base.float().detach(),
+        speech_mask=speech_mask.float(),
+        silence_mask=silence_mask.float(),
+        committed_speech_mask=committed_speech_mask.float(),
+        committed_silence_mask=committed_silence_mask.float(),
+        silence_coarse_weight=float(config.silence_coarse_weight),
         unit_confidence_tgt=unit_confidence_tgt,
         prediction_anchor=prediction_anchor.float().detach(),
         unit_mask=unit_mask,
@@ -1092,7 +1116,8 @@ def _masked_duration_v3_median(
 def _build_duration_v3_prefix_median_seq(
     *,
     values: torch.Tensor,
-    mask: torch.Tensor,
+    update_mask: torch.Tensor,
+    output_mask: torch.Tensor,
     weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch_size, num_units = values.shape
@@ -1102,7 +1127,7 @@ def _build_duration_v3_prefix_median_seq(
         running_values: list[torch.Tensor] = []
         running_weights: list[torch.Tensor] = []
         for unit_idx in range(num_units):
-            if float(mask[batch_idx, unit_idx].item()) > 0.5:
+            if float(update_mask[batch_idx, unit_idx].item()) > 0.5:
                 running_values.append(values[batch_idx, unit_idx : unit_idx + 1])
                 if weight_f is not None:
                     running_weights.append(weight_f[batch_idx, unit_idx : unit_idx + 1].clamp_min(1.0e-4))
@@ -1120,7 +1145,7 @@ def _build_duration_v3_prefix_median_seq(
             cutoff = 0.5 * sorted_weight.sum()
             median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
             seq[batch_idx, unit_idx] = sorted_values[median_idx]
-    return seq * mask.float()
+    return seq * output_mask.float()
 
 
 def _build_duration_v3_baseline_targets(

@@ -59,7 +59,7 @@ In other words:
 - the writer is source-anchored
 - the coarse branch stays close to the analytic `g_ref - g_src_prefix,i` term
 - only sealed speech units are committed
-- silence-like runs stay source-observed in the canonical v1 path
+- silence runs remain but follow the coarse/global bias (clipped, no local residual) so speech stats stay speech-only while pauses stretch with the overall pace
 - the projector only handles integerization and carry
 
 ## 3. Scope boundary

@@ -61,6 +61,7 @@ class ConanDurationAdapter(nn.Module):
             num_summary_slots=int(hparams.get("rhythm_num_summary_slots", hparams.get("rhythm_num_role_slots", 12))),
             role_cov_floor=float(hparams.get("rhythm_prompt_cov_floor", 0.05)),
             max_logstretch=float(hparams.get("rhythm_max_logstretch", 1.2)),
+            max_silence_logstretch=float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35)),
             response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
             response_window_right=int(hparams.get("rhythm_response_window_right", 0)),
             streaming_mode=streaming_mode,

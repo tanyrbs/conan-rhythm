@@ -395,10 +395,12 @@ class StreamingDurationHead(nn.Module):
         num_slots: int,
         spk_dim: int | None = None,
         max_logstretch: float = 1.2,
+        max_silence_logstretch: float = 0.35,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
         self.max_logstretch = float(max(0.1, max_logstretch))
+        self.max_silence_logstretch = float(max(0.01, min(self.max_logstretch, max_silence_logstretch)))
         self.query_dim = int(max(8, dim))
         self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.codebook = codebook if codebook is not None else SharedSummaryCodebook(num_slots=num_slots, dim=self.query_dim)
@@ -440,7 +442,9 @@ class StreamingDurationHead(nn.Module):
         mask = unit_mask.float().clamp(0.0, 1.0)
         sealed = sealed_mask.float().clamp(0.0, 1.0)
         silence = silence_mask.float().clamp(0.0, 1.0) if isinstance(silence_mask, torch.Tensor) else torch.zeros_like(mask)
-        speech_mask = mask * sealed * (1.0 - silence)
+        commit_valid_mask = mask * sealed
+        silence_commit_mask = commit_valid_mask * silence
+        speech_mask = commit_valid_mask * (1.0 - silence)
 
         init_local_rate = None
         if isinstance(local_rate_ema, torch.Tensor):
@@ -508,7 +512,7 @@ class StreamingDurationHead(nn.Module):
         else:
             spk_ctx = summary.new_zeros(summary.shape)
 
-        global_shift_analytic = (global_rate.float() - local_rate_seq.float()) * speech_mask
+        global_shift_analytic = (global_rate.float() - local_rate_seq.float()) * commit_valid_mask
         summary_expand = summary.unsqueeze(1).expand(-1, query.size(1), -1)
         spk_expand = spk_ctx.unsqueeze(1).expand(-1, query.size(1), -1)
         prefix_query = _masked_prefix_mean(query, speech_mask)
@@ -521,7 +525,7 @@ class StreamingDurationHead(nn.Module):
             dim=-1,
         )
         coarse_correction = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_input).squeeze(-1))
-        coarse_correction = coarse_correction * speech_mask
+        coarse_correction = coarse_correction * commit_valid_mask
         global_term = global_shift_analytic + coarse_correction
         residual_input = torch.cat(
             [
@@ -534,10 +538,15 @@ class StreamingDurationHead(nn.Module):
         )
         residual = self.local_residual_scale * torch.tanh(self.residual_head(residual_input).squeeze(-1))
         residual = residual * speech_mask
-        pred = (global_term + residual).clamp(
+        pred_speech = (global_term + residual).clamp(
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
+        pred_silence = global_term.clamp(
+            min=-self.max_silence_logstretch,
+            max=self.max_silence_logstretch,
+        ) * silence_commit_mask
+        pred = pred_speech + pred_silence
         global_bias_scalar = _masked_mean_1d(coarse_correction, speech_mask)
 
         return {

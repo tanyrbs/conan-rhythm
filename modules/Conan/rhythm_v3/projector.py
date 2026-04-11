@@ -91,6 +91,7 @@ class StreamingDurationProjector(nn.Module):
         source_duration_obs: torch.Tensor,
         commit_mask: torch.Tensor,
         speech_commit_mask: torch.Tensor,
+        coarse_only_commit_mask: torch.Tensor | None,
         residual_prev: torch.Tensor,
         prefix_unit_offset_prev: torch.Tensor,
         committed_units_prev: torch.Tensor | None,
@@ -122,7 +123,12 @@ class StreamingDurationProjector(nn.Module):
                 if float(commit_mask[batch_idx, unit_idx].item()) <= 0.5:
                     continue
                 source_count = int(max(0.0, round(float(source_duration_obs[batch_idx, unit_idx].item()))))
-                if float(speech_commit_mask[batch_idx, unit_idx].item()) <= 0.5:
+                is_speech = float(speech_commit_mask[batch_idx, unit_idx].item()) > 0.5
+                is_coarse_only = (
+                    isinstance(coarse_only_commit_mask, torch.Tensor)
+                    and float(coarse_only_commit_mask[batch_idx, unit_idx].item()) > 0.5
+                )
+                if (not is_speech) and (not is_coarse_only):
                     projected[batch_idx, unit_idx] = float(source_count)
                     continue
                 total = max(0.0, float(unit_duration_exec[batch_idx, unit_idx].item()) + carry)
@@ -181,6 +187,7 @@ class StreamingDurationProjector(nn.Module):
         progress_response: torch.Tensor | None = None,
         detector_response: torch.Tensor | None = None,
         local_response: torch.Tensor | None = None,
+        coarse_only_commit_mask: torch.Tensor | None = None,
         role_attn_unit: torch.Tensor | None = None,
         role_value_unit: torch.Tensor | None = None,
         role_var_unit: torch.Tensor | None = None,
@@ -209,6 +216,9 @@ class StreamingDurationProjector(nn.Module):
             source_duration_obs=source_duration_obs,
             commit_mask=commit_mask,
             speech_commit_mask=speech_commit_mask.float(),
+            coarse_only_commit_mask=(
+                None if not isinstance(coarse_only_commit_mask, torch.Tensor) else coarse_only_commit_mask.float()
+            ),
             residual_prev=state.rounding_residual,
             prefix_unit_offset_prev=state.prefix_unit_offset,
             committed_units_prev=state.committed_units,

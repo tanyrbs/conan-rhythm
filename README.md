@@ -28,7 +28,7 @@ and committed speech duration is written as:
 
 > `log d_hat_i = log a_i + z_hat_i`
 
-with silence-like runs frozen to observed source multiplicity.
+Silence-like runs remain in the retimed prefix but only follow the coarse/global bias (clipped for stability) without a local residual, so they stretch or compress slightly with the overall pace while speech-only statistics stay focused on speaking runs.
 
 The maintained explanation is:
 
@@ -38,6 +38,7 @@ The maintained explanation is:
 - **strict-causal prefix-rate correction**
 - **carry-only integer projection**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
+- **silence runs follow the coarse/global bias (clipped) without a local residual, keeping them tied to the overall rate**
 - **paired-target supervision drawn from dedicated target data instead of prompt sidecars**
 - **runtime enforces prefix unit-budget clamping while retaining raw open tail tokens**
 
@@ -79,6 +80,7 @@ units use source-observed duration as the anchor and keep only a strict-causal
 local-rate EMA in runtime state. `sep_mask` is not treated as a speech mask in
 the canonical path; the maintained v3 frontend now materializes explicit
 silence runs and exports `source_silence_mask` directly.
+Silence runs still exist in the stream but commit through the coarse/global bias path only (no local residual), and `source_silence_mask` keeps speech-only statistics from being contaminated by those paused units.
 
 ### Projector
 

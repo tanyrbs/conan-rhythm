@@ -88,6 +88,11 @@ class DurationV3LossTargets:
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
     committed_mask: torch.Tensor
+    speech_mask: Optional[torch.Tensor] = None
+    silence_mask: Optional[torch.Tensor] = None
+    committed_speech_mask: Optional[torch.Tensor] = None
+    committed_silence_mask: Optional[torch.Tensor] = None
+    silence_coarse_weight: float = 0.25
     unit_confidence_tgt: Optional[torch.Tensor] = None
     prediction_anchor: Optional[torch.Tensor] = None
     baseline_duration_tgt: Optional[torch.Tensor] = None
@@ -1250,6 +1255,11 @@ def _build_duration_v3_duration_loss(
     targets: DurationV3LossTargets,
     committed_mask: torch.Tensor,
 ) -> torch.Tensor:
+    speech_commit_mask = (
+        targets.committed_speech_mask.float()
+        if isinstance(targets.committed_speech_mask, torch.Tensor)
+        else committed_mask
+    )
     pred_residual = getattr(execution, "local_residual", getattr(execution, "local_response", None))
     if (
         isinstance(pred_residual, torch.Tensor)
@@ -1258,7 +1268,7 @@ def _build_duration_v3_duration_loss(
         return _weighted_masked_huber(
             pred_residual.float(),
             targets.local_residual_tgt.float(),
-            committed_mask,
+            speech_commit_mask,
             weight=targets.unit_confidence_tgt,
             beta=0.25,
             batch_weight=None,
@@ -1274,7 +1284,7 @@ def _build_duration_v3_duration_loss(
     return _masked_huber(
         pred_logstretch,
         tgt_logstretch,
-        committed_mask,
+        speech_commit_mask,
         beta=0.25,
         batch_weight=None,
     )
@@ -1412,8 +1422,20 @@ def _build_duration_v3_stream_losses(
     targets: DurationV3LossTargets,
     committed_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pred_prefix = torch.cumsum(pred_speech * committed_mask, dim=1)
-    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * committed_mask, dim=1)
+    speech_commit_mask = (
+        targets.committed_speech_mask.float()
+        if isinstance(targets.committed_speech_mask, torch.Tensor)
+        else committed_mask
+    )
+    silence_commit_mask = (
+        targets.committed_silence_mask.float()
+        if isinstance(targets.committed_silence_mask, torch.Tensor)
+        else committed_mask.new_zeros(committed_mask.shape)
+    )
+    silence_scale = float(max(0.0, targets.silence_coarse_weight))
+    prefix_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
+    pred_prefix = torch.cumsum(pred_speech * prefix_weight, dim=1)
+    tgt_prefix = torch.cumsum(targets.unit_duration_tgt.float() * prefix_weight, dim=1)
     l_pref = _masked_huber(
         pred_prefix,
         tgt_prefix,
@@ -1427,6 +1449,21 @@ def _build_duration_v3_stream_losses(
         and targets.consistency_duration_tgt is not None
         and targets.consistency_mask is not None
     ):
+        consistency_weight = targets.unit_confidence_tgt
+        if isinstance(targets.consistency_mask, torch.Tensor):
+            speech_consistency_mask = (
+                targets.consistency_mask.float() * targets.speech_mask.float()
+                if isinstance(targets.speech_mask, torch.Tensor)
+                else None
+            )
+            silence_consistency_mask = (
+                targets.consistency_mask.float() * targets.silence_mask.float()
+                if isinstance(targets.silence_mask, torch.Tensor)
+                else None
+            )
+            if speech_consistency_mask is not None:
+                base_weight = speech_consistency_mask + (float(max(0.0, targets.silence_coarse_weight)) * silence_consistency_mask)
+                consistency_weight = base_weight if consistency_weight is None else consistency_weight * base_weight
         pred_cons_logstretch = getattr(execution, "unit_logstretch_raw", None)
         if not isinstance(pred_cons_logstretch, torch.Tensor):
             pred_cons_logstretch = execution.unit_logstretch
@@ -1435,7 +1472,7 @@ def _build_duration_v3_stream_losses(
                 pred_cons_logstretch.float(),
                 targets.consistency_logstretch_tgt.float(),
                 targets.consistency_mask.float(),
-                weight=targets.unit_confidence_tgt,
+                weight=consistency_weight,
                 beta=0.25,
                 batch_weight=None,
             )
@@ -1477,12 +1514,29 @@ def _build_duration_v3_bias_loss(
         if isinstance(targets.committed_mask, torch.Tensor)
         else targets.unit_mask.float()
     )
+    speech_commit_mask = (
+        targets.committed_speech_mask.float()
+        if isinstance(targets.committed_speech_mask, torch.Tensor)
+        else committed_mask
+    )
+    silence_commit_mask = (
+        targets.committed_silence_mask.float()
+        if isinstance(targets.committed_silence_mask, torch.Tensor)
+        else committed_mask.new_zeros(committed_mask.shape)
+    )
+    coarse_weight = None
+    if isinstance(targets.unit_confidence_tgt, torch.Tensor):
+        coarse_weight = targets.unit_confidence_tgt.float()
+    if speech_commit_mask is not None:
+        silence_scale = float(max(0.0, targets.silence_coarse_weight))
+        base_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
+        coarse_weight = base_weight if coarse_weight is None else coarse_weight * base_weight
     if isinstance(getattr(execution, "coarse_logstretch", None), torch.Tensor) and isinstance(targets.coarse_logstretch_tgt, torch.Tensor):
         return _weighted_masked_huber(
             execution.coarse_logstretch.float(),
             targets.coarse_logstretch_tgt.float(),
             committed_mask,
-            weight=targets.unit_confidence_tgt,
+            weight=coarse_weight,
             beta=0.25,
             batch_weight=None,
         )
@@ -1491,7 +1545,7 @@ def _build_duration_v3_bias_loss(
             execution.coarse_correction.float(),
             targets.coarse_correction_tgt.float(),
             committed_mask,
-            weight=targets.unit_confidence_tgt,
+            weight=coarse_weight,
             beta=0.25,
             batch_weight=None,
         )

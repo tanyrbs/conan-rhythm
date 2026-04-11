@@ -335,6 +335,7 @@ class MixedEffectsDurationModule(nn.Module):
         summary_slots = int(unused_kwargs.pop("num_summary_slots", unused_kwargs.pop("num_role_slots", max(4, basis_rank))))
         summary_cov_floor = float(unused_kwargs.pop("summary_cov_floor", unused_kwargs.pop("role_cov_floor", 0.05)))
         max_logstretch = float(unused_kwargs.pop("max_logstretch", 1.2))
+        max_silence_logstretch = float(unused_kwargs.pop("max_silence_logstretch", 0.35))
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
@@ -408,6 +409,7 @@ class MixedEffectsDurationModule(nn.Module):
                 num_slots=summary_slots,
                 spk_dim=hidden_size,
                 max_logstretch=max_logstretch,
+                max_silence_logstretch=max_silence_logstretch,
                 codebook=self.summary_codebook,
             )
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
@@ -706,13 +708,14 @@ class MixedEffectsDurationModule(nn.Module):
         *,
         source_batch: SourceUnitBatch,
         speech_commit_mask: torch.Tensor,
+        commit_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.backbone_mode == "prompt_summary":
             observed = source_batch.source_duration_obs.float().clamp_min(1.0e-4)
             baseline = source_batch.unit_anchor_base.float().clamp_min(1.0e-4)
-            speech_mask = speech_commit_mask.float()
-            anchor = torch.where(speech_mask > 0.5, observed, torch.zeros_like(observed))
-            return torch.where(anchor > 0.0, anchor, baseline * speech_mask)
+            valid_mask = commit_mask.float() if isinstance(commit_mask, torch.Tensor) else source_batch.unit_mask.float()
+            anchor = torch.where(valid_mask > 0.5, observed, torch.zeros_like(observed))
+            return torch.where(anchor > 0.0, anchor, baseline * valid_mask)
         return source_batch.unit_anchor_base.float()
 
     @staticmethod
@@ -766,6 +769,7 @@ class MixedEffectsDurationModule(nn.Module):
         prediction_anchor = self._resolve_prediction_anchor(
             source_batch=source_batch,
             speech_commit_mask=speech_commit_mask,
+            commit_mask=commit_mask,
         )
         if self.backbone_mode == "prompt_summary":
             if self.duration_head is None:
@@ -791,19 +795,11 @@ class MixedEffectsDurationModule(nn.Module):
                 local_rate_ema=local_rate_ema,
                 silence_mask=getattr(source_batch, "source_silence_mask", None),
             )
-            unit_logstretch = role_plan["unit_logstretch"] * speech_commit_mask.float()
+            unit_logstretch = role_plan["unit_logstretch"] * commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
                 prediction_anchor=prediction_anchor,
                 unit_logstretch=unit_logstretch,
             )
-            silence_mask = getattr(source_batch, "source_silence_mask", None)
-            if isinstance(silence_mask, torch.Tensor):
-                silence_mask = silence_mask.float().clamp(0.0, 1.0) * unit_mask.float()
-                unit_duration_exec = torch.where(
-                    silence_mask > 0.5,
-                    source_batch.source_duration_obs.float(),
-                    unit_duration_exec,
-                )
             unit_logstretch_raw = unit_logstretch.clone()
             unit_duration_raw = unit_duration_exec.clone()
             unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
@@ -830,6 +826,11 @@ class MixedEffectsDurationModule(nn.Module):
                 role_conf_unit=role_plan["role_conf_unit"] * unit_mask,
                 unit_logstretch_raw=unit_logstretch_raw,
                 unit_duration_raw=unit_duration_raw,
+                coarse_only_commit_mask=(
+                    commit_mask.float() * source_batch.source_silence_mask.float().clamp(0.0, 1.0)
+                    if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor)
+                    else None
+                ),
                 global_bias_scalar=role_plan.get("global_bias_scalar"),
                 global_shift_analytic=role_plan.get("unit_global_shift_analytic"),
                 coarse_logstretch=role_plan.get("unit_coarse_logstretch"),

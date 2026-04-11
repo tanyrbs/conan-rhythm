@@ -36,6 +36,8 @@ class DurationV3TaskRuntimeSupportMixin:
             baseline_train_mode=str(
                 hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint"
             ).strip().lower(),
+            silence_coarse_weight=max(0.0, float(hparams.get("rhythm_v3_silence_coarse_weight", 0.25) or 0.0)),
+            silence_logstretch_max=max(0.01, float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35) or 0.35)),
         )
 
 
