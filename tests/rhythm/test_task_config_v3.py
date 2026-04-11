@@ -334,6 +334,29 @@ def test_validate_rhythm_training_hparams_accepts_role_memory_legacy_alias_surfa
     )
 
 
+def test_validate_rhythm_training_hparams_accepts_unit_run_alias_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_bias": 0.20,
+            "lambda_rhythm_mem": 0.25,
+            "lambda_rhythm_zero": 0.0,
+            "lambda_rhythm_ortho": 0.0,
+            "rhythm_public_losses": [
+                "rhythm_total",
+                "rhythm_v3_dur",
+                "rhythm_v3_bias",
+                "rhythm_v3_mem",
+                "rhythm_v3_pref",
+            ],
+        }
+    )
+
+
 def test_validate_rhythm_training_hparams_allows_prompt_summary_public_losses_without_summary_when_disabled():
     validate_rhythm_training_hparams(
         {

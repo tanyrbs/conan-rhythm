@@ -9,27 +9,32 @@ The maintained default is **streaming VC unit-duration transfer**.
 Use:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
-- `rhythm_v3_backbone: prompt_summary`
+- `rhythm_v3_backbone: unit_run`  (`prompt_summary` / `role_memory` remain accepted aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
 
 In that default path, the writer is:
 
-> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + b_hat + delta_i`
+> `z_hat_i = (g_ref - g_src_prefix,i) + c_hat_i + r_hat_i`
 
 where:
 
-- `a_i`: source-unit anchor from observed duration when sealed, with frontend fallback only when needed
 - `g_ref`: speech-only prompt global log-rate
 - `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
-- `b_hat`: prompt/speaker-level scalar global bias
-- `delta_i`: small learned speech-run residual from a causal source query against a static prompt summary
+- `c_hat_i`: small prefix-coarse correction from pooled causal source state + static prompt summary + speaker vector
+- `r_hat_i`: bounded local speech-run residual
+
+and committed speech duration is written as:
+
+> `log d_hat_i = log a_i + z_hat_i`
+
+with silence-like runs frozen to observed source multiplicity.
 
 The maintained explanation is:
 
 - **source-anchored duration writing**
 - **static prompt summary memory**
-- **explicit speaker-conditioned global bias**
+- **prefix-level coarse correction over the analytic source/ref rate gap**
 - **strict-causal prefix-rate correction**
 - **carry-only integer projection**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
@@ -57,7 +62,8 @@ It produces:
 - diagnostic slot statistics (`role_value`, `role_var`, `role_coverage`)
 
 The diagnostic slot statistics remain useful for losses and observability, while
-runtime now directly uses `summary_state + spk_embed` as static conditioning.
+runtime now directly uses `summary_state + spk_embed` as static conditioning;
+slot statistics are diagnostics only.
 
 ### Source side
 
@@ -68,7 +74,7 @@ The streaming writer uses:
 - `unit_anchor_base`
 - sealed/open masks from the frontend
 
-For the maintained `prompt_summary + source_observed` path, committed speech
+For the maintained `unit_run/prompt_summary + source_observed` path, committed speech
 units use source-observed duration as the anchor and keep only a strict-causal
 local-rate EMA in runtime state. `sep_mask` is not treated as a speech mask in
 the canonical path; the maintained v3 frontend now materializes explicit
@@ -140,7 +146,7 @@ Compact public losses:
 Recommended default weights in `egs/conan_emformer_rhythm_v3.yaml` currently keep:
 
 - duration loss on
-- explicit bias loss on
+- prefix-coarse loss on (`lambda_rhythm_bias`, now supervising the coarse branch even though the compatibility metric still exports `global_bias_scalar`)
 - prompt-summary residual self-fit disabled by default (`lambda_rhythm_summary=0`)
 - prefix consistency off by default
 - cross-prefix consistency on
@@ -202,7 +208,7 @@ checkpoints:
 Ready now:
 
 - one maintained `rhythm_v3` line
-- prompt-summary default path for streaming VC duration transfer
+- unit-run default path for streaming VC duration transfer
 - real `common / duration_v3 / rhythm_v2` task split
 - deterministic projector contract
 - explicit prompt-unit training semantics

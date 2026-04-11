@@ -189,8 +189,11 @@ class StreamingDurationProjector(nn.Module):
         unit_duration_raw: torch.Tensor | None = None,
         global_bias_scalar: torch.Tensor | None = None,
         global_shift_analytic: torch.Tensor | None = None,
+        coarse_logstretch: torch.Tensor | None = None,
+        coarse_correction: torch.Tensor | None = None,
         local_residual: torch.Tensor | None = None,
         source_rate_seq: torch.Tensor | None = None,
+        source_prefix_summary: torch.Tensor | None = None,
     ) -> DurationExecution:
         batch_size = unit_duration_exec.size(0)
         device = unit_duration_exec.device
@@ -249,7 +252,10 @@ class StreamingDurationProjector(nn.Module):
             frame_plan=frame_plan,
             global_bias_scalar=global_bias_scalar,
             global_shift_analytic=global_shift_analytic,
+            coarse_logstretch=coarse_logstretch,
+            coarse_correction=coarse_correction,
             local_residual=local_residual,
             source_rate_seq=source_rate_seq,
+            source_prefix_summary=source_prefix_summary,
             prefix_unit_offset=prefix_unit_offset_next,
         )

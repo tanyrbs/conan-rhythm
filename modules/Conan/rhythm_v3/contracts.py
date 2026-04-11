@@ -317,8 +317,11 @@ class DurationExecution:
     frame_plan: Optional["RhythmFramePlan"] = None
     global_bias_scalar: Optional[torch.Tensor] = None
     global_shift_analytic: Optional[torch.Tensor] = None
+    coarse_logstretch: Optional[torch.Tensor] = None
+    coarse_correction: Optional[torch.Tensor] = None
     local_residual: Optional[torch.Tensor] = None
     source_rate_seq: Optional[torch.Tensor] = None
+    source_prefix_summary: Optional[torch.Tensor] = None
     prefix_unit_offset: Optional[torch.Tensor] = None
 
     @property

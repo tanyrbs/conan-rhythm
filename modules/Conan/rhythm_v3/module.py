@@ -20,12 +20,12 @@ from .reference_memory import PromptConditionedOperatorEstimator
 from .summary_memory import PromptDurationMemoryEncoder, SharedSummaryCodebook, StreamingDurationHead
 
 
-_PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory"}
+_PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory", "unit_run"}
 
 
 def _normalize_prompt_summary_backbone(backbone_mode: str | None) -> str:
     normalized = str(backbone_mode or "global_only").strip().lower()
-    if normalized == "role_memory":
+    if normalized in {"role_memory", "unit_run"}:
         return "prompt_summary"
     return normalized
 
@@ -102,17 +102,17 @@ def _resolve_duration_runtime_surface(
         raise ValueError(
             "Unsupported rhythm_v3 backbone mode: "
             f"{backbone_mode!r}. Supported values are global_only, operator, prompt_summary "
-            "(legacy alias: role_memory)."
+            "(legacy aliases: role_memory, unit_run)."
         )
     if resolved_warp not in {"none", "progress", "detector"}:
         raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
     if resolved_backbone == "prompt_summary":
         if resolved_warp != "none":
-            raise ValueError("rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory') only supports rhythm_v3_warp_mode='none'.")
+            raise ValueError("rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'.")
         if resolved_allow_hybrid:
-            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory').")
+            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run').")
         if float(source_residual_gain) > 0.0:
-            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory').")
+            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run').")
         return resolved_backbone, resolved_warp, False, "prompt_summary"
     if resolved_backbone == "global_only":
         if resolved_allow_hybrid:
@@ -443,7 +443,7 @@ class MixedEffectsDurationModule(nn.Module):
             if isinstance(ref_conditioning, ReferenceDurationMemory):
                 return ref_conditioning
             if not isinstance(ref_conditioning, dict):
-                raise ValueError("rhythm_v3 prompt_summary backbone requires explicit prompt-unit conditioning.")
+                raise ValueError("rhythm_v3 prompt_summary/unit_run backbone requires explicit prompt-unit conditioning.")
             prompt_content_units = ref_conditioning.get("prompt_content_units")
             prompt_duration_obs = ref_conditioning.get("prompt_duration_obs")
             prompt_mask = ref_conditioning.get("prompt_unit_mask")
@@ -453,7 +453,7 @@ class MixedEffectsDurationModule(nn.Module):
                 and isinstance(prompt_mask, torch.Tensor)
             ):
                 raise ValueError(
-                    "rhythm_v3 prompt_summary backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
+                    "rhythm_v3 prompt_summary/unit_run backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
                 )
             return self.prompt_memory_encoder(
                 prompt_content_units=prompt_content_units,
@@ -769,7 +769,7 @@ class MixedEffectsDurationModule(nn.Module):
         )
         if self.backbone_mode == "prompt_summary":
             if self.duration_head is None:
-                raise RuntimeError("prompt_summary backbone is missing StreamingDurationHead.")
+                raise RuntimeError("prompt_summary/unit_run backbone is missing StreamingDurationHead.")
             local_rate_ema = (
                 state.local_rate_ema.float()
                 if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
@@ -832,8 +832,11 @@ class MixedEffectsDurationModule(nn.Module):
                 unit_duration_raw=unit_duration_raw,
                 global_bias_scalar=role_plan.get("global_bias_scalar"),
                 global_shift_analytic=role_plan.get("unit_global_shift_analytic"),
+                coarse_logstretch=role_plan.get("unit_coarse_logstretch"),
+                coarse_correction=role_plan.get("unit_coarse_correction"),
                 local_residual=role_plan.get("unit_residual_logstretch"),
                 source_rate_seq=role_plan.get("source_rate_seq"),
+                source_prefix_summary=role_plan.get("source_prefix_summary"),
             )
             execution.next_state = self._update_prompt_summary_state(
                 final_rate_ema=role_plan["local_rate_final"],

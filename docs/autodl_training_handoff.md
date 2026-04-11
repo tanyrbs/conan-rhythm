@@ -26,7 +26,7 @@ That includes:
 Do **not** use this file as the authority for:
 
 - current `rhythm_v3` architecture
-- current prompt-summary runtime
+- current unit-run / prompt-summary runtime
 - current task-layer split
 - current v3 public inputs / outputs / losses
 
@@ -48,6 +48,6 @@ The maintained current branch is:
 
 - `rhythm_v3`
 - default config: `egs/conan_emformer_rhythm_v3.yaml`
-- default reading: prompt summary + source-observed anchor + carry-only projector
+- default reading: unit-run stretch head + source-observed anchor + carry-only projector
 
 Legacy v2 remains available, but it is not the maintained architecture story.

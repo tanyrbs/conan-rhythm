@@ -95,6 +95,8 @@ class DurationV3LossTargets:
     baseline_global_tgt: Optional[torch.Tensor] = None
     global_rate: Optional[torch.Tensor] = None
     global_shift_tgt: Optional[torch.Tensor] = None
+    coarse_logstretch_tgt: Optional[torch.Tensor] = None
+    coarse_correction_tgt: Optional[torch.Tensor] = None
     residual_logstretch_tgt: Optional[torch.Tensor] = None
     global_bias_tgt: Optional[torch.Tensor] = None
     local_residual_tgt: Optional[torch.Tensor] = None
@@ -113,6 +115,7 @@ class DurationV3LossTargets:
     prompt_log_residual: Optional[torch.Tensor] = None
     consistency_duration_tgt: Optional[torch.Tensor] = None
     consistency_mask: Optional[torch.Tensor] = None
+    consistency_logstretch_tgt: Optional[torch.Tensor] = None
     consistency_local_residual_tgt: Optional[torch.Tensor] = None
     lambda_dur: float = 1.0
     lambda_op: float = 0.25
@@ -1424,6 +1427,19 @@ def _build_duration_v3_stream_losses(
         and targets.consistency_duration_tgt is not None
         and targets.consistency_mask is not None
     ):
+        pred_cons_logstretch = getattr(execution, "unit_logstretch_raw", None)
+        if not isinstance(pred_cons_logstretch, torch.Tensor):
+            pred_cons_logstretch = execution.unit_logstretch
+        if isinstance(targets.consistency_logstretch_tgt, torch.Tensor):
+            l_cons = _weighted_masked_huber(
+                pred_cons_logstretch.float(),
+                targets.consistency_logstretch_tgt.float(),
+                targets.consistency_mask.float(),
+                weight=targets.unit_confidence_tgt,
+                beta=0.25,
+                batch_weight=None,
+            )
+            return l_pref, l_cons, l_pref + l_cons
         if (
             isinstance(getattr(execution, "local_residual", getattr(execution, "local_response", None)), torch.Tensor)
             and isinstance(targets.consistency_local_residual_tgt, torch.Tensor)
@@ -1456,6 +1472,29 @@ def _build_duration_v3_bias_loss(
     pred_speech: torch.Tensor,
     targets: DurationV3LossTargets,
 ) -> torch.Tensor:
+    committed_mask = (
+        targets.committed_mask.float()
+        if isinstance(targets.committed_mask, torch.Tensor)
+        else targets.unit_mask.float()
+    )
+    if isinstance(getattr(execution, "coarse_logstretch", None), torch.Tensor) and isinstance(targets.coarse_logstretch_tgt, torch.Tensor):
+        return _weighted_masked_huber(
+            execution.coarse_logstretch.float(),
+            targets.coarse_logstretch_tgt.float(),
+            committed_mask,
+            weight=targets.unit_confidence_tgt,
+            beta=0.25,
+            batch_weight=None,
+        )
+    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor) and isinstance(targets.coarse_correction_tgt, torch.Tensor):
+        return _weighted_masked_huber(
+            execution.coarse_correction.float(),
+            targets.coarse_correction_tgt.float(),
+            committed_mask,
+            weight=targets.unit_confidence_tgt,
+            beta=0.25,
+            batch_weight=None,
+        )
     if not isinstance(getattr(execution, "global_bias_scalar", None), torch.Tensor):
         return pred_speech.new_tensor(0.0)
     if not isinstance(targets.global_bias_tgt, torch.Tensor):

@@ -6,7 +6,8 @@ binarization_args:
 
 # Recommended maintained mainline:
 # explicit silence-run frontend + paired target projection + source-observed anchor
-# + prompt-summary writer + speech-only carry projector + prefix unit-budget clamp.
+# + unit-run stretch writer (analytic rate gap + prefix coarse + local residual)
+# + speech-only carry projector + prefix unit-budget clamp.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
@@ -34,7 +35,7 @@ rhythm_response_window_left: 4
 rhythm_response_window_right: 0
 rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
-rhythm_v3_backbone: prompt_summary
+rhythm_v3_backbone: unit_run
 rhythm_v3_warp_mode: none
 rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
@@ -78,7 +79,7 @@ rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.0
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_bias: 0.20
+lambda_rhythm_bias: 0.20  # prefix-coarse supervision (compat metric still exports global_bias_scalar)
 lambda_rhythm_summary: 0.0
 # canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
 lambda_rhythm_pref: 0.0

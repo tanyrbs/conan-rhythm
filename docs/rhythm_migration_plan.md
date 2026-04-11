@@ -11,7 +11,7 @@ The maintained default is:
 - explicit prompt units
 - source-observed duration anchors for sealed speech units
 - speech-only prompt global-rate estimation
-- prompt/speaker-level scalar global bias
+- prefix-level coarse correction around the analytic source/ref rate gap
 - strict-causal source prefix-rate EMA
 - static prompt summary memory
 - single duration writer
@@ -22,31 +22,44 @@ The maintained default is:
 Recommended config:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
-- `rhythm_v3_backbone: prompt_summary`
+- `rhythm_v3_backbone: unit_run` (`prompt_summary` / `role_memory` remain accepted aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
 
 Canonical training intentionally keeps the prompt-summary auxiliary loss disabled (`lambda_rhythm_summary=0`) so the maintained path focuses on duration/bias supervision plus the optional prefix consistency term.
 
-## 2. Default prompt-summary formula
+## 1.1 External rationale checkpoints
+
+The maintained narrowing of this branch is aligned with a few external anchors:
+
+- Conan paper: discrete content labels are the controllable interface, so the retimer is attached on the content-code stream instead of the chunk scheduler — https://arxiv.org/abs/2507.14534
+- R-VC: explicit token-level duration modeling is useful; their ablations report that sentence-level duration is less stable and that removing duration-side speaker conditioning hurts WER / UTMOS / style transfer — https://aclanthology.org/2025.acl-long.790/
+- L2-ARCTIC: 24 non-native speakers with manually annotated pronunciation deviations make it suitable for run-level confidence weighting — https://psi.engr.tamu.edu/l2-arctic-corpus/
+- CMU ARCTIC / ARCTIC prompts: shared prompt inventory remains the simplest native-native / L2-native sanity surface — https://www.festvox.org/cmu_arctic/
+
+## 2. Default unit-run writer formula
 
 For the maintained default path, the runtime reading is:
 
-> `log d_hat_i = log a_i + (g_ref - g_src_prefix,i) + b_hat + delta_i`
+> `z_hat_i = (g_ref - g_src_prefix,i) + c_hat_i + r_hat_i`
+>
+> `log d_hat_i = log a_i + z_hat_i`
 
 where:
 
 - `a_i`: source-observed duration for sealed speech units, with frontend fallback only when needed
 - `g_ref`: speech-only global prompt log-rate
 - `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
-- `b_hat`: prompt/speaker-level scalar global bias
-- `delta_i`: learned speech-run residual from a causal source query against a static prompt summary
+- `c_hat_i`: small prefix-coarse correction from pooled causal source state + static prompt summary + speaker vector
+- `r_hat_i`: learned speech-run residual from a causal source query against the same static prompt summary
 
 In other words:
 
 - the prompt is distilled once into static conditioning
 - the writer is source-anchored
+- the coarse branch stays close to the analytic `g_ref - g_src_prefix,i` term
 - only sealed speech units are committed
+- silence-like runs stay source-observed in the canonical v1 path
 - the projector only handles integerization and carry
 
 ## 3. Scope boundary
@@ -66,7 +79,7 @@ low-latency deployment.
 - source-residual operator variants
 
 These stay for controlled comparison, but the maintained default branch reading
-is the prompt-summary path above.
+is the unit-run / prompt-summary path above.
 
 ## 5. Prompt-side contract
 
@@ -101,7 +114,7 @@ the prompt diagnostics, and it only accepts a source-self fallback when
 
 ## 6. Source-side/runtime contract
 
-The maintained prompt-summary runtime uses:
+The maintained unit-run / prompt-summary runtime uses:
 
 - `content_units`
 - `dur_anchor_src`
@@ -177,7 +190,7 @@ Top-level files remain only as compatibility facades:
 When documentation disagrees, prefer the smallest truthful current reading:
 
 - `rhythm_v3` is the maintained line
-- `prompt_summary + source_observed + carry-only projector` is the maintained default
+- `unit_run + source_observed + carry-only projector` is the maintained default
 - top-level task files are compatibility shells, not the main implementation location
 - legacy v2 docs are archive notes, not the mainline spec
 

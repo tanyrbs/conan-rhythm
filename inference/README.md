@@ -13,7 +13,7 @@ Authoritative current docs:
 The maintained default inference path is the same as the maintained training
 mainline:
 
-- `rhythm_v3_backbone: prompt_summary`
+- `rhythm_v3_backbone: unit_run` (`prompt_summary` / `role_memory` remain accepted aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
 
@@ -31,6 +31,8 @@ The maintained v3 inference story is:
 - prompt distilled into static summary conditioning
 - speaker embedding passed explicitly into the duration writer
 - source-observed sealed-unit anchors
+- analytic source/ref rate gap corrected by a small prefix-coarse branch
+- bounded local speech-run residual on top of that coarse term
 - strict-causal prefix-rate state
 - deterministic carry-only projection
 - runtime enforces the prefix unit-budget clamp so retimed counts stay within configured drift bounds

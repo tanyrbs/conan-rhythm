@@ -8,6 +8,7 @@ keeps the legacy import path alive.
 """
 
 from .summary_memory import (
+    CausalUnitRunEncoder,
     CausalRoleQueryEncoder,
     CausalStretchQueryEncoder,
     CausalSummaryQueryEncoder,
@@ -22,6 +23,7 @@ SharedRoleCodebook = SharedSummaryCodebook
 PromptSummaryProbeBank = SharedSummaryCodebook
 
 __all__ = [
+    "CausalUnitRunEncoder",
     "CausalRoleQueryEncoder",
     "CausalStretchQueryEncoder",
     "CausalSummaryQueryEncoder",

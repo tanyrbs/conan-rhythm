@@ -59,7 +59,7 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
 
 def normalize_duration_v3_backbone_mode(value) -> str:
     normalized = str(value or "global_only").strip().lower()
-    if normalized == "role_memory":
+    if normalized in {"role_memory", "unit_run"}:
         return "prompt_summary"
     return normalized
 
@@ -100,7 +100,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     allow_hybrid = bool(hparams.get("rhythm_v3_allow_hybrid", False))
     if backbone_mode not in {"global_only", "operator", "prompt_summary"}:
         raise ValueError(
-            "rhythm_v3_backbone must be one of: global_only, operator, prompt_summary (legacy alias: role_memory)"
+            "rhythm_v3_backbone must be one of: global_only, operator, prompt_summary "
+            "(legacy aliases: role_memory, unit_run)"
         )
     if warp_mode not in {"none", "progress", "detector"}:
         raise ValueError("rhythm_v3_warp_mode must be one of: none, progress, detector")
@@ -109,11 +110,11 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     if backbone_mode == "prompt_summary":
         if warp_mode != "none":
             raise ValueError(
-                "rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory') only supports rhythm_v3_warp_mode='none'."
+                "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'."
             )
         if allow_hybrid:
             raise ValueError(
-                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory')."
+                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run')."
             )
     if backbone_mode == "operator" and warp_mode == "progress" and not allow_hybrid:
         raise ValueError(
@@ -130,7 +131,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         raise ValueError("rhythm_v3_anchor_mode must be one of: baseline, source_observed")
     if backbone_mode == "prompt_summary" and anchor_mode != "source_observed":
         raise ValueError(
-            "rhythm_v3_backbone='prompt_summary' (legacy alias: 'role_memory') requires rhythm_v3_anchor_mode='source_observed'."
+            "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
         )
     if source_residual_gain > 0.0 and warp_mode == "progress":
         raise ValueError(

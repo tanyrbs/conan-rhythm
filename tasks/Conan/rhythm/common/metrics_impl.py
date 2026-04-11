@@ -1175,6 +1175,24 @@ def _build_duration_v3_metric_sections(
             local_response.float().abs(),
             speech_commit_mask,
         )
+    coarse_logstretch = getattr(execution, "coarse_logstretch", None)
+    if isinstance(coarse_logstretch, torch.Tensor):
+        core_metrics["rhythm_metric_coarse_logstretch_abs_mean"] = _masked_mean(
+            coarse_logstretch.float().abs(),
+            speech_commit_mask,
+        )
+    coarse_correction = getattr(execution, "coarse_correction", None)
+    if isinstance(coarse_correction, torch.Tensor):
+        core_metrics["rhythm_metric_coarse_correction_abs_mean"] = _masked_mean(
+            coarse_correction.float().abs(),
+            speech_commit_mask,
+        )
+    source_rate_seq = getattr(execution, "source_rate_seq", None)
+    if isinstance(source_rate_seq, torch.Tensor):
+        core_metrics["rhythm_metric_source_rate_seq_mean"] = _masked_mean(
+            source_rate_seq.float(),
+            speech_commit_mask,
+        )
     progress_response = getattr(execution, "progress_response", None)
     if isinstance(progress_response, torch.Tensor):
         progress_response_abs_mean = _masked_mean(

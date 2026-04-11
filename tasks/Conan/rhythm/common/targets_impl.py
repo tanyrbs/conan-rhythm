@@ -936,11 +936,27 @@ def build_duration_v3_loss_targets(
         lambda_zero=(0.0 if baseline_pretrain_only else float(config.lambda_zero)),
         lambda_ortho=(0.0 if baseline_pretrain_only else float(config.lambda_ortho)),
     )
+    unit_confidence_tgt = None
+    if "unit_confidence_tgt" in sample:
+        raw_confidence = sample.get("unit_confidence_tgt")
+        confidence_tensor = raw_confidence if isinstance(raw_confidence, torch.Tensor) else torch.as_tensor(
+            raw_confidence,
+            dtype=torch.float32,
+            device=unit_mask.device,
+        )
+        unit_confidence_tgt = _align_duration_v3_surface(
+            tensor=confidence_tensor,
+            unit_mask=unit_mask,
+            strict_target_alignment=False,
+        ).float()
     global_shift_tgt = None
+    coarse_logstretch_tgt = None
+    coarse_correction_tgt = None
     residual_logstretch_tgt = None
     global_bias_tgt = None
     local_residual_tgt = None
     consistency_local_residual_tgt = None
+    consistency_logstretch_tgt = None
     state_prev = output.get("rhythm_state_prev")
     init_local_rate = None
     default_init_rate = output.get("rhythm_v3_source_rate_init")
@@ -961,8 +977,19 @@ def build_duration_v3_loss_targets(
             - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
         ) * committed_mask.float()
         residual_logstretch_tgt = (full_logstretch_tgt - global_shift_tgt).detach()
-        global_bias_tgt = _masked_duration_v3_median(residual_logstretch_tgt, committed_mask.float())
-        local_residual_tgt = (residual_logstretch_tgt - global_bias_tgt) * committed_mask.float()
+        coarse_residual_tgt = residual_logstretch_tgt.detach()
+        coarse_correction_tgt = _build_duration_v3_prefix_median_seq(
+            values=coarse_residual_tgt,
+            mask=committed_mask.float(),
+            weight=unit_confidence_tgt,
+        )
+        coarse_logstretch_tgt = (global_shift_tgt + coarse_correction_tgt) * committed_mask.float()
+        global_bias_tgt = _masked_duration_v3_median(
+            coarse_correction_tgt,
+            committed_mask.float(),
+            weight=unit_confidence_tgt,
+        )
+        local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_mask.float()
     consistency_duration_tgt = None
     consistency_mask = None
     if float(config.lambda_cons) > 0.0 and not baseline_pretrain_only:
@@ -980,24 +1007,15 @@ def build_duration_v3_loss_targets(
                 torch.log(consistency_duration_tgt.float().clamp_min(1.0e-6))
                 - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
             ) * consistency_mask.float()
+            consistency_logstretch_tgt = consistency_full
             consistency_local_residual_tgt = (
                 consistency_full
-                - global_shift_tgt.float()
-                - (global_bias_tgt.float() if isinstance(global_bias_tgt, torch.Tensor) else 0.0)
+                - (
+                    coarse_logstretch_tgt.float()
+                    if isinstance(coarse_logstretch_tgt, torch.Tensor)
+                    else global_shift_tgt.float()
+                )
             ) * consistency_mask.float()
-    unit_confidence_tgt = None
-    if "unit_confidence_tgt" in sample:
-        raw_confidence = sample.get("unit_confidence_tgt")
-        confidence_tensor = raw_confidence if isinstance(raw_confidence, torch.Tensor) else torch.as_tensor(
-            raw_confidence,
-            dtype=torch.float32,
-            device=unit_mask.device,
-        )
-        unit_confidence_tgt = _align_duration_v3_surface(
-            tensor=confidence_tensor,
-            unit_mask=unit_mask,
-            strict_target_alignment=False,
-        ).float()
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
         unit_anchor_base=unit_anchor_base.float().detach(),
@@ -1010,6 +1028,8 @@ def build_duration_v3_loss_targets(
         baseline_global_tgt=baseline_global_tgt,
         global_rate=prompt_targets["global_rate"],
         global_shift_tgt=global_shift_tgt,
+        coarse_logstretch_tgt=coarse_logstretch_tgt,
+        coarse_correction_tgt=coarse_correction_tgt,
         residual_logstretch_tgt=residual_logstretch_tgt,
         global_bias_tgt=global_bias_tgt,
         local_residual_tgt=local_residual_tgt,
@@ -1028,6 +1048,7 @@ def build_duration_v3_loss_targets(
         prompt_log_residual=prompt_targets["prompt_log_residual"],
         consistency_duration_tgt=consistency_duration_tgt,
         consistency_mask=consistency_mask,
+        consistency_logstretch_tgt=consistency_logstretch_tgt,
         consistency_local_residual_tgt=consistency_local_residual_tgt,
         lambda_dur=float(config.lambda_dur),
         lambda_op=float(config.lambda_op),
@@ -1041,14 +1062,65 @@ def build_duration_v3_loss_targets(
     )
 
 
-def _masked_duration_v3_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _masked_duration_v3_median(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    weight: torch.Tensor | None = None,
+) -> torch.Tensor:
     batch_size = values.size(0)
     median = values.new_zeros((batch_size, 1))
+    if isinstance(weight, torch.Tensor):
+        weight = weight.float()
     for batch_idx in range(batch_size):
         valid = mask[batch_idx] > 0.5
         if bool(valid.any().item()):
-            median[batch_idx, 0] = values[batch_idx][valid].median()
+            selected = values[batch_idx][valid]
+            if not isinstance(weight, torch.Tensor):
+                median[batch_idx, 0] = selected.median()
+                continue
+            selected_weight = weight[batch_idx][valid].float().clamp_min(1.0e-4)
+            order = torch.argsort(selected)
+            sorted_values = selected[order]
+            sorted_weight = selected_weight[order]
+            cumsum = torch.cumsum(sorted_weight, dim=0)
+            cutoff = 0.5 * sorted_weight.sum()
+            median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
+            median[batch_idx, 0] = sorted_values[median_idx]
     return median
+
+
+def _build_duration_v3_prefix_median_seq(
+    *,
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    weight: torch.Tensor | None = None,
+) -> torch.Tensor:
+    batch_size, num_units = values.shape
+    seq = values.new_zeros(values.shape)
+    weight_f = weight.float() if isinstance(weight, torch.Tensor) else None
+    for batch_idx in range(batch_size):
+        running_values: list[torch.Tensor] = []
+        running_weights: list[torch.Tensor] = []
+        for unit_idx in range(num_units):
+            if float(mask[batch_idx, unit_idx].item()) > 0.5:
+                running_values.append(values[batch_idx, unit_idx : unit_idx + 1])
+                if weight_f is not None:
+                    running_weights.append(weight_f[batch_idx, unit_idx : unit_idx + 1].clamp_min(1.0e-4))
+            if not running_values:
+                continue
+            prefix_values = torch.cat(running_values, dim=0)
+            if weight_f is None:
+                seq[batch_idx, unit_idx] = prefix_values.median()
+                continue
+            prefix_weight = torch.cat(running_weights, dim=0)
+            order = torch.argsort(prefix_values)
+            sorted_values = prefix_values[order]
+            sorted_weight = prefix_weight[order]
+            cumsum = torch.cumsum(sorted_weight, dim=0)
+            cutoff = 0.5 * sorted_weight.sum()
+            median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
+            seq[batch_idx, unit_idx] = sorted_values[median_idx]
+    return seq * mask.float()
 
 
 def _build_duration_v3_baseline_targets(

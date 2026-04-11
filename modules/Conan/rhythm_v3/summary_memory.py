@@ -38,6 +38,23 @@ def _masked_std(values: torch.Tensor, mask: torch.Tensor, mean: torch.Tensor) ->
     return torch.sqrt(diff2.sum(dim=1) / denom.clamp_min(1.0e-6) + 1.0e-6)
 
 
+def _masked_prefix_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask_f = mask.float().clamp(0.0, 1.0)
+    prefix_num = torch.cumsum(values * mask_f.unsqueeze(-1), dim=1)
+    prefix_den = torch.cumsum(mask_f, dim=1).clamp_min(1.0).unsqueeze(-1)
+    prefix_mean = prefix_num / prefix_den
+    has_support = (torch.cumsum(mask_f, dim=1) > 0.0).unsqueeze(-1)
+    return torch.where(has_support, prefix_mean, torch.zeros_like(prefix_mean))
+
+
+def _masked_mean_1d(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask_f = mask.float().clamp(0.0, 1.0)
+    denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+    mean = (values * mask_f).sum(dim=1, keepdim=True) / denom
+    has_support = mask_f.sum(dim=1, keepdim=True) > 0.0
+    return torch.where(has_support, mean, torch.zeros_like(mean))
+
+
 def _build_causal_local_rate_seq(
     *,
     observed_log: torch.Tensor,
@@ -169,6 +186,69 @@ class CausalRoleQueryEncoder(nn.Module):
 
 class CausalStretchQueryEncoder(CausalRoleQueryEncoder):
     """Backward-compatible alias for legacy imports."""
+
+
+class CausalUnitRunEncoder(nn.Module):
+    """Minimal source-side run encoder for the maintained unit-run stretch head."""
+
+    def __init__(
+        self,
+        *,
+        vocab_size: int = 2048,
+        dim: int = 64,
+        kernel_size: int = 3,
+        dilations: tuple[int, ...] = (1, 2, 4, 8),
+    ) -> None:
+        super().__init__()
+        self.dim = int(max(8, dim))
+        self.kernel_size = int(max(2, kernel_size))
+        self.dilations = tuple(max(1, int(value)) for value in dilations)
+        self.unit_emb = nn.Embedding(int(vocab_size), self.dim)
+        self.in_proj = nn.Linear(self.dim + 3, self.dim)
+        self.dw = nn.ModuleList(
+            [
+                nn.Conv1d(
+                    self.dim,
+                    self.dim,
+                    kernel_size=self.kernel_size,
+                    dilation=dilation,
+                    groups=self.dim,
+                )
+                for dilation in self.dilations
+            ]
+        )
+        self.pw = nn.ModuleList([nn.Conv1d(self.dim, self.dim, kernel_size=1) for _ in self.dilations])
+        self.norm = nn.LayerNorm(self.dim)
+
+    def forward(
+        self,
+        *,
+        unit_ids: torch.Tensor,
+        log_anchor: torch.Tensor,
+        source_rate: torch.Tensor,
+        silence_mask: torch.Tensor,
+        unit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = unit_mask.float().clamp(0.0, 1.0)
+        centered = (log_anchor.float() - source_rate.float()) * mask
+        silence = silence_mask.float().clamp(0.0, 1.0) * mask
+        hidden = torch.cat(
+            [
+                self.unit_emb(unit_ids.long()),
+                log_anchor.float().unsqueeze(-1),
+                centered.unsqueeze(-1),
+                silence.unsqueeze(-1),
+            ],
+            dim=-1,
+        )
+        hidden = self.in_proj(hidden) * mask.unsqueeze(-1)
+        hidden_t = hidden.transpose(1, 2)
+        for depthwise, pointwise, dilation in zip(self.dw, self.pw, self.dilations):
+            padded = F.pad(hidden_t, (dilation * (self.kernel_size - 1), 0))
+            update = pointwise(F.gelu(depthwise(padded)))
+            hidden_t = hidden_t + update
+        hidden = self.norm(hidden_t.transpose(1, 2))
+        return hidden * mask.unsqueeze(-1)
 
 
 class PromptDurationMemoryEncoder(nn.Module):
@@ -305,7 +385,7 @@ class PromptDurationMemoryEncoder(nn.Module):
 
 
 class StreamingDurationHead(nn.Module):
-    """Source-anchored writer with analytic global shift, prompt bias, and local residual."""
+    """Source-anchored unit-run writer with prefix coarse control and local residual."""
 
     def __init__(
         self,
@@ -320,12 +400,12 @@ class StreamingDurationHead(nn.Module):
         super().__init__()
         self.max_logstretch = float(max(0.1, max_logstretch))
         self.query_dim = int(max(8, dim))
-        self.query_encoder = CausalRoleQueryEncoder(vocab_size=vocab_size, dim=self.query_dim)
+        self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.codebook = codebook if codebook is not None else SharedSummaryCodebook(num_slots=num_slots, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
         self.spk_proj = nn.Linear(self.spk_dim, self.query_dim)
-        self.global_bias_head = nn.Sequential(
-            nn.Linear(self.query_dim * 2, self.query_dim),
+        self.coarse_head = nn.Sequential(
+            nn.Linear(self.query_dim * 3, self.query_dim),
             nn.GELU(),
             nn.Linear(self.query_dim, 1),
         )
@@ -334,7 +414,7 @@ class StreamingDurationHead(nn.Module):
             nn.GELU(),
             nn.Linear(self.query_dim, 1),
         )
-        self.global_bias_scale = 0.25
+        self.coarse_delta_scale = 0.20
         self.local_residual_scale = 0.35
         self.src_rate_init = nn.Parameter(torch.full((1,), math.log(2.0)))
 
@@ -379,11 +459,11 @@ class StreamingDurationHead(nn.Module):
         )
 
         query = self.query_encoder(
-            unit_ids=content_units,
+            unit_ids=content_units.long(),
             log_anchor=log_anchor.float(),
-            edge_cue=torch.zeros_like(log_anchor),
-            sep_hint=silence if silence_mask is not None else sep_hint.float(),
-            local_rate=local_rate_seq,
+            source_rate=local_rate_seq.float(),
+            silence_mask=silence if silence_mask is not None else sep_hint.float(),
+            unit_mask=mask,
         ) * mask.unsqueeze(-1)
 
         attn = None
@@ -429,12 +509,20 @@ class StreamingDurationHead(nn.Module):
             spk_ctx = summary.new_zeros(summary.shape)
 
         global_shift_analytic = (global_rate.float() - local_rate_seq.float()) * speech_mask
-        global_bias_scalar = self.global_bias_scale * torch.tanh(
-            self.global_bias_head(torch.cat([summary, spk_ctx], dim=-1))
-        )
-        global_term = global_shift_analytic + global_bias_scalar.expand_as(global_shift_analytic) * speech_mask
         summary_expand = summary.unsqueeze(1).expand(-1, query.size(1), -1)
         spk_expand = spk_ctx.unsqueeze(1).expand(-1, query.size(1), -1)
+        prefix_query = _masked_prefix_mean(query, speech_mask)
+        coarse_input = torch.cat(
+            [
+                prefix_query,
+                summary_expand,
+                spk_expand,
+            ],
+            dim=-1,
+        )
+        coarse_correction = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_input).squeeze(-1))
+        coarse_correction = coarse_correction * speech_mask
+        global_term = global_shift_analytic + coarse_correction
         residual_input = torch.cat(
             [
                 query,
@@ -450,12 +538,15 @@ class StreamingDurationHead(nn.Module):
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
+        global_bias_scalar = _masked_mean_1d(coarse_correction, speech_mask)
 
         return {
             "unit_logstretch": pred,
             "unit_global_shift": global_term * mask,
             "unit_global_shift_analytic": global_shift_analytic * mask,
             "global_bias_scalar": global_bias_scalar,
+            "unit_coarse_logstretch": global_term * mask,
+            "unit_coarse_correction": coarse_correction * mask,
             "unit_residual_logstretch": residual * mask,
             "role_attn_unit": (attn if attn is not None else mask.unsqueeze(-1)),
             "role_value_unit": (
@@ -478,6 +569,7 @@ class StreamingDurationHead(nn.Module):
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
+            "source_prefix_summary": prefix_query * mask.unsqueeze(-1),
         }
 
 
