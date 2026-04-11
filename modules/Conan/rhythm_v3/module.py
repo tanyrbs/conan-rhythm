@@ -17,7 +17,7 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
-from .role_memory import PromptDurationMemoryEncoder, SharedRoleCodebook, StreamingDurationHead
+from .summary_memory import PromptDurationMemoryEncoder, SharedSummaryCodebook, StreamingDurationHead
 
 
 _PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory"}
@@ -331,9 +331,9 @@ class MixedEffectsDurationModule(nn.Module):
         **unused_kwargs,
     ) -> None:
         super().__init__()
-        role_dim = int(unused_kwargs.pop("role_dim", hidden_size))
-        role_slots = int(unused_kwargs.pop("num_role_slots", max(4, basis_rank)))
-        role_cov_floor = float(unused_kwargs.pop("role_cov_floor", 0.05))
+        summary_dim = int(unused_kwargs.pop("summary_dim", unused_kwargs.pop("role_dim", hidden_size)))
+        summary_slots = int(unused_kwargs.pop("num_summary_slots", unused_kwargs.pop("num_role_slots", max(4, basis_rank))))
+        summary_cov_floor = float(unused_kwargs.pop("summary_cov_floor", unused_kwargs.pop("role_cov_floor", 0.05)))
         max_logstretch = float(unused_kwargs.pop("max_logstretch", 1.2))
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
@@ -378,25 +378,28 @@ class MixedEffectsDurationModule(nn.Module):
             holdout_ratio=operator_holdout_ratio,
         )
         self.projector = StreamingDurationProjector()
+        self.summary_codebook = None
         self.role_codebook = None
         self.prompt_memory_encoder = None
         self.duration_head = None
         if self.backbone_mode == "prompt_summary":
-            self.role_codebook = SharedRoleCodebook(num_slots=role_slots, dim=role_dim)
+            summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
+            self.summary_codebook = summary_codebook
+            self.role_codebook = summary_codebook
             self.prompt_memory_encoder = PromptDurationMemoryEncoder(
                 vocab_size=vocab_size,
-                dim=role_dim,
-                num_slots=role_slots,
+                dim=summary_dim,
+                num_slots=summary_slots,
                 operator_rank=basis_rank,
-                coverage_floor=role_cov_floor,
-                codebook=self.role_codebook,
+                coverage_floor=summary_cov_floor,
+                codebook=self.summary_codebook,
             )
             self.duration_head = StreamingDurationHead(
                 vocab_size=vocab_size,
-                dim=role_dim,
-                num_slots=role_slots,
+                dim=summary_dim,
+                num_slots=summary_slots,
                 max_logstretch=max_logstretch,
-                codebook=self.role_codebook,
+                codebook=self.summary_codebook,
             )
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
@@ -443,12 +446,11 @@ class MixedEffectsDurationModule(nn.Module):
                 raise ValueError(
                     "rhythm_v3 prompt_summary backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
                 )
-            prompt_edge_cue = ref_conditioning.get("prompt_source_boundary_cue")
             return self.prompt_memory_encoder(
                 prompt_content_units=prompt_content_units,
                 prompt_duration_obs=prompt_duration_obs,
                 prompt_mask=prompt_mask,
-                prompt_edge_cue=prompt_edge_cue if isinstance(prompt_edge_cue, torch.Tensor) else None,
+                prompt_edge_cue=None,
             )
         need_progress = self._use_progress_response()
         need_detector = self._use_detector_bank()
@@ -758,10 +760,10 @@ class MixedEffectsDurationModule(nn.Module):
                 raise RuntimeError("prompt_summary backbone is missing StreamingDurationHead.")
             if ref_memory.role is None:
                 raise ValueError("rhythm_v3 prompt_summary backbone requires summary prompt statistics.")
-            source_rate_context, final_rate_ema = self._build_causal_source_rate_context(
-                source_batch=source_batch,
-                speech_commit_mask=speech_commit_mask,
-                state=state,
+            local_rate_ema = (
+                state.local_rate_ema.float()
+                if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
+                else unit_mask.new_zeros((batch_size, 1))
             )
             role_plan = self.duration_head(
                 content_units=source_batch.content_units,
@@ -778,8 +780,7 @@ class MixedEffectsDurationModule(nn.Module):
                 role_value=ref_memory.role_value,
                 role_var=ref_memory.role_var,
                 role_coverage=ref_memory.role_coverage,
-                local_rate_ema=source_rate_context,
-                summary_state=ref_memory.operator_coeff,
+                local_rate_ema=local_rate_ema,
             )
             unit_logstretch = role_plan["unit_logstretch"] * speech_commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
@@ -805,7 +806,7 @@ class MixedEffectsDurationModule(nn.Module):
                 state=state,
                 progress_response=None,
                 detector_response=None,
-                local_response=role_plan["local_response"] * speech_commit_mask.float(),
+                local_response=role_plan["unit_residual_logstretch"] * speech_commit_mask.float(),
                 role_attn_unit=role_plan["role_attn_unit"] * unit_mask.unsqueeze(-1),
                 role_value_unit=role_plan["role_value_unit"] * unit_mask,
                 role_var_unit=role_plan["role_var_unit"] * unit_mask,
@@ -814,7 +815,7 @@ class MixedEffectsDurationModule(nn.Module):
                 unit_duration_raw=unit_duration_raw,
             )
             execution.next_state = self._update_prompt_summary_state(
-                final_rate_ema=final_rate_ema,
+                final_rate_ema=role_plan["local_rate_final"],
                 next_state=execution.next_state,
             )
             return execution

@@ -133,7 +133,6 @@ def test_rhythm_v3_prompt_summary_runtime_uses_static_prompt_memory_and_source_a
     ref_memory = ret["rhythm_ref_conditioning"]
     execution = ret["rhythm_execution"]
     assert ret["rhythm_v3_runtime_mode"] == "prompt_summary"
-    assert ret["rhythm_v3_runtime_mode_legacy"] == "role_memory"
     assert ref_memory.role_value is not None
     assert ref_memory.role_var is not None
     assert ref_memory.role_coverage is not None

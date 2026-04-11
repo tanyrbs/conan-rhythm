@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
-from tasks.Conan.rhythm.targets import DistillConfidenceBundle
+from tasks.Conan.rhythm.rhythm_v2.targets import DistillConfidenceBundle
 
 _DISTILL_CONFIDENCE_OUTPUT_KEYS = {
     "shared": "rhythm_offline_confidence",

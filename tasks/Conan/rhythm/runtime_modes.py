@@ -1,191 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-import torch
-
-from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
-from modules.Conan.rhythm.policy import is_duration_operator_mode, resolve_apply_override
-from modules.Conan.rhythm.stages import detect_rhythm_stage, resolve_teacher_as_main
-from modules.Conan.rhythm_v3.reference_memory import normalize_duration_v3_conditioning
-from tasks.Conan.rhythm.budget_repair import compute_budget_projection_repair_stats
-from tasks.Conan.rhythm.confidence_utils import clamp_confidence_preserve_zero
-from tasks.Conan.rhythm.task_config import (
+from .common.runtime_modes import (
+    TaskRuntimeState,
+    _resolve_online_retimed_sample_confidence,
+    merge_retimed_weight,
+    resolve_task_apply_override,
+    resolve_task_runtime_state,
+)
+from .common.task_config import (
     resolve_task_retimed_target_mode,
     resolve_task_target_mode,
 )
-
-
-@dataclass(frozen=True)
-class TaskRuntimeState:
-    effective_global_step: int
-    stage: str
-    teacher_as_main: bool
-    use_reference: bool
-    rhythm_apply_override: str | bool | None
-    apply_rhythm_render: bool
-    retimed_stage_active: bool
-    disable_source_pitch_supervision: bool
-    disable_acoustic_train_path: bool
-    module_only_objective: bool
-
-
-def resolve_task_apply_override(
-    hparams,
-    *,
-    global_step: int,
-    infer: bool,
-    test: bool,
-    explicit=None,
-):
-    return resolve_apply_override(
-        hparams,
-        infer=infer,
-        test=test,
-        explicit=explicit,
-        current_step=int(global_step),
-    )
-
-
-def resolve_task_runtime_state(
-    hparams,
-    *,
-    global_step: int,
-    infer: bool,
-    test: bool,
-    explicit_apply_override=None,
-    has_f0: bool,
-    has_uv: bool,
-) -> TaskRuntimeState:
-    rhythm_enable_v2 = bool(hparams.get("rhythm_enable_v2", False))
-    rhythm_enable_v3 = bool(
-        hparams.get("rhythm_enable_v3", False)
-        or is_duration_operator_mode(hparams.get("rhythm_mode", ""))
-    )
-    rhythm_enabled = bool(rhythm_enable_v2 or rhythm_enable_v3)
-    effective_global_step = 200000 if test else int(global_step)
-    use_reference = (
-        test
-        or effective_global_step >= int(hparams["random_speaker_steps"])
-        or bool(hparams.get("rhythm_force_reference_conditioning", False))
-    )
-    rhythm_apply_override = resolve_task_apply_override(
-        hparams,
-        global_step=effective_global_step,
-        infer=infer,
-        test=test,
-        explicit=explicit_apply_override,
-    )
-    apply_rhythm_render = resolve_rhythm_apply_mode(
-        hparams,
-        infer=infer,
-        override=rhythm_apply_override,
-    )
-    retimed_stage_active = bool(
-        apply_rhythm_render
-        and not infer
-        and not test
-        and bool(hparams.get("rhythm_use_retimed_target_if_available", False))
-        and effective_global_step >= int(hparams.get("rhythm_retimed_target_start_steps", 0) or 0)
-    )
-    use_retimed_pitch_target = bool(hparams.get("rhythm_use_retimed_pitch_target", False))
-    disable_source_pitch_supervision = bool(
-        retimed_stage_active
-        and (
-            not use_retimed_pitch_target
-            or not has_f0
-            or not has_uv
-            or bool(hparams.get("rhythm_disable_pitch_loss_when_retimed", False))
-        )
-    )
-    module_only_objective = bool(
-        not test
-        and not apply_rhythm_render
-        and rhythm_enabled
-        and bool(hparams.get("rhythm_optimize_module_only", False))
-    )
-    disable_acoustic_train_path = bool(
-        not infer
-        and module_only_objective
-        and bool(hparams.get("rhythm_fastpath_disable_acoustic_when_module_only", True))
-    )
-    disable_source_pitch_supervision = bool(
-        disable_source_pitch_supervision or disable_acoustic_train_path
-    )
-    if rhythm_enable_v3 and not rhythm_enable_v2:
-        return TaskRuntimeState(
-            effective_global_step=effective_global_step,
-            stage="duration_v3",
-            teacher_as_main=False,
-            use_reference=use_reference,
-            rhythm_apply_override=rhythm_apply_override,
-            apply_rhythm_render=bool(apply_rhythm_render),
-            retimed_stage_active=retimed_stage_active,
-            disable_source_pitch_supervision=disable_source_pitch_supervision,
-            disable_acoustic_train_path=disable_acoustic_train_path,
-            module_only_objective=module_only_objective,
-        )
-    stage = detect_rhythm_stage(hparams)
-    teacher_as_main = resolve_teacher_as_main(hparams, stage=stage, infer=bool(infer))
-    return TaskRuntimeState(
-        effective_global_step=effective_global_step,
-        stage=stage,
-        teacher_as_main=teacher_as_main,
-        use_reference=use_reference,
-        rhythm_apply_override=rhythm_apply_override,
-        apply_rhythm_render=bool(apply_rhythm_render),
-        retimed_stage_active=retimed_stage_active,
-        disable_source_pitch_supervision=disable_source_pitch_supervision,
-        disable_acoustic_train_path=disable_acoustic_train_path,
-        module_only_objective=module_only_objective,
-    )
-
-def build_duration_v3_ref_conditioning(sample, *, explicit=None):
-    if explicit is not None and not isinstance(explicit, dict):
-        return explicit
-    source = explicit if isinstance(explicit, dict) else sample
-    return normalize_duration_v3_conditioning(source)
-
-
-def build_legacy_v2_ref_conditioning(sample, *, explicit=None):
-    if explicit is not None:
-        return explicit
-    ref_stats = sample.get("ref_rhythm_stats")
-    ref_trace = sample.get("ref_rhythm_trace")
-    if ref_stats is None or ref_trace is None:
-        return None
-    conditioning = {
-        "ref_rhythm_stats": ref_stats,
-        "ref_rhythm_trace": ref_trace,
-    }
-    for extra_key in (
-        "global_rate",
-        "pause_ratio",
-        "local_rate_trace",
-        "boundary_trace",
-        "planner_ref_stats",
-        "planner_ref_trace",
-        "slow_rhythm_memory",
-        "slow_rhythm_summary",
-        "planner_slow_rhythm_memory",
-        "planner_slow_rhythm_summary",
-        "selector_meta_indices",
-        "selector_meta_scores",
-        "selector_meta_starts",
-        "selector_meta_ends",
-        "ref_phrase_trace",
-        "planner_ref_phrase_trace",
-        "ref_phrase_valid",
-        "ref_phrase_lengths",
-        "ref_phrase_starts",
-        "ref_phrase_ends",
-        "ref_phrase_boundary_strength",
-        "ref_phrase_stats",
-    ):
-        extra_value = sample.get(extra_key)
-        if extra_value is not None:
-            conditioning[extra_key] = extra_value
-    return conditioning
+from .duration_v3.runtime_modes import build_duration_v3_ref_conditioning
+from .rhythm_v2.runtime_modes import (
+    _apply_online_retimed_repair_gate,
+    _apply_online_retimed_trace_reliability_gate,
+    build_legacy_v2_ref_conditioning,
+    collect_legacy_planner_runtime_outputs,
+)
 
 
 def build_rhythm_ref_conditioning(sample, *, explicit=None, backend=None):
@@ -197,147 +29,10 @@ def build_rhythm_ref_conditioning(sample, *, explicit=None, backend=None):
     if explicit is not None and not isinstance(explicit, dict):
         return explicit
     source = explicit if isinstance(explicit, dict) else sample
-    normalized_v3 = normalize_duration_v3_conditioning(source)
+    normalized_v3 = build_duration_v3_ref_conditioning(source)
     if isinstance(normalized_v3, dict) and all(key in normalized_v3 for key in ("global_rate", "operator_coeff")):
         return build_duration_v3_ref_conditioning(sample, explicit=explicit)
     return build_legacy_v2_ref_conditioning(sample, explicit=explicit)
-
-
-def collect_legacy_planner_runtime_outputs(rhythm_execution) -> dict[str, torch.Tensor]:
-    runtime_outputs = {}
-    if rhythm_execution is None or getattr(rhythm_execution, "planner", None) is None:
-        return runtime_outputs
-    planner = rhythm_execution.planner
-    for attr_name, output_key in (
-        ("raw_speech_budget_win", "raw_speech_budget_win"),
-        ("raw_pause_budget_win", "raw_pause_budget_win"),
-        ("effective_speech_budget_win", "effective_speech_budget_win"),
-        ("effective_pause_budget_win", "effective_pause_budget_win"),
-        ("pause_topk_ratio", "rhythm_projector_pause_topk_ratio"),
-        ("pause_soft_selection_active", "rhythm_projector_pause_soft_selection_active"),
-        ("projector_force_full_commit", "rhythm_projector_force_full_commit"),
-        ("pause_selection_mode_id", "rhythm_projector_pause_selection_mode_id"),
-    ):
-        attr_value = getattr(planner, attr_name, None)
-        if attr_value is not None:
-            runtime_outputs[output_key] = attr_value
-    for attr_name in (
-        "feasible_speech_budget_delta",
-        "feasible_pause_budget_delta",
-        "feasible_total_budget_delta",
-        "pause_support_prob_unit",
-        "pause_allocation_weight_unit",
-        "pause_support_logit_unit",
-        "pause_run_length_unit",
-        "pause_breath_debt_unit",
-        "trace_reliability",
-        "local_trace_path_weight",
-        "boundary_trace_path_weight",
-        "trace_phase_gap_runtime",
-        "trace_phase_gap_anchor",
-        "trace_coverage_alpha",
-        "trace_blend",
-        "trace_phrase_blend",
-        "trace_global_blend",
-        "trace_tail_alpha",
-        "trace_gap_alpha",
-        "trace_reuse_alpha",
-        "trace_tail_reuse_count",
-        "ref_phrase_index",
-        "commit_confidence",
-        "planned_commit_frontier",
-    ):
-        attr_value = getattr(planner, attr_name, None)
-        if attr_value is not None:
-            runtime_outputs[attr_name] = attr_value
-    return runtime_outputs
-
-
-def merge_retimed_weight(frame_weight, confidence, *, confidence_floor: float = 0.05):
-    if frame_weight is None and confidence is None:
-        return None
-    if confidence is not None:
-        confidence = clamp_confidence_preserve_zero(
-            confidence.float(),
-            floor=float(confidence_floor),
-        )
-    if frame_weight is None:
-        return confidence
-    frame_weight = frame_weight.float()
-    if confidence is None:
-        return frame_weight
-    while confidence.dim() < frame_weight.dim():
-        confidence = confidence.unsqueeze(-1)
-    return frame_weight * confidence
-
-
-def _resolve_online_retimed_sample_confidence(sample, model_out):
-    reference = model_out.get("rhythm_online_retimed_frame_weight") if model_out is not None else None
-    if not isinstance(reference, torch.Tensor) and model_out is not None:
-        reference = model_out.get("rhythm_online_retimed_mel_tgt")
-    reference_device = reference.device if isinstance(reference, torch.Tensor) else None
-    for key in (
-        "rhythm_retimed_target_confidence",
-        "rhythm_teacher_confidence",
-        "rhythm_target_confidence",
-    ):
-        for source in (model_out, sample):
-            if source is None:
-                continue
-            value = source.get(key)
-            if value is None:
-                continue
-            if torch.is_tensor(value):
-                value = value.float()
-                if reference_device is not None:
-                    value = value.to(device=reference_device)
-                return value
-            return torch.as_tensor(value, dtype=torch.float32, device=reference_device)
-    return None
-
-
-def _apply_online_retimed_repair_gate(frame_weight, model_out):
-    if frame_weight is None or model_out is None:
-        return frame_weight
-    execution = model_out.get("rhythm_execution")
-    planner = getattr(execution, "planner", None) if execution is not None else None
-    if planner is None:
-        return frame_weight
-    repair_stats = compute_budget_projection_repair_stats(planner)
-    effective_total = (
-        repair_stats.effective_speech_budget + repair_stats.effective_pause_budget
-    ).clamp_min(0.0)
-    repair_mass = repair_stats.repair_mass.clamp_min(0.0)
-    # Keep clean short-utterance online targets at full weight when no repair happened.
-    # clamp_min(1.0) would incorrectly shrink samples with effective_total < 1 even when
-    # repair_mass == 0.
-    repair_gate = (effective_total / (effective_total + repair_mass).clamp_min(1e-6)).clamp_(0.0, 1.0)
-    repair_gate = repair_gate.to(device=frame_weight.device, dtype=frame_weight.dtype)
-    while repair_gate.dim() < frame_weight.dim():
-        repair_gate = repair_gate.unsqueeze(-1)
-    return frame_weight * repair_gate
-
-
-def _apply_online_retimed_trace_reliability_gate(frame_weight, model_out):
-    if frame_weight is None or model_out is None:
-        return frame_weight
-    execution = model_out.get("rhythm_execution")
-    planner = getattr(execution, "planner", None) if execution is not None else None
-    if planner is None:
-        return frame_weight
-    reliability_gate = getattr(planner, "local_trace_path_weight", None)
-    if reliability_gate is None:
-        reliability_gate = getattr(planner, "trace_reliability", None)
-    if reliability_gate is None:
-        return frame_weight
-    reliability_gate = reliability_gate.float().to(device=frame_weight.device, dtype=frame_weight.dtype)
-    while reliability_gate.dim() < frame_weight.dim():
-        reliability_gate = reliability_gate.unsqueeze(-1)
-    # Expose the scalar gate for observability so stage-3 can tell whether
-    # online retimed supervision is being downweighted because the local
-    # reference trace has already become unreliable.
-    model_out["rhythm_online_retimed_trace_gate"] = reliability_gate.detach()
-    return frame_weight * reliability_gate
 
 
 def resolve_acoustic_target_post_model(
@@ -411,3 +106,16 @@ def resolve_acoustic_target_post_model(
             f"({stage}) but neither online nor cached retimed targets are available."
         )
     return target, is_retimed, frame_weight, source
+
+
+__all__ = [
+    "TaskRuntimeState",
+    "build_duration_v3_ref_conditioning",
+    "build_legacy_v2_ref_conditioning",
+    "build_rhythm_ref_conditioning",
+    "collect_legacy_planner_runtime_outputs",
+    "merge_retimed_weight",
+    "resolve_acoustic_target_post_model",
+    "resolve_task_apply_override",
+    "resolve_task_runtime_state",
+]

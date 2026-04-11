@@ -121,6 +121,7 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
         "rhythm_v3_base",
         "rhythm_v3_dur",
         "rhythm_v3_op",
+        "rhythm_v3_summary",
         "rhythm_v3_ortho",
         "rhythm_v3_pref",
         "rhythm_v3_cons",
@@ -137,6 +138,7 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
     for legacy_key in ("rhythm_v3_break", "rhythm_exec_pause", "rhythm_budget", "rhythm_prefix_clock", "rhythm_prefix_backlog"):
         assert legacy_key not in losses
     assert torch.equal(losses["rhythm_is_v3_bundle"], torch.tensor(1.0, device=losses["rhythm_is_v3_bundle"].device))
+    assert torch.allclose(losses["rhythm_v3_summary"], losses["rhythm_v3_op"])
 
 
 def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_loss():
@@ -194,9 +196,11 @@ def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_lo
     assert targets.prompt_role_value is not None
     assert targets.prompt_role_var is not None
     losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
+    assert "rhythm_v3_summary" in losses
+    assert torch.allclose(losses["rhythm_v3_summary"], losses["rhythm_v3_op"])
     assert "rhythm_v3_mem" in losses
-    assert torch.allclose(losses["rhythm_v3_mem"], losses["rhythm_v3_op"])
-    assert torch.isfinite(losses["rhythm_v3_op"]).all()
+    assert torch.allclose(losses["rhythm_v3_mem"], losses["rhythm_v3_summary"])
+    assert torch.isfinite(losses["rhythm_v3_summary"]).all()
 
 
 def test_rhythm_v3_loss_routing_keeps_single_trainable_total():

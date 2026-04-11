@@ -172,21 +172,6 @@ class StreamingVoiceConversion:
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
             "prompt_unit_mask": prompt_unit_mask,
-            "prompt_source_boundary_cue": torch.tensor(
-                cache.get("source_boundary_cue", np.zeros_like(cache["dur_anchor_src"])),
-                device=self.device,
-                dtype=torch.float32,
-            ).unsqueeze(0),
-            "prompt_phrase_group_pos": torch.tensor(
-                cache.get("phrase_group_pos", np.zeros_like(cache["dur_anchor_src"])),
-                device=self.device,
-                dtype=torch.float32,
-            ).unsqueeze(0),
-            "prompt_phrase_final_mask": torch.tensor(
-                cache.get("phrase_final_mask", np.zeros_like(cache["dur_anchor_src"])),
-                device=self.device,
-                dtype=torch.float32,
-            ).unsqueeze(0),
         }
 
     def _render_vocoder_chunk(

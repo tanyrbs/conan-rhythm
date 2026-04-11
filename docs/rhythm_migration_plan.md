@@ -1,4 +1,4 @@
-# Rhythm Migration Plan (2026-04-10)
+# Rhythm Migration Plan (2026-04-11)
 
 This file is now the **short current-mechanism note** for rhythm.
 Historical slot-memory, pointer/planner, and oversized v2 stage narratives were
@@ -66,22 +66,22 @@ So the repository should no longer be described as
 
 The preferred runtime control surface is now:
 
-- `rhythm_v3_backbone: global_only | operator | role_memory`
+- `rhythm_v3_backbone: global_only | operator | prompt_summary`
 - `rhythm_v3_warp_mode: none | progress | detector`
 - `rhythm_v3_allow_hybrid: false | true`
 - `rhythm_v3_anchor_mode: baseline | source_observed`
 
 For the new simplified streaming VC path, the preferred setting is:
 
-- `rhythm_v3_backbone: role_memory`
+- `rhythm_v3_backbone: prompt_summary`
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
-- `rhythm_role_dim`
-- `rhythm_num_role_slots`
+- `rhythm_summary_dim`
+- `rhythm_num_summary_slots`
 - `rhythm_prompt_cov_floor`
 
 This path keeps `RhythmUnitFrontend`, removes timeline-consuming reference use
-from the duration writer, and replaces prompt solving with static role-memory
+from the duration writer, and replaces prompt solving with static prompt-summary
 statistics (`role_value`, `role_var`, `role_coverage`) plus a single learned
 duration head.
 
@@ -202,12 +202,12 @@ The compact committed surface is the one in:
 
 - `rhythm_total`
 - `rhythm_v3_dur`
-- `rhythm_v3_op`
+- `rhythm_v3_summary`
 - `rhythm_v3_pref`
-- `rhythm_v3_zero`
+- `rhythm_v3_cons`
 
-Diagnostics like `rhythm_v3_cons` and `rhythm_v3_ortho` may still exist in
-code/tests, but they are not the compact example contract.
+Legacy aliases like `rhythm_v3_op` / `rhythm_v3_mem` may still exist in
+code/tests, but `rhythm_v3_summary` is the canonical public name.
 
 ## 8. File map for the current story
 
@@ -221,11 +221,19 @@ code/tests, but they are not the compact example contract.
 
 ### Training surfaces
 
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/metrics.py`
-- `tasks/Conan/rhythm/task_config.py`
-- `tasks/Conan/rhythm/task_mixin.py`
+- canonical split:
+  - `tasks/Conan/rhythm/common/`
+  - `tasks/Conan/rhythm/duration_v3/`
+  - `tasks/Conan/rhythm/rhythm_v2/`
+- top-level compatibility facade:
+  - `tasks/Conan/rhythm/targets.py`
+  - `tasks/Conan/rhythm/losses.py`
+  - `tasks/Conan/rhythm/metrics.py`
+  - `tasks/Conan/rhythm/task_config.py`
+  - `tasks/Conan/rhythm/runtime_modes.py`
+  - `tasks/Conan/rhythm/task_runtime_support.py`
+  - `tasks/Conan/rhythm/task_mixin.py`
+  - `tasks/Conan/rhythm/dataset_mixin.py`
 
 ### Inference/runtime utilities
 
@@ -238,6 +246,8 @@ code/tests, but they are not the compact example contract.
 ### Ready enough for
 
 - one-branch `rhythm_v3` code maintenance
+- shared/common task utilities separated from `duration_v3` and legacy `rhythm_v2`
+- stable top-level task facade for `tasks.Conan.Conan`, `tasks.Conan.dataset`, and `inference.Conan`
 - local mechanism ablations
 - baseline/global/progress/detector/operator comparative experiments
 - focused streaming-oriented evaluation
@@ -278,3 +288,32 @@ Authoritative current docs:
 - `README.md`
 - `docs/rhythm_migration_plan.md`
 - `inference/README.md`
+
+## 12. Validation snapshot after task split
+
+Validated locally after the `tasks/Conan/rhythm -> common / duration_v3 / rhythm_v2` split:
+
+- `python -m compileall -q tasks/Conan/rhythm tasks/Conan/Conan.py tasks/Conan/dataset.py inference/Conan.py`
+- import smoke:
+  - `tasks.Conan.rhythm`
+  - `tasks.Conan.Conan`
+  - `tasks.Conan.dataset`
+  - `inference.Conan`
+- targeted pytest bundle:
+  - `tests/rhythm/test_rhythm_v3_losses.py`
+  - `tests/rhythm/test_rhythm_v3_metrics.py`
+  - `tests/rhythm/test_loss_components.py`
+  - `tests/rhythm/test_target_builder.py`
+  - `tests/rhythm/test_task_config_v3.py`
+  - `tests/rhythm/test_runtime_modes_v3.py`
+  - `tests/rhythm/test_task_runtime_support.py`
+  - `tests/rhythm/test_inference_entrypoints.py`
+  - `tests/rhythm/test_reference_sidecar.py`
+  - `tests/rhythm/test_optimizer_param_collection.py`
+  - `tests/rhythm/test_pitch_supervision_runtime.py`
+  - `tests/rhythm/test_loss_confidence_routing.py`
+  - `tests/rhythm/test_metrics_masking.py`
+  - `tests/rhythm/test_streaming_chunk_metrics.py`
+  - `tests/rhythm/test_budget_surfaces.py`
+
+Result: **192 passed**.

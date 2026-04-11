@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 
 from modules.Conan.rhythm.source_boundary import resolve_boundary_score_unit
-from tasks.Conan.rhythm.losses import RhythmLossTargets
+from tasks.Conan.rhythm.rhythm_v2.losses import RhythmLossTargets
 
 
 def _normalize_optional_confidence(confidence, *, batch_size: int, device: torch.device) -> torch.Tensor:

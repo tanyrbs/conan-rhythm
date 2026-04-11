@@ -39,8 +39,11 @@ rhythm_v3_warp_mode: none
 rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
 rhythm_v3_anchor_mode: source_observed
-rhythm_role_dim: 64
-rhythm_num_role_slots: 1
+rhythm_summary_dim: 64
+rhythm_num_summary_slots: 1
+# legacy aliases still accepted:
+# rhythm_role_dim: 64
+# rhythm_num_role_slots: 1
 rhythm_prompt_cov_floor: 0.05
 rhythm_operator_ridge_lambda: 1.0
 rhythm_global_shrink_tau: 8.0
@@ -66,10 +69,10 @@ rhythm_pseudo_source_local_span_prob: 0.20
 rhythm_pseudo_source_local_scale_min: 0.70
 rhythm_pseudo_source_local_scale_max: 1.30
 rhythm_pseudo_source_mask_prob: 0.10
-rhythm_pseudo_source_flatten_boundary_prob: 0.15
+rhythm_pseudo_source_flatten_boundary_prob: 0.0
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_summary: 0.0
+lambda_rhythm_summary: 0.10
 lambda_rhythm_pref: 0.0
 lambda_rhythm_base: 0.0
 lambda_rhythm_cons: 0.10

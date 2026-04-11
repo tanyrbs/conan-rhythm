@@ -5,9 +5,6 @@ from collections.abc import Mapping
 import torch
 import torch.nn as nn
 
-from modules.Conan.rhythm.bridge import resolve_rhythm_apply_mode
-from modules.Conan.rhythm.renderer import render_rhythm_sequence
-
 from .contracts import (
     ReferenceDurationMemory,
     collect_duration_v3_source_cache,
@@ -15,7 +12,9 @@ from .contracts import (
     move_reference_duration_memory,
     move_source_unit_batch,
 )
+from .bridge import resolve_rhythm_apply_mode
 from .module import MixedEffectsDurationModule
+from .renderer import render_rhythm_sequence
 from .unit_frontend import DurationUnitFrontend
 
 _PROMPT_UNIT_REQUIRED_KEYS = (
@@ -51,8 +50,13 @@ class ConanDurationAdapter(nn.Module):
             vocab_size=vocab_size,
             hidden_size=int(hparams.get("rhythm_hidden_size", hidden_size)),
             basis_rank=int(hparams.get("rhythm_response_rank", 12)),
-            role_dim=int(hparams.get("rhythm_role_dim", hparams.get("rhythm_hidden_size", hidden_size))),
-            num_role_slots=int(hparams.get("rhythm_num_role_slots", 12)),
+            summary_dim=int(
+                hparams.get(
+                    "rhythm_summary_dim",
+                    hparams.get("rhythm_role_dim", hparams.get("rhythm_hidden_size", hidden_size)),
+                )
+            ),
+            num_summary_slots=int(hparams.get("rhythm_num_summary_slots", hparams.get("rhythm_num_role_slots", 12))),
             role_cov_floor=float(hparams.get("rhythm_prompt_cov_floor", 0.05)),
             max_logstretch=float(hparams.get("rhythm_max_logstretch", 1.2)),
             response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
@@ -229,10 +233,6 @@ class ConanDurationAdapter(nn.Module):
         ret["commit_frontier"] = execution.commit_frontier
         ret["rhythm_v3_runtime_mode"] = self.module.runtime_mode
         ret["rhythm_v3_backbone_mode"] = self.module.backbone_mode
-        if self.module.runtime_mode == "prompt_summary":
-            ret["rhythm_v3_runtime_mode_legacy"] = "role_memory"
-        if self.module.backbone_mode == "prompt_summary":
-            ret["rhythm_v3_backbone_mode_legacy"] = "role_memory"
         ret["rhythm_v3_warp_mode"] = self.module.warp_mode
         ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
@@ -241,7 +241,7 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_v3_summary_state_dim"] = float(ref_memory.operator_coeff.size(1))
         if ref_memory is not None and isinstance(getattr(ref_memory, "role_value", None), torch.Tensor):
             ret["rhythm_v3_summary_channels"] = float(ref_memory.role_value.size(1))
-            ret["rhythm_v3_role_slots"] = float(ref_memory.role_value.size(1))
+            ret["rhythm_v3_summary_slots"] = float(ref_memory.role_value.size(1))
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
 

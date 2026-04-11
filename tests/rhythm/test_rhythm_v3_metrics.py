@@ -107,6 +107,7 @@ def test_rhythm_v3_metric_sections_cover_committed_duration_path_only():
         "rhythm_metric_rhythm_total",
         "rhythm_metric_rhythm_v3_base",
         "rhythm_metric_rhythm_v3_dur",
+        "rhythm_metric_rhythm_v3_summary",
         "rhythm_metric_rhythm_v3_op",
         "rhythm_metric_rhythm_v3_zero",
         "rhythm_metric_rhythm_v3_ortho",

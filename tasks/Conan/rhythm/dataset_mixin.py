@@ -12,7 +12,8 @@ import numpy as np
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
-from tasks.Conan.rhythm.targets import build_pseudo_source_duration_context
+from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
+from tasks.Conan.rhythm.duration_v3.targets import build_pseudo_source_duration_context
 from modules.Conan.rhythm.supervision import (
     RHYTHM_CACHE_VERSION,
     build_reference_rhythm_conditioning,
@@ -572,7 +573,7 @@ class RhythmConanDatasetMixin:
             return False
         if str(self.prefix).lower() != "train":
             return False
-        if str(self.hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() not in {"role_memory", "prompt_summary"}:
+        if not is_duration_v3_prompt_summary_backbone(self.hparams.get("rhythm_v3_backbone", "global_only")):
             return False
         if str(self.hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower() != "source_observed":
             return False

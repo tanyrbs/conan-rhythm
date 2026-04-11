@@ -7,7 +7,7 @@ from typing import Optional, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from modules.Conan.rhythm.frame_plan import RhythmFramePlan
+    from .frame_plan import RhythmFramePlan
 
 
 @dataclass
@@ -152,6 +152,18 @@ class ReferenceDurationMemory:
         return None if self.role is None else self.role.role_coverage
 
     @property
+    def summary_value(self) -> Optional[torch.Tensor]:
+        return self.role_value
+
+    @property
+    def summary_var(self) -> Optional[torch.Tensor]:
+        return self.role_var
+
+    @property
+    def summary_coverage(self) -> Optional[torch.Tensor]:
+        return self.role_coverage
+
+    @property
     def prompt_basis_activation(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_basis_activation
 
@@ -235,6 +247,14 @@ class ReferenceDurationMemory:
     def prompt_role_fit(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_role_fit
 
+    @property
+    def prompt_summary_attn(self) -> Optional[torch.Tensor]:
+        return self.prompt_role_attn
+
+    @property
+    def prompt_summary_fit(self) -> Optional[torch.Tensor]:
+        return self.prompt_role_fit
+
 
 @dataclass
 class DurationRuntimeState:
@@ -286,6 +306,22 @@ class DurationExecution:
     @property
     def planner(self):
         return None
+
+    @property
+    def summary_attn_unit(self) -> Optional[torch.Tensor]:
+        return self.role_attn_unit
+
+    @property
+    def summary_value_unit(self) -> Optional[torch.Tensor]:
+        return self.role_value_unit
+
+    @property
+    def summary_var_unit(self) -> Optional[torch.Tensor]:
+        return self.role_var_unit
+
+    @property
+    def summary_conf_unit(self) -> Optional[torch.Tensor]:
+        return self.role_conf_unit
 
 
 def _move_tensor(value, *, device: torch.device, dtype: torch.dtype | None = None):

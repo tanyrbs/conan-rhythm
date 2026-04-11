@@ -5,9 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
-from modules.Conan.rhythm.frame_plan import build_frame_plan_from_execution
-
 from .contracts import DurationExecution, DurationRuntimeState
+from .frame_plan import build_frame_plan_from_execution
 
 
 class StreamingDurationProjector(nn.Module):

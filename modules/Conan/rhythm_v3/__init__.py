@@ -1,6 +1,10 @@
 from .contracts import DurationExecution, DurationRuntimeState, ReferenceDurationMemory, SourceUnitBatch
 from .module import MixedEffectsDurationModule, StreamingDurationModule
-from .role_memory import PromptDurationMemoryEncoder, StreamingDurationHead
+from .summary_memory import (
+    PromptDurationMemoryEncoder,
+    SharedSummaryCodebook,
+    StreamingDurationHead,
+)
 from .runtime_adapter import ConanDurationAdapter
 
 __all__ = [
@@ -8,6 +12,7 @@ __all__ = [
     "DurationExecution",
     "MixedEffectsDurationModule",
     "PromptDurationMemoryEncoder",
+    "SharedSummaryCodebook",
     "DurationRuntimeState",
     "ReferenceDurationMemory",
     "SourceUnitBatch",

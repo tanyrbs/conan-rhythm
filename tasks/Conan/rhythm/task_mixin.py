@@ -26,38 +26,43 @@ from tasks.Conan.rhythm.runtime_teacher_supervision import (
     build_runtime_teacher_supervision_targets as build_runtime_teacher_supervision_targets_helper,
 )
 from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
-from tasks.Conan.rhythm.runtime_modes import (
-    build_duration_v3_ref_conditioning,
-    build_legacy_v2_ref_conditioning,
-    collect_legacy_planner_runtime_outputs,
-    resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
-    resolve_task_runtime_state,
+from tasks.Conan.rhythm.common.runtime_modes import resolve_task_runtime_state
+from tasks.Conan.rhythm.duration_v3.runtime_modes import build_duration_v3_ref_conditioning
+from tasks.Conan.rhythm.duration_v3.targets import (
+    DurationV3TargetBuildConfig,
+    build_duration_v3_loss_targets,
 )
+from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 from tasks.Conan.rhythm.reference_regularization import (
     build_predicted_compact_reference_descriptor,
     build_target_compact_reference_descriptor,
     compute_descriptor_consistency_loss,
     compute_group_reference_contrastive_loss,
 )
+from tasks.Conan.rhythm.rhythm_v2.runtime_modes import (
+    build_legacy_v2_ref_conditioning,
+    collect_legacy_planner_runtime_outputs,
+)
+from tasks.Conan.rhythm.rhythm_v2.targets import (
+    RhythmTargetBuildConfig,
+    build_identity_rhythm_loss_targets,
+    build_rhythm_loss_targets_from_sample,
+    scale_rhythm_loss_terms,
+)
+from tasks.Conan.rhythm.runtime_modes import (
+    resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
+)
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
-from tasks.Conan.rhythm.task_config import (
+from tasks.Conan.rhythm.common.task_config import (
     parse_task_optional_bool,
     resolve_task_distill_surface,
     resolve_task_pause_boundary_weight,
     resolve_task_primary_target_surface,
     resolve_task_retimed_target_mode,
     resolve_task_target_mode,
-    validate_rhythm_training_hparams,
 )
-from tasks.Conan.rhythm.targets import (
-    DurationV3TargetBuildConfig,
-    RhythmTargetBuildConfig,
-    build_duration_v3_loss_targets,
-    build_identity_rhythm_loss_targets,
-    build_rhythm_loss_targets_from_sample,
-    scale_rhythm_loss_terms,
-)
+from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
 from modules.Conan.rhythm.policy import (
     resolve_apply_override,
     resolve_prefix_state_lambda,
@@ -212,7 +217,7 @@ class RhythmConanTaskMixin:
     def _collect_rhythm_v3_baseline_only_params(self):
         if self.model is None or not getattr(self.model, "rhythm_enable_v3", False):
             return []
-        if str(hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() in {"role_memory", "prompt_summary"}:
+        if is_duration_v3_prompt_summary_backbone(hparams.get("rhythm_v3_backbone", "global_only")):
             return []
         baseline_module = self._get_rhythm_v3_baseline_module()
         if baseline_module is None:
@@ -221,7 +226,7 @@ class RhythmConanTaskMixin:
 
     @staticmethod
     def _should_collect_rhythm_v3_baseline_params() -> bool:
-        if str(hparams.get("rhythm_v3_backbone", "global_only") or "global_only").strip().lower() in {"role_memory", "prompt_summary"}:
+        if is_duration_v3_prompt_summary_backbone(hparams.get("rhythm_v3_backbone", "global_only")):
             return False
         baseline_mode = RhythmConanTaskMixin._resolve_rhythm_v3_baseline_train_mode()
         if baseline_mode != "joint":

@@ -11,7 +11,7 @@ The honest reading of the current repository is:
 
 - **task scope**: speech-unit duration transfer
 - **research shape**: maintained `rhythm_v3` mainline with backward-compatible ablations
-- **recommended config**: `role_memory + source_observed + deterministic projector`
+- **recommended config**: `prompt_summary + source_observed + carry-only projector`
 - **legacy v2**: compatibility, teacher/export history, old checkpoints only
 
 ## Current code-level prediction form
@@ -122,7 +122,7 @@ instead of supervising through the live execution-side baseline path.
 4. **progress warp candidate**
 5. **detector-bank candidate**
 6. **shared causal local basis + prompt-conditioned operator**
-7. **static prompt role-memory + single duration writer**
+7. **static prompt summary + single duration writer**
 8. **optional centered source residual ablation**
 
 Only the first three are unconditional. The rest are controlled by
@@ -130,13 +130,13 @@ Only the first three are unconditional. The rest are controlled by
 
 Recommended simplified VC path:
 
-- `rhythm_v3_backbone: role_memory`
+- `rhythm_v3_backbone: prompt_summary`
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
-- `rhythm_role_dim`
-- `rhythm_num_role_slots`
+- `rhythm_summary_dim`
+- `rhythm_num_summary_slots`
 - `rhythm_prompt_cov_floor`
-- `lambda_rhythm_mem` or `lambda_rhythm_op`
+- `lambda_rhythm_summary`
 
 For the progress-warp candidate, the preferred config keys are now:
 
@@ -159,7 +159,7 @@ The current v3 story is **not**:
 Separator / pause duration is **not** the core mechanism claim. The branch
 scope is speech-unit duration transfer.
 
-The new `role_memory` candidate keeps the same speech-unit scope but changes
+The maintained `prompt_summary` candidate keeps the same speech-unit scope but changes
 the writer semantics: prompt is distilled once into static role statistics
 (`mu`, `sigma^2`, coverage), source observed duration is the anchor, and only
 sealed units are committed through the integer projector.
@@ -209,12 +209,12 @@ The compact public contract is defined by:
 
 - `rhythm_total`
 - `rhythm_v3_dur`
-- `rhythm_v3_op`
+- `rhythm_v3_summary`
 - `rhythm_v3_pref`
-- `rhythm_v3_zero`
+- `rhythm_v3_cons`
 
-Optional/internal diagnostics like `rhythm_v3_cons` and `rhythm_v3_ortho`
-exist in code/tests but are not the compact public example surface.
+Legacy aliases like `rhythm_v3_op` / `rhythm_v3_mem` still exist in
+code/tests for compatibility, but they are no longer the recommended public names.
 
 ## Main files
 
@@ -228,11 +228,19 @@ exist in code/tests but are not the compact public example surface.
 
 ### Training surfaces
 
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/metrics.py`
-- `tasks/Conan/rhythm/task_config.py`
-- `tasks/Conan/rhythm/task_mixin.py`
+- canonical shared/task split now lives under:
+  - `tasks/Conan/rhythm/common/`
+  - `tasks/Conan/rhythm/duration_v3/`
+  - `tasks/Conan/rhythm/rhythm_v2/`
+- top-level compatibility facade remains at:
+  - `tasks/Conan/rhythm/targets.py`
+  - `tasks/Conan/rhythm/losses.py`
+  - `tasks/Conan/rhythm/metrics.py`
+  - `tasks/Conan/rhythm/task_config.py`
+  - `tasks/Conan/rhythm/runtime_modes.py`
+  - `tasks/Conan/rhythm/task_runtime_support.py`
+  - `tasks/Conan/rhythm/task_mixin.py`
+  - `tasks/Conan/rhythm/dataset_mixin.py`
 
 ### Inference/runtime helpers
 
@@ -245,6 +253,8 @@ exist in code/tests but are not the compact public example surface.
 ### What is ready now
 
 - a single `rhythm_v3` code mainline
+- a real task-layer split: `common / duration_v3 / rhythm_v2`
+- lazy top-level rhythm package init without circular import on `losses/targets/metrics`
 - baseline protocol with lifecycle control
 - stop-gradient baseline separation through operator and stream-side losses
 - compact v3 config/validator surface
@@ -279,14 +289,24 @@ Legacy operational notes only:
 
 ```bash
 py -3 -B -m pytest -q ^
-  tests/rhythm/test_task_config_v3.py ^
-  tests/rhythm/test_conan_task_build_tts_model_v3.py ^
-  tests/rhythm/test_optimizer_param_collection.py ^
   tests/rhythm/test_rhythm_v3_losses.py ^
-  tests/rhythm/test_rhythm_v3_runtime.py ^
   tests/rhythm/test_rhythm_v3_metrics.py ^
-  tests/rhythm/test_inference_entrypoints.py
+  tests/rhythm/test_loss_components.py ^
+  tests/rhythm/test_target_builder.py ^
+  tests/rhythm/test_task_config_v3.py ^
+  tests/rhythm/test_runtime_modes_v3.py ^
+  tests/rhythm/test_task_runtime_support.py ^
+  tests/rhythm/test_inference_entrypoints.py ^
+  tests/rhythm/test_reference_sidecar.py ^
+  tests/rhythm/test_optimizer_param_collection.py ^
+  tests/rhythm/test_pitch_supervision_runtime.py ^
+  tests/rhythm/test_loss_confidence_routing.py ^
+  tests/rhythm/test_metrics_masking.py ^
+  tests/rhythm/test_streaming_chunk_metrics.py ^
+  tests/rhythm/test_budget_surfaces.py
 ```
+
+Current local smoke result for the list above: **192 passed**.
 
 ## License
 
