@@ -329,6 +329,11 @@ class DurationExecution:
     local_residual: Optional[torch.Tensor] = None
     source_rate_seq: Optional[torch.Tensor] = None
     source_prefix_summary: Optional[torch.Tensor] = None
+    g_ref: Optional[torch.Tensor] = None
+    g_src_prefix: Optional[torch.Tensor] = None
+    eval_mode: Optional[str] = None
+    prompt_speech_ratio: Optional[torch.Tensor] = None
+    prompt_valid_len: Optional[torch.Tensor] = None
     prefix_unit_offset: Optional[torch.Tensor] = None
     projector_budget_hit_pos: Optional[torch.Tensor] = None
     projector_budget_hit_neg: Optional[torch.Tensor] = None
@@ -831,6 +836,19 @@ def validate_reference_duration_memory(
         if value.size(0) != batch_size:
             raise ValueError(
                 f"ReferenceDurationMemory.{name} batch mismatch: expected {batch_size}, got {tuple(value.shape)}"
+            )
+    if (
+        isinstance(memory.prompt_valid_mask, torch.Tensor)
+        and isinstance(memory.prompt_speech_mask, torch.Tensor)
+    ):
+        if tuple(memory.prompt_valid_mask.shape) != tuple(memory.prompt_speech_mask.shape):
+            raise ValueError(
+                "ReferenceDurationMemory.prompt_valid_mask/prompt_speech_mask shape mismatch: "
+                f"{tuple(memory.prompt_valid_mask.shape)} vs {tuple(memory.prompt_speech_mask.shape)}"
+            )
+        if bool((memory.prompt_speech_mask > (memory.prompt_valid_mask + 1.0e-6)).any().item()):
+            raise ValueError(
+                "ReferenceDurationMemory.prompt_speech_mask must be bounded by prompt_valid_mask."
             )
     validate_structured_duration_operator_memory(memory.operator, batch_size=batch_size)
     validate_structured_progress_duration_memory(memory.progress, batch_size=batch_size)

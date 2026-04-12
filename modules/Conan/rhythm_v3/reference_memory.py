@@ -7,7 +7,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from .g_stats import compute_global_rate, normalize_global_rate_variant
+from .g_stats import (
+    build_global_rate_support_mask,
+    compute_global_rate,
+    normalize_global_rate_variant,
+)
 from .contracts import (
     PromptConditioningEvidence,
     ReferenceDurationMemory,
@@ -26,6 +30,8 @@ _V3_MEMORY_OPTIONAL_FIELDS = (
     "role_value",
     "role_var",
     "role_coverage",
+    "prompt_valid_mask",
+    "prompt_speech_mask",
     "prompt_basis_activation",
     "prompt_operator_fit",
     "prompt_operator_cv_fit",
@@ -101,6 +107,8 @@ _V3_REMOVED_MEMORY_ALIASES = {
 @dataclass(frozen=True)
 class PromptOperatorSummary:
     prompt_mask: torch.Tensor
+    prompt_valid_mask: torch.Tensor
+    prompt_speech_mask: torch.Tensor
     prompt_log_base: torch.Tensor
     prompt_log_duration: torch.Tensor | None
     prompt_log_residual: torch.Tensor
@@ -171,6 +179,10 @@ def _collect_nested_v3_memory(source: Mapping[str, Any]) -> dict[str, Any] | Non
         normalized["operator_coeff"] = operator_coeff
     if detector_coeff is not None:
         normalized["detector_coeff"] = detector_coeff
+    for key in ("prompt_valid_mask", "prompt_speech_mask"):
+        value = source.get(key)
+        if value is not None:
+            normalized[key] = value
     progress = source.get("progress")
     progress_profile = _lookup_mapping_or_attr(progress, "progress_profile")
     if progress_profile is not None:
@@ -246,6 +258,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         use_log_base_rate: bool = False,
         g_variant: str = "raw_median",
         g_trim_ratio: float = 0.2,
+        drop_edge_runs_for_g: int = 0,
     ) -> None:
         super().__init__()
         self.progress_bins = int(max(1, progress_bins))
@@ -260,6 +273,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
         self.g_variant = normalize_global_rate_variant(g_variant)
         self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
+        self.g_drop_edge_runs = max(0, int(drop_edge_runs_for_g))
 
     @staticmethod
     def _masked_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -443,13 +457,18 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_unit_anchor_base: torch.Tensor | None,
         prompt_log_base: torch.Tensor | None,
         prompt_unit_mask: torch.Tensor | None,
+        prompt_valid_mask: torch.Tensor | None,
         prompt_speech_mask: torch.Tensor | None = None,
         prompt_global_weight: torch.Tensor | None = None,
         prompt_unit_log_prior: torch.Tensor | None = None,
     ) -> PromptOperatorSummary:
-        prompt_mask = self._resolve_prompt_mask(
-            prompt_duration_obs=prompt_duration_obs,
-            prompt_unit_mask=prompt_unit_mask,
+        prompt_mask = (
+            prompt_valid_mask.float().clamp(0.0, 1.0)
+            if isinstance(prompt_valid_mask, torch.Tensor)
+            else self._resolve_prompt_mask(
+                prompt_duration_obs=prompt_duration_obs,
+                prompt_unit_mask=prompt_unit_mask,
+            )
         )
         if self.use_log_base_rate:
             resolved_log_base = self._resolve_prompt_log_base(
@@ -469,23 +488,22 @@ class PromptConditionedOperatorEstimator(nn.Module):
             if isinstance(prompt_speech_mask, torch.Tensor)
             else prompt_mask
         )
-        support_mask = torch.where(
-            (speech_mask.sum(dim=1, keepdim=True) > 0.0),
-            speech_mask,
-            prompt_mask,
+        support_mask = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=prompt_mask,
+            drop_edge_runs=self.g_drop_edge_runs,
         )
-        global_rate = prompt_log_residual.new_zeros((prompt_log_residual.size(0), 1))
-        for batch_idx in range(int(prompt_log_residual.size(0))):
-            global_rate[batch_idx, 0] = compute_global_rate(
-                log_dur=prompt_log_residual[batch_idx],
-                speech_mask=support_mask[batch_idx],
-                valid_mask=prompt_mask[batch_idx],
-                variant=self.g_variant,
-                weight=(None if prompt_global_weight is None else prompt_global_weight[batch_idx]),
-                trim_ratio=self.g_trim_ratio,
-                unit_ids=prompt_content_units[batch_idx],
-                unit_prior=prompt_unit_log_prior,
-            )
+        global_rate = compute_global_rate(
+            log_dur=prompt_log_residual,
+            speech_mask=speech_mask,
+            valid_mask=prompt_mask,
+            variant=self.g_variant,
+            weight=prompt_global_weight,
+            trim_ratio=self.g_trim_ratio,
+            drop_edge_runs=self.g_drop_edge_runs,
+            unit_ids=prompt_content_units,
+            unit_prior=prompt_unit_log_prior,
+        )
         global_rate = self._support_shrink(
             global_rate,
             self._masked_count(support_mask),
@@ -494,6 +512,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_random_target = (prompt_log_residual - global_rate) * prompt_mask
         return PromptOperatorSummary(
             prompt_mask=prompt_mask,
+            prompt_valid_mask=prompt_mask,
+            prompt_speech_mask=speech_mask,
             prompt_log_base=prompt_log_base,
             prompt_log_duration=prompt_log_duration,
             prompt_log_residual=prompt_log_residual,
@@ -751,6 +771,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_unit_anchor_base: torch.Tensor | None,
         prompt_log_base: torch.Tensor | None,
         prompt_unit_mask: torch.Tensor | None,
+        prompt_valid_mask: torch.Tensor | None,
         prompt_speech_mask: torch.Tensor | None,
         prompt_global_weight: torch.Tensor | None,
         prompt_unit_log_prior: torch.Tensor | None,
@@ -768,6 +789,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
             prompt_unit_anchor_base=prompt_unit_anchor_base,
             prompt_log_base=prompt_log_base,
             prompt_unit_mask=prompt_unit_mask,
+            prompt_valid_mask=prompt_valid_mask,
             prompt_speech_mask=prompt_speech_mask,
             prompt_global_weight=prompt_global_weight,
             prompt_unit_log_prior=prompt_unit_log_prior,
@@ -889,6 +911,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
                         None if detector_diagnostics is None else detector_diagnostics.detector_coeff_norm
                     ),
                 ),
+                prompt_valid_mask=summary.prompt_valid_mask,
+                prompt_speech_mask=summary.prompt_speech_mask,
             )
         )
 
@@ -970,6 +994,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
                     )
                 ),
                 prompt=prompt,
+                prompt_valid_mask=_detach_float(ref_conditioning.get("prompt_valid_mask")),
+                prompt_speech_mask=_detach_float(ref_conditioning.get("prompt_speech_mask")),
             )
         )
 
@@ -999,6 +1025,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 prompt_unit_anchor_base=normalized.get("prompt_unit_anchor_base"),
                 prompt_log_base=normalized.get("prompt_log_base"),
                 prompt_unit_mask=normalized.get("prompt_unit_mask"),
+                prompt_valid_mask=normalized.get("prompt_valid_mask"),
                 prompt_speech_mask=normalized.get("prompt_speech_mask"),
                 prompt_global_weight=normalized.get("prompt_global_weight"),
                 prompt_unit_log_prior=normalized.get("prompt_unit_log_prior"),

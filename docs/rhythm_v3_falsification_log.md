@@ -72,6 +72,16 @@ The runtime still exports the key audit signals:
 So the review surface got smaller, but the underlying observability was not
 reduced.
 
+### 2.4 `g` is now locked to one support path
+
+The local implementation should keep training, runtime diagnostics, and review
+on the same `g` semantics:
+
+- speech-only support first
+- optional `rhythm_v3_drop_edge_runs_for_g` cleanup
+- fallback to valid support only when speech support disappears
+- `prompt_speech_mask` carried through as an explicit contract field
+
 ## 3. The five retained main figures
 
 The main review surface is now explicitly restricted to five figures.

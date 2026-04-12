@@ -537,6 +537,36 @@ def test_validate_rhythm_training_hparams_requires_prompt_unit_public_inputs_whe
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_requires_prompt_speech_mask_for_prompt_summary_public_surface():
+    hparams = {
+        **_minimal_v3_hparams(),
+        "rhythm_v3_backbone": "prompt_summary",
+        "rhythm_v3_warp_mode": "none",
+        "rhythm_v3_allow_hybrid": False,
+        "rhythm_v3_anchor_mode": "source_observed",
+        "lambda_rhythm_bias": 0.20,
+        "lambda_rhythm_op": 0.0,
+        "lambda_rhythm_zero": 0.0,
+        "lambda_rhythm_ortho": 0.0,
+        "rhythm_public_inputs": [
+            "content_units",
+            "dur_anchor_src",
+            "unit_anchor_base",
+            "prompt_content_units",
+            "prompt_duration_obs",
+            "prompt_unit_mask",
+        ],
+        "rhythm_public_losses": [
+            "rhythm_total",
+            "rhythm_v3_dur",
+            "rhythm_v3_bias",
+            "rhythm_v3_pref",
+        ],
+    }
+    with pytest.raises(ValueError, match="prompt_speech_mask"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_legacy_public_inputs_for_v3():
     hparams = _minimal_v3_hparams()
     hparams["rhythm_public_inputs"] = [
@@ -1001,6 +1031,7 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_disable_learned_gate: true" in source
     assert "rhythm_v3_eval_mode: learned" in source
     assert "rhythm_v3_g_variant: raw_median" in source
+    assert "rhythm_v3_drop_edge_runs_for_g: 1" in source
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_num_summary_slots: 1" in source
@@ -1008,6 +1039,7 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_disallow_same_text_reference: true" in source
     assert "rhythm_v3_disallow_same_text_paired_target: false" in source
     assert "rhythm_v3_require_same_text_paired_target: true" in source
+    assert "prompt_speech_mask" in source
 
 
 def test_deprecated_v2_minimal_v1_yaml_now_aliases_v3_contract():

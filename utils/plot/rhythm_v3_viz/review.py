@@ -149,6 +149,7 @@ def compute_g(
     valid_mask: Any | None = None,
     variant: str = "raw_median",
     trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
     weight: Any | None = None,
     unit_ids: Any | None = None,
     unit_log_prior: Any | None = None,
@@ -165,6 +166,7 @@ def compute_g(
             valid_mask=None if valid is None else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32),
             variant=variant,
             trim_ratio=float(trim_ratio),
+            drop_edge_runs=int(drop_edge_runs),
             weight=None
             if weight is None
             else torch.as_tensor(np.asarray(weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32),

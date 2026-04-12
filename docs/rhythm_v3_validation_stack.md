@@ -70,6 +70,8 @@ The project was intentionally simplified here:
 - no extra falsification CLI layer is required
 - no extra dedicated falsification test file is kept
 - review logic should live in the util layer, not be copied across scripts
+- local `g` reconstruction should call the shared speech-only support path,
+  including `rhythm_v3_drop_edge_runs_for_g` when the experiment enables it
 
 ## 3. Unified analysis tables
 
@@ -167,7 +169,14 @@ Figure B Panel A only becomes meaningful when the debug records contain
 multiple crops for the same `pair_id`. If there is only one crop, the review
 util keeps the field but does not pretend the stability question was answered.
 
-### 5.3 Closed and committed are different
+### 5.3 Prompt speech masks are part of the contract
+
+For the maintained prompt-summary / minimal-V1 line, `prompt_speech_mask` is no
+longer treated as an optional convenience field. It is part of the explicit
+speech-only `g` contract, and the config/runtime surfaces should keep that
+visible.
+
+### 5.4 Closed and committed are different
 
 Figure A uses `is_closed`.
 Figure E uses `is_committed`.

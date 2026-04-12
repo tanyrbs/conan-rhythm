@@ -153,6 +153,7 @@ class ConanDurationAdapter(nn.Module):
             eval_mode=str(hparams.get("rhythm_v3_eval_mode", "learned")),
             g_variant=str(hparams.get("rhythm_v3_g_variant", "raw_median")),
             g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2)),
+            drop_edge_runs_for_g=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             disable_local_residual=bool(hparams.get("rhythm_v3_disable_local_residual", False)),
             disable_coarse_bias=bool(hparams.get("rhythm_v3_disable_coarse_bias", False)),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
@@ -542,6 +543,10 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
         ret["rhythm_v3_g_variant"] = self.module.g_variant
+        if isinstance(getattr(execution, "prompt_speech_ratio", None), torch.Tensor):
+            ret["rhythm_prompt_speech_ratio"] = execution.prompt_speech_ratio.detach()
+        if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor):
+            ret["rhythm_prompt_valid_len"] = execution.prompt_valid_len.detach()
         if ref_memory is not None and isinstance(getattr(ref_memory, "summary_state", None), torch.Tensor):
             ret["rhythm_v3_summary_state_dim"] = float(ref_memory.summary_state.size(1))
         elif ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
@@ -554,35 +559,66 @@ class ConanDurationAdapter(nn.Module):
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
         if self.module.debug_export:
-            ret["rhythm_debug_g_ref"] = ref_memory.global_rate.detach()
-            ret["rhythm_debug_g_src_prefix"] = (
-                execution.source_rate_seq.detach()
-                if isinstance(getattr(execution, "source_rate_seq", None), torch.Tensor)
-                else None
-            )
-            ret["rhythm_debug_analytic_gap"] = (
-                execution.global_shift_analytic.detach()
-                if isinstance(getattr(execution, "global_shift_analytic", None), torch.Tensor)
-                else None
-            )
-            ret["rhythm_debug_coarse_bias"] = (
-                execution.coarse_correction.detach()
-                if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
-                else None
-            )
-            ret["rhythm_debug_local_residual"] = (
-                execution.local_residual.detach()
-                if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
-                else None
-            )
+            debug_bundle = {
+                "g_ref": (
+                    execution.g_ref.detach()
+                    if isinstance(getattr(execution, "g_ref", None), torch.Tensor)
+                    else ref_memory.global_rate.detach()
+                ),
+                "g_src_prefix": (
+                    execution.g_src_prefix.detach()
+                    if isinstance(getattr(execution, "g_src_prefix", None), torch.Tensor)
+                    else None
+                ),
+                "global_shift_analytic": (
+                    execution.global_shift_analytic.detach()
+                    if isinstance(getattr(execution, "global_shift_analytic", None), torch.Tensor)
+                    else None
+                ),
+                "coarse_correction": (
+                    execution.coarse_correction.detach()
+                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
+                    else None
+                ),
+                "local_residual": (
+                    execution.local_residual.detach()
+                    if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
+                    else None
+                ),
+                "source_rate_seq": (
+                    execution.source_rate_seq.detach()
+                    if isinstance(getattr(execution, "source_rate_seq", None), torch.Tensor)
+                    else None
+                ),
+                "prompt_speech_ratio": (
+                    execution.prompt_speech_ratio.detach()
+                    if isinstance(getattr(execution, "prompt_speech_ratio", None), torch.Tensor)
+                    else None
+                ),
+                "prompt_valid_len": (
+                    execution.prompt_valid_len.detach()
+                    if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor)
+                    else None
+                ),
+                "eval_mode": getattr(execution, "eval_mode", self.module.eval_mode),
+            }
+            ret["rhythm_v3_debug"] = debug_bundle
+            ret["rhythm_debug_g_ref"] = debug_bundle["g_ref"]
+            ret["rhythm_debug_g_src_prefix"] = debug_bundle["g_src_prefix"]
+            ret["rhythm_debug_analytic_gap"] = debug_bundle["global_shift_analytic"]
+            ret["rhythm_debug_coarse_bias"] = debug_bundle["coarse_correction"]
+            ret["rhythm_debug_local_residual"] = debug_bundle["local_residual"]
             if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
-                ret["rhythm_debug_is_speech"] = (
+                debug_bundle["is_speech"] = (
                     source_batch.unit_mask.float() * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))
                 ).detach()
+                ret["rhythm_debug_is_speech"] = debug_bundle["is_speech"]
             if isinstance(getattr(execution, "projector_budget_hit_pos", None), torch.Tensor):
-                ret["rhythm_debug_budget_hit_pos"] = execution.projector_budget_hit_pos.detach()
+                debug_bundle["budget_hit_pos"] = execution.projector_budget_hit_pos.detach()
+                ret["rhythm_debug_budget_hit_pos"] = debug_bundle["budget_hit_pos"]
             if isinstance(getattr(execution, "projector_budget_hit_neg", None), torch.Tensor):
-                ret["rhythm_debug_budget_hit_neg"] = execution.projector_budget_hit_neg.detach()
+                debug_bundle["budget_hit_neg"] = execution.projector_budget_hit_neg.detach()
+                ret["rhythm_debug_budget_hit_neg"] = debug_bundle["budget_hit_neg"]
 
     @staticmethod
     def _pad_tail_sequences(

@@ -37,6 +37,7 @@ Operationally, the maintained default means:
 - `rhythm_v3_use_reference_summary: false`
 - `rhythm_v3_use_learned_residual_gate: false`
 - `rhythm_v3_disable_learned_gate: true`
+- `rhythm_v3_drop_edge_runs_for_g: 1`
 - `rhythm_v3_require_same_text_paired_target: true`
 - speech-only prompt global-rate estimation
 - speech = coarse + local
@@ -96,6 +97,9 @@ At a high level:
 The important contract detail is that train-time cache construction and
 inference-time prompt/source preparation now share the same `rhythm_v3`
 stable-lattice builder rather than separate legacy/v3 runizers.
+
+For the maintained prompt-summary path, `prompt_speech_mask` is part of the
+public conditioning contract rather than an internal optional hint.
 
 ---
 

@@ -244,6 +244,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
+            "g_ref": global_rate_col.squeeze(-1),
+            "g_src_prefix": local_rate_seq * mask,
+            "eval_mode": self.eval_mode,
             "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
         }
 

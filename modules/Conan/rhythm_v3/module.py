@@ -434,6 +434,16 @@ class MixedEffectsDurationModule(nn.Module):
                 ),
             )
         )
+        self.g_drop_edge_runs = max(
+            0,
+            int(
+                unused_kwargs.pop(
+                    "drop_edge_runs_for_g",
+                    unused_kwargs.pop("rhythm_v3_drop_edge_runs_for_g", 0),
+                )
+                or 0
+            ),
+        )
         self.eval_mode = normalize_falsification_eval_mode(
             unused_kwargs.pop("eval_mode", unused_kwargs.pop("rhythm_v3_eval_mode", "learned"))
         )
@@ -495,6 +505,7 @@ class MixedEffectsDurationModule(nn.Module):
                 use_log_base_rate=self.use_log_base_rate,
                 g_variant=self.g_variant,
                 g_trim_ratio=self.g_trim_ratio,
+                drop_edge_runs_for_g=self.g_drop_edge_runs,
             )
             self.reference_memory_builder.rate_mode = self.rate_mode
         self.projector = StreamingDurationProjector(
@@ -519,6 +530,7 @@ class MixedEffectsDurationModule(nn.Module):
                     use_log_base_rate=self.use_log_base_rate,
                     g_variant=self.g_variant,
                     g_trim_ratio=self.g_trim_ratio,
+                    drop_edge_runs_for_g=self.g_drop_edge_runs,
                 )
                 self.duration_head = MinimalStreamingDurationHeadV1G(
                     vocab_size=vocab_size,
@@ -554,6 +566,7 @@ class MixedEffectsDurationModule(nn.Module):
                     emit_prompt_diagnostics=emit_prompt_diagnostics,
                     g_variant=self.g_variant,
                     g_trim_ratio=self.g_trim_ratio,
+                    drop_edge_runs_for_g=self.g_drop_edge_runs,
                     codebook=self.summary_codebook,
                 )
                 if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
@@ -566,6 +579,7 @@ class MixedEffectsDurationModule(nn.Module):
             self.prompt_memory_encoder.use_log_base_rate = self.use_log_base_rate
             self.prompt_memory_encoder.g_variant = self.g_variant
             self.prompt_memory_encoder.g_trim_ratio = self.g_trim_ratio
+            self.prompt_memory_encoder.g_drop_edge_runs = self.g_drop_edge_runs
 
             if not self.minimal_v1_profile:
                 duration_head_kwargs = dict(
@@ -1079,6 +1093,25 @@ class MixedEffectsDurationModule(nn.Module):
                 final_rate_ema=role_plan["local_rate_final"],
                 next_state=execution.next_state,
             )
+            execution.g_ref = (
+                role_plan.get("g_ref")
+                if isinstance(role_plan.get("g_ref"), torch.Tensor)
+                else ref_memory.global_rate.detach()
+            )
+            execution.g_src_prefix = (
+                role_plan.get("g_src_prefix")
+                if isinstance(role_plan.get("g_src_prefix"), torch.Tensor)
+                else execution.source_rate_seq
+            )
+            execution.eval_mode = str(role_plan.get("eval_mode", self.eval_mode))
+            if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
+                valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)
+                execution.prompt_valid_len = valid_len
+                if isinstance(ref_memory.prompt_speech_mask, torch.Tensor):
+                    execution.prompt_speech_ratio = (
+                        ref_memory.prompt_speech_mask.float().sum(dim=1, keepdim=True)
+                        / valid_len.clamp_min(1.0)
+                    )
             return execution
         global_response, structure_response, local_response, source_residual_response = self.backbone(
             module=self,
@@ -1116,7 +1149,7 @@ class MixedEffectsDurationModule(nn.Module):
             unit_anchor_base=prediction_anchor.float().clamp_min(1.0e-4),
             state=state,
         )
-        return self.projector.finalize_execution(
+        execution = self.projector.finalize_execution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=unit_duration_exec,
             basis_activation=basis_activation * speech_commit_mask.unsqueeze(-1),
@@ -1137,6 +1170,18 @@ class MixedEffectsDurationModule(nn.Module):
             unit_logstretch_raw=unit_logstretch_raw,
             unit_duration_raw=unit_duration_raw,
         )
+        execution.g_ref = ref_memory.global_rate.detach()
+        execution.g_src_prefix = None
+        execution.eval_mode = self.eval_mode
+        if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
+            valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)
+            execution.prompt_valid_len = valid_len
+            if isinstance(ref_memory.prompt_speech_mask, torch.Tensor):
+                execution.prompt_speech_ratio = (
+                    ref_memory.prompt_speech_mask.float().sum(dim=1, keepdim=True)
+                    / valid_len.clamp_min(1.0)
+                )
+        return execution
 
 
 SharedResponseEncoder = SharedCausalBasisEncoder

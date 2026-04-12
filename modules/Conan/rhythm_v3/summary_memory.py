@@ -7,7 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .math_utils import build_causal_local_rate_seq
-from .g_stats import compute_global_rate, normalize_falsification_eval_mode, normalize_global_rate_variant
+from .g_stats import (
+    build_global_rate_support_mask,
+    compute_global_rate,
+    normalize_falsification_eval_mode,
+    normalize_global_rate_variant,
+)
 from .contracts import (
     PromptConditioningEvidence,
     ReferenceDurationMemory,
@@ -233,6 +238,7 @@ class PromptDurationMemoryEncoder(nn.Module):
         emit_prompt_diagnostics: bool = True,
         g_variant: str = "raw_median",
         g_trim_ratio: float = 0.2,
+        drop_edge_runs_for_g: int = 0,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
@@ -246,6 +252,7 @@ class PromptDurationMemoryEncoder(nn.Module):
         self.emit_prompt_diagnostics = bool(emit_prompt_diagnostics)
         self.g_variant = normalize_global_rate_variant(g_variant)
         self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
+        self.g_drop_edge_runs = max(0, int(drop_edge_runs_for_g))
         self.summary_dim = int(max(8, dim))
         self.prompt_unit_emb = (
             nn.Embedding(vocab_size, self.summary_dim)
@@ -348,21 +355,22 @@ class PromptDurationMemoryEncoder(nn.Module):
             if self.use_log_base_rate
             else logdur
         )
-        speech_support = (speech_mask.sum(dim=1, keepdim=True) > 0.0).float()
-        support_mask = torch.where(speech_support > 0.0, speech_mask, valid_mask)
-        global_rate = rate_logdur.new_zeros((rate_logdur.size(0), 1))
-        for batch_idx in range(int(rate_logdur.size(0))):
-            if bool(speech_support[batch_idx, 0].item()):
-                global_rate[batch_idx, 0] = compute_global_rate(
-                    log_dur=rate_logdur[batch_idx],
-                    speech_mask=speech_mask[batch_idx],
-                    valid_mask=support_mask[batch_idx],
-                    variant=self.g_variant,
-                    weight=(None if prompt_global_weight is None else prompt_global_weight[batch_idx]),
-                    trim_ratio=self.g_trim_ratio,
-                    unit_ids=prompt_content_units[batch_idx],
-                    unit_prior=prompt_unit_log_prior,
-                )
+        support_mask = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=self.g_drop_edge_runs,
+        )
+        global_rate = compute_global_rate(
+            log_dur=rate_logdur,
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            variant=self.g_variant,
+            weight=prompt_global_weight,
+            trim_ratio=self.g_trim_ratio,
+            drop_edge_runs=self.g_drop_edge_runs,
+            unit_ids=prompt_content_units,
+            unit_prior=prompt_unit_log_prior,
+        )
         ref_residual = (rate_logdur - global_rate) * support_mask
         if self.simple_global_stats and not self.emit_prompt_diagnostics:
             operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
@@ -459,6 +467,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         use_log_base_rate: bool = False,
         g_variant: str = "raw_median",
         g_trim_ratio: float = 0.2,
+        drop_edge_runs_for_g: int = 0,
     ) -> None:
         super().__init__()
         self.operator_rank = int(max(1, operator_rank))
@@ -468,6 +477,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         self.simple_global_stats = not self.use_log_base_rate
         self.g_variant = normalize_global_rate_variant(g_variant)
         self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
+        self.g_drop_edge_runs = max(0, int(drop_edge_runs_for_g))
 
     def forward(
         self,
@@ -527,6 +537,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             variant=self.g_variant,
             weight=prompt_global_weight,
             trim_ratio=self.g_trim_ratio,
+            drop_edge_runs=self.g_drop_edge_runs,
             unit_ids=prompt_content_units,
             unit_prior=prompt_unit_log_prior,
         )
@@ -836,6 +847,9 @@ class StreamingDurationHead(nn.Module):
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
+            "g_ref": global_rate.float().reshape(global_rate.size(0), -1)[:, 0],
+            "g_src_prefix": local_rate_seq * mask,
+            "eval_mode": self.eval_mode,
             "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
         }
 

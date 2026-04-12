@@ -31,6 +31,9 @@ _REQUIRED_V3_PUBLIC_INPUTS = (
     "prompt_duration_obs",
     "prompt_unit_mask",
 )
+_PROMPT_SUMMARY_REQUIRED_V3_PUBLIC_INPUTS = (
+    "prompt_speech_mask",
+)
 _FORBIDDEN_V3_PUBLIC_INPUTS = (
     "ref_rhythm_stats",
     "ref_rhythm_trace",
@@ -315,6 +318,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     holdout_ratio = float(hparams.get("rhythm_operator_holdout_ratio", 0.30) or 0.0)
     if holdout_ratio >= 1.0:
         raise ValueError("rhythm_operator_holdout_ratio must be < 1 for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0) < 0:
+        raise ValueError("rhythm_v3_drop_edge_runs_for_g must be >= 0 for rhythm_v3.")
     if baseline_train_mode == "pretrain" and float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) <= 0.0:
         raise ValueError("rhythm_v3_baseline_train_mode='pretrain' requires lambda_rhythm_base > 0.")
     if source_residual_gain < 0.0:
@@ -355,6 +360,15 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         required=_REQUIRED_V3_PUBLIC_INPUTS,
         forbidden=_FORBIDDEN_V3_PUBLIC_INPUTS,
     )
+    if public_inputs is not None and runtime_mode == "prompt_summary":
+        missing_prompt_summary_inputs = [
+            key for key in _PROMPT_SUMMARY_REQUIRED_V3_PUBLIC_INPUTS if key not in public_inputs
+        ]
+        if missing_prompt_summary_inputs:
+            raise ValueError(
+                "rhythm_v3 prompt_summary public surface requires explicit speech-only prompt inputs: "
+                + ", ".join(missing_prompt_summary_inputs)
+            )
     _validate_required_public_surface(
         public_outputs,
         key="rhythm_public_outputs",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 
+EPS = 1.0e-6
 _VALID_G_VARIANTS = {"raw_median", "weighted_median", "trimmed_mean", "unit_norm"}
 _VALID_EVAL_MODES = {"analytic", "coarse_only", "learned"}
 
@@ -59,6 +60,78 @@ def weighted_median_1d(values: torch.Tensor, weights: torch.Tensor) -> torch.Ten
     idx = torch.searchsorted(cdf, cutoff, right=False)
     idx = idx.clamp(max=values_sorted.numel() - 1)
     return values_sorted[idx]
+
+
+def _normalize_drop_edge_runs(value) -> int:
+    return max(0, int(value or 0))
+
+
+def _full_support_mask(mask: torch.Tensor) -> torch.Tensor:
+    return torch.ones_like(mask, dtype=torch.bool)
+
+
+def _drop_edge_support_1d(mask: torch.Tensor, *, drop_edge_runs: int) -> torch.Tensor:
+    keep = mask.bool().clone()
+    drop = _normalize_drop_edge_runs(drop_edge_runs)
+    if drop <= 0:
+        return keep
+    active = torch.nonzero(keep, as_tuple=False).reshape(-1)
+    active_count = int(active.numel())
+    if active_count <= (2 * drop):
+        return keep
+    keep[active[:drop]] = False
+    keep[active[-drop:]] = False
+    return keep
+
+
+def _build_single_support_mask(
+    *,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None,
+    drop_edge_runs: int,
+) -> torch.Tensor:
+    speech = speech_mask.bool()
+    valid = _full_support_mask(speech) if valid_mask is None else valid_mask.bool()
+    speech_valid = speech & valid
+    if bool(speech_valid.any().item()):
+        support = _drop_edge_support_1d(speech_valid, drop_edge_runs=drop_edge_runs)
+        if bool(support.any().item()):
+            return support
+        return speech_valid
+    if bool(valid.any().item()):
+        return valid
+    if bool(speech.any().item()):
+        return speech
+    return _full_support_mask(speech)
+
+
+def build_global_rate_support_mask(
+    *,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    drop_edge_runs: int = 0,
+) -> torch.Tensor:
+    drop_edge_runs = _normalize_drop_edge_runs(drop_edge_runs)
+    if speech_mask.ndim == 1:
+        return _build_single_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=drop_edge_runs,
+        )
+    if speech_mask.ndim != 2:
+        raise ValueError(
+            "build_global_rate_support_mask expects rank-1 or rank-2 speech_mask, "
+            f"got {tuple(speech_mask.shape)}"
+        )
+    batch_size = int(speech_mask.size(0))
+    support = torch.zeros_like(speech_mask, dtype=torch.bool)
+    for batch_idx in range(batch_size):
+        support[batch_idx] = _build_single_support_mask(
+            speech_mask=speech_mask[batch_idx],
+            valid_mask=None if valid_mask is None else valid_mask[batch_idx],
+            drop_edge_runs=drop_edge_runs,
+        )
+    return support
 
 
 def _resolve_unit_prior(
@@ -122,7 +195,7 @@ def _compute_single_global_rate(
     raise ValueError(f"Unsupported g_variant={variant!r}")
 
 
-def compute_global_rate(
+def compute_global_rate_1d(
     *,
     log_dur: torch.Tensor,
     speech_mask: torch.Tensor,
@@ -130,21 +203,49 @@ def compute_global_rate(
     variant: str = "raw_median",
     weight: torch.Tensor | None = None,
     trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
+    unit_ids: torch.Tensor | None = None,
+    unit_prior: torch.Tensor | None = None,
+) -> torch.Tensor:
+    support_mask = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+    )
+    return _compute_single_global_rate(
+        log_dur=log_dur.float(),
+        mask=support_mask,
+        variant=normalize_global_rate_variant(variant),
+        weight=weight,
+        trim_ratio=trim_ratio,
+        unit_ids=unit_ids,
+        unit_prior=unit_prior,
+    )
+
+
+def compute_global_rate_batch(
+    *,
+    log_dur: torch.Tensor,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    variant: str = "raw_median",
+    weight: torch.Tensor | None = None,
+    trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
 ) -> torch.Tensor:
     variant = normalize_global_rate_variant(variant)
-    mask = speech_mask.bool()
-    if valid_mask is not None:
-        mask = mask & valid_mask.bool()
     log_dur = log_dur.float()
     if log_dur.ndim == 1:
-        return _compute_single_global_rate(
+        return compute_global_rate_1d(
             log_dur=log_dur,
-            mask=mask,
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
             variant=variant,
             weight=weight,
             trim_ratio=trim_ratio,
+            drop_edge_runs=drop_edge_runs,
             unit_ids=unit_ids,
             unit_prior=unit_prior,
         )
@@ -156,20 +257,51 @@ def compute_global_rate(
         unit_prior_row = unit_prior
         if isinstance(unit_prior, torch.Tensor) and unit_prior.ndim == 2 and int(unit_prior.size(0)) == batch_size:
             unit_prior_row = unit_prior[batch_idx]
-        out[batch_idx, 0] = _compute_single_global_rate(
+        out[batch_idx, 0] = compute_global_rate_1d(
             log_dur=log_dur[batch_idx],
-            mask=mask[batch_idx],
+            speech_mask=speech_mask[batch_idx],
+            valid_mask=None if valid_mask is None else valid_mask[batch_idx],
             variant=variant,
             weight=None if weight is None else weight[batch_idx],
             trim_ratio=trim_ratio,
+            drop_edge_runs=drop_edge_runs,
             unit_ids=None if unit_ids is None else unit_ids[batch_idx],
             unit_prior=unit_prior_row,
         )
     return out
 
 
+def compute_global_rate(
+    *,
+    log_dur: torch.Tensor,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    variant: str = "raw_median",
+    weight: torch.Tensor | None = None,
+    trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
+    unit_ids: torch.Tensor | None = None,
+    unit_prior: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return compute_global_rate_batch(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        variant=variant,
+        weight=weight,
+        trim_ratio=trim_ratio,
+        drop_edge_runs=drop_edge_runs,
+        unit_ids=unit_ids,
+        unit_prior=unit_prior,
+    )
+
+
 __all__ = [
+    "EPS",
+    "build_global_rate_support_mask",
     "compute_global_rate",
+    "compute_global_rate_1d",
+    "compute_global_rate_batch",
     "normalize_falsification_eval_mode",
     "normalize_global_rate_variant",
     "weighted_median_1d",
