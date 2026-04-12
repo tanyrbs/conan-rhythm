@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _minimal_v3_hparams():
@@ -32,6 +36,18 @@ def test_validate_rhythm_training_hparams_rejects_v2_v3_mutual_exclusion():
             {
                 **_minimal_v3_hparams(),
                 "rhythm_enable_v2": True,
+            }
+        )
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_stage_on_v2_backend():
+    with pytest.raises(ValueError, match="minimal_v1 must run on rhythm_v3 only"):
+        validate_rhythm_training_hparams(
+            {
+                "rhythm_stage": "minimal_v1",
+                "rhythm_enable_v2": True,
+                "rhythm_enable_v3": False,
+                "rhythm_response_rank": 4,
             }
         )
 
@@ -140,6 +156,119 @@ def test_validate_rhythm_training_hparams_rejects_prompt_summary_without_explici
     hparams["lambda_rhythm_zero"] = 0.0
     hparams["rhythm_v3_emit_silence_runs"] = False
     with pytest.raises(ValueError, match="rhythm_v3_emit_silence_runs=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_simple_global_stats():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": False,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_simple_global_stats=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_when_same_text_paired_target_is_disabled():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_disallow_same_text_paired_target": True,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_disallow_same_text_paired_target=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_same_text_paired_target_requirement():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_require_same_text_paired_target": False,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_require_same_text_paired_target=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_reference_summary_enabled():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_use_reference_summary": True,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_use_reference_summary=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_log_base_rate_enabled():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_use_log_base_rate": True,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_use_log_base_rate=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_simple_rate_mode():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_rate_mode": "log_base",
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_rate_mode=simple_global"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -753,3 +882,28 @@ def test_validate_rhythm_training_hparams_rejects_non_positive_progress_bins():
                 "rhythm_progress_bins": 0,
             }
         )
+
+
+def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
+    source = (ROOT / "egs" / "conan_emformer_rhythm_v3.yaml").read_text(encoding="utf-8")
+    assert "rhythm_v3_minimal_v1_profile: true" in source
+    assert "rhythm_v3_backbone: prompt_summary" in source
+    assert "rhythm_v3_rate_mode: simple_global" in source
+    assert "rhythm_v3_simple_global_stats: true" in source
+    assert "rhythm_v3_use_log_base_rate: false" in source
+    assert "rhythm_v3_use_reference_summary: false" in source
+    assert "rhythm_v3_use_learned_residual_gate: false" in source
+    assert "rhythm_v3_disable_learned_gate: true" in source
+    assert "rhythm_num_summary_slots: 1" in source
+    assert "rhythm_v3_summary_use_unit_embedding: false" in source
+    assert "rhythm_v3_disallow_same_text_reference: true" in source
+    assert "rhythm_v3_disallow_same_text_paired_target: false" in source
+    assert "rhythm_v3_require_same_text_paired_target: true" in source
+
+
+def test_deprecated_v2_minimal_v1_yaml_now_aliases_v3_contract():
+    source = (ROOT / "egs" / "conan_emformer_rhythm_v2_minimal_v1.yaml").read_text(encoding="utf-8")
+    assert "base_config: egs/conan_emformer_rhythm_v3.yaml" in source
+    assert "rhythm_enable_v2: false" in source
+    assert "rhythm_enable_v3: true" in source
+    assert "rhythm_v3_rate_mode: simple_global" in source

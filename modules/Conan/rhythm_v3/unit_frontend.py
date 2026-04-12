@@ -634,8 +634,15 @@ class DurationUnitFrontend(nn.Module):
         anchor_min_frames: float = 1.0,
         anchor_max_frames: float = 12.0,
         phrase_boundary_threshold: float = 0.55,
+        rate_mode: str | None = None,
+        simple_global_stats: bool = False,
     ) -> None:
         super().__init__()
+        normalized_rate_mode = str(rate_mode or "").strip().lower()
+        if normalized_rate_mode in {"", "none", "auto"}:
+            normalized_rate_mode = "simple_global" if bool(simple_global_stats) else "log_base"
+        self.rate_mode = normalized_rate_mode
+        self.simple_global_stats = bool(simple_global_stats) or self.rate_mode == "simple_global"
         self.phrase_boundary_threshold = float(max(0.0, min(1.0, phrase_boundary_threshold)))
         self.base_frontend = RhythmUnitFrontend(
             silent_token=silent_token,
@@ -706,6 +713,9 @@ class DurationUnitFrontend(nn.Module):
         *,
         stop_gradient: bool = False,
     ) -> torch.Tensor:
+        if self.simple_global_stats:
+            log_base = torch.zeros_like(unit_mask, dtype=torch.float32)
+            return log_base.detach() if stop_gradient else log_base
         log_base = self.baseline.compute_log_rate_base(
             content_units=content_units,
             unit_mask=unit_mask,
@@ -731,6 +741,13 @@ class DurationUnitFrontend(nn.Module):
         base_batch,
         unit_anchor_base: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.simple_global_stats:
+            safe_obs = base_batch.dur_anchor_src.float().clamp_min(1.0e-4)
+            return torch.where(
+                base_batch.unit_mask.float() > 0.5,
+                safe_obs,
+                torch.ones_like(safe_obs),
+            )
         if unit_anchor_base is not None:
             return unit_anchor_base.float() * base_batch.unit_mask.float()
         return self.compute_baseline(
@@ -753,15 +770,18 @@ class DurationUnitFrontend(nn.Module):
         unit_mask = base_batch.unit_mask.float()
         sep_mask = base_batch.sep_hint.float() * unit_mask
         resolved_anchor_base = self._resolve_anchor_base(base_batch=base_batch, unit_anchor_base=unit_anchor_base)
-        resolved_rate_log_base = (
-            unit_rate_log_base.float() * unit_mask
-            if isinstance(unit_rate_log_base, torch.Tensor)
-            else self.compute_rate_log_base(
-                content_units=base_batch.content_units,
-                unit_mask=unit_mask,
-                stop_gradient=True,
+        if self.simple_global_stats:
+            resolved_rate_log_base = None
+        else:
+            resolved_rate_log_base = (
+                unit_rate_log_base.float() * unit_mask
+                if isinstance(unit_rate_log_base, torch.Tensor)
+                else self.compute_rate_log_base(
+                    content_units=base_batch.content_units,
+                    unit_mask=unit_mask,
+                    stop_gradient=True,
+                )
             )
-        )
         (
             resolved_boundary,
             resolved_phrase_index,

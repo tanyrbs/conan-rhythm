@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,13 @@ def _normalize_prompt_summary_backbone(backbone_mode: str | None) -> str:
     if normalized in {"role_memory", "unit_run"}:
         return "prompt_summary"
     return normalized
+
+
+def _init_accepts_kwarg(module_cls: type[nn.Module], kwarg_name: str) -> bool:
+    return kwarg_name in inspect.signature(module_cls.__init__).parameters
+
+
+_MISSING = object()
 
 
 class SharedCausalBasisEncoder(nn.Module):
@@ -343,6 +351,55 @@ class MixedEffectsDurationModule(nn.Module):
         local_rate_decay = float(unused_kwargs.pop("local_rate_decay", 0.95))
         short_gap_silence_scale = float(unused_kwargs.pop("short_gap_silence_scale", 0.35))
         leading_silence_scale = float(unused_kwargs.pop("leading_silence_scale", 0.0))
+        rate_mode = str(
+            unused_kwargs.pop(
+                "rate_mode",
+                unused_kwargs.pop("rhythm_v3_rate_mode", ""),
+            )
+            or ""
+        ).strip().lower()
+        self.minimal_v1_profile = bool(
+            unused_kwargs.pop(
+                "minimal_v1_profile",
+                unused_kwargs.pop("rhythm_v3_minimal_v1_profile", False),
+            )
+        )
+        requested_simple_global_stats = bool(
+            unused_kwargs.pop(
+                "simple_global_stats",
+                unused_kwargs.pop("rhythm_v3_simple_global_stats", self.minimal_v1_profile),
+            )
+        )
+        if rate_mode in {"", "none", "auto"}:
+            rate_mode = "simple_global" if requested_simple_global_stats else "log_base"
+        self.rate_mode = rate_mode
+        self.simple_global_stats = bool(requested_simple_global_stats) or self.rate_mode == "simple_global"
+        use_log_base_rate = unused_kwargs.pop(
+            "use_log_base_rate",
+            unused_kwargs.pop("rhythm_v3_use_log_base_rate", _MISSING),
+        )
+        if use_log_base_rate is _MISSING:
+            use_log_base_rate = True
+        self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
+        disable_learned_gate = unused_kwargs.pop(
+            "disable_learned_gate",
+            unused_kwargs.pop("rhythm_v3_disable_learned_gate", _MISSING),
+        )
+        self.use_learned_residual_gate = bool(
+            unused_kwargs.pop(
+                "use_learned_residual_gate",
+                unused_kwargs.pop("rhythm_v3_use_learned_residual_gate", True),
+            )
+        )
+        if disable_learned_gate is not _MISSING and bool(disable_learned_gate):
+            self.use_learned_residual_gate = False
+        use_reference_summary = unused_kwargs.pop(
+            "use_reference_summary",
+            unused_kwargs.pop("rhythm_v3_use_reference_summary", _MISSING),
+        )
+        if use_reference_summary is _MISSING:
+            use_reference_summary = False if self.minimal_v1_profile else False
+        self.use_reference_summary = bool(use_reference_summary)
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
@@ -394,7 +451,10 @@ class MixedEffectsDurationModule(nn.Module):
                 progress_support_tau=progress_support_tau,
                 ridge_support_tau=ridge_support_tau,
                 holdout_ratio=operator_holdout_ratio,
+                simple_global_stats=self.simple_global_stats,
+                use_log_base_rate=self.use_log_base_rate,
             )
+            self.reference_memory_builder.rate_mode = self.rate_mode
         self.projector = StreamingDurationProjector(
             prefix_budget_pos=prefix_budget_pos,
             prefix_budget_neg=prefix_budget_neg,
@@ -412,7 +472,7 @@ class MixedEffectsDurationModule(nn.Module):
             summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
             self.summary_codebook = summary_codebook
             self.role_codebook = summary_codebook
-            self.prompt_memory_encoder = PromptDurationMemoryEncoder(
+            prompt_memory_kwargs = dict(
                 vocab_size=vocab_size,
                 dim=summary_dim,
                 num_slots=summary_slots,
@@ -422,7 +482,16 @@ class MixedEffectsDurationModule(nn.Module):
                 summary_use_unit_embedding=summary_use_unit_embedding,
                 codebook=self.summary_codebook,
             )
-            self.duration_head = StreamingDurationHead(
+            if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
+                prompt_memory_kwargs["simple_global_stats"] = self.simple_global_stats
+            if _init_accepts_kwarg(PromptDurationMemoryEncoder, "use_log_base_rate"):
+                prompt_memory_kwargs["use_log_base_rate"] = self.use_log_base_rate
+            self.prompt_memory_encoder = PromptDurationMemoryEncoder(**prompt_memory_kwargs)
+            self.prompt_memory_encoder.rate_mode = self.rate_mode
+            self.prompt_memory_encoder.simple_global_stats = self.simple_global_stats
+            self.prompt_memory_encoder.use_log_base_rate = self.use_log_base_rate
+
+            duration_head_kwargs = dict(
                 vocab_size=vocab_size,
                 dim=summary_dim,
                 num_slots=summary_slots,
@@ -436,6 +505,17 @@ class MixedEffectsDurationModule(nn.Module):
                 leading_silence_scale=leading_silence_scale,
                 codebook=self.summary_codebook,
             )
+            if _init_accepts_kwarg(StreamingDurationHead, "simple_global_stats"):
+                duration_head_kwargs["simple_global_stats"] = self.simple_global_stats
+            if _init_accepts_kwarg(StreamingDurationHead, "use_log_base_rate"):
+                duration_head_kwargs["use_log_base_rate"] = self.use_log_base_rate
+            if _init_accepts_kwarg(StreamingDurationHead, "use_learned_residual_gate"):
+                duration_head_kwargs["use_learned_residual_gate"] = self.use_learned_residual_gate
+            self.duration_head = StreamingDurationHead(**duration_head_kwargs)
+            self.duration_head.rate_mode = self.rate_mode
+            self.duration_head.simple_global_stats = self.simple_global_stats
+            self.duration_head.use_log_base_rate = self.use_log_base_rate
+            self.duration_head.use_learned_residual_gate = self.use_learned_residual_gate
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
         elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
@@ -487,14 +567,24 @@ class MixedEffectsDurationModule(nn.Module):
                     "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask "
                     "to preserve speech-only global rate semantics."
                 )
+            prompt_unit_anchor_base = (
+                ref_conditioning.get("prompt_unit_anchor_base")
+                if self.use_log_base_rate
+                else None
+            )
+            prompt_log_base = (
+                ref_conditioning.get("prompt_log_base")
+                if self.use_log_base_rate
+                else None
+            )
             return self.prompt_memory_encoder(
                 prompt_content_units=prompt_content_units,
                 prompt_duration_obs=prompt_duration_obs,
                 prompt_mask=prompt_mask,
                 prompt_valid_mask=ref_conditioning.get("prompt_valid_mask"),
                 prompt_speech_mask=prompt_speech_mask,
-                prompt_unit_anchor_base=ref_conditioning.get("prompt_unit_anchor_base"),
-                prompt_log_base=ref_conditioning.get("prompt_log_base"),
+                prompt_unit_anchor_base=prompt_unit_anchor_base,
+                prompt_log_base=prompt_log_base,
                 prompt_spk_embed=ref_conditioning.get("prompt_spk_embed"),
                 prompt_edge_cue=ref_conditioning.get("prompt_source_boundary_cue"),
                 prompt_phrase_final_mask=ref_conditioning.get("prompt_phrase_final_mask"),
@@ -815,14 +905,20 @@ class MixedEffectsDurationModule(nn.Module):
                 if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
                 else None
             )
+            log_base = None
+            if self.use_log_base_rate:
+                if isinstance(getattr(source_batch, "unit_rate_log_base", None), torch.Tensor):
+                    log_base = source_batch.unit_rate_log_base.float()
+                else:
+                    log_base = torch.log(source_batch.unit_anchor_base.float().clamp_min(1.0e-4))
+            summary_state = ref_memory.summary_state if self.use_reference_summary else None
+            role_value = ref_memory.role_value if self.use_reference_summary else None
+            role_var = ref_memory.role_var if self.use_reference_summary else None
+            role_coverage = ref_memory.role_coverage if self.use_reference_summary else None
             role_plan = self.duration_head(
                 content_units=source_batch.content_units,
                 log_anchor=torch.log(prediction_anchor.clamp_min(1.0e-4)),
-                log_base=(
-                    source_batch.unit_rate_log_base.float()
-                    if isinstance(getattr(source_batch, "unit_rate_log_base", None), torch.Tensor)
-                    else torch.log(source_batch.unit_anchor_base.float().clamp_min(1.0e-4))
-                ),
+                log_base=log_base,
                 unit_mask=unit_mask,
                 sealed_mask=sealed_mask,
                 sep_hint=(source_batch.sep_mask.float() if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor) else unit_mask.new_zeros(unit_mask.shape)),
@@ -833,11 +929,11 @@ class MixedEffectsDurationModule(nn.Module):
                 ),
                 phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
                 global_rate=ref_memory.global_rate,
-                summary_state=ref_memory.summary_state,
+                summary_state=summary_state,
                 spk_embed=ref_memory.spk_embed,
-                role_value=ref_memory.role_value,
-                role_var=ref_memory.role_var,
-                role_coverage=ref_memory.role_coverage,
+                role_value=role_value,
+                role_var=role_var,
+                role_coverage=role_coverage,
                 local_rate_ema=local_rate_ema,
                 silence_mask=getattr(source_batch, "source_silence_mask", None),
                 run_stability=getattr(source_batch, "source_run_stability", None),

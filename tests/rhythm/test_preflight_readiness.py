@@ -32,6 +32,7 @@ from tasks.Conan.rhythm.preflight_support import (
     _inspect_processed_data_dir,
     _run_dataset_and_model_dry_run,
 )
+from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
 from utils.commons.hparams import set_hparams
 
 
@@ -109,6 +110,17 @@ class PreflightReadinessTests(unittest.TestCase):
             config_path="egs/custom_stage.yaml",
         )
         self.assertEqual(profile, "minimal_v1")
+
+    def test_minimal_stage_requires_v3_backend(self) -> None:
+        with self.assertRaisesRegex(ValueError, "minimal_v1 must run on rhythm_v3 only"):
+            validate_rhythm_training_hparams(
+                {
+                    "rhythm_stage": "minimal_v1",
+                    "rhythm_enable_v2": True,
+                    "rhythm_enable_v3": False,
+                    "rhythm_response_rank": 4,
+                }
+            )
 
     def test_preflight_flags_empty_shell_and_missing_lengths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

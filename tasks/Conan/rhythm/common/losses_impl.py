@@ -1559,6 +1559,18 @@ def _build_duration_v3_bias_loss(
     pred_speech: torch.Tensor,
     targets: DurationV3LossTargets,
 ) -> torch.Tensor:
+    # Minimal-V1 path: always prefer the utterance-level scalar bias target when available.
+    pred_bias_scalar = getattr(execution, "global_bias_scalar", None)
+    tgt_bias_scalar = targets.global_bias_tgt
+    if isinstance(pred_bias_scalar, torch.Tensor) and isinstance(tgt_bias_scalar, torch.Tensor):
+        return F.smooth_l1_loss(
+            pred_bias_scalar.float().reshape(tgt_bias_scalar.shape),
+            tgt_bias_scalar.float(),
+            beta=0.25,
+            reduction="mean",
+        )
+
+    # Compatibility fallback for checkpoints that only expose sequence coarse outputs.
     committed_mask = (
         targets.committed_mask.float()
         if isinstance(targets.committed_mask, torch.Tensor)
@@ -1600,16 +1612,7 @@ def _build_duration_v3_bias_loss(
             beta=0.25,
             batch_weight=None,
         )
-    if not isinstance(getattr(execution, "global_bias_scalar", None), torch.Tensor):
-        return pred_speech.new_tensor(0.0)
-    if not isinstance(targets.global_bias_tgt, torch.Tensor):
-        return pred_speech.new_tensor(0.0)
-    return F.smooth_l1_loss(
-        execution.global_bias_scalar.float().reshape(targets.global_bias_tgt.shape),
-        targets.global_bias_tgt.float(),
-        beta=0.25,
-        reduction="mean",
-    )
+    return pred_speech.new_tensor(0.0)
 
 
 def _rebuild_duration_v3_sgbase_prediction(

@@ -25,6 +25,9 @@ def validate_rhythm_training_hparams(hparams) -> None:
         hparams.get("rhythm_enable_v3", False)
         or is_duration_operator_mode(hparams.get("rhythm_mode", ""))
     )
+    if str(hparams.get("rhythm_stage", "") or "").strip().lower() == "minimal_v1":
+        if not rhythm_enable_v3 or rhythm_enable_v2:
+            raise ValueError("minimal_v1 must run on rhythm_v3 only.")
     if rhythm_enable_v2 and rhythm_enable_v3:
         raise ValueError("Enable only one rhythm backend: rhythm_enable_v2 or rhythm_enable_v3.")
     if rhythm_enable_v3 and not rhythm_enable_v2:

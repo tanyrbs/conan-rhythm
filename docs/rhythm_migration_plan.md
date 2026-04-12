@@ -2,6 +2,9 @@
 
 This file is the canonical architecture note for the maintained `rhythm_v3` line.
 
+For the practical repo setup / data preparation / training workflow, see
+`docs/rhythm_v3_training_guide.md`.
+
 ## 1. Current maintained reading
 
 The maintained line is **`rhythm_v3`**.
@@ -22,17 +25,23 @@ The maintained default remains:
 - explicit silence runs
 - speech-only prompt global-rate estimation
 - shared train/infer lattice stabilizer
-- prompt summary memory with low-leakage rhythm summary
+- prompt summary memory kept as an optional diagnostic/ablation surface
 - deterministic carry-rounding projector with prefix budget
 - paired-target supervision projected back onto the source lattice with split local/coarse confidence
 
 Recommended config surface:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
-- `rhythm_v3_backbone: unit_run` (`prompt_summary` / `role_memory` remain accepted aliases)
+- `rhythm_v3_backbone: prompt_summary` (`unit_run` / `role_memory` remain accepted legacy aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
+- `rhythm_v3_minimal_v1_profile: true`
+- `rhythm_v3_rate_mode: simple_global`
+- `rhythm_v3_simple_global_stats: true`
+- `rhythm_v3_use_reference_summary: false`
+- `rhythm_v3_disable_learned_gate: true`
 - `rhythm_v3_emit_silence_runs: true`
+- `rhythm_v3_require_same_text_paired_target: true`
 - `rhythm_tail_open_units: 2`
 - `rhythm_v3_debounce_min_run_frames: 2`
 
@@ -109,8 +118,8 @@ The stabilizer may use fixed rules or lightweight parametric rules, but the main
 Current code surfaces that implement this contract include:
 
 - `modules/Conan/rhythm_v3/unitizer.py`
-- `modules/Conan/rhythm/unitizer.py`
 - `modules/Conan/rhythm_v3/unit_frontend.py`
+- `modules/Conan/rhythm_v3/source_cache.py`
 - `tasks/Conan/rhythm/duration_v3/dataset_mixin.py`
 - `inference/Conan.py`
 
@@ -122,33 +131,31 @@ This preserves the source-anchor reading: the model learns how to stretch the fi
 
 ### 3.3 Layer 1: Minimal Retimer
 
-#### 3.3.1 Content-normalized global rate
+#### 3.3.1 Simple speech-only global tempo statistic
 
-To avoid content composition dominating speaking-rate estimates, V1 uses content-normalized speech durations. Let `mu_u` be the unit-conditioned base prior. For speech runs only,
+V1-G deliberately drops content-normalized rate modeling from the default path.
+For speech runs only, it uses the raw log-duration statistic
 
-`d_i = log(n_i + eps) - mu_{u_i}`, with `s_i = 0`.
+`d_i = log(n_i + eps)`, with `s_i = 0`.
 
-The source prefix speech rate is the strict-causal EMA
+The source prefix speech tempo is the strict-causal EMA
 
 `p_i = EMA_{k < i, s_k = 0}(d_k)`.
 
-The reference-side speech-only global rate is
+The reference-side global tempo statistic is
 
-`g = rho * median_{j: s_j^ref = 0}(d_j^ref)`
+`g = median_{j: s_j^ref = 0}(d_j^ref)`.
 
-where `rho in [0,1]` is a short-prompt shrinkage factor that pulls very short prompts toward a conservative estimate.
+So the maintained claim is intentionally narrower: `g` is a stable speech-only
+global tempo proxy, not a fully content-normalized speaking-rate estimate. The
+default reference condition is therefore just
 
-The reference condition is compressed into
+`c = [e, g]`
 
-`c = [e, g, m]`
-
-where:
-
-- `e`: speaker embedding
-- `g`: speech-only global rate
-- `m`: low-leakage rhythm summary
-
-V1 does **not** treat `m` as a reference timeline, slot planner, or lexical template memory.
+where `e` is the speaker embedding. Low-leakage prompt summary memory remains
+available for diagnostics and ablation, but it is not part of the default V1-G
+writer. The maintained CI/preflight/smoke surface should therefore follow the
+same V3-only reading rather than the archived V2 smoke path.
 
 #### 3.3.2 Three explanatory terms: `a_i`, `b`, `r_i`
 
@@ -160,7 +167,7 @@ V1 keeps exactly three explanatory terms.
 
 2. **Single coarse correction**
 
-   `b = delta * tanh(F_b(e, m))`
+   `b = delta * tanh(F_b(e))`
 
    `b` is an utterance-level scalar, not a time-varying vector. This is deliberate: V1 does not allow the coarse branch to compete with the local branch in explaining the same local structure.
 
@@ -168,7 +175,7 @@ V1 keeps exactly three explanatory terms.
 
    Let the source encoder produce a causal source state `h_i`. Then
 
-   `r_i = alpha * tanh(F_r(h_i, e, m, a_i + b))`
+   `r_i = alpha * tanh(F_r(h_i, e, a_i + b))`
 
    `r_i` only applies to stable, closed, speech runs. Low-confidence or still-open runs are implicitly gated down.
 
@@ -219,6 +226,12 @@ A key rule is:
 > unstable silence may remain on the lattice, but it must not be elevated into high-confidence hard truth.
 
 This is why V1 splits the existence of silence runs from the right to supervise them strongly.
+
+For the maintained `minimal_v1_profile`, data pairing is also intentionally asymmetric:
+
+- the **reference prompt** should stay same-speaker / different-text to reduce prompt leakage
+- the **paired supervision target** should stay same-text so source-anchor projection is not polluted by lexical mismatch
+- if precomputed `unit_duration_tgt` is already cached, that explicit cached target can replace the online same-text projection step
 
 In the current code, this is expressed through split confidence routing:
 

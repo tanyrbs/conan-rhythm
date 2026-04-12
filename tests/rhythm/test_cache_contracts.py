@@ -15,6 +15,7 @@ from tasks.Conan.rhythm.config_contract import build_contract_context
 from tasks.Conan.rhythm.config_contract_cache_rules import validate_cache_field_contract
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+from tasks.Conan.rhythm.duration_v3.dataset_mixin import _align_target_runs_to_source_discrete
 
 
 class _DummyDataset(RhythmConanDatasetMixin):
@@ -322,11 +323,57 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertGreater(float(merged["unit_confidence_coarse_tgt"][0]), 0.5)
         self.assertGreater(float(merged["unit_confidence_coarse_tgt"][2]), 0.5)
         self.assertEqual(float(merged["unit_confidence_local_tgt"][1]), 0.0)
-        self.assertEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
+        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
+        self.assertLessEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.35)
         self.assertTrue(np.all((merged["unit_alignment_coverage_tgt"] >= 0.0) & (merged["unit_alignment_coverage_tgt"] <= 1.0)))
         self.assertTrue(np.all((merged["unit_alignment_match_tgt"] >= 0.0) & (merged["unit_alignment_match_tgt"] <= 1.0)))
         self.assertTrue(np.all(np.isfinite(merged["unit_alignment_cost_tgt"])))
         self.assertTrue(np.all(merged["unit_alignment_cost_tgt"] >= 0.0))
+
+    def test_duration_v3_target_merge_rejects_cross_text_paired_projection_when_same_text_is_required(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_require_same_text_paired_target": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_allow_source_self_target_fallback": False,
+            }
+        )
+        source_cache = {
+            "content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([2.0, 1.0, 2.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        paired_target_conditioning = {
+            "paired_target_content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "paired_target_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "paired_target_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "paired_target_speech_mask": np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+            "paired_target_text_signature": np.asarray([("txt", "target-a")], dtype=object),
+            "source_text_signature": np.asarray([("txt", "source-b")], dtype=object),
+        }
+        with self.assertRaisesRegex(RuntimeError, "same-text paired target"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_a"},
+                source_cache=source_cache,
+                paired_target_conditioning=paired_target_conditioning,
+                sample={},
+            )
+
+    def test_duration_v3_discrete_alignment_keeps_skipped_target_unassigned(self) -> None:
+        assigned_source, assigned_cost = _align_target_runs_to_source_discrete(
+            source_units=np.asarray([1, 2], dtype=np.int64),
+            source_durations=np.asarray([2.0, 2.0], dtype=np.float32),
+            source_silence=np.asarray([0.0, 0.0], dtype=np.float32),
+            target_units=np.asarray([1, 99, 2], dtype=np.int64),
+            target_durations=np.asarray([2.0, 1.0, 2.0], dtype=np.float32),
+            target_silence=np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        self.assertEqual(assigned_source.tolist(), [0, -1, 1])
+        self.assertGreaterEqual(float(assigned_cost[1]), 0.0)
 
     def test_duration_v3_target_merge_preserves_split_confidence_fields_from_sample(self) -> None:
         dataset = _DummyDataset(

@@ -17,7 +17,10 @@ from .frame_plan import RhythmFramePlan, build_frame_plan_from_execution
 from .module import MixedEffectsDurationModule
 from .renderer import RenderedRhythmSequence, render_rhythm_sequence
 from .unit_frontend import DurationUnitFrontend
-from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
+from tasks.Conan.rhythm.duration_v3.task_config import (
+    is_duration_v3_prompt_summary_backbone,
+    resolve_duration_v3_rate_mode,
+)
 
 _PROMPT_UNIT_REQUIRED_KEYS = (
     "prompt_content_units",
@@ -29,6 +32,23 @@ class ConanDurationAdapter(nn.Module):
     def __init__(self, hparams, hidden_size: int, *, vocab_size: int) -> None:
         super().__init__()
         self.hparams = hparams
+        minimal_v1_profile = bool(hparams.get("rhythm_v3_minimal_v1_profile", False))
+        rate_mode = resolve_duration_v3_rate_mode(hparams)
+        self.rate_mode = rate_mode
+        simple_global_stats = rate_mode == "simple_global" or bool(
+            hparams.get("rhythm_v3_simple_global_stats", minimal_v1_profile)
+        )
+        use_log_base_rate = bool(hparams.get("rhythm_v3_use_log_base_rate", False))
+        if rate_mode == "simple_global" or simple_global_stats:
+            use_log_base_rate = False
+        if "rhythm_v3_disable_learned_gate" in hparams:
+            use_learned_residual_gate = not bool(hparams.get("rhythm_v3_disable_learned_gate", False))
+        else:
+            use_learned_residual_gate = bool(hparams.get("rhythm_v3_use_learned_residual_gate", False))
+        if "rhythm_v3_use_reference_summary" in hparams:
+            use_reference_summary = bool(hparams.get("rhythm_v3_use_reference_summary", False))
+        else:
+            use_reference_summary = False if minimal_v1_profile else False
         self.baseline_train_mode = str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
         self.silent_token = int(hparams.get("silent_token", 57))
         self.emit_silence_runs = bool(hparams.get("rhythm_v3_emit_silence_runs", True))
@@ -56,6 +76,8 @@ class ConanDurationAdapter(nn.Module):
             anchor_min_frames=float(hparams.get("rhythm_anchor_min_frames", 1.0)),
             anchor_max_frames=float(hparams.get("rhythm_anchor_max_frames", 12.0)),
             phrase_boundary_threshold=float(hparams.get("rhythm_source_phrase_threshold", 0.55)),
+            rate_mode=rate_mode,
+            simple_global_stats=simple_global_stats,
         )
         streaming_mode = str(hparams.get("rhythm_streaming_mode", "strict") or "strict")
         micro_lookahead_units = hparams.get("rhythm_micro_lookahead_units")
@@ -100,6 +122,12 @@ class ConanDurationAdapter(nn.Module):
             max_prefix_budget=int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0),
             boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
             boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
+            rate_mode=rate_mode,
+            simple_global_stats=simple_global_stats,
+            minimal_v1_profile=minimal_v1_profile,
+            use_log_base_rate=use_log_base_rate,
+            use_learned_residual_gate=use_learned_residual_gate,
+            use_reference_summary=use_reference_summary,
             allow_hybrid=(
                 None
                 if "rhythm_v3_allow_hybrid" not in hparams
@@ -244,7 +272,13 @@ class ConanDurationAdapter(nn.Module):
         ):
             if isinstance(ref_conditioning.get(key), torch.Tensor):
                 enriched[key] = ref_conditioning[key].to(device=device).float()
-        if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
+        rate_mode = str(getattr(self.module, "rate_mode", "" ) or "").strip().lower()
+        if (
+            rate_mode != "simple_global"
+            and bool(getattr(self.module, "use_log_base_rate", False))
+            and enriched.get("prompt_log_base") is None
+            and enriched.get("prompt_unit_anchor_base") is None
+        ):
             enriched["prompt_log_base"] = self.unit_frontend.compute_rate_log_base(
                 prompt_content_units,
                 prompt_valid_mask,

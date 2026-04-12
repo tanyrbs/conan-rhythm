@@ -26,18 +26,25 @@ rhythm_anchor_max_frames: 12.0
 # Slow structure, if used, lives outside baseline via progress/detector candidate layers.
 # Optional scaffold: set rhythm_v3_baseline_train_mode=pretrain and lambda_rhythm_base>0
 # to run baseline-only deglobalized pretraining before joint duration experiments.
-rhythm_v3_baseline_train_mode: joint
-rhythm_v3_freeze_baseline: false
+rhythm_v3_baseline_train_mode: frozen
+rhythm_v3_freeze_baseline: true
 rhythm_v3_baseline_ckpt: null
 rhythm_baseline_table_prior_path: null
 rhythm_v3_baseline_target_mode: deglobalized
+rhythm_v3_rate_mode: simple_global
+rhythm_v3_use_log_base_rate: false
+rhythm_v3_use_reference_summary: false
+rhythm_v3_use_learned_residual_gate: false
+rhythm_v3_disable_learned_gate: true
 
 rhythm_response_rank: 12
 rhythm_response_window_left: 4
 rhythm_response_window_right: 0
 rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
-rhythm_v3_backbone: unit_run
+rhythm_v3_minimal_v1_profile: true
+rhythm_v3_simple_global_stats: true
+rhythm_v3_backbone: prompt_summary
 rhythm_v3_warp_mode: none
 rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
@@ -49,7 +56,7 @@ rhythm_num_summary_slots: 1
 # rhythm_num_role_slots: 1
 rhythm_prompt_cov_floor: 0.05
 rhythm_operator_ridge_lambda: 1.0
-rhythm_global_shrink_tau: 8.0
+rhythm_global_shrink_tau: 0.0
 rhythm_progress_support_tau: 8.0
 rhythm_operator_support_tau: 8.0
 rhythm_operator_holdout_ratio: 0.30
@@ -80,12 +87,13 @@ rhythm_v3_local_cold_start_runs: 2
 rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
-rhythm_v3_short_gap_silence_scale: 0.35
+rhythm_v3_short_gap_silence_scale: 1.0
 rhythm_v3_leading_silence_scale: 0.0
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
 rhythm_v3_disallow_same_text_reference: true
-rhythm_v3_disallow_same_text_paired_target: true
+rhythm_v3_disallow_same_text_paired_target: false
+rhythm_v3_require_same_text_paired_target: true
 pseudo_source_duration_perturbation: false
 # Canonical paired training should not silently fall back to source-self
 # duration targets. Only enable this for bootstrap/pretrain.

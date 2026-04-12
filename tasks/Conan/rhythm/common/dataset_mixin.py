@@ -8,8 +8,12 @@ import torch
 from utils.commons.dataset_utils import collate_1d_or_2d
 
 from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
-from modules.Conan.rhythm.supervision import RHYTHM_CACHE_VERSION, build_source_rhythm_cache
-from modules.Conan.rhythm.unitizer import estimate_boundary_confidence, estimate_run_stability
+from modules.Conan.rhythm.supervision import RHYTHM_CACHE_VERSION
+from modules.Conan.rhythm_v3.source_cache import (
+    build_source_rhythm_cache_v3 as build_source_rhythm_cache,
+    estimate_boundary_confidence,
+    estimate_run_stability,
+)
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
@@ -50,13 +54,23 @@ class CommonRhythmDatasetMixin:
         )
 
     def _disallow_same_text_paired_target(self) -> bool:
+        if self._is_enabled_flag(self.hparams.get("rhythm_v3_minimal_v1_profile", False)):
+            return False
         return bool(
             self.hparams.get(
                 "rhythm_v3_disallow_same_text_paired_target",
                 self.hparams.get(
                     "rhythm_disallow_same_text_paired_target",
-                    self._disallow_same_text_reference(),
+                    False,
                 ),
+            )
+        )
+
+    def _require_same_text_paired_target(self) -> bool:
+        return bool(
+            self.hparams.get(
+                "rhythm_v3_require_same_text_paired_target",
+                self._is_enabled_flag(self.hparams.get("rhythm_v3_minimal_v1_profile", False)),
             )
         )
 

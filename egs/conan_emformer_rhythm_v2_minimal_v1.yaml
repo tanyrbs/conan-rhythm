@@ -1,70 +1,21 @@
-base_config: egs/conan_emformer_rhythm_v2.yaml
+base_config: egs/conan_emformer_rhythm_v3.yaml
 
-# Minimal Strong-Rhythm V1:
-# canonical formal base for all maintained training stages.
-# Keep the runtime path narrow and cache-first before any stage-specific override.
+# Deprecated filename kept as a compatibility alias.
+# The maintained minimal-V1/V1-G surface is rhythm_v3 only.
 rhythm_stage: minimal_v1
-rhythm_minimal_v1_profile: true
-rhythm_strict_mainline: true
-rhythm_dataset_target_mode: cached_only
-rhythm_cached_reference_policy: self
+rhythm_enable_v2: false
+rhythm_enable_v3: true
 
-# Formal path should learn against cached teacher timing surfaces, not runtime heuristics.
-rhythm_primary_target_surface: teacher
-rhythm_distill_surface: none
-rhythm_require_cached_teacher: true
-rhythm_enable_learned_offline_teacher: false
-rhythm_runtime_enable_learned_offline_teacher: false
-rhythm_teacher_target_source: learned_offline
-lambda_rhythm_teacher_aux: 0.0
+rhythm_v3_minimal_v1_profile: true
+rhythm_v3_backbone: prompt_summary
+rhythm_v3_rate_mode: simple_global
+rhythm_v3_simple_global_stats: true
+rhythm_v3_use_log_base_rate: false
+rhythm_v3_use_reference_summary: false
+rhythm_v3_use_learned_residual_gate: false
+rhythm_v3_disable_learned_gate: true
 
-# Keep preprocessing/cache generation teacher-ready, but do not rebuild guidance/teacher targets at runtime.
-rhythm_binarize_teacher_targets: true
-rhythm_dataset_build_guidance_from_ref: false
-rhythm_dataset_build_teacher_from_ref: false
-
-# Main maintained timing objective stays minimal.
-# Keep the core lambdas explicit here so contract validation and runtime loss
-# scaling cannot drift apart through inherited defaults.
-lambda_rhythm_exec_speech: 1.0
-lambda_rhythm_exec_pause: 1.0
-lambda_rhythm_budget: 0.15
-lambda_rhythm_cumplan: 0.15
-lambda_rhythm_guidance: 0.0
-lambda_rhythm_plan: 0.0
-lambda_rhythm_distill: 0.0
-rhythm_unit_logratio_weight: 0.0
-rhythm_budget_raw_weight: 1.0
-rhythm_budget_exec_weight: 0.25
-rhythm_distill_budget_weight: 0.0
-rhythm_distill_allocation_weight: 0.0
-rhythm_distill_prefix_weight: 0.0
-rhythm_distill_speech_shape_weight: 0.0
-rhythm_distill_pause_shape_weight: 0.0
-rhythm_pause_boundary_weight: 0.35
-rhythm_feasible_debt_weight: 0.05
-# Optional support-first pause event term. Keep the maintained baseline off by
-# default and only enable it when pause precision is acceptable but recall is
-# clearly lagging.
-rhythm_pause_event_weight: 0.0
-rhythm_pause_support_weight: 0.0
-rhythm_pause_allocation_weight: 0.0
-rhythm_pause_event_threshold: 0.5
-rhythm_pause_event_temperature: 0.25
-rhythm_pause_event_pos_weight: 2.0
-
-# Structural pause-recall upgrade remains opt-in. These knobs are intentionally
-# off in the maintained baseline, but the stage-1 recall overlays can enable
-# them when dense guidance targets keep collapsing into sparse boundary-only
-# pause support.
-rhythm_pause_support_split_enable: false
-rhythm_pause_breath_features_enable: false
-rhythm_pause_breath_reset_threshold: 0.55
-
-# Teacher-offline recall ablations may optionally keep full-commit semantics
-# while still enabling soft sparse pause selection during training so near-top-k
-# pause candidates receive gradient. This knob belongs to the offline teacher
-# branch / teacher_as_main path; it is not the student streaming pause-selection
-# knob.
-rhythm_teacher_projector_force_full_commit: true
-rhythm_teacher_projector_soft_pause_selection: false
+rhythm_v3_disallow_same_text_reference: true
+rhythm_v3_disallow_same_text_paired_target: false
+rhythm_v3_require_same_text_paired_target: true
+rhythm_v3_allow_source_self_target_fallback: false

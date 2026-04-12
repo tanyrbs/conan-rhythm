@@ -239,6 +239,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         ridge_support_tau: float = 8.0,
         holdout_ratio: float = 0.30,
         min_operator_support_factor: float = 1.0,
+        simple_global_stats: bool = False,
+        use_log_base_rate: bool = False,
     ) -> None:
         super().__init__()
         self.progress_bins = int(max(1, progress_bins))
@@ -248,6 +250,9 @@ class PromptConditionedOperatorEstimator(nn.Module):
         self.ridge_support_tau = float(max(0.0, ridge_support_tau))
         self.holdout_ratio = float(max(0.0, min(0.95, holdout_ratio)))
         self.min_operator_support_factor = float(max(0.0, min_operator_support_factor))
+        self.simple_global_stats = bool(simple_global_stats)
+        self.rate_mode = "simple_global" if self.simple_global_stats else "log_base"
+        self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
 
     @staticmethod
     def _masked_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -435,13 +440,19 @@ class PromptConditionedOperatorEstimator(nn.Module):
             prompt_duration_obs=prompt_duration_obs,
             prompt_unit_mask=prompt_unit_mask,
         )
-        resolved_log_base = self._resolve_prompt_log_base(
-            prompt_unit_anchor_base=prompt_unit_anchor_base,
-            prompt_log_base=prompt_log_base,
-        )
+        if self.use_log_base_rate:
+            resolved_log_base = self._resolve_prompt_log_base(
+                prompt_unit_anchor_base=prompt_unit_anchor_base,
+                prompt_log_base=prompt_log_base,
+            )
+        else:
+            resolved_log_base = torch.zeros_like(prompt_duration_obs.float())
         prompt_log_duration = torch.log(prompt_duration_obs.float().clamp_min(1.0e-6)).detach() * prompt_mask
         prompt_log_base = resolved_log_base.float().detach() * prompt_mask
-        prompt_log_residual = (prompt_log_duration - prompt_log_base).detach() * prompt_mask
+        if self.use_log_base_rate:
+            prompt_log_residual = (prompt_log_duration - prompt_log_base).detach() * prompt_mask
+        else:
+            prompt_log_residual = prompt_log_duration
         global_rate = self._support_shrink(
             self._masked_median(prompt_log_residual, prompt_mask),
             self._masked_count(prompt_mask),

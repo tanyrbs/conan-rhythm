@@ -64,8 +64,34 @@ def normalize_duration_v3_backbone_mode(value) -> str:
     return normalized
 
 
+def normalize_duration_v3_rate_mode(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "none", "auto"}:
+        return ""
+    if normalized in {"simple", "simple_global", "global_stat", "global_stats"}:
+        return "simple_global"
+    if normalized in {"log_base", "normalized", "content_normalized"}:
+        return "log_base"
+    return normalized
+
+
+def resolve_duration_v3_rate_mode(hparams) -> str:
+    explicit = normalize_duration_v3_rate_mode(hparams.get("rhythm_v3_rate_mode", ""))
+    if explicit:
+        return explicit
+    if _is_enabled_flag(hparams.get("rhythm_v3_simple_global_stats", False)):
+        return "simple_global"
+    return "log_base"
+
+
 def is_duration_v3_prompt_summary_backbone(value) -> bool:
     return normalize_duration_v3_backbone_mode(value) == "prompt_summary"
+
+
+def _is_enabled_flag(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def validate_duration_v3_training_hparams(hparams) -> None:
@@ -134,9 +160,63 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     anchor_mode = str(hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower()
     if anchor_mode not in {"baseline", "source_observed"}:
         raise ValueError("rhythm_v3_anchor_mode must be one of: baseline, source_observed")
+    rate_mode = resolve_duration_v3_rate_mode(hparams)
+    if rate_mode not in {"simple_global", "log_base"}:
+        raise ValueError("rhythm_v3_rate_mode must be one of: simple_global, log_base")
     if backbone_mode == "prompt_summary" and anchor_mode != "source_observed":
         raise ValueError(
             "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
+        )
+    minimal_v1_profile = _is_enabled_flag(hparams.get("rhythm_v3_minimal_v1_profile", False))
+    if minimal_v1_profile:
+        backbone_value = hparams.get("rhythm_v3_backbone", "unit_run")
+        if not is_duration_v3_prompt_summary_backbone(backbone_value):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_backbone to be 'unit_run' "
+                "or normalized 'prompt_summary'."
+            )
+        if int(hparams.get("rhythm_num_summary_slots", 1) or 1) != 1:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_num_summary_slots=1.")
+        if _is_enabled_flag(hparams.get("rhythm_v3_summary_use_unit_embedding", False)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_use_unit_embedding=false."
+            )
+        if _is_enabled_flag(hparams.get("rhythm_v3_disallow_same_text_paired_target", False)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_disallow_same_text_paired_target=false."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_require_same_text_paired_target", True)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_require_same_text_paired_target=true."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_simple_global_stats", True)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_simple_global_stats=true.")
+        if rate_mode != "simple_global":
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_rate_mode=simple_global.")
+        if _is_enabled_flag(hparams.get("rhythm_v3_use_log_base_rate", False)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_log_base_rate=false.")
+        if _is_enabled_flag(hparams.get("rhythm_v3_use_reference_summary", False)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_reference_summary=false.")
+        if _is_enabled_flag(hparams.get("rhythm_v3_use_learned_residual_gate", False)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_learned_residual_gate=false.")
+        if not _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", True)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_disable_learned_gate=true.")
+        if float(hparams.get("lambda_rhythm_summary", hparams.get("lambda_rhythm_mem", 0.0)) or 0.0) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_summary=0.")
+        if float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_base=0.")
+    if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
+        hparams.get("rhythm_v3_use_learned_residual_gate", False)
+    ):
+        raise ValueError(
+            "rhythm_v3_disable_learned_gate=true is incompatible with rhythm_v3_use_learned_residual_gate=true."
+        )
+    if _is_enabled_flag(hparams.get("rhythm_v3_require_same_text_paired_target", False)) and _is_enabled_flag(
+        hparams.get("rhythm_v3_disallow_same_text_paired_target", False)
+    ):
+        raise ValueError(
+            "rhythm_v3_require_same_text_paired_target=true is incompatible with "
+            "rhythm_v3_disallow_same_text_paired_target=true."
         )
     if source_residual_gain > 0.0 and warp_mode == "progress":
         raise ValueError(
@@ -314,6 +394,8 @@ def validate_rhythm_training_hparams(hparams) -> None:
 __all__ = [
     "is_duration_v3_prompt_summary_backbone",
     "normalize_duration_v3_backbone_mode",
+    "normalize_duration_v3_rate_mode",
+    "resolve_duration_v3_rate_mode",
     "validate_duration_v3_training_hparams",
     "validate_rhythm_training_hparams",
 ]

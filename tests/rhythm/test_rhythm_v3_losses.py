@@ -224,7 +224,7 @@ def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_lo
     assert torch.isfinite(losses["rhythm_v3_summary"]).all()
 
 
-def test_prompt_summary_global_rate_normalizes_by_content_prior():
+def test_prompt_summary_global_rate_uses_raw_log_by_default():
     encoder = PromptDurationMemoryEncoder(
         vocab_size=16,
         dim=32,
@@ -232,6 +232,34 @@ def test_prompt_summary_global_rate_normalizes_by_content_prior():
         operator_rank=2,
         coverage_floor=0.05,
         summary_pool_speech_only=True,
+    )
+    prompt_units = torch.tensor([[10, 11, 12, 13]], dtype=torch.long)
+    prompt_duration_obs = torch.tensor([[6.0, 4.0, 10.0, 8.0]], dtype=torch.float32)
+    prompt_anchor_base = torch.tensor([[3.0, 2.0, 2.0, 4.0]], dtype=torch.float32)
+    valid_mask = torch.ones_like(prompt_duration_obs)
+    speech_mask = torch.tensor([[1.0, 1.0, 0.0, 1.0]], dtype=torch.float32)
+    memory = encoder(
+        prompt_content_units=prompt_units,
+        prompt_duration_obs=prompt_duration_obs,
+        prompt_mask=valid_mask,
+        prompt_valid_mask=valid_mask,
+        prompt_speech_mask=speech_mask,
+        prompt_unit_anchor_base=prompt_anchor_base,
+    )
+    speech_values = torch.log(prompt_duration_obs)[speech_mask.bool()]
+    expected = torch.median(speech_values).reshape(1, 1)
+    assert torch.allclose(memory.global_rate, expected)
+
+
+def test_prompt_summary_global_rate_can_use_prompt_log_base_when_enabled():
+    encoder = PromptDurationMemoryEncoder(
+        vocab_size=16,
+        dim=32,
+        num_slots=4,
+        operator_rank=2,
+        coverage_floor=0.05,
+        summary_pool_speech_only=True,
+        use_log_base_rate=True,
     )
     prompt_units = torch.tensor([[10, 11, 12, 13]], dtype=torch.long)
     prompt_duration_obs = torch.tensor([[6.0, 4.0, 10.0, 8.0]], dtype=torch.float32)
@@ -841,6 +869,45 @@ def test_rhythm_v3_loss_routes_local_and_coarse_confidence_separately():
     assert not torch.allclose(coarse_losses["rhythm_v3_bias"], base_losses["rhythm_v3_bias"])
 
 
+def test_rhythm_v3_bias_loss_prefers_global_bias_scalar_when_available():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "local_residual": torch.zeros((1, 2), dtype=torch.float32),
+            "coarse_logstretch": torch.tensor([[3.0, 3.0]], dtype=torch.float32),
+            "global_bias_scalar": torch.tensor([[0.25]], dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        prediction_anchor=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        local_residual_tgt=torch.zeros((1, 2), dtype=torch.float32),
+        coarse_logstretch_tgt=torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        coarse_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        global_bias_tgt=torch.tensor([[0.25]], dtype=torch.float32),
+        unit_confidence_local_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        lambda_bias=1.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    assert torch.allclose(losses["rhythm_v3_bias"], torch.tensor(0.0))
+
+
 def test_prompt_summary_runtime_uses_learned_source_rate_init_without_history():
     adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
     adapter.module.duration_head.src_rate_init.data.fill_(1.2345)
@@ -871,8 +938,10 @@ def test_prompt_summary_runtime_uses_learned_source_rate_init_without_history():
     assert torch.allclose(source_rate_seq[0, 0], source_rate_seq.new_tensor(1.2345), atol=1e-4)
 
 
-def test_prompt_summary_reference_global_rate_uses_prompt_log_base_normalization():
-    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+def test_prompt_summary_reference_global_rate_uses_prompt_log_base_normalization_when_enabled():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_use_log_base_rate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
     ref_memory = adapter.module.build_reference_conditioning(
         ref_conditioning={
             "prompt_content_units": torch.tensor([[1, 2, 3]], dtype=torch.long),

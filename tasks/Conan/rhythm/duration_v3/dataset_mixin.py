@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from modules.Conan.rhythm.policy import is_duration_operator_mode
-from modules.Conan.rhythm.supervision import build_source_rhythm_cache
+from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3 as build_source_rhythm_cache
 from tasks.Conan.rhythm.duration_v3.targets import build_pseudo_source_duration_context
 from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 
@@ -15,6 +15,32 @@ def _as_int64_1d(value) -> np.ndarray:
 
 def _as_float32_1d(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32).reshape(-1)
+
+
+def _extract_object_scalar(value):
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        if value.dtype == object:
+            if value.size == 1:
+                return value.reshape(-1)[0]
+            if value.shape[0] == 1:
+                first = value[0]
+                if isinstance(first, np.ndarray):
+                    first_list = first.tolist()
+                    return tuple(first_list) if isinstance(first_list, list) else first_list
+                return first
+        flat = value.reshape(-1)
+        if flat.size > 0:
+            return flat[0].item() if hasattr(flat[0], "item") else flat[0]
+        return None
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return value[0]
+        return tuple(value)
+    return value
 
 
 def _resolve_run_silence_mask(*, size: int, silence_mask=None) -> np.ndarray:
@@ -48,7 +74,7 @@ def _filter_valid_runs(
     )
 
 
-def _align_target_runs_to_source(
+def _align_target_runs_to_source_discrete(
     *,
     source_units: np.ndarray,
     source_durations: np.ndarray,
@@ -101,17 +127,17 @@ def _align_target_runs_to_source(
         right = min(num_target + 1, center + band + 1)
         for tgt_idx in range(left, right):
             cost = local_cost[src_idx - 1, tgt_idx - 1]
-            diag = dp_prev[tgt_idx - 1]
+            diag = dp_prev[tgt_idx - 1] + cost
             up = dp_prev[tgt_idx] + gap_penalty
             left_cost = dp_curr[tgt_idx - 1] + gap_penalty
             if diag <= up and diag <= left_cost:
-                dp_curr[tgt_idx] = cost + diag
+                dp_curr[tgt_idx] = diag
                 back[src_idx, tgt_idx] = 0
             elif up <= left_cost:
-                dp_curr[tgt_idx] = cost + up
+                dp_curr[tgt_idx] = up
                 back[src_idx, tgt_idx] = 1
             else:
-                dp_curr[tgt_idx] = cost + left_cost
+                dp_curr[tgt_idx] = left_cost
                 back[src_idx, tgt_idx] = 2
         dp_prev, dp_curr = dp_curr, dp_prev
 
@@ -129,11 +155,60 @@ def _align_target_runs_to_source(
         elif move == 1:
             src_idx -= 1
         else:
-            if src_idx > 0:
-                assigned_source[tgt_idx - 1] = src_idx - 1
-                assigned_cost[tgt_idx - 1] = local_cost[src_idx - 1, tgt_idx - 1]
             tgt_idx -= 1
     return assigned_source, assigned_cost
+
+
+def _align_target_frames_to_source_runs(
+    *,
+    source_units: np.ndarray,
+    source_durations: np.ndarray,
+    source_silence: np.ndarray,
+    target_units: np.ndarray,
+    target_durations: np.ndarray,
+    target_silence: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Future hook for continuous-content alignment; return None to fall back."""
+    del (
+        source_units,
+        source_durations,
+        source_silence,
+        target_units,
+        target_durations,
+        target_silence,
+    )
+    return None
+
+
+def _align_target_to_source(
+    *,
+    source_units: np.ndarray,
+    source_durations: np.ndarray,
+    source_silence: np.ndarray,
+    target_units: np.ndarray,
+    target_durations: np.ndarray,
+    target_silence: np.ndarray,
+    use_continuous_alignment: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    if use_continuous_alignment:
+        continuous = _align_target_frames_to_source_runs(
+            source_units=source_units,
+            source_durations=source_durations,
+            source_silence=source_silence,
+            target_units=target_units,
+            target_durations=target_durations,
+            target_silence=target_silence,
+        )
+        if continuous is not None:
+            return continuous
+    return _align_target_runs_to_source_discrete(
+        source_units=source_units,
+        source_durations=source_durations,
+        source_silence=source_silence,
+        target_units=target_units,
+        target_durations=target_durations,
+        target_silence=target_silence,
+    )
 
 
 def _project_target_runs_onto_source(
@@ -145,6 +220,7 @@ def _project_target_runs_onto_source(
     target_durations: np.ndarray,
     target_valid_mask: np.ndarray,
     target_speech_mask: np.ndarray,
+    use_continuous_alignment: bool = False,
  ) -> dict[str, np.ndarray]:
     source_silence_mask = _resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
     target_silence_mask = ((target_valid_mask > 0.5) & ~(target_speech_mask > 0.5)).astype(np.float32)
@@ -174,13 +250,14 @@ def _project_target_runs_onto_source(
     if tgt_units_valid.size <= 0:
         raise RuntimeError("paired projection requires a non-empty paired target prompt lattice.")
 
-    assigned_source, assigned_cost = _align_target_runs_to_source(
+    assigned_source, assigned_cost = _align_target_to_source(
         source_units=src_units_valid,
         source_durations=src_durations_valid,
         source_silence=src_silence_valid,
         target_units=tgt_units_valid,
         target_durations=tgt_durations_valid,
         target_silence=tgt_silence_valid,
+        use_continuous_alignment=use_continuous_alignment,
     )
 
     num_source_runs = int(source_units.shape[0])
@@ -244,7 +321,16 @@ def _project_target_runs_onto_source(
     source_is_silence = source_silence_mask > 0.5
     projected[source_is_silence] = np.maximum(projected[source_is_silence], 1.0).astype(np.float32)
     confidence_local[source_is_silence] = 0.0
-    confidence_coarse[source_is_silence] = 0.0
+    sil_floor = np.float32(0.15)
+    sil_shape = np.clip(source_durations.astype(np.float32) / 3.0, 0.0, 1.0)
+    confidence_coarse[source_is_silence] = np.clip(
+        np.maximum(
+            sil_floor,
+            0.5 * confidence_coarse[source_is_silence] * sil_shape[source_is_silence],
+        ),
+        sil_floor,
+        np.float32(0.35),
+    ).astype(np.float32)
 
     speech_zero = (~source_is_silence) & (projected <= 0.0)
     projected[speech_zero] = source_durations[speech_zero].astype(np.float32)
@@ -614,6 +700,9 @@ class DurationV3DatasetMixin:
                 target_durations=target_duration,
                 target_valid_mask=target_valid,
                 target_speech_mask=target_speech,
+                use_continuous_alignment=bool(
+                    self.hparams.get("rhythm_v3_use_continuous_alignment", False)
+                ),
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to build paired duration_v3 targets for {item_name}: {exc}") from exc
@@ -669,11 +758,15 @@ class DurationV3DatasetMixin:
                     out[key] = np.asarray(sample[key], dtype=np.float32)
             return out
 
+        minimal_v1_profile = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_minimal_v1_profile", False)
+        )
+        require_same_text = bool(self._require_same_text_paired_target())
         source_item_name = str(item.get("item_name", "<unknown-item>")) if isinstance(item, dict) else "<unknown-item>"
         if isinstance(paired_target_conditioning, dict):
             paired_target_item_name = paired_target_conditioning.get("paired_target_item_name")
             if paired_target_item_name is not None:
-                paired_target_item_name = str(np.asarray(paired_target_item_name).reshape(-1)[0])
+                paired_target_item_name = str(_extract_object_scalar(paired_target_item_name))
                 if (
                     paired_target_item_name == source_item_name
                     and not self._is_enabled_flag(self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False))
@@ -682,12 +775,23 @@ class DurationV3DatasetMixin:
                         "Canonical duration_v3 training requires an external paired target item or explicit unit_duration_tgt. "
                         "Self paired-target projection is disabled unless rhythm_v3_allow_source_self_target_fallback=true."
                     )
+            paired_target_text_signature = paired_target_conditioning.get("paired_target_text_signature")
+            source_text_signature = paired_target_conditioning.get("source_text_signature")
+            if require_same_text:
+                paired_sig = _extract_object_scalar(paired_target_text_signature)
+                source_sig = _extract_object_scalar(source_text_signature)
+                if paired_sig is None or source_sig is None or paired_sig != source_sig:
+                    raise RuntimeError(
+                        (
+                            "minimal_v1 requires same-text paired target projection or explicit cached unit_duration_tgt."
+                            if minimal_v1_profile
+                            else "V1 paired-target projection requires same-text paired target."
+                        )
+                    )
             if self._disallow_same_text_paired_target():
-                paired_target_text_signature = paired_target_conditioning.get("paired_target_text_signature")
-                source_text_signature = paired_target_conditioning.get("source_text_signature")
                 if paired_target_text_signature is not None and source_text_signature is not None:
-                    paired_sig = np.asarray(paired_target_text_signature, dtype=object).reshape(-1)[0]
-                    source_sig = np.asarray(source_text_signature, dtype=object).reshape(-1)[0]
+                    paired_sig = _extract_object_scalar(paired_target_text_signature)
+                    source_sig = _extract_object_scalar(source_text_signature)
                     if paired_sig is not None and source_sig is not None and paired_sig == source_sig:
                         raise RuntimeError(
                             "rhythm_v3 paired-target projection forbids same-text targets by default. "

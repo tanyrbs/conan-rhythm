@@ -9,9 +9,12 @@ The maintained default is **streaming VC unit-duration transfer**.
 Use:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
-- `rhythm_v3_backbone: unit_run`  (`prompt_summary` / `role_memory` remain accepted aliases)
+- `rhythm_v3_backbone: prompt_summary`  (`unit_run` / `role_memory` remain accepted legacy aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
+- `rhythm_v3_minimal_v1_profile: true`
+- `rhythm_v3_rate_mode: simple_global`
+- `rhythm_v3_simple_global_stats: true`
 
 In that default path, the writer is:
 
@@ -19,9 +22,9 @@ In that default path, the writer is:
 
 where:
 
-- `g_ref`: speech-only prompt global rate on content-normalized log-duration residuals
-- `g_src_prefix,i`: strict-causal source prefix rate EMA on content-normalized source log-duration residuals before unit `i`
-- `c_hat_i`: small prefix-coarse correction from pooled causal source state + static prompt summary + speaker vector
+- `g_ref`: speech-only prompt global tempo statistic on raw log-duration
+- `g_src_prefix,i`: strict-causal source prefix tempo EMA on raw source log-duration before unit `i`
+- `c_hat_i`: small utterance-level coarse scalar, conditioned on speaker and, only in ablation/diagnostic modes, optional static prompt summary
 - `r_hat_i`: bounded local speech-run residual
 
 and committed speech duration is written as:
@@ -34,13 +37,16 @@ The canonical writer also keeps local residuals conservative at cold start: open
 The maintained explanation is:
 
 - **source-anchored duration writing**
-- **static prompt summary memory**
+- **global-stat prompt conditioning by default**
 - **prefix-level coarse correction over the analytic source/ref rate gap**
 - **strict-causal prefix-rate correction**
 - **carry-only integer projection**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
+- **stable-lattice suppression of short flicker runs and micro-silence islands before retiming**
 - **silence runs follow the coarse/global bias (clipped) without a local residual, keeping them tied to the overall rate**
+- **reference summary diagnostics remain available but are disabled in the default V1-G writer**
 - **paired-target supervision drawn from dedicated target data instead of prompt sidecars**
+- **same-text rule split by role: reference stays different-text, paired-target supervision stays same-text unless `unit_duration_tgt` is already cached**
 - **runtime enforces prefix unit-budget clamping while retaining raw open tail tokens**
 
 ## What the default v3 path does
@@ -63,11 +69,20 @@ It produces:
 - `spk_embed`
 - diagnostic slot statistics (`role_value`, `role_var`, `role_coverage`)
 
-The diagnostic slot statistics remain useful for losses and observability, while
-runtime now directly uses `summary_state + spk_embed` as static conditioning;
-slot statistics are diagnostics only.
+The diagnostic slot statistics remain useful for observability, but the
+maintained V1-G writer defaults to:
 
-A `rhythm_v3_summary_pool_speech_only` flag keeps that summary pooling speech-only, masking out silence runs before computing the pooled mean/std so `global_rate` and `summary_state` stay focused on speaking rhythm rather than pause counts.
+- `rhythm_v3_minimal_v1_profile: true`
+- `rhythm_v3_rate_mode: simple_global`
+- `rhythm_v3_simple_global_stats: true`
+- `rhythm_v3_use_log_base_rate: false`
+- `rhythm_v3_use_reference_summary: false`
+- `rhythm_v3_use_learned_residual_gate: false`
+- `rhythm_v3_disable_learned_gate: true`
+
+So the main retiming path consumes the prompt's speech-only global statistic and
+speaker embedding by default; `summary_state` / slot statistics stay available
+for diagnostics and ablations instead of defining the default writer.
 
 A `rhythm_v3_summary_pool_speech_only` flag keeps that summary pooling speech-only, masking out silence runs before computing the pooled mean/std so `global_rate` and `summary_state` stay focused on speaking rhythm rather than pause counts.
 
@@ -118,6 +133,15 @@ and optional `unit_confidence_tgt`, and keeps that signal strictly apart from
 prompt-side diagnostics. Source-self fallback is disabled by default and
 becomes available only with the explicit `rhythm_v3_allow_source_self_target_fallback`
 escape hatch.
+
+For the maintained `rhythm_v3_minimal_v1_profile`, the pairing rule is:
+
+- **reference prompt**: same-speaker / different-text
+- **paired target supervision**: same-text target-to-source projection (`rhythm_v3_require_same_text_paired_target: true`), or an explicitly cached `unit_duration_tgt`
+
+The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
+compatibility alias that inherits the maintained `rhythm_v3` contract; it is no
+longer a separate V2 experiment surface.
 
 Required public inputs:
 
@@ -199,6 +223,13 @@ Current split:
 - `inference/run_voice_conversion.py`
 - `inference/run_streaming_latency_report.py`
 
+### CI / smoke surface
+
+Maintained automation should exercise the V3 path:
+
+- `scripts/preflight_rhythm_v3.py`
+- `scripts/smoke_test_rhythm_v3.py`
+
 ## Legacy status
 
 These are still kept only for compatibility, archive experiments, and old
@@ -229,8 +260,28 @@ Not claimed ready:
 ## Authoritative current docs
 
 - `README.md`
+- `docs/rhythm_v3_training_guide.md`
 - `docs/rhythm_migration_plan.md`
 - `inference/README.md`
+
+## Practical setup and training
+
+If you want the repo-specific "what files matter / how do I prepare data / how do I actually train" walkthrough, use:
+
+- `docs/rhythm_v3_training_guide.md`
+
+Short version:
+
+1. create a dataset-specific yaml that inherits from `egs/conan_emformer_rhythm_v3.yaml`
+2. prepare `metadata.json` (or `metadata_vctk_librittsr_gt.json`) plus `spker_set.json`
+3. generate the expected F0 side files if `with_f0: true`
+4. provide canonical paired-target supervision via `rhythm_pair_manifest_path` or explicit `unit_duration_tgt`
+5. binarize with `python -m data_gen.tts.runs.binarize --config <yaml>`
+6. train with `python tasks/run.py --config <yaml> --exp_name <exp> --reset`
+
+Most important operational caveat:
+
+- if `checkpoints/<exp_name>/config.yaml` already exists, it overrides newly provided yaml values unless you pass `--reset`
 
 ## Quick validation
 

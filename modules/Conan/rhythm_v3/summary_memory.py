@@ -39,15 +39,6 @@ def _masked_std(values: torch.Tensor, mask: torch.Tensor, mean: torch.Tensor) ->
     return torch.sqrt(diff2.sum(dim=1) / denom.clamp_min(1.0e-6) + 1.0e-6)
 
 
-def _masked_prefix_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    mask_f = mask.float().clamp(0.0, 1.0)
-    prefix_num = torch.cumsum(values * mask_f.unsqueeze(-1), dim=1)
-    prefix_den = torch.cumsum(mask_f, dim=1).clamp_min(1.0).unsqueeze(-1)
-    prefix_mean = prefix_num / prefix_den
-    has_support = (torch.cumsum(mask_f, dim=1) > 0.0).unsqueeze(-1)
-    return torch.where(has_support, prefix_mean, torch.zeros_like(prefix_mean))
-
-
 def _masked_mean_1d(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask_f = mask.float().clamp(0.0, 1.0)
     denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
@@ -177,6 +168,7 @@ class CausalUnitRunEncoder(nn.Module):
         unit_ids: torch.Tensor,
         log_anchor: torch.Tensor,
         log_base: torch.Tensor | None,
+        use_log_base_rate: bool = True,
         source_rate: torch.Tensor,
         silence_mask: torch.Tensor,
         sep_hint: torch.Tensor,
@@ -187,7 +179,7 @@ class CausalUnitRunEncoder(nn.Module):
         mask = unit_mask.float().clamp(0.0, 1.0)
         base = (
             log_base.float()
-            if isinstance(log_base, torch.Tensor)
+            if (bool(use_log_base_rate) and isinstance(log_base, torch.Tensor))
             else torch.zeros_like(log_anchor.float())
         )
         normalized_anchor = (log_anchor.float() - base) * mask
@@ -235,13 +227,18 @@ class PromptDurationMemoryEncoder(nn.Module):
         coverage_floor: float = 0.05,
         summary_pool_speech_only: bool = True,
         summary_use_unit_embedding: bool = False,
+        simple_global_stats: bool = False,
+        use_log_base_rate: bool = False,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
         del operator_rank
+        self.simple_global_stats = bool(simple_global_stats)
+        self.rate_mode = "simple_global" if self.simple_global_stats else "log_base"
         self.coverage_floor = float(max(1.0e-4, coverage_floor))
         self.summary_pool_speech_only = bool(summary_pool_speech_only)
         self.summary_use_unit_embedding = bool(summary_use_unit_embedding)
+        self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
         self.summary_dim = int(max(8, dim))
         self.prompt_unit_emb = nn.Embedding(vocab_size, self.summary_dim)
         self.prompt_in_proj = nn.Linear(self.summary_dim + 4, self.summary_dim)
@@ -330,11 +327,15 @@ class PromptDurationMemoryEncoder(nn.Module):
             log_base = torch.log(prompt_unit_anchor_base.float().detach().clamp_min(1.0e-6)) * valid_mask
         else:
             log_base = torch.zeros_like(logdur)
-        normalized_logdur = (logdur - log_base) * valid_mask
-        global_rate = _masked_median(normalized_logdur, speech_mask)
+        rate_logdur = (
+            (logdur - log_base) * valid_mask
+            if self.use_log_base_rate
+            else logdur
+        )
+        global_rate = _masked_median(rate_logdur, speech_mask)
         speech_support = (speech_mask.sum(dim=1, keepdim=True) > 0.0).float()
         support_mask = torch.where(speech_support > 0.0, speech_mask, valid_mask)
-        ref_residual = (normalized_logdur - global_rate) * support_mask
+        ref_residual = (rate_logdur - global_rate) * support_mask
 
         summary_mask = support_mask if self.summary_pool_speech_only else valid_mask
         hidden = self._encode_prompt_summary(
@@ -407,6 +408,9 @@ class StreamingDurationHead(nn.Module):
         dim: int,
         num_slots: int,
         spk_dim: int | None = None,
+        simple_global_stats: bool = False,
+        use_log_base_rate: bool = False,
+        use_learned_residual_gate: bool = False,
         max_logstretch: float = 1.2,
         max_silence_logstretch: float = 0.35,
         local_cold_start_runs: int = 2,
@@ -417,6 +421,10 @@ class StreamingDurationHead(nn.Module):
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
+        self.simple_global_stats = bool(simple_global_stats)
+        self.rate_mode = "simple_global" if self.simple_global_stats else "log_base"
+        self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
+        self.use_learned_residual_gate = bool(use_learned_residual_gate)
         self.max_logstretch = float(max(0.1, max_logstretch))
         self.max_silence_logstretch = float(max(0.01, min(self.max_logstretch, max_silence_logstretch)))
         self.local_cold_start_runs = int(max(0, local_cold_start_runs))
@@ -489,13 +497,13 @@ class StreamingDurationHead(nn.Module):
                     f"StreamingDurationHead.local_rate_ema must have shape [B, 1], got {tuple(init_local_rate.shape)}"
                 )
 
-        normalized_log_anchor = (
+        observed_log_anchor = (
             (log_anchor.float() - log_base.float())
-            if isinstance(log_base, torch.Tensor)
+            if (self.use_log_base_rate and isinstance(log_base, torch.Tensor))
             else log_anchor.float()
         )
         local_rate_seq, local_rate_final = build_causal_local_rate_seq(
-            observed_log=normalized_log_anchor,
+            observed_log=observed_log_anchor,
             speech_mask=speech_mask,
             init_rate=init_local_rate,
             default_init_rate=self.src_rate_init,
@@ -506,6 +514,7 @@ class StreamingDurationHead(nn.Module):
             unit_ids=content_units.long(),
             log_anchor=log_anchor.float(),
             log_base=log_base.float() if isinstance(log_base, torch.Tensor) else None,
+            use_log_base_rate=self.use_log_base_rate,
             source_rate=local_rate_seq.float(),
             silence_mask=silence,
             sep_hint=sep_hint.float(),
@@ -559,7 +568,6 @@ class StreamingDurationHead(nn.Module):
         global_shift_analytic = (global_rate.float() - local_rate_seq.float()) * commit_valid_mask
         summary_expand = summary.unsqueeze(1).expand(-1, query.size(1), -1)
         spk_expand = spk_ctx.unsqueeze(1).expand(-1, query.size(1), -1)
-        prefix_query = _masked_prefix_mean(query, speech_mask)
         coarse_context = torch.cat(
             [
                 summary,
@@ -580,7 +588,6 @@ class StreamingDurationHead(nn.Module):
             dim=-1,
         )
         residual = self.local_residual_scale * torch.tanh(self.residual_head(residual_input).squeeze(-1))
-        gate_raw = torch.sigmoid(self.residual_gate_head(residual_input).squeeze(-1))
         prefix_speech_prev = (torch.cumsum(speech_mask, dim=1) - speech_mask).clamp_min(0.0)
         if self.local_cold_start_runs > 0:
             cold_gate = (prefix_speech_prev / float(self.local_cold_start_runs)).clamp(0.0, 1.0)
@@ -591,7 +598,12 @@ class StreamingDurationHead(nn.Module):
             (torch.exp(log_anchor.float()).clamp_min(1.0) - 1.0)
             / max(1.0, min_duration - 1.0)
         ).clamp(0.0, 1.0)
-        residual_gate = gate_raw * cold_gate * short_gate * runtime_stability * speech_mask
+        deterministic_gate = cold_gate * short_gate * runtime_stability * speech_mask
+        if self.use_learned_residual_gate:
+            gate_raw = torch.sigmoid(self.residual_gate_head(residual_input).squeeze(-1))
+            residual_gate = gate_raw * deterministic_gate
+        else:
+            residual_gate = deterministic_gate
         residual = residual * residual_gate
         pred_speech = (global_term + residual).clamp(
             min=-self.max_logstretch,
@@ -645,7 +657,6 @@ class StreamingDurationHead(nn.Module):
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
-            "source_prefix_summary": prefix_query * mask.unsqueeze(-1),
         }
 
 

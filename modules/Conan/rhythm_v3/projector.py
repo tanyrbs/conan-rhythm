@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -178,31 +179,33 @@ class StreamingDurationProjector(nn.Module):
                 residual_next[batch_idx] = carry
                 prefix_offset_next[batch_idx] = float(prefix_offset)
                 continue
-            row_exec = unit_duration_exec[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
-            row_source = source_duration_obs[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
-            row_speech = speech_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
+            row_exec = unit_duration_exec[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
+            row_source = source_duration_obs[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
+            row_source_rounded = np.rint(np.clip(row_source, a_min=0.0, a_max=None)).astype(np.int64, copy=False)
+            row_speech = speech_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
             row_coarse = (
-                coarse_only_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
+                coarse_only_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
                 if isinstance(coarse_only_commit_mask, torch.Tensor)
                 else None
             )
             row_boundary = (
-                source_boundary_cue[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
+                source_boundary_cue[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
                 if isinstance(source_boundary_cue, torch.Tensor)
                 else None
             )
             row_phrase_final = (
-                phrase_final_mask[batch_idx, start_unit:committed_len].detach().float().cpu().tolist()
+                phrase_final_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
                 if isinstance(phrase_final_mask, torch.Tensor)
                 else None
             )
-            row_projected: list[float] = []
-            for offset, exec_value in enumerate(row_exec):
-                source_count = int(max(0.0, round(float(row_source[offset]))))
-                is_speech = float(row_speech[offset]) > 0.5
-                is_coarse_only = row_coarse is not None and float(row_coarse[offset]) > 0.5
+            row_projected = np.empty_like(row_exec, dtype=np.float32)
+            for offset in range(int(row_exec.shape[0])):
+                exec_value = float(row_exec[offset])
+                source_count = int(max(0, int(row_source_rounded[offset])))
+                is_speech = bool(row_speech[offset] > 0.5)
+                is_coarse_only = bool(row_coarse is not None and row_coarse[offset] > 0.5)
                 if (not is_speech) and (not is_coarse_only):
-                    row_projected.append(float(source_count))
+                    row_projected[offset] = np.float32(source_count)
                     continue
                 total = max(0.0, float(exec_value) + carry)
                 frames = float(math.floor(total + 0.5))
@@ -211,7 +214,7 @@ class StreamingDurationProjector(nn.Module):
                 lower = max(1, int(math.ceil(float(anchor - (row_budget_neg + prefix_offset)))))
                 upper = max(lower, int(math.floor(float(anchor + (row_budget_pos - prefix_offset)))))
                 frames = float(min(max(int(frames), lower), upper))
-                row_projected.append(frames)
+                row_projected[offset] = np.float32(frames)
                 prefix_offset += int(frames) - anchor
                 carry = total - frames
                 boundary_hit = False
@@ -223,12 +226,10 @@ class StreamingDurationProjector(nn.Module):
                     carry = float(carry) * float(boundary_carry_decay)
                     prefix_offset = int(round(float(prefix_offset) * float(boundary_carry_decay)))
                     prefix_offset = max(-int(row_budget_neg), min(int(row_budget_pos), int(prefix_offset)))
-            if len(row_projected) > 0:
-                projected[batch_idx, start_unit:committed_len] = torch.tensor(
-                    row_projected,
-                    dtype=projected.dtype,
-                    device=projected.device,
-                )
+            projected[batch_idx, start_unit:committed_len] = torch.from_numpy(row_projected).to(
+                device=projected.device,
+                dtype=projected.dtype,
+            )
             residual_next[batch_idx] = carry
             prefix_offset_next[batch_idx] = float(prefix_offset)
         return projected, residual_next.reshape(batch_size, 1), prefix_offset_next.reshape(batch_size, 1)

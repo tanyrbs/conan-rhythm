@@ -27,10 +27,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Preflight CLI help
-        run: python scripts/preflight_rhythm_v2.py --help
+        run: python scripts/preflight_rhythm_v3.py --help
       - name: Compile check
         run: python -m compileall -q modules tasks scripts tests utils data_gen
       - name: Rhythm unit tests
         run: python -m unittest discover -s tests/rhythm -p "test_*.py"
       - name: Rhythm smoke
-        run: python -u scripts/smoke_test_rhythm_v2.py
+        run: python -u scripts/smoke_test_rhythm_v3.py

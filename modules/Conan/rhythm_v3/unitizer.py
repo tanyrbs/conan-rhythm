@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -111,6 +112,69 @@ def _merge_short_flicker_runs(
     return units, durations, silence_mask, sep_hint
 
 
+def _suppress_micro_silence_runs(
+    units: list[int],
+    durations: list[int],
+    silence_mask: list[int],
+    sep_hint: list[int],
+    *,
+    max_silence_frames: int = 1,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    max_silence_frames = int(max(0, max_silence_frames))
+    if len(units) < 3 or max_silence_frames <= 0:
+        return units, durations, silence_mask, sep_hint
+    idx = 1
+    while idx < len(units) - 1:
+        is_micro_silence = (
+            int(silence_mask[idx]) == 1
+            and int(durations[idx]) <= max_silence_frames
+            and int(sep_hint[idx - 1]) == 0
+            and int(sep_hint[idx]) == 0
+            and int(silence_mask[idx - 1]) == 0
+            and int(silence_mask[idx + 1]) == 0
+        )
+        if is_micro_silence:
+            if int(durations[idx - 1]) <= int(durations[idx + 1]):
+                durations[idx - 1] += int(durations[idx])
+            else:
+                durations[idx + 1] += int(durations[idx])
+            del units[idx]
+            del durations[idx]
+            del silence_mask[idx]
+            del sep_hint[idx]
+            continue
+        idx += 1
+    return units, durations, silence_mask, sep_hint
+
+
+def _stabilize_run_lists(
+    units: list[int],
+    durations: list[int],
+    silence_mask: list[int],
+    sep_hint: list[int],
+    *,
+    min_speech_frames: int = 2,
+    min_silence_frames: int = 2,
+    max_micro_silence_frames: int = 1,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    units, durations, silence_mask, sep_hint = _merge_short_flicker_runs(
+        units,
+        durations,
+        silence_mask,
+        sep_hint,
+        min_speech_frames=min_speech_frames,
+        min_silence_frames=min_silence_frames,
+    )
+    units, durations, silence_mask, sep_hint = _suppress_micro_silence_runs(
+        units,
+        durations,
+        silence_mask,
+        sep_hint,
+        max_silence_frames=max_micro_silence_frames,
+    )
+    return units, durations, silence_mask, sep_hint
+
+
 def _merge_short_jitter_runs(
     units: list[int],
     durations: list[int],
@@ -129,6 +193,12 @@ def _merge_short_jitter_runs(
     )
 
 
+def _cpu_int64_list(values: torch.Tensor | Sequence[int] | Sequence[float]) -> list[int]:
+    if isinstance(values, torch.Tensor):
+        return values.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy().tolist()
+    return np.asarray(values, dtype=np.int64).reshape(-1).tolist()
+
+
 def _debounce_tail_tensors(
     units: torch.Tensor,
     durations: torch.Tensor,
@@ -144,17 +214,18 @@ def _debounce_tail_tensors(
     prefix_len = max(0, min(int(mutable_start), int(units.numel())))
     if int(units.numel()) - prefix_len < 3:
         return units, durations, silence_mask, sep_hint
-    tail_units = units[prefix_len:].detach().cpu().tolist()
-    tail_durations = durations[prefix_len:].detach().cpu().tolist()
-    tail_silence = silence_mask[prefix_len:].detach().cpu().tolist()
-    tail_sep = sep_hint[prefix_len:].detach().cpu().tolist()
-    tail_units, tail_durations, tail_silence, tail_sep = _merge_short_flicker_runs(
+    tail_units = _cpu_int64_list(units[prefix_len:])
+    tail_durations = _cpu_int64_list(durations[prefix_len:])
+    tail_silence = _cpu_int64_list(silence_mask[prefix_len:])
+    tail_sep = _cpu_int64_list(sep_hint[prefix_len:])
+    tail_units, tail_durations, tail_silence, tail_sep = _stabilize_run_lists(
         tail_units,
         tail_durations,
         tail_silence,
         tail_sep,
         min_speech_frames=min_speech_frames,
         min_silence_frames=min_silence_frames,
+        max_micro_silence_frames=1,
     )
     device = units.device
     tail_units_tensor = torch.tensor(tail_units, dtype=units.dtype, device=device)
@@ -312,27 +383,29 @@ def build_compressed_sequence(
     open_tail = min(len(units), max(0, int(tail_open_units)) if mark_last_open else 0)
     sealed_limit = max(0, len(units) - open_tail)
     if sealed_limit > 0:
-        prefix_units, prefix_durations, prefix_silence, prefix_sep = _merge_short_flicker_runs(
+        prefix_units, prefix_durations, prefix_silence, prefix_sep = _stabilize_run_lists(
             units[:sealed_limit],
             durations[:sealed_limit],
             silence_mask[:sealed_limit],
             sep_hint[:sealed_limit],
             min_speech_frames=debounce_min_run_frames,
             min_silence_frames=debounce_min_run_frames,
+            max_micro_silence_frames=1,
         )
         units = prefix_units + units[sealed_limit:]
         durations = prefix_durations + durations[sealed_limit:]
         silence_mask = prefix_silence + silence_mask[sealed_limit:]
         sep_hint = prefix_sep + sep_hint[sealed_limit:]
     elif not mark_last_open:
-        units, durations, silence_mask, sep_hint = _merge_short_flicker_runs(
+        units, durations, silence_mask, sep_hint = _stabilize_run_lists(
             units,
             durations,
             silence_mask,
             sep_hint,
             min_speech_frames=debounce_min_run_frames,
             min_silence_frames=debounce_min_run_frames,
-    )
+            max_micro_silence_frames=1,
+        )
     open_run_mask = [0 for _ in units]
     if mark_last_open and len(open_run_mask) > 0:
         keep_open_from = max(0, len(open_run_mask) - open_tail)
@@ -421,10 +494,10 @@ class StreamingRunLengthUnitizer:
         *,
         mark_last_open: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        units_list = row_state.units.detach().cpu().tolist()
-        durations_list = row_state.durations.detach().cpu().tolist()
-        silence_list = row_state.silence_mask.detach().cpu().tolist()
-        sep_list = row_state.sep_hint.detach().cpu().tolist()
+        units_list = _cpu_int64_list(row_state.units)
+        durations_list = _cpu_int64_list(row_state.durations)
+        silence_list = _cpu_int64_list(row_state.silence_mask)
+        sep_list = _cpu_int64_list(row_state.sep_hint)
         open_tail = min(len(units_list), self.tail_open_units if mark_last_open else 0)
         sealed_limit = max(0, len(units_list) - open_tail)
         if sealed_limit > 0:
@@ -432,18 +505,29 @@ class StreamingRunLengthUnitizer:
             prefix_durations = durations_list[:sealed_limit]
             prefix_silence = silence_list[:sealed_limit]
             prefix_sep = sep_list[:sealed_limit]
-            prefix_units, prefix_durations, prefix_silence, prefix_sep = _merge_short_flicker_runs(
+            prefix_units, prefix_durations, prefix_silence, prefix_sep = _stabilize_run_lists(
                 prefix_units,
                 prefix_durations,
                 prefix_silence,
                 prefix_sep,
                 min_speech_frames=self.debounce_min_run_frames,
                 min_silence_frames=self.debounce_min_run_frames,
+                max_micro_silence_frames=1,
             )
             units_list = prefix_units + units_list[sealed_limit:]
             durations_list = prefix_durations + durations_list[sealed_limit:]
             silence_list = prefix_silence + silence_list[sealed_limit:]
             sep_list = prefix_sep + sep_list[sealed_limit:]
+        elif not mark_last_open:
+            units_list, durations_list, silence_list, sep_list = _stabilize_run_lists(
+                units_list,
+                durations_list,
+                silence_list,
+                sep_list,
+                min_speech_frames=self.debounce_min_run_frames,
+                min_silence_frames=self.debounce_min_run_frames,
+                max_micro_silence_frames=1,
+            )
         device = row_state.units.device if row_state.units.numel() > 0 else row_state.durations.device
         units = torch.tensor(units_list, dtype=torch.long, device=device)
         durations = torch.tensor(durations_list, dtype=torch.long, device=device)

@@ -1,4 +1,6 @@
+import hashlib
 import os
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 import numpy as np
@@ -11,6 +13,7 @@ if _REPO_ROOT not in sys.path:
 
 from modules.Conan.Conan import Conan
 from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
+from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3 as build_source_rhythm_cache
 from modules.Emformer.emformer import EmformerDistillModel
 from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
 from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
@@ -65,6 +68,11 @@ class StreamingVoiceConversion:
             vocoder_left_context_frames=self.vocoder_left_context_frames,
             vocoder_native_streaming=self.vocoder_native_streaming_capable,
         )
+        self._prompt_conditioning_cache: OrderedDict[str, Dict[str, torch.Tensor]] = OrderedDict()
+        self._prompt_conditioning_cache_size = max(
+            0,
+            int(self.hparams.get("rhythm_prompt_conditioning_cache_size", 4) or 0),
+        )
         self.runtime_metadata = self.get_streaming_runtime_metadata()
         self.last_inference_metadata = dict(self.runtime_metadata)
         self._vocoder_warm_zero()
@@ -95,6 +103,50 @@ class StreamingVoiceConversion:
         _ = self.vocoder.spec2wav(
             np.zeros((warm_frames, self.hparams["audio_num_mel_bins"]), dtype=np.float32)
         )
+
+    def _resolve_content_window_left_tokens(self) -> int:
+        left_tokens = self.hparams.get("rhythm_infer_content_left_context_tokens")
+        if left_tokens is None:
+            left_tokens = self.hparams.get("rhythm_v3_infer_content_left_context_tokens")
+        if left_tokens is None:
+            left_tokens = max(64, int(self.hparams.get("right_context", 0)) * 8)
+        return max(0, int(left_tokens))
+
+    @staticmethod
+    def _compute_content_window_start(
+        *,
+        total_tokens: int,
+        committed_frontier_tokens: int,
+        left_context_tokens: int,
+    ) -> int:
+        if total_tokens <= 0 or committed_frontier_tokens <= 0:
+            return 0
+        keep_from = max(0, int(committed_frontier_tokens) - int(left_context_tokens))
+        return min(keep_from, max(0, int(total_tokens) - 1))
+
+    @staticmethod
+    def _resolve_committed_token_frontier_from_cache(
+        *,
+        commit_frontier: torch.Tensor | None,
+        rhythm_source_cache: Dict[str, torch.Tensor] | None,
+        batch_index: int = 0,
+    ) -> int | None:
+        if not isinstance(commit_frontier, torch.Tensor):
+            return None
+        if not isinstance(rhythm_source_cache, dict):
+            return None
+        source_duration_obs = rhythm_source_cache.get("source_duration_obs")
+        if not isinstance(source_duration_obs, torch.Tensor):
+            return None
+        if source_duration_obs.dim() != 2 or source_duration_obs.size(0) <= batch_index:
+            return None
+
+        frontier_units = int(commit_frontier[batch_index].item())
+        frontier_units = max(0, min(frontier_units, int(source_duration_obs.size(1))))
+        if frontier_units <= 0:
+            return 0
+        committed_src = source_duration_obs[batch_index, :frontier_units].float().clamp_min(0.0)
+        return int(torch.round(committed_src).sum().item())
 
     @staticmethod
     def _wav_to_mel(path: str) -> np.ndarray:
@@ -145,11 +197,61 @@ class StreamingVoiceConversion:
             spk_embed = spk_embed.unsqueeze(1)
         return spk_embed
 
+    @staticmethod
+    def _make_prompt_conditioning_cache_key(ref_mel_batch: torch.Tensor) -> str:
+        ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        array = ref_cpu.numpy()
+        digest = hashlib.sha1()
+        digest.update(str(tuple(array.shape)).encode("utf-8"))
+        digest.update(array.tobytes())
+        return digest.hexdigest()
+
+    @staticmethod
+    def _clone_prompt_conditioning_to_device(
+        payload: Dict[str, torch.Tensor],
+        *,
+        device: str | torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        cloned: Dict[str, torch.Tensor] = {}
+        for key, value in payload.items():
+            if isinstance(value, torch.Tensor):
+                cloned[key] = value.clone().to(device=device)
+        return cloned
+
+    def _remember_prompt_conditioning_cache(self, key: str, payload: Dict[str, torch.Tensor]) -> None:
+        if self._prompt_conditioning_cache_size <= 0:
+            return
+        cacheable = {
+            name: tensor.detach().to(device="cpu").clone()
+            for name, tensor in payload.items()
+            if isinstance(tensor, torch.Tensor) and name != "prompt_spk_embed"
+        }
+        self._prompt_conditioning_cache[key] = cacheable
+        self._prompt_conditioning_cache.move_to_end(key)
+        while len(self._prompt_conditioning_cache) > self._prompt_conditioning_cache_size:
+            self._prompt_conditioning_cache.popitem(last=False)
+
     def _extract_prompt_unit_conditioning(
         self,
         ref_mel_batch: torch.Tensor,
         prepared_spk_embed: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
+        cache_key = None
+        if self._prompt_conditioning_cache_size > 0:
+            cache_key = self._make_prompt_conditioning_cache_key(ref_mel_batch)
+            cached = self._prompt_conditioning_cache.get(cache_key)
+            if cached is not None:
+                out = self._clone_prompt_conditioning_to_device(cached, device=self.device)
+                if prepared_spk_embed is not None:
+                    prompt_spk = prepared_spk_embed
+                    if prompt_spk.dim() == 3 and prompt_spk.size(-1) == 1:
+                        prompt_spk = prompt_spk.squeeze(-1)
+                    elif prompt_spk.dim() == 3 and prompt_spk.size(1) == 1:
+                        prompt_spk = prompt_spk.squeeze(1)
+                    if prompt_spk.dim() == 2:
+                        out["prompt_spk_embed"] = prompt_spk.detach()
+                self._prompt_conditioning_cache.move_to_end(cache_key)
+                return out
         with torch.no_grad():
             ref_lengths = torch.tensor([ref_mel_batch.size(1)], dtype=torch.long, device=ref_mel_batch.device)
             codes, _, _ = self.emformer.emformer.infer(ref_mel_batch, ref_lengths, None)
@@ -160,10 +262,8 @@ class StreamingVoiceConversion:
             if codes.dim() == 3 and codes.shape[-1] > 1:
                 codes = torch.argmax(codes, dim=-1)
 
-        from modules.Conan.rhythm.supervision import build_source_rhythm_cache
-
         cache = build_source_rhythm_cache(
-            codes[0].detach().cpu().tolist(),
+            codes[0].detach().cpu().reshape(-1).numpy(),
             silent_token=self.hparams.get("silent_token", 57),
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
@@ -203,12 +303,18 @@ class StreamingVoiceConversion:
             ).unsqueeze(0),
         }
         rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
+        rhythm_module = getattr(self.model, "rhythm_module", None)
+        rate_mode = str(getattr(rhythm_module, "rate_mode", "") or "").strip().lower()
         if rhythm_frontend is not None:
-            out["prompt_log_base"] = rhythm_frontend.compute_rate_log_base(
-                prompt_content_units,
-                prompt_valid_mask,
-                stop_gradient=True,
-            ).detach()
+            if rate_mode == "simple_global":
+                out["prompt_log_base"] = torch.zeros_like(prompt_duration_obs)
+                out["prompt_unit_anchor_base"] = prompt_duration_obs.clamp_min(1.0e-4)
+            else:
+                out["prompt_log_base"] = rhythm_frontend.compute_rate_log_base(
+                    prompt_content_units,
+                    prompt_valid_mask,
+                    stop_gradient=True,
+                ).detach()
         if prepared_spk_embed is not None:
             prompt_spk = prepared_spk_embed
             if prompt_spk.dim() == 3 and prompt_spk.size(-1) == 1:
@@ -217,6 +323,8 @@ class StreamingVoiceConversion:
                 prompt_spk = prompt_spk.squeeze(1)
             if prompt_spk.dim() == 2:
                 out["prompt_spk_embed"] = prompt_spk.detach()
+        if cache_key is not None:
+            self._remember_prompt_conditioning_cache(cache_key, out)
         return out
 
     def _render_vocoder_chunk(
@@ -279,6 +387,9 @@ class StreamingVoiceConversion:
         rhythm_ref_conditioning = None
         last_mel_out = None
         eos_tail_closed = False
+        content_window_left_tokens = self._resolve_content_window_left_tokens()
+        committed_token_frontier = 0
+        max_content_window_start = 0
 
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
@@ -353,8 +464,17 @@ class StreamingVoiceConversion:
                     )
 
             with torch.no_grad():
+                model_content = all_codes
+                model_content_offset = self._compute_content_window_start(
+                    total_tokens=int(all_codes.size(1)),
+                    committed_frontier_tokens=int(committed_token_frontier),
+                    left_context_tokens=int(content_window_left_tokens),
+                )
+                if model_content_offset > 0:
+                    model_content = all_codes[:, model_content_offset:]
+                max_content_window_start = max(max_content_window_start, int(model_content_offset))
                 out = self.model(
-                    content=all_codes,
+                    content=model_content,
                     spk_embed=prepared_spk_embed,
                     target=None,
                     ref=ref_mel_batch if require_runtime_ref else None,
@@ -362,7 +482,7 @@ class StreamingVoiceConversion:
                     uv=None,
                     infer=True,
                     global_steps=200000,
-                    content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
+                    content_lengths=torch.tensor([model_content.size(1)], device=self.device),
                     rhythm_state=rhythm_state,
                     rhythm_ref_conditioning=rhythm_ref_conditioning,
                     rhythm_source_cache=rhythm_source_cache,
@@ -372,6 +492,13 @@ class StreamingVoiceConversion:
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 decoder_cache = out.get("decoder_cache", decoder_cache)
                 last_mel_out = out["mel_out"][0]
+                resolved_committed_frontier = self._resolve_committed_token_frontier_from_cache(
+                    commit_frontier=out.get("commit_frontier"),
+                    rhythm_source_cache=rhythm_source_cache,
+                    batch_index=0,
+                )
+                if isinstance(resolved_committed_frontier, int):
+                    committed_token_frontier = max(committed_token_frontier, resolved_committed_frontier)
 
             mel_new, prev_committed_len = extract_incremental_committed_mel(
                 out,
@@ -401,9 +528,18 @@ class StreamingVoiceConversion:
                 for key, value in rhythm_source_cache.items()
             }
             final_cache["sealed_mask"] = final_cache["unit_mask"].clone().float()
+            final_content = all_codes
+            final_content_offset = self._compute_content_window_start(
+                total_tokens=int(all_codes.size(1)),
+                committed_frontier_tokens=int(committed_token_frontier),
+                left_context_tokens=int(content_window_left_tokens),
+            )
+            if final_content_offset > 0:
+                final_content = all_codes[:, final_content_offset:]
+            max_content_window_start = max(max_content_window_start, int(final_content_offset))
             with torch.no_grad():
                 final_out = self.model(
-                    content=all_codes,
+                    content=final_content,
                     spk_embed=prepared_spk_embed,
                     target=None,
                     ref=ref_mel_batch if require_runtime_ref else None,
@@ -411,7 +547,7 @@ class StreamingVoiceConversion:
                     uv=None,
                     infer=True,
                     global_steps=200000,
-                    content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
+                    content_lengths=torch.tensor([final_content.size(1)], device=self.device),
                     rhythm_state=rhythm_state,
                     rhythm_ref_conditioning=rhythm_ref_conditioning,
                     rhythm_source_cache=final_cache,
@@ -420,6 +556,13 @@ class StreamingVoiceConversion:
             rhythm_state = final_out.get("rhythm_state_next", rhythm_state)
             decoder_cache = final_out.get("decoder_cache", decoder_cache)
             last_mel_out = final_out["mel_out"][0]
+            final_committed_frontier = self._resolve_committed_token_frontier_from_cache(
+                commit_frontier=final_out.get("commit_frontier"),
+                rhythm_source_cache=rhythm_source_cache,
+                batch_index=0,
+            )
+            if isinstance(final_committed_frontier, int):
+                committed_token_frontier = max(committed_token_frontier, final_committed_frontier)
             final_mel_new, prev_committed_len = extract_incremental_committed_mel(
                 final_out,
                 prev_committed_len=prev_committed_len,
@@ -478,6 +621,10 @@ class StreamingVoiceConversion:
                 "rhythm_incremental_source_cache": True,
                 "rhythm_final_tail_closed_eos": bool(eos_tail_closed),
                 "rhythm_final_tail_is_not_strictly_committed_only": bool(not eos_tail_closed),
+                "content_history_windowing_enabled": True,
+                "content_history_left_context_tokens": int(content_window_left_tokens),
+                "content_history_max_trimmed_tokens": int(max_content_window_start),
+                "content_history_last_committed_token_frontier": int(committed_token_frontier),
                 "full_end_to_end_stateful_streaming": False,
             }
         )

@@ -97,6 +97,9 @@ class DurationV3TargetBuildConfig:
     silence_logstretch_max: float = 0.35
     local_rate_decay: float = 0.95
     silence_short_gap_scale: float = 0.35
+    use_log_base_rate: bool = False
+    simple_global_stats: bool = False
+    rate_mode: str = "log_base"
 
     @property
     def lambda_mem(self) -> float:
@@ -1000,14 +1003,28 @@ def build_duration_v3_loss_targets(
     if state_prev is not None and isinstance(getattr(state_prev, "local_rate_ema", None), torch.Tensor):
         init_local_rate = state_prev.local_rate_ema.float().detach()
     if isinstance(prompt_targets["global_rate"], torch.Tensor):
-        if isinstance(getattr(unit_batch, "unit_rate_log_base", None), torch.Tensor):
+        use_log_base_rate = bool(getattr(config, "use_log_base_rate", False))
+        if str(getattr(config, "rate_mode", "log_base") or "log_base").strip().lower() == "simple_global":
+            use_log_base_rate = False
+        if bool(getattr(config, "simple_global_stats", False)):
+            use_log_base_rate = False
+        if (
+            use_log_base_rate
+            and isinstance(getattr(unit_batch, "unit_rate_log_base", None), torch.Tensor)
+        ):
             log_rate_base = getattr(unit_batch, "unit_rate_log_base").float().detach()
-        else:
+        elif use_log_base_rate:
             log_rate_base = torch.log(unit_anchor_base.float().detach().clamp_min(1.0e-6))
+        else:
+            log_rate_base = None
         log_anchor = torch.log(prediction_anchor.float().clamp_min(1.0e-6))
-        normalized_log_anchor = (log_anchor - log_rate_base) * unit_mask.float()
+        observed_log_anchor = (
+            (log_anchor - log_rate_base) * unit_mask.float()
+            if isinstance(log_rate_base, torch.Tensor)
+            else log_anchor * unit_mask.float()
+        )
         local_rate_seq_tgt, _ = build_causal_local_rate_seq(
-            observed_log=normalized_log_anchor,
+            observed_log=observed_log_anchor,
             speech_mask=committed_speech_mask.float(),
             init_rate=init_local_rate,
             default_init_rate=default_init_rate,
@@ -1019,13 +1036,15 @@ def build_duration_v3_loss_targets(
             - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
         ) * committed_mask.float()
         residual_logstretch_tgt = (full_logstretch_tgt - global_shift_tgt).detach()
-        coarse_residual_tgt = residual_logstretch_tgt.detach()
-        coarse_correction_tgt = _build_duration_v3_prefix_median_seq(
-            values=coarse_residual_tgt,
-            update_mask=committed_speech_mask.float(),
-            output_mask=committed_mask.float(),
+        global_bias_tgt = _masked_duration_v3_median(
+            residual_logstretch_tgt,
+            committed_speech_mask.float(),
             weight=unit_confidence_coarse_tgt,
-        )
+        ).detach()
+        coarse_bias_seq = global_bias_tgt.float()
+        while coarse_bias_seq.dim() < residual_logstretch_tgt.dim():
+            coarse_bias_seq = coarse_bias_seq.unsqueeze(-1)
+        coarse_correction_tgt = coarse_bias_seq.expand_as(residual_logstretch_tgt) * committed_mask.float()
         coarse_logstretch_tgt = (global_shift_tgt + coarse_correction_tgt) * committed_mask.float()
         silence_tau_tgt = _build_duration_v3_silence_tau(
             prediction_anchor=prediction_anchor.float(),
@@ -1053,20 +1072,12 @@ def build_duration_v3_loss_targets(
                 coarse_logstretch_tgt * committed_speech_mask.float()
                 + silence_coarse_tgt
             )
-            coarse_correction_tgt = (
-                (coarse_logstretch_tgt - global_shift_tgt) * committed_mask.float()
-            )
         coarse_duration_tgt = (
             prediction_anchor.float()
             * torch.exp(coarse_logstretch_tgt.float())
             * committed_mask.float()
         )
         prefix_duration_tgt = coarse_duration_tgt.detach()
-        global_bias_tgt = _masked_duration_v3_median(
-            coarse_correction_tgt,
-            committed_speech_mask.float(),
-            weight=unit_confidence_coarse_tgt,
-        )
         local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
     if prefix_duration_tgt is None:
         prefix_duration_tgt = (
