@@ -335,6 +335,7 @@ class DurationExecution:
     prompt_speech_ratio: Optional[torch.Tensor] = None
     prompt_valid_len: Optional[torch.Tensor] = None
     prefix_unit_offset: Optional[torch.Tensor] = None
+    projector_rounding_residual: Optional[torch.Tensor] = None
     projector_budget_hit_pos: Optional[torch.Tensor] = None
     projector_budget_hit_neg: Optional[torch.Tensor] = None
 

@@ -51,7 +51,24 @@ the duration writer to absorb that noise.
 
 So this branch is **not** training a free-form pause planner. It is training a **source-anchored causal retimer** over a stabilized run lattice.
 
----
+### 1.1 Recommended falsification profiles
+
+The maintained yaml already exposes the switches needed for staged validation.
+In practice, keep one base config and move between these four profiles with
+small overrides:
+
+| Profile | Purpose | Key overrides |
+| --- | --- | --- |
+| `A` | static / analytic falsification | `rhythm_v3_eval_mode=analytic`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0`, `rhythm_v3_silence_coarse_weight=0.0` |
+| `B` | coarse-only validation training | `rhythm_v3_eval_mode=coarse_only`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_bias=0.20`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
+| `C` | full learned sanity | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
+| `D` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
+
+Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
+`weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
+shows a real reason.
+
+--- 
 
 ## 2. Current project layout
 
@@ -491,6 +508,45 @@ This is the fastest way to catch:
 - missing cached fields
 - dataset shape drift
 - checkpoint/config path issues
+
+### 9.3 Export one falsification bundle before scaling up
+
+Once a smoke run or eval pass can emit debug bundles, prefer exporting the
+review surface before starting a larger training schedule:
+
+```bash
+py -3 scripts\rhythm_v3_debug_records.py ^
+  --input artifacts\rhythm_debug.pt ^
+  --output artifacts\rhythm_v3_summary.csv ^
+  --review-dir artifacts\rhythm_v3_review ^
+  --g-variant raw_median ^
+  --drop-edge-runs 1
+```
+
+This keeps the current workflow aligned with the falsification-first order:
+
+1. static `g` audit
+2. analytic monotonicity
+3. coarse-only sanity
+4. learned sanity
+5. prefix fine-tune
+
+If you want the narrower per-gate tables directly, read them from the
+`--review-dir` bundle that the same command writes:
+
+- `gate_ref_crop_table.csv`
+- `gate_monotonicity_table.csv`
+- `gate_prefix_silence_table.csv`
+- `gate_mode_ladder_table.csv`
+
+This keeps the default CLI surface to one maintained export command instead of
+multiple gate-specific wrappers.
+
+For the strongest Gate-0 / cross-text readout, prefer a debug bundle exported
+from the maintained train/eval path with pair metadata still attached
+(`pair_id`, prompt ids, same-text flags, `lexical_mismatch`, `ref_len_sec`,
+`speech_ratio`). Pure inference bundles can still be summarized, but some slice
+plots will only provide partial evidence.
 
 ---
 

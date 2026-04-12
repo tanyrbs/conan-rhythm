@@ -210,6 +210,11 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert execution.eval_mode == "learned"
     assert torch.allclose(debug["g_ref"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix"], execution.g_src_prefix)
+    assert debug["g_variant"] == "raw_median"
+    assert torch.allclose(debug["g_ref_scalar"], execution.g_ref)
+    assert torch.allclose(debug["g_src_prefix_seq"], execution.g_src_prefix)
+    assert debug["projector_prefix_offset"] is not None
+    assert debug["projector_rounding_residual"] is not None
     assert torch.allclose(execution.prompt_valid_len, torch.tensor([[3.0]], dtype=torch.float32))
     assert torch.allclose(execution.prompt_speech_ratio, torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_prompt_valid_len"], execution.prompt_valid_len)

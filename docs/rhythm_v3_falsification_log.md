@@ -43,17 +43,24 @@ This is now the single home for:
 - per-figure summaries
 - lightweight plotting helpers for the five retained figures
 
-### 2.2 Extra falsification script/test surface was removed
+### 2.2 Falsification script surface stays thin
 
-To keep the project lean:
+To keep the project lean, the maintained script surface is intentionally small:
 
-- the small `scripts/rhythm_v3/` falsification wrappers were removed
-- the dedicated `tests/rhythm/test_rhythm_v3_falsification.py` file was removed
+- `scripts/preflight_rhythm_v3.py`
+- `scripts/smoke_test_rhythm_v3.py`
+- `scripts/rhythm_v3_debug_records.py`
 
 The intent is deliberate:
 
-- keep the **core implementation** and **review util**
-- avoid keeping parallel demo/test shells that grow stale
+- keep the **core implementation** and **review util** authoritative
+- keep the CLI surface to one maintained review/export command
+- avoid growing a second plotting or experiment framework
+
+The maintained export command is most informative when the debug bundle still carries pair
+metadata (`pair_id`, prompt ids, same-text flags, `lexical_mismatch`,
+`ref_len_sec`, `speech_ratio`). If that metadata is absent, the scripts still
+export tables, but Gate-0 contamination slices should be read as incomplete.
 
 ### 2.3 Runtime/debug export remains the same
 
@@ -81,6 +88,17 @@ on the same `g` semantics:
 - optional `rhythm_v3_drop_edge_runs_for_g` cleanup
 - fallback to valid support only when speech support disappears
 - `prompt_speech_mask` carried through as an explicit contract field
+
+### 2.5 Static `g_src_utt` is kept separate from runtime `g_src_prefix`
+
+The local workspace now makes this split explicit:
+
+- `g_src_utt`: analysis-side full-utterance source statistic used for static
+  `delta_g` plots
+- `g_src_prefix`: runtime causal prefix summary used by the online retimer
+
+This avoids the earlier drift where static explainability could accidentally
+mix a full-reference statistic with a prefix-state statistic.
 
 ## 3. The five retained main figures
 
@@ -205,6 +223,23 @@ prefix_df = build_prefix_replay_table(records)
 
 paths = save_review_figure_bundle(records, output_dir="artifacts/rhythm_v3_review")
 ```
+
+Or directly from the maintained script:
+
+```bash
+py -3 scripts\rhythm_v3_debug_records.py ^
+  --input path\to\debug_bundle.pt ^
+  --output artifacts\rhythm_v3_summary.csv ^
+  --review-dir artifacts\rhythm_v3_review ^
+  --g-variant raw_median ^
+  --drop-edge-runs 1
+```
+
+That single command now exports:
+
+- the row-level summary CSV
+- the retained five-figure review bundle
+- the gate-oriented monotonicity / stability / ladder bundle
 
 ## 7. Current empirical status
 

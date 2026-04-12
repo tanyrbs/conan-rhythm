@@ -92,6 +92,33 @@ def tempo_monotonicity(tempo_slow: Any, tempo_mid: Any, tempo_fast: Any) -> torc
     return ((slow[valid] < mid[valid]) & (mid[valid] < fast[valid])).float().mean()
 
 
+def transfer_slope(delta_g: Any, tempo_delta: Any) -> dict[str, float]:
+    return tempo_explainability(delta_g, tempo_delta)
+
+
+def monotonic_triplet_table(
+    sample_ids: Any,
+    tempo_slow: Any,
+    tempo_mid: Any,
+    tempo_fast: Any,
+) -> dict[str, list[float | str]]:
+    slow = _to_tensor(tempo_slow).reshape(-1)
+    mid = _to_tensor(tempo_mid).reshape(-1)
+    fast = _to_tensor(tempo_fast).reshape(-1)
+    count = min(int(slow.numel()), int(mid.numel()), int(fast.numel()))
+    mono = ((slow[:count] < mid[:count]) & (mid[:count] < fast[:count])).float()
+    values = sample_ids[:count] if isinstance(sample_ids, (list, tuple)) else None
+    if values is None:
+        values = [str(index) for index in range(count)]
+    return {
+        "sample_id": [str(value) for value in values],
+        "tempo_slow": [float(value) for value in slow[:count].tolist()],
+        "tempo_mid": [float(value) for value in mid[:count].tolist()],
+        "tempo_fast": [float(value) for value in fast[:count].tolist()],
+        "mono_ok": [float(value) for value in mono[:count].tolist()],
+    }
+
+
 def silence_leakage(delta_z: Any, speech_mask: Any, silence_mask: Any) -> torch.Tensor:
     dz = _to_tensor(delta_z).float()
     speech = _to_tensor(speech_mask).float()
@@ -121,15 +148,53 @@ def budget_hit_rate(
     return hits.mean() if hits.numel() > 0 else torch.tensor(float("nan"))
 
 
+def same_text_gap(
+    same_text_value: Any,
+    cross_text_value: Any | None = None,
+    same_text_mask: Any | None = None,
+) -> torch.Tensor:
+    if same_text_mask is not None:
+        values = _to_tensor(same_text_value).float().reshape(-1)
+        mask = _to_tensor(same_text_mask).float().reshape(-1) > 0.5
+        valid = torch.isfinite(values)
+        same = values[valid & mask]
+        cross = values[valid & (~mask)]
+    else:
+        same = _to_tensor(same_text_value).float().reshape(-1)
+        cross = _to_tensor(cross_text_value).float().reshape(-1) if cross_text_value is not None else same.new_empty((0,))
+        same = same[torch.isfinite(same)]
+        cross = cross[torch.isfinite(cross)]
+    if same.numel() <= 0 or cross.numel() <= 0:
+        return torch.tensor(float("nan"))
+    return same.mean() - cross.mean()
+
+
+def cumulative_drift(prefix_offset: Any) -> torch.Tensor:
+    offset = _to_tensor(prefix_offset).float()
+    if offset.numel() <= 0:
+        return torch.tensor(float("nan"))
+    if offset.ndim == 0:
+        return offset.abs()
+    final = offset[..., -1].reshape(-1)
+    valid = final[torch.isfinite(final)]
+    if valid.numel() <= 0:
+        return torch.tensor(float("nan"))
+    return valid.abs().mean()
+
+
 __all__ = [
     "budget_hit_rate",
     "build_duration_v3_metric_sections",
     "build_rhythm_metric_dict",
     "build_rhythm_metric_sections",
+    "cumulative_drift",
     "prefix_discrepancy",
+    "same_text_gap",
     "silence_leakage",
+    "monotonic_triplet_table",
     "tempo_explainability",
     "tempo_monotonicity",
+    "transfer_slope",
 ]
 
 

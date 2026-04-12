@@ -560,12 +560,23 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_frame_plan"] = execution.frame_plan
         if self.module.debug_export:
             debug_bundle = {
+                "g_variant": self.module.g_variant,
                 "g_ref": (
                     execution.g_ref.detach()
                     if isinstance(getattr(execution, "g_ref", None), torch.Tensor)
                     else ref_memory.global_rate.detach()
                 ),
+                "g_ref_scalar": (
+                    execution.g_ref.detach()
+                    if isinstance(getattr(execution, "g_ref", None), torch.Tensor)
+                    else ref_memory.global_rate.detach()
+                ),
                 "g_src_prefix": (
+                    execution.g_src_prefix.detach()
+                    if isinstance(getattr(execution, "g_src_prefix", None), torch.Tensor)
+                    else None
+                ),
+                "g_src_prefix_seq": (
                     execution.g_src_prefix.detach()
                     if isinstance(getattr(execution, "g_src_prefix", None), torch.Tensor)
                     else None
@@ -578,6 +589,16 @@ class ConanDurationAdapter(nn.Module):
                 "coarse_correction": (
                     execution.coarse_correction.detach()
                     if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
+                    else None
+                ),
+                "coarse_correction_used": (
+                    execution.coarse_correction.detach()
+                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
+                    else None
+                ),
+                "coarse_correction_pred": (
+                    execution.coarse_logstretch.detach()
+                    if isinstance(getattr(execution, "coarse_logstretch", None), torch.Tensor)
                     else None
                 ),
                 "local_residual": (
@@ -600,14 +621,34 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor)
                     else None
                 ),
+                "projector_prefix_offset": (
+                    execution.prefix_unit_offset.detach()
+                    if isinstance(getattr(execution, "prefix_unit_offset", None), torch.Tensor)
+                    else None
+                ),
+                "projector_rounding_residual": (
+                    execution.projector_rounding_residual.detach()
+                    if isinstance(getattr(execution, "projector_rounding_residual", None), torch.Tensor)
+                    else (
+                        execution.next_state.rounding_residual.detach()
+                        if isinstance(getattr(execution.next_state, "rounding_residual", None), torch.Tensor)
+                        else None
+                    )
+                ),
                 "eval_mode": getattr(execution, "eval_mode", self.module.eval_mode),
             }
             ret["rhythm_v3_debug"] = debug_bundle
             ret["rhythm_debug_g_ref"] = debug_bundle["g_ref"]
+            ret["rhythm_debug_g_ref_scalar"] = debug_bundle["g_ref_scalar"]
             ret["rhythm_debug_g_src_prefix"] = debug_bundle["g_src_prefix"]
+            ret["rhythm_debug_g_src_prefix_seq"] = debug_bundle["g_src_prefix_seq"]
             ret["rhythm_debug_analytic_gap"] = debug_bundle["global_shift_analytic"]
             ret["rhythm_debug_coarse_bias"] = debug_bundle["coarse_correction"]
+            ret["rhythm_debug_coarse_used"] = debug_bundle["coarse_correction_used"]
+            ret["rhythm_debug_coarse_pred"] = debug_bundle["coarse_correction_pred"]
             ret["rhythm_debug_local_residual"] = debug_bundle["local_residual"]
+            ret["rhythm_debug_projector_prefix_offset"] = debug_bundle["projector_prefix_offset"]
+            ret["rhythm_debug_projector_rounding_residual"] = debug_bundle["projector_rounding_residual"]
             if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
                 debug_bundle["is_speech"] = (
                     source_batch.unit_mask.float() * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))

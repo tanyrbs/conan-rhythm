@@ -437,6 +437,7 @@ class StreamingDurationProjector(nn.Module):
             source_rate_seq=source_rate_seq,
             source_prefix_summary=source_prefix_summary,
             prefix_unit_offset=prefix_unit_offset_next,
+            projector_rounding_residual=residual_next.detach(),
             projector_budget_hit_pos=budget_hit_pos.detach(),
             projector_budget_hit_neg=budget_hit_neg.detach(),
         )

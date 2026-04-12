@@ -10,7 +10,9 @@ import torch
 from modules.Conan.rhythm_v3.g_stats import compute_global_rate
 from tasks.Conan.rhythm.duration_v3.metrics import (
     budget_hit_rate,
+    cumulative_drift,
     prefix_discrepancy,
+    same_text_gap,
     silence_leakage,
     tempo_explainability,
     tempo_monotonicity,
@@ -98,6 +100,13 @@ def _as_str(value: Any, default: str = "") -> str:
     return str(value)
 
 
+def _infer_speaker_id(value: Any, default: str = "") -> str:
+    name = _as_str(value, default=default).strip()
+    if not name:
+        return default
+    return name.split("_", 1)[0]
+
+
 def _safe_array(value: Any, *, dtype: np.dtype | type = np.float32) -> np.ndarray | None:
     if value is None:
         return None
@@ -131,15 +140,10 @@ def _align_pair(
 
 
 def _speech_tempo(duration: Any, speech_mask: Any) -> float:
-    dur = _safe_array(duration, dtype=np.float32)
-    if dur is None:
-        return float("nan")
-    speech = _safe_bool_array(speech_mask)
-    valid = np.ones_like(dur, dtype=bool) if speech is None else speech[: dur.shape[0]]
-    if not bool(np.any(valid)):
-        return float("nan")
-    mean_duration = float(dur[valid].mean())
-    return 1.0 / max(mean_duration, 1.0e-6)
+    return compute_speech_tempo_for_analysis(
+        source_duration_obs=duration,
+        source_speech_mask=speech_mask,
+    )
 
 
 def compute_g(
@@ -182,6 +186,82 @@ def compute_g(
         return float("nan")
 
 
+def compute_source_global_rate_for_analysis(
+    source_log_dur: Any | None = None,
+    *,
+    source_duration_obs: Any | None = None,
+    source_speech_mask: Any,
+    source_valid_mask: Any | None = None,
+    g_variant: str = "raw_median",
+    source_weight: Any | None = None,
+    source_unit_ids: Any | None = None,
+    source_unit_prior: Any | None = None,
+    g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
+) -> float:
+    log_dur = _safe_array(source_log_dur, dtype=np.float32)
+    if log_dur is None:
+        duration = _safe_array(source_duration_obs, dtype=np.float32)
+        if duration is None:
+            return float("nan")
+        log_dur = np.log(np.clip(duration, 1.0e-4, None))
+    speech = _safe_array(source_speech_mask, dtype=np.float32)
+    valid = None if source_valid_mask is None else _safe_array(source_valid_mask, dtype=np.float32)
+    if speech is None:
+        return float("nan")
+    try:
+        value = compute_global_rate(
+            log_dur=torch.as_tensor(log_dur.reshape(1, -1), dtype=torch.float32),
+            speech_mask=torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32),
+            valid_mask=None if valid is None else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32),
+            variant=g_variant,
+            trim_ratio=float(g_trim_ratio),
+            drop_edge_runs=int(drop_edge_runs),
+            weight=None
+            if source_weight is None
+            else torch.as_tensor(np.asarray(source_weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32),
+            unit_ids=None
+            if source_unit_ids is None
+            else torch.as_tensor(np.asarray(source_unit_ids, dtype=np.int64).reshape(1, -1), dtype=torch.long),
+            unit_prior=None
+            if source_unit_prior is None
+            else torch.as_tensor(np.asarray(source_unit_prior, dtype=np.float32), dtype=torch.float32),
+        )
+        return float(value.reshape(-1)[0].item())
+    except Exception:
+        return float("nan")
+
+
+def compute_speech_tempo_for_analysis(
+    *,
+    source_log_dur: Any | None = None,
+    source_duration_obs: Any | None = None,
+    source_speech_mask: Any,
+    source_valid_mask: Any | None = None,
+    g_variant: str = "raw_median",
+    source_weight: Any | None = None,
+    source_unit_ids: Any | None = None,
+    source_unit_prior: Any | None = None,
+    g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
+) -> float:
+    global_rate = compute_source_global_rate_for_analysis(
+        source_log_dur,
+        source_duration_obs=source_duration_obs,
+        source_speech_mask=source_speech_mask,
+        source_valid_mask=source_valid_mask,
+        g_variant=g_variant,
+        source_weight=source_weight,
+        source_unit_ids=source_unit_ids,
+        source_unit_prior=source_unit_prior,
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=drop_edge_runs,
+    )
+    if not np.isfinite(global_rate):
+        return float("nan")
+    return float(np.exp(-float(global_rate)))
+
+
 def compute_prefix_tempo(record: RhythmV3DebugRecord) -> np.ndarray | None:
     derived = derive_record(record)
     return None if derived.source_rate_seq is None else derived.source_rate_seq.copy()
@@ -221,13 +301,16 @@ def compute_b_star(
 
 def _resolve_record_ids(record: RhythmV3DebugRecord, index: int) -> dict[str, Any]:
     item_name = record.item_name or f"item_{index:06d}"
+    pair_id = _meta(record, "pair_id", "rhythm_pair_group_id", default=item_name)
     return {
         "item_name": item_name,
+        "sample_id": _as_str(_meta(record, "sample_id", default=item_name)),
         "utt_id": _as_str(_meta(record, "utt_id", "src_id", "sample_id", default=item_name)),
-        "pair_id": _as_str(_meta(record, "pair_id", default=item_name)),
+        "pair_id": _as_str(pair_id, default=item_name),
         "split": _as_str(record.split),
         "chunk_scheme": _as_str(_meta(record, "chunk_scheme", "replay_scheme", default="default")),
         "commit_lag": int(_as_float(_meta(record, "commit_lag", default=0.0), default=0.0)),
+        "eval_mode": _as_str(_meta(record, "eval_mode", "rhythm_v3_eval_mode", default="")),
     }
 
 
@@ -336,6 +419,7 @@ def build_ref_crop_table(
     *,
     g_variant: str = "raw_median",
     g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
     unit_step_ms: float = DEFAULT_REVIEW_UNIT_STEP_MS,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
@@ -348,6 +432,7 @@ def build_ref_crop_table(
         prompt_speech = _safe_array(record.prompt_speech_mask, dtype=np.float32)
         source_duration = _safe_array(record.source_duration_obs, dtype=np.float32)
         source_silence = _safe_array(record.source_silence_mask, dtype=np.float32)
+        source_valid = _safe_array(record.unit_mask, dtype=np.float32)
         source_units = _safe_array(record.source_content_units, dtype=np.int64)
         prompt_units = _safe_array(record.prompt_content_units, dtype=np.int64)
         if prompt_speech is None and prompt_duration is not None and derived.prompt_speech_mask is not None:
@@ -355,25 +440,37 @@ def build_ref_crop_table(
         g_ref = (
             float(record.global_rate)
             if record.global_rate is not None
-            else compute_g(
-                prompt_duration,
-                speech_mask=np.ones_like(prompt_duration, dtype=np.float32) if prompt_speech is None and prompt_duration is not None else prompt_speech,
-                valid_mask=prompt_valid,
-                variant=g_variant,
-                trim_ratio=g_trim_ratio,
-                unit_ids=prompt_units,
+            else compute_source_global_rate_for_analysis(
+                source_duration_obs=prompt_duration,
+                source_speech_mask=np.ones_like(prompt_duration, dtype=np.float32)
+                if prompt_speech is None and prompt_duration is not None
+                else prompt_speech,
+                source_valid_mask=prompt_valid,
+                g_variant=g_variant,
+                g_trim_ratio=g_trim_ratio,
+                drop_edge_runs=drop_edge_runs,
+                source_unit_ids=prompt_units,
             )
         )
-        g_src = compute_g(
-            source_duration,
-            speech_mask=np.ones_like(source_duration, dtype=np.float32)
+        source_speech = (
+            np.ones_like(source_duration, dtype=np.float32)
             if source_duration is not None and source_silence is None
-            else (1.0 - np.clip(source_silence, 0.0, 1.0) if source_silence is not None else None),
-            valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None else None,
-            variant=g_variant,
-            trim_ratio=g_trim_ratio,
-            unit_ids=source_units,
+            else (1.0 - np.clip(source_silence, 0.0, 1.0) if source_silence is not None else None)
         )
+        g_src = compute_source_global_rate_for_analysis(
+            source_duration_obs=source_duration,
+            source_speech_mask=source_speech,
+            source_valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None and source_valid is None else source_valid,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=source_units,
+        )
+        g_src_prefix_mean = float("nan")
+        if derived.source_rate_seq is not None and derived.speech_mask is not None:
+            speech_valid = derived.speech_mask > 0.5
+            if bool(np.any(speech_valid)):
+                g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
         ref_len_sec = _as_float(
             _meta(record, "ref_len_sec", default=None),
             default=(
@@ -391,32 +488,67 @@ def build_ref_crop_table(
             ),
         )
         src_prompt_id = _as_str(_meta(record, "src_prompt_id", "prompt_id", default=ids["item_name"]))
-        ref_prompt_id = _as_str(_meta(record, "ref_prompt_id", "reference_prompt_id", default=""))
-        same_text = _meta(record, "same_text", default=None)
-        if same_text is None and src_prompt_id and ref_prompt_id:
-            same_text = int(src_prompt_id == ref_prompt_id)
-        speech_target_mean = float("nan")
+        ref_prompt_id = _as_str(_meta(record, "ref_prompt_id", "reference_prompt_id", "ref_item_name", default=""))
+        tgt_prompt_id = _as_str(_meta(record, "tgt_prompt_id", "target_prompt_id", "paired_target_item_name", default=""))
+        same_text_reference = _meta(record, "same_text_reference", "same_text", default=None)
+        if same_text_reference is None:
+            ref_sig = _meta(record, "reference_text_signature", default=None)
+            src_sig = _meta(record, "source_text_signature", default=None)
+            if ref_sig is not None and src_sig is not None:
+                same_text_reference = int(ref_sig == src_sig)
+            elif src_prompt_id and ref_prompt_id:
+                same_text_reference = int(src_prompt_id == ref_prompt_id)
+        same_text_target = _meta(record, "same_text_target", default=None)
+        if same_text_target is None:
+            tgt_sig = _meta(record, "paired_target_text_signature", default=None)
+            src_sig = _meta(record, "source_text_signature", default=None)
+            if tgt_sig is not None and src_sig is not None:
+                same_text_target = int(tgt_sig == src_sig)
+            elif src_prompt_id and tgt_prompt_id:
+                same_text_target = int(src_prompt_id == tgt_prompt_id)
+        speech_target_stat = float("nan")
         if derived.target_logstretch is not None and derived.speech_mask is not None:
             valid = derived.speech_mask > 0.5
             if bool(np.any(valid)):
-                speech_target_mean = float(np.mean(derived.target_logstretch[valid]))
+                weight = _safe_array(record.unit_confidence_tgt, dtype=np.float32)
+                if weight is None:
+                    weight = _safe_array(record.unit_confidence_coarse_tgt, dtype=np.float32)
+                if weight is None:
+                    weight = np.ones_like(derived.target_logstretch, dtype=np.float32)
+                speech_target_stat = weighted_median(derived.target_logstretch[valid], weight[valid])
+        src_spk = _as_str(_meta(record, "src_spk", "source_speaker", default=""))
+        if not src_spk:
+            src_spk = _infer_speaker_id(record.item_name)
+        ref_spk = _as_str(_meta(record, "ref_spk", "reference_speaker", "reference_item_speaker", default=""))
+        if not ref_spk:
+            ref_spk = _infer_speaker_id(_meta(record, "ref_item_name", "ref_prompt_id", default=""))
+        tgt_spk = _as_str(_meta(record, "tgt_spk", "target_speaker", default=""))
+        if not tgt_spk:
+            tgt_spk = _infer_speaker_id(_meta(record, "paired_target_item_name", "tgt_prompt_id", default=""))
         rows.append(
             {
                 **ids,
                 "crop_id": _as_str(_meta(record, "crop_id", default=f"crop_{index:06d}")),
-                "src_spk": _as_str(_meta(record, "src_spk", "source_speaker", default="")),
-                "ref_spk": _as_str(_meta(record, "ref_spk", "reference_speaker", default="")),
+                "g_variant": g_variant,
+                "src_spk": src_spk,
+                "tgt_spk": tgt_spk,
+                "ref_spk": ref_spk,
                 "src_prompt_id": src_prompt_id,
+                "tgt_prompt_id": tgt_prompt_id,
                 "ref_prompt_id": ref_prompt_id,
                 "ref_len_sec": ref_len_sec,
                 "speech_ratio": speech_ratio,
-                "same_text": np.nan if same_text is None else float(same_text),
+                "same_text": np.nan if same_text_reference is None else float(same_text_reference),
+                "same_text_reference": np.nan if same_text_reference is None else float(same_text_reference),
+                "same_text_target": np.nan if same_text_target is None else float(same_text_target),
                 "lexical_mismatch": _meta(record, "lexical_mismatch", default=np.nan),
                 "g_crop": g_ref,
                 "g_src": g_src,
+                "g_src_utt": g_src,
+                "g_src_prefix_mean": g_src_prefix_mean,
                 "delta_g": float(g_ref - g_src) if np.isfinite(g_ref) and np.isfinite(g_src) else float("nan"),
                 "c_star": np.nan if derived.oracle_bias is None else float(derived.oracle_bias),
-                "zbar_sp_star": speech_target_mean,
+                "zbar_sp_star": speech_target_stat,
             }
         )
     frame = pd.DataFrame(rows)
@@ -538,7 +670,16 @@ def summarize_global_cue_review(ref_crop_df: pd.DataFrame) -> tuple[pd.DataFrame
         return pd.DataFrame(), pd.DataFrame()
     sliced_rows: list[dict[str, Any]] = []
     definitions = [
-        ("same_text", ref_crop_df["same_text"].map(lambda x: "same_text" if float(x) > 0.5 else "cross_text") if "same_text" in ref_crop_df else None),
+        (
+            "same_text_reference",
+            ref_crop_df["same_text_reference"].map(lambda x: "same_text" if float(x) > 0.5 else "cross_text")
+            if "same_text_reference" in ref_crop_df
+            else (
+                ref_crop_df["same_text"].map(lambda x: "same_text" if float(x) > 0.5 else "cross_text")
+                if "same_text" in ref_crop_df
+                else None
+            ),
+        ),
         ("lexical_mismatch", pd.cut(pd.to_numeric(ref_crop_df["lexical_mismatch"], errors="coerce"), bins=[-np.inf, 0.1, 0.3, 0.6, np.inf], labels=["<=0.1", "0.1-0.3", "0.3-0.6", ">0.6"]) if "lexical_mismatch" in ref_crop_df else None),
         ("ref_len_sec", pd.cut(ref_crop_df["ref_len_sec"], bins=[0.0, 3.0, 5.0, 8.0, np.inf], labels=["<3s", "3-5s", "5-8s", ">=8s"])),
         ("speech_ratio", pd.cut(ref_crop_df["speech_ratio"], bins=[0.0, 0.4, 0.6, 0.8, 1.01], labels=["<0.4", "0.4-0.6", "0.6-0.8", ">=0.8"])),
@@ -696,12 +837,13 @@ def build_prefix_silence_review_table(
     items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
-    grouped: dict[str, list[tuple[int, RhythmV3DebugRecord]]] = {}
+    grouped: dict[tuple[str, str], list[tuple[int, RhythmV3DebugRecord]]] = {}
     for index, record in enumerate(records):
         sample_id = _as_str(_meta(record, "sample_id", default=record.item_name or f"sample_{index:06d}"))
-        grouped.setdefault(sample_id, []).append((index, record))
+        eval_mode = _as_str(_meta(record, "eval_mode", "rhythm_v3_eval_mode", default=""))
+        grouped.setdefault((sample_id, eval_mode), []).append((index, record))
     rows: list[dict[str, Any]] = []
-    for sample_id, group in grouped.items():
+    for (sample_id, eval_mode), group in grouped.items():
         sorted_group = sorted(group, key=lambda item: _resolve_prefix_ratio(item[1]))
         _, short_record = sorted_group[0]
         _, long_record = sorted_group[-1]
@@ -733,18 +875,22 @@ def build_prefix_silence_review_table(
                 long_record.projector_budget_hit_neg,
             ).item()
         )
-        drift = (
-            float("nan")
-            if long_record.prefix_unit_offset is None or np.asarray(long_record.prefix_unit_offset).reshape(-1).size <= 0
-            else float(np.abs(np.asarray(long_record.prefix_unit_offset).reshape(-1)[-1]))
-        )
+        hit_pos = _safe_array(long_record.projector_budget_hit_pos, dtype=np.float32)
+        hit_neg = _safe_array(long_record.projector_budget_hit_neg, dtype=np.float32)
+        hit_pos_rate = float(np.mean(hit_pos > 0.5)) if hit_pos is not None and hit_pos.size > 0 else float("nan")
+        hit_neg_rate = float(np.mean(hit_neg > 0.5)) if hit_neg is not None and hit_neg.size > 0 else float("nan")
+        drift = float(cumulative_drift(long_record.prefix_unit_offset).item())
         rows.append(
             {
                 "sample_id": sample_id,
+                "eval_mode": eval_mode,
                 "prefix_ratio": long_ratio,
                 "short_prefix_ratio": short_ratio,
                 "prefix_discrepancy": discrepancy,
                 "budget_hit": budget_hit,
+                "budget_hit_rate": budget_hit,
+                "budget_hit_pos_rate": hit_pos_rate,
+                "budget_hit_neg_rate": hit_neg_rate,
                 "cumulative_drift": drift,
                 "silence_leakage": leakage,
             }
@@ -754,9 +900,13 @@ def build_prefix_silence_review_table(
 
 def build_monotonicity_table(
     items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+    *,
+    g_variant: str = "raw_median",
+    g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
-    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
     for index, record in enumerate(records):
         meta = dict(record.metadata or {})
         src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
@@ -764,14 +914,54 @@ def build_monotonicity_table(
         if ref_bin not in {"slow", "mid", "fast"}:
             continue
         derived = derive_record(record)
-        grouped.setdefault(src_id, {})[ref_bin] = {
-            "tempo_out": _speech_tempo(record.unit_duration_exec, derived.speech_mask),
-            "tempo_src": _speech_tempo(record.source_duration_obs, derived.speech_mask),
-            "eval_mode": _as_str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", ""))),
+        eval_mode = _as_str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", "")))
+        tempo_src = compute_speech_tempo_for_analysis(
+            source_duration_obs=record.source_duration_obs,
+            source_speech_mask=derived.speech_mask,
+            source_valid_mask=record.unit_mask,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=record.source_content_units,
+        )
+        tempo_out = compute_speech_tempo_for_analysis(
+            source_duration_obs=record.unit_duration_exec,
+            source_speech_mask=derived.speech_mask,
+            source_valid_mask=record.unit_mask,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=record.source_content_units,
+        )
+        tempo_ref = compute_speech_tempo_for_analysis(
+            source_duration_obs=record.prompt_duration_obs,
+            source_speech_mask=record.prompt_speech_mask if record.prompt_speech_mask is not None else derived.prompt_speech_mask,
+            source_valid_mask=record.prompt_valid_mask,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=record.prompt_content_units,
+        )
+        g_src_utt = compute_source_global_rate_for_analysis(
+            source_duration_obs=record.source_duration_obs,
+            source_speech_mask=derived.speech_mask,
+            source_valid_mask=record.unit_mask,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=record.source_content_units,
+        )
+        grouped.setdefault((src_id, eval_mode), {})[ref_bin] = {
+            "tempo_out": tempo_out,
+            "tempo_src": tempo_src,
+            "tempo_ref": tempo_ref,
+            "g_ref": float(derived.global_rate) if derived.global_rate is not None else float("nan"),
+            "g_src_utt": g_src_utt,
             "item_name": record.item_name or src_id,
+            "same_text_reference": _as_float(meta.get("same_text_reference", meta.get("same_text", float("nan")))),
         }
     rows: list[dict[str, Any]] = []
-    for src_id, bins in grouped.items():
+    for (src_id, eval_mode), bins in grouped.items():
         mono = float("nan")
         if all(name in bins for name in ("slow", "mid", "fast")):
             mono = float(
@@ -788,12 +978,179 @@ def build_monotonicity_table(
                     "ref_bin": ref_bin,
                     "tempo_out": payload["tempo_out"],
                     "tempo_src": payload["tempo_src"],
-                    "eval_mode": payload["eval_mode"],
+                    "tempo_ref": payload["tempo_ref"],
+                    "g_ref": payload["g_ref"],
+                    "g_src_utt": payload["g_src_utt"],
+                    "delta_g": (
+                        float(payload["g_ref"] - payload["g_src_utt"])
+                        if np.isfinite(payload["g_ref"]) and np.isfinite(payload["g_src_utt"])
+                        else float("nan")
+                    ),
+                    "eval_mode": eval_mode,
+                    "same_text_reference": payload["same_text_reference"],
                     "mono_triplet_ok": mono,
                     "item_name": payload["item_name"],
                 }
             )
     return pd.DataFrame(rows)
+
+
+def summarize_falsification_ladder(
+    ref_crop_df: pd.DataFrame,
+    monotonicity_df: pd.DataFrame,
+    prefix_silence_df: pd.DataFrame,
+) -> pd.DataFrame:
+    eval_modes: set[str] = set()
+    for frame in (ref_crop_df, monotonicity_df, prefix_silence_df):
+        if not frame.empty and "eval_mode" in frame:
+            eval_modes.update(_as_str(mode) for mode in frame["eval_mode"].dropna().tolist())
+    if not eval_modes:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for eval_mode in sorted(eval_modes):
+        crop_mode = ref_crop_df[ref_crop_df["eval_mode"] == eval_mode].copy() if not ref_crop_df.empty and "eval_mode" in ref_crop_df else pd.DataFrame()
+        mono_mode = monotonicity_df[monotonicity_df["eval_mode"] == eval_mode].copy() if not monotonicity_df.empty and "eval_mode" in monotonicity_df else pd.DataFrame()
+        prefix_mode = prefix_silence_df[prefix_silence_df["eval_mode"] == eval_mode].copy() if not prefix_silence_df.empty and "eval_mode" in prefix_silence_df else pd.DataFrame()
+
+        explain = tempo_explainability(crop_mode.get("delta_g", []), crop_mode.get("c_star", [])) if not crop_mode.empty else {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+        }
+        gap = float("nan")
+        if not crop_mode.empty and "same_text_reference" in crop_mode:
+            same = crop_mode[crop_mode["same_text_reference"] > 0.5]
+            cross = crop_mode[crop_mode["same_text_reference"] <= 0.5]
+            if not same.empty and not cross.empty:
+                same_metric = tempo_explainability(same["delta_g"], same["c_star"])
+                cross_metric = tempo_explainability(cross["delta_g"], cross["c_star"])
+                gap = float(same_text_gap(same_metric["robust_slope"], cross_metric["robust_slope"]).item())
+
+        mono_rate = float("nan")
+        if not mono_mode.empty:
+            unique_triplets = mono_mode.drop_duplicates(subset=["src_id", "eval_mode"])
+            mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
+
+        rows.append(
+            {
+                "eval_mode": eval_mode,
+                "explainability_spearman": float(explain["spearman"]),
+                "explainability_slope": float(explain["robust_slope"]),
+                "explainability_r2_like": float(explain["r2_like"]),
+                "monotonicity_rate": mono_rate,
+                "same_text_gap": gap,
+                "silence_leakage": float(np.nanmean(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
+                "prefix_discrepancy": float(np.nanmean(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
+                "budget_hit_rate": float(np.nanmean(prefix_mode["budget_hit_rate"].to_numpy(dtype=np.float32))) if not prefix_mode.empty and "budget_hit_rate" in prefix_mode else float("nan"),
+                "cumulative_drift": float(np.nanmean(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
+                "n_ref_crops": int(crop_mode.shape[0]),
+                "n_triplets": 0 if mono_mode.empty else int(mono_mode["src_id"].nunique()),
+                "n_prefix_samples": int(prefix_mode.shape[0]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_monotonicity_intervention(monotonicity_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    if monotonicity_df.empty:
+        fig, ax = plt.subplots(figsize=(6, 4.8), constrained_layout=True)
+        ax.text(0.5, 0.5, "No monotonicity intervention data", ha="center", va="center")
+        ax.set_axis_off()
+        fig.suptitle("Gate Figure: Monotonicity Intervention", fontsize=14)
+        return fig
+
+    modes = sorted(str(mode) for mode in monotonicity_df["eval_mode"].dropna().unique().tolist()) or ["unknown"]
+    fig, axes = plt.subplots(1, len(modes), figsize=(5.4 * len(modes), 4.8), constrained_layout=True)
+    axes = np.asarray(axes).reshape(-1)
+    order = ["slow", "mid", "fast"]
+    for ax, eval_mode in zip(axes, modes):
+        work = monotonicity_df[monotonicity_df["eval_mode"] == eval_mode].copy()
+        if work.empty:
+            ax.text(0.5, 0.5, f"No {eval_mode} data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        series = [work.loc[work["ref_bin"] == ref_bin, "tempo_out"].dropna().to_numpy(dtype=np.float32) for ref_bin in order]
+        if any(arr.size > 0 for arr in series):
+            ax.boxplot(series, labels=order, showmeans=True)
+        paired = work.pivot_table(index="src_id", columns="ref_bin", values="tempo_out", aggfunc="first")
+        for _, row in paired.iterrows():
+            if all(name in row.index and np.isfinite(row[name]) for name in order):
+                ax.plot(np.arange(1, 4), [row["slow"], row["mid"], row["fast"]], color="#4C78A8", alpha=0.18, linewidth=1.0)
+        unique_triplets = work.drop_duplicates(subset=["src_id", "eval_mode"])
+        mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
+        ax.set_title(f"{eval_mode}\nmono={mono_rate:.3f}" if np.isfinite(mono_rate) else eval_mode)
+        ax.set_ylabel("tempo_out")
+        ax.grid(axis="y", alpha=0.25)
+    fig.suptitle("Gate Figure: Monotonicity Intervention", fontsize=14)
+    return fig
+
+
+def plot_prefix_silence_stability(prefix_silence_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8.5), constrained_layout=True)
+    metrics = [
+        ("silence_leakage", "silence_leakage"),
+        ("prefix_discrepancy", "prefix_discrepancy"),
+        ("budget_hit_rate", "budget_hit_rate"),
+        ("cumulative_drift", "cumulative_drift"),
+    ]
+    if prefix_silence_df.empty:
+        for ax, (_, title) in zip(axes.reshape(-1), metrics):
+            ax.text(0.5, 0.5, "No prefix/silence stability data", ha="center", va="center")
+            ax.set_title(title)
+            ax.set_axis_off()
+        fig.suptitle("Gate Figure: Prefix + Silence Stability", fontsize=14)
+        return fig
+
+    modes = sorted(str(mode) for mode in prefix_silence_df["eval_mode"].dropna().unique().tolist()) or ["unknown"]
+    for ax, (column, title) in zip(axes.reshape(-1), metrics):
+        series = [
+            prefix_silence_df.loc[prefix_silence_df["eval_mode"] == eval_mode, column].dropna().to_numpy(dtype=np.float32)
+            for eval_mode in modes
+        ]
+        if any(arr.size > 0 for arr in series):
+            ax.boxplot(series, labels=modes, showmeans=True)
+        else:
+            ax.text(0.5, 0.5, f"No {column} data", ha="center", va="center")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.25)
+        ax.tick_params(axis="x", rotation=20)
+    fig.suptitle("Gate Figure: Prefix + Silence Stability", fontsize=14)
+    return fig
+
+
+def plot_falsification_ladder(ladder_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    metrics = [
+        ("explainability_slope", "slope"),
+        ("monotonicity_rate", "mono"),
+        ("same_text_gap", "same-text gap"),
+        ("silence_leakage", "silence leak"),
+        ("prefix_discrepancy", "prefix disc"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(18, 4.8), constrained_layout=True)
+    if ladder_df.empty:
+        for ax, (_, title) in zip(np.asarray(axes).reshape(-1), metrics):
+            ax.text(0.5, 0.5, "No ladder summary", ha="center", va="center")
+            ax.set_title(title)
+            ax.set_axis_off()
+        fig.suptitle("Gate Figure: Analytic / Coarse / Learned Ladder", fontsize=14)
+        return fig
+
+    x = np.arange(ladder_df.shape[0])
+    labels = ladder_df["eval_mode"].astype(str).tolist()
+    for ax, (column, title) in zip(np.asarray(axes).reshape(-1), metrics):
+        ax.bar(x, ladder_df[column].to_numpy(dtype=np.float32), color="#4C78A8")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20)
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.25)
+    fig.suptitle("Gate Figure: Analytic / Coarse / Learned Ladder", fontsize=14)
+    return fig
 
 
 def plot_run_lattice_stability(prefix_df: pd.DataFrame):
@@ -1018,6 +1375,7 @@ def save_review_figure_bundle(
     output_dir: str | Path,
     g_variant: str = "raw_median",
     g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
     silence_tau: float = DEFAULT_REVIEW_SILENCE_TAU,
     boundary_threshold: float = DEFAULT_REVIEW_BOUNDARY_THRESHOLD,
 ) -> dict[str, Path]:
@@ -1025,22 +1383,66 @@ def save_review_figure_bundle(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     run_df = build_run_table(records, silence_tau=silence_tau, boundary_threshold=boundary_threshold)
-    ref_crop_df = build_ref_crop_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio)
+    ref_crop_df = build_ref_crop_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
     prefix_df = build_prefix_replay_table(records)
+    monotonicity_df = build_monotonicity_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
+    prefix_silence_df = build_prefix_silence_review_table(records)
     paths = {
         "run_table": out_dir / "run_table.csv",
         "ref_crop_table": out_dir / "ref_crop_table.csv",
         "prefix_replay_table": out_dir / "prefix_replay_table.csv",
+        "monotonicity_table": out_dir / "monotonicity_table.csv",
+        "prefix_silence_review_table": out_dir / "prefix_silence_review_table.csv",
     }
     run_df.to_csv(paths["run_table"], index=False)
     ref_crop_df.to_csv(paths["ref_crop_table"], index=False)
     prefix_df.to_csv(paths["prefix_replay_table"], index=False)
+    monotonicity_df.to_csv(paths["monotonicity_table"], index=False)
+    prefix_silence_df.to_csv(paths["prefix_silence_review_table"], index=False)
     figures = {
         "fig_a_run_lattice_stability.png": plot_run_lattice_stability(prefix_df),
         "fig_b_global_cue_survival.png": plot_global_cue_survival(ref_crop_df),
         "fig_c_oracle_decomposition.png": plot_oracle_decomposition(run_df),
         "fig_d_silence_theory_audit.png": plot_silence_theory_audit(run_df, silence_tau=silence_tau),
         "fig_e_online_commit_semantics.png": plot_online_commit_semantics(prefix_df),
+    }
+    for name, fig in figures.items():
+        path = out_dir / name
+        fig.savefig(path, dpi=180)
+        fig.clf()
+        paths[name] = path
+    return paths
+
+
+def save_validation_gate_bundle(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+    *,
+    output_dir: str | Path,
+    g_variant: str = "raw_median",
+    g_trim_ratio: float = 0.2,
+    drop_edge_runs: int = 0,
+) -> dict[str, Path]:
+    records = ensure_debug_records(items)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ref_crop_df = build_ref_crop_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
+    monotonicity_df = build_monotonicity_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
+    prefix_silence_df = build_prefix_silence_review_table(records)
+    ladder_df = summarize_falsification_ladder(ref_crop_df, monotonicity_df, prefix_silence_df)
+    paths = {
+        "gate_ref_crop_table": out_dir / "gate_ref_crop_table.csv",
+        "gate_monotonicity_table": out_dir / "gate_monotonicity_table.csv",
+        "gate_prefix_silence_table": out_dir / "gate_prefix_silence_table.csv",
+        "gate_mode_ladder_table": out_dir / "gate_mode_ladder_table.csv",
+    }
+    ref_crop_df.to_csv(paths["gate_ref_crop_table"], index=False)
+    monotonicity_df.to_csv(paths["gate_monotonicity_table"], index=False)
+    prefix_silence_df.to_csv(paths["gate_prefix_silence_table"], index=False)
+    ladder_df.to_csv(paths["gate_mode_ladder_table"], index=False)
+    figures = {
+        "gate_fig_monotonicity_intervention.png": plot_monotonicity_intervention(monotonicity_df),
+        "gate_fig_prefix_silence_stability.png": plot_prefix_silence_stability(prefix_silence_df),
+        "gate_fig_mode_ladder.png": plot_falsification_ladder(ladder_df),
     }
     for name, fig in figures.items():
         path = out_dir / name
@@ -1066,14 +1468,21 @@ __all__ = [
     "compute_commit_metrics",
     "compute_g",
     "compute_prefix_tempo",
+    "compute_source_global_rate_for_analysis",
+    "compute_speech_tempo_for_analysis",
     "compute_run_stability",
     "ensure_debug_records",
+    "plot_falsification_ladder",
     "plot_global_cue_survival",
+    "plot_monotonicity_intervention",
     "plot_online_commit_semantics",
     "plot_oracle_decomposition",
+    "plot_prefix_silence_stability",
     "plot_run_lattice_stability",
     "plot_silence_theory_audit",
     "save_review_figure_bundle",
+    "save_validation_gate_bundle",
+    "summarize_falsification_ladder",
     "summarize_global_cue_review",
     "summarize_oracle_decomposition",
     "summarize_silence_audit",

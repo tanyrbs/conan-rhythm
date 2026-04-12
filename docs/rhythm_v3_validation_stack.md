@@ -61,17 +61,21 @@ File:
 This is now the single place for:
 
 - shared scalar reconstruction such as `g`, `p_i`, `a_i`, `b*`
+- analysis-side `g_src_utt` and speech-tempo reconstruction
 - unified table builders
 - per-figure summaries
 - lightweight plotting helpers
+- gate-oriented figures built from the same tables
 
 The project was intentionally simplified here:
 
-- no extra falsification CLI layer is required
 - no extra dedicated falsification test file is kept
 - review logic should live in the util layer, not be copied across scripts
 - local `g` reconstruction should call the shared speech-only support path,
   including `rhythm_v3_drop_edge_runs_for_g` when the experiment enables it
+- the maintained CLI should stay singular: `scripts/rhythm_v3_debug_records.py`
+  exports the shared review/gate bundle, while narrower gate inspection should
+  come from the emitted CSVs or direct util calls instead of extra wrapper CLIs
 
 ## 3. Unified analysis tables
 
@@ -100,8 +104,8 @@ Key columns:
 
 - `pair_id`, `crop_id`
 - `ref_len_sec`, `speech_ratio`
-- `same_text`, `lexical_mismatch`
-- `g_crop`, `g_full`, `delta_g`
+- `same_text_reference`, `same_text_target`, `lexical_mismatch`
+- `g_crop`, `g_full`, `g_src_utt`, `g_src_prefix_mean`, `delta_g`
 - `c_star`, `zbar_sp_star`
 
 ### 3.3 `prefix_replay_table`
@@ -116,6 +120,15 @@ Key columns:
 - `n_pred_cont`, `k_pred_disc`, `k_full_disc`
 - `budget_drift`, `budget_hit`
 
+### 3.4 Gate tables
+
+On top of the retained five theory-review figures, the same util layer now
+keeps three gate-oriented tables for rapid falsification:
+
+- `monotonicity_table`
+- `prefix_silence_review_table`
+- `mode_ladder_table`
+
 ## 4. Review util entry points
 
 Typical usage:
@@ -126,6 +139,7 @@ from utils.plot.rhythm_v3_viz import (
     build_ref_crop_table,
     build_run_table,
     save_review_figure_bundle,
+    save_validation_gate_bundle,
 )
 
 run_df = build_run_table(records)
@@ -133,6 +147,7 @@ crop_df = build_ref_crop_table(records)
 prefix_df = build_prefix_replay_table(records)
 
 paths = save_review_figure_bundle(records, output_dir="artifacts/rhythm_v3_review")
+gate_paths = save_validation_gate_bundle(records, output_dir="artifacts/rhythm_v3_review")
 ```
 
 Useful public helpers:
@@ -140,12 +155,49 @@ Useful public helpers:
 - `build_run_table(...)`
 - `build_ref_crop_table(...)`
 - `build_prefix_replay_table(...)`
+- `build_monotonicity_table(...)`
+- `build_prefix_silence_review_table(...)`
+- `compute_source_global_rate_for_analysis(...)`
+- `compute_speech_tempo_for_analysis(...)`
 - `compute_run_stability(...)`
+- `summarize_falsification_ladder(...)`
 - `summarize_global_cue_review(...)`
 - `summarize_oracle_decomposition(...)`
 - `build_silence_audit_table(...)`
 - `compute_commit_metrics(...)`
 - `save_review_figure_bundle(...)`
+- `save_validation_gate_bundle(...)`
+
+Maintained CLI entrypoint built on top of the same util layer:
+
+- `scripts/rhythm_v3_debug_records.py`
+
+### 4.1 `g_src_utt` vs `g_src_prefix`
+
+The local code now keeps these two meanings separate:
+
+- `g_src_utt`: full-utterance source statistic used in static explainability
+  analysis such as `delta_g = g_ref - g_src_utt`
+- `g_src_prefix`: causal runtime prefix state exported by the online planner
+
+They should not be mixed when making falsification plots.
+
+### 4.2 Debug-bundle metadata expectations
+
+The maintained export script can summarize any valid debug bundle, but the
+strongest Gate-0 / contamination-slice conclusions assume the bundle still
+carries:
+
+- `pair_id`
+- prompt ids or source/reference signatures
+- `same_text_reference`
+- `lexical_mismatch`
+- `ref_len_sec`
+- `speech_ratio`
+
+If those fields are missing, the scripts still export tables and figures, but
+you should read the result as a partial audit rather than a full falsification
+verdict.
 
 ## 5. Important local implementation boundaries
 
@@ -198,3 +250,22 @@ commit violation.
 If one of these five figures fails badly, the right next step is usually to
 repair the corresponding interface or statistic first, not to add more model
 capacity.
+
+## 7. One-script export
+
+The maintained export surface is deliberately small:
+
+```bash
+py -3 scripts\rhythm_v3_debug_records.py ^
+  --input path\to\debug_bundle.pt ^
+  --output artifacts\rhythm_v3_summary.csv ^
+  --review-dir artifacts\rhythm_v3_review ^
+  --g-variant raw_median ^
+  --drop-edge-runs 1
+```
+
+This now writes:
+
+- the row-level falsification summary CSV
+- the retained five-figure review bundle
+- the gate-oriented monotonicity / stability / ladder bundle

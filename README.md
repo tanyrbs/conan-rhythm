@@ -4,6 +4,13 @@ This checkout has one maintained rhythm code mainline: **`rhythm_v3`**.
 
 The maintained default is **streaming VC unit-duration transfer**.
 
+The current recommended research workflow is not "train everything first". It
+is a **three-gate falsification loop** over the maintained `rhythm_v3` line:
+
+1. Gate 0: static `g` audit
+2. Gate 1: analytic monotonicity
+3. Gate 2: coarse-only vs learned stability trade-off
+
 ## Current maintained default
 
 Use:
@@ -180,7 +187,28 @@ Recommended default weights in `egs/conan_emformer_rhythm_v3.yaml` currently kee
 - prefix-coarse loss on (`lambda_rhythm_bias`, now supervising the coarse branch even though the compatibility metric still exports `global_bias_scalar`)
 - prompt-summary residual self-fit disabled by default (`lambda_rhythm_summary=0`)
 - prefix consistency off by default
-- cross-prefix consistency on
+- cross-prefix consistency off by default until strict-causal fine-tuning
+
+## Falsification-first scripts
+
+The maintained evaluation surface is now intentionally reduced to one export
+script plus two health checks:
+
+- `scripts/preflight_rhythm_v3.py`
+- `scripts/smoke_test_rhythm_v3.py`
+- `scripts/rhythm_v3_debug_records.py`
+
+`scripts/rhythm_v3_debug_records.py` is the single maintained review/export
+entrypoint. It writes the row summary CSV, the retained five-figure bundle, and
+the gate-oriented tables/figures from the same `utils/plot/rhythm_v3_viz/`
+util layer instead of keeping separate per-gate wrapper CLIs.
+
+For Gate-0 and contamination-slice style review, prefer debug bundles exported
+from the maintained train/eval path with pair metadata still attached
+(`pair_id`, prompt ids, same-text flags, `lexical_mismatch`, `ref_len_sec`,
+`speech_ratio`). Inference-only bundles can still be summarized, but some
+stability/cross-text panels may collapse to partial evidence rather than a full
+falsification readout.
 
 ## Training/task code layout
 
@@ -229,6 +257,7 @@ Maintained automation should exercise the V3 path:
 
 - `scripts/preflight_rhythm_v3.py`
 - `scripts/smoke_test_rhythm_v3.py`
+- `scripts/rhythm_v3_debug_records.py`
 
 ## Legacy status
 
