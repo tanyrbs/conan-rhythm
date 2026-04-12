@@ -216,8 +216,8 @@ def build_source_rhythm_cache_v3(
     silent_token: int | None = None,
     separator_aware: bool = True,
     tail_open_units: int = 1,
-    emit_silence_runs: bool = False,
-    debounce_min_run_frames: int = 1,
+    emit_silence_runs: bool = True,
+    debounce_min_run_frames: int = 2,
     phrase_boundary_threshold: float = 0.55,
 ) -> dict[str, np.ndarray]:
     frontend = _cached_frontend(

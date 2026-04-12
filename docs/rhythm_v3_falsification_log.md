@@ -62,7 +62,16 @@ metadata (`pair_id`, prompt ids, same-text flags, `lexical_mismatch`,
 `ref_len_sec`, `speech_ratio`). If that metadata is absent, the scripts still
 export tables, but Gate-0 contamination slices should be read as incomplete.
 
-### 2.3 Runtime/debug export remains the same
+The export surface also now keeps small but useful analysis aliases together:
+
+- `same_speaker_reference` / `same_speaker_target`
+- `tempo_delta = tempo_out - tempo_src`
+- `mono_triplet_ok`
+- ladder-level `tempo_transfer_slope`
+- `alignment_kind`
+- `target_duration_surface`
+
+### 2.3 Runtime/debug export keeps the same core signals plus clearer boundary provenance
 
 The runtime still exports the key audit signals:
 
@@ -74,10 +83,16 @@ The runtime still exports the key audit signals:
 - `rhythm_debug_is_speech`
 - `rhythm_debug_budget_hit_pos`
 - `rhythm_debug_budget_hit_neg`
+- `rhythm_debug_projector_boundary_hit`
+- `rhythm_debug_projector_boundary_decay`
+- `rhythm_debug_projector_since_last_boundary`
 - `unit_duration_exec`
 
 So the review surface got smaller, but the underlying observability was not
 reduced.
+`rhythm_debug_projector_boundary_hit` marks boundary events;
+`rhythm_debug_projector_boundary_decay` marks only the subset where decay was
+actually applied.
 
 ### 2.4 `g` is now locked to one support path
 
@@ -86,10 +101,28 @@ on the same `g` semantics:
 
 - speech-only support first
 - optional `rhythm_v3_drop_edge_runs_for_g` cleanup
-- fallback to valid support only when speech support disappears
+- edge-drop fallback only back to raw speech support, never to non-speech valid/full support
 - `prompt_speech_mask` carried through as an explicit contract field
+- runtime/debug export now also carries `g_support_count`,
+  `g_support_ratio_vs_speech`, `g_support_ratio_vs_valid`, `g_valid`,
+  `g_drop_edge_runs`, and `g_strict_speech_only` so Gate-0 analysis can tell
+  whether `g` survived on real speech support instead of assuming it did
 
-### 2.5 Static `g_src_utt` is kept separate from runtime `g_src_prefix`
+### 2.5 Continuous alignment provenance is now by contract
+
+The maintained `continuous` path is still `continuous_precomputed` only, but it
+is no longer accepted by convention alone.
+
+- paired-target alignment arrays now only feed the maintained continuous path
+  when paired metadata explicitly marks them as `continuous_precomputed`
+- otherwise the existing fail-fast path remains in charge
+- projection export also carries
+  `unit_alignment_unmatched_speech_ratio_tgt`,
+  `unit_alignment_mean_local_confidence_speech_tgt`, and
+  `unit_alignment_mean_coarse_confidence_speech_tgt`
+  so weak supervision does not hide inside a single opaque confidence surface
+
+### 2.6 Static `g_src_utt` is kept separate from runtime `g_src_prefix`
 
 The local workspace now makes this split explicit:
 
@@ -148,7 +181,9 @@ Claim:
 
 Primary questions:
 
-- does raw silence target diverge from clipped coarse pseudo-target?
+- does the raw projected target surface (`unit_duration_proj_raw_tgt`, or
+  legacy `unit_duration_tgt` when no alias is present) diverge from the clipped
+  coarse pseudo-target?
 - is that divergence boundary-dependent?
 - does the evidence point to boundary-aware clipping rather than silence local residual?
 
@@ -195,6 +230,17 @@ Run `analytic` mode and stop early if:
 
 Only keep strong local residual if it improves control without obviously
 damaging silence leakage or prefix stability.
+
+### Outdated suggestions
+
+Several earlier "next steps" are now already implemented locally and should not
+be re-proposed as new refactors:
+
+- shared `g` computation already lives in `modules/Conan/rhythm_v3/g_stats.py`
+- `analytic / coarse_only / learned` already run inside the same maintained runtime
+- projector budget/drift observability is already exported; the remaining work
+  is interpretation, especially `boundary_hit` vs `boundary_decay_applied`, not
+  projector replacement
 
 ## 6. Recommended util-first workflow
 
@@ -256,9 +302,9 @@ So the current status is:
 
 ### Gate 0 summary
 
-| date | split | g_variant | rho(delta_g,c*) | robust_slope | r2_like | notes |
-| --- | --- | --- | ---: | ---: | ---: | --- |
-| pending | pending | raw_median | pending | pending | pending | no experiment run yet |
+| date | split | g_variant | alignment_kind | target_duration_surface | rho(delta_g,c*) | robust_slope | r2_like | notes |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |
+| pending | pending | raw_median | pending | pending | pending | pending | pending | no experiment run yet |
 
 ### Gate 1 summary
 
@@ -268,7 +314,7 @@ So the current status is:
 
 ### Gate 2 summary
 
-| date | split | eval_mode | monotonicity_rate | silence_leakage | prefix_discrepancy | budget_hit_rate | notes |
-| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| pending | pending | coarse_only | pending | pending | pending | pending | no experiment run yet |
-| pending | pending | learned | pending | pending | pending | pending | no experiment run yet |
+| date | split | eval_mode | monotonicity_rate | silence_leakage | prefix_discrepancy | budget_hit_rate | projector_boundary_hit_rate | projector_boundary_decay_rate | notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pending | pending | coarse_only | pending | pending | pending | pending | pending | pending | no experiment run yet |
+| pending | pending | learned | pending | pending | pending | pending | pending | pending | no experiment run yet |

@@ -17,6 +17,7 @@ from .contracts import (
 )
 from .bridge import resolve_rhythm_apply_mode
 from .frame_plan import RhythmFramePlan, build_frame_plan_from_execution
+from .g_stats import build_global_rate_support_mask
 from .module import MixedEffectsDurationModule
 from .renderer import RenderedRhythmSequence, render_rhythm_sequence
 from .source_cache import (
@@ -337,6 +338,11 @@ class ConanDurationAdapter(nn.Module):
         prompt_silence_mask: torch.Tensor | None,
         prompt_cache_meta: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
+        if self.minimal_v1_profile and not isinstance(prompt_speech_mask, torch.Tensor):
+            raise ValueError(
+                "rhythm_v3 minimal_v1_profile requires explicit prompt_speech_mask. "
+                "prompt_silence_mask is auxiliary-only and silence-token fallback is disabled."
+            )
         if isinstance(prompt_speech_mask, torch.Tensor):
             return prompt_speech_mask.float().clamp(0.0, 1.0) * prompt_valid_mask.float()
         if isinstance(prompt_silence_mask, torch.Tensor):
@@ -354,11 +360,6 @@ class ConanDurationAdapter(nn.Module):
                 )
             derived_silence = prompt_content_units.long().eq(int(self.silent_token)).float()
             return prompt_valid_mask.float() * (1.0 - derived_silence)
-        if self.minimal_v1_profile:
-            raise ValueError(
-                "rhythm_v3 minimal_v1_profile requires prompt_speech_mask, prompt_silence_mask, "
-                "or explicit silence-run prompt units."
-            )
         if self.prompt_summary_backbone:
             raise ValueError(
                 "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask, "
@@ -558,6 +559,35 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_v3_source_rate_init"] = self.module.duration_head.src_rate_init.detach().reshape(1)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
+        g_debug_stats = {}
+        prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
+        prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
+        if isinstance(prompt_speech_mask, torch.Tensor):
+            support_mask = build_global_rate_support_mask(
+                speech_mask=prompt_speech_mask.float(),
+                valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
+                drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
+            )
+            speech_count = prompt_speech_mask.float().sum(dim=1, keepdim=True)
+            valid_count = (
+                prompt_valid_mask.float().sum(dim=1, keepdim=True)
+                if isinstance(prompt_valid_mask, torch.Tensor)
+                else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
+            )
+            support_count = support_mask.float().sum(dim=1, keepdim=True)
+            g_debug_stats = {
+                "g_support_count": support_count.detach(),
+                "g_speech_count": speech_count.detach(),
+                "g_valid_count": valid_count.detach(),
+                "g_support_ratio_vs_speech": (support_count / speech_count.clamp_min(1.0)).detach(),
+                "g_support_ratio_vs_valid": (support_count / valid_count.clamp_min(1.0)).detach(),
+                "g_valid": (support_count > 0.5).float().detach(),
+                "g_drop_edge_runs": support_count.new_full(
+                    support_count.shape,
+                    float(int(getattr(self.module, "g_drop_edge_runs", 0))),
+                ),
+                "g_strict_speech_only": support_count.new_ones(support_count.shape),
+            }
         if self.module.debug_export:
             debug_bundle = {
                 "g_variant": self.module.g_variant,
@@ -597,13 +627,32 @@ class ConanDurationAdapter(nn.Module):
                     else None
                 ),
                 "coarse_correction_pred": (
-                    execution.coarse_logstretch.detach()
-                    if isinstance(getattr(execution, "coarse_logstretch", None), torch.Tensor)
+                    execution.coarse_path_logstretch.detach()
+                    if isinstance(getattr(execution, "coarse_path_logstretch", None), torch.Tensor)
+                    else (
+                        execution.coarse_logstretch.detach()
+                        if isinstance(getattr(execution, "coarse_logstretch", None), torch.Tensor)
+                        else None
+                    )
+                ),
+                "coarse_path_logstretch": (
+                    execution.coarse_path_logstretch.detach()
+                    if isinstance(getattr(execution, "coarse_path_logstretch", None), torch.Tensor)
                     else None
                 ),
                 "local_residual": (
                     execution.local_residual.detach()
                     if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
+                    else None
+                ),
+                "speech_pred": (
+                    execution.speech_pred.detach()
+                    if isinstance(getattr(execution, "speech_pred", None), torch.Tensor)
+                    else None
+                ),
+                "silence_pred": (
+                    execution.silence_pred.detach()
+                    if isinstance(getattr(execution, "silence_pred", None), torch.Tensor)
                     else None
                 ),
                 "source_rate_seq": (
@@ -621,6 +670,7 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor)
                     else None
                 ),
+                **g_debug_stats,
                 "projector_prefix_offset": (
                     execution.prefix_unit_offset.detach()
                     if isinstance(getattr(execution, "prefix_unit_offset", None), torch.Tensor)
@@ -635,6 +685,35 @@ class ConanDurationAdapter(nn.Module):
                         else None
                     )
                 ),
+                "projector_boundary_decay_applied": (
+                    execution.projector_boundary_decay_applied.detach()
+                    if isinstance(getattr(execution, "projector_boundary_decay_applied", None), torch.Tensor)
+                    else None
+                ),
+                "projector_boundary_hit": (
+                    execution.projector_boundary_hit.detach()
+                    if isinstance(getattr(execution, "projector_boundary_hit", None), torch.Tensor)
+                    else None
+                ),
+                "projector_budget_pos_used": (
+                    execution.projector_budget_pos_used.detach()
+                    if isinstance(getattr(execution, "projector_budget_pos_used", None), torch.Tensor)
+                    else None
+                ),
+                "projector_budget_neg_used": (
+                    execution.projector_budget_neg_used.detach()
+                    if isinstance(getattr(execution, "projector_budget_neg_used", None), torch.Tensor)
+                    else None
+                ),
+                "projector_since_last_boundary": (
+                    execution.projector_since_last_boundary.detach()
+                    if isinstance(getattr(execution, "projector_since_last_boundary", None), torch.Tensor)
+                    else (
+                        execution.next_state.since_last_boundary.detach()
+                        if isinstance(getattr(execution.next_state, "since_last_boundary", None), torch.Tensor)
+                        else None
+                    )
+                ),
                 "eval_mode": getattr(execution, "eval_mode", self.module.eval_mode),
             }
             ret["rhythm_v3_debug"] = debug_bundle
@@ -646,9 +725,19 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_coarse_bias"] = debug_bundle["coarse_correction"]
             ret["rhythm_debug_coarse_used"] = debug_bundle["coarse_correction_used"]
             ret["rhythm_debug_coarse_pred"] = debug_bundle["coarse_correction_pred"]
+            ret["rhythm_debug_coarse_path"] = debug_bundle["coarse_path_logstretch"]
             ret["rhythm_debug_local_residual"] = debug_bundle["local_residual"]
+            ret["rhythm_debug_speech_pred"] = debug_bundle["speech_pred"]
+            ret["rhythm_debug_silence_pred"] = debug_bundle["silence_pred"]
             ret["rhythm_debug_projector_prefix_offset"] = debug_bundle["projector_prefix_offset"]
             ret["rhythm_debug_projector_rounding_residual"] = debug_bundle["projector_rounding_residual"]
+            ret["rhythm_debug_projector_boundary_hit"] = debug_bundle["projector_boundary_hit"]
+            ret["rhythm_debug_projector_boundary_decay"] = debug_bundle["projector_boundary_decay_applied"]
+            ret["rhythm_debug_projector_budget_pos_used"] = debug_bundle["projector_budget_pos_used"]
+            ret["rhythm_debug_projector_budget_neg_used"] = debug_bundle["projector_budget_neg_used"]
+            ret["rhythm_debug_projector_since_last_boundary"] = debug_bundle["projector_since_last_boundary"]
+            for key, value in g_debug_stats.items():
+                ret[f"rhythm_debug_{key}"] = value
             if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
                 debug_bundle["is_speech"] = (
                     source_batch.unit_mask.float() * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))

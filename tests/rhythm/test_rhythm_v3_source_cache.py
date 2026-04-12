@@ -51,3 +51,14 @@ def test_duration_v3_cache_meta_mismatch_fails_fast():
             debounce_min_run_frames=2,
             phrase_boundary_threshold=0.55,
         )
+
+
+def test_build_source_rhythm_cache_v3_defaults_follow_mainline_surface():
+    cache = build_source_rhythm_cache_v3(
+        [1, 1, 57, 57, 2],
+        silent_token=57,
+    )
+    meta = cache[DURATION_V3_CACHE_META_KEY]
+    assert meta["emit_silence_runs"] is True
+    assert meta["debounce_min_run_frames"] == 2
+    assert cache["source_silence_mask"].tolist() == [0.0, 1.0, 0.0]

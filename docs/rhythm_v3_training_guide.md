@@ -39,6 +39,8 @@ Operationally, the maintained default means:
 - `rhythm_v3_disable_learned_gate: true`
 - `rhythm_v3_drop_edge_runs_for_g: 1`
 - `rhythm_v3_require_same_text_paired_target: true`
+- `rhythm_v3_g_variant: raw_median`
+- `rhythm_v3_eval_mode: learned`
 - speech-only prompt global-rate estimation
 - speech = coarse + local
 - silence = clipped coarse-only follower
@@ -50,6 +52,9 @@ short fake silence islands when boundary evidence is weak, instead of asking
 the duration writer to absorb that noise.
 
 So this branch is **not** training a free-form pause planner. It is training a **source-anchored causal retimer** over a stabilized run lattice.
+The maintained runtime default is therefore `raw_median + learned`; the
+falsification ladder should only override `eval_mode` (and, when needed,
+`g_variant`) on that same surface.
 
 ### 1.1 Recommended falsification profiles
 
@@ -67,6 +72,11 @@ small overrides:
 Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
 `weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
 shows a real reason.
+
+One practical note: the maintained config file still ships with
+`rhythm_v3_eval_mode=learned` because that is the runtime default surface. For
+actual falsification work, do not start there. Override into profile `A`
+first, then `B`, and only then come back to `C`.
 
 --- 
 
@@ -116,7 +126,12 @@ inference-time prompt/source preparation now share the same `rhythm_v3`
 stable-lattice builder rather than separate legacy/v3 runizers.
 
 For the maintained prompt-summary path, `prompt_speech_mask` is part of the
-public conditioning contract rather than an internal optional hint.
+public conditioning contract rather than an internal optional hint. In the
+current strict minimal runtime, that means `prompt_speech_mask` should be
+materialized explicitly instead of being reconstructed from silence-token
+fallback. The shared `g` path is also fail-fast now: when prompt speech support
+disappears after masking / edge cleanup, the maintained mainline raises rather
+than silently widening into non-speech support.
 
 ---
 
@@ -181,6 +196,13 @@ You need one of these:
 1. **explicit `unit_duration_tgt` already stored in the binary sample**, or
 2. **an external paired target item** that the dataset can project onto the source lattice
 
+When that target comes from the maintained paired-projection path,
+`unit_duration_proj_raw_tgt` is the preferred explicit alias for the raw
+projection surface. Training still decomposes supervision into
+`global_shift_tgt`, `coarse_logstretch_tgt`, `local_residual_tgt`, and the
+clipped coarse-derived silence target instead of treating the raw projection
+surface as the final supervision object.
+
 In practice, the normal way is to provide a **pair manifest** via:
 
 - `rhythm_pair_manifest_path`
@@ -237,6 +259,7 @@ Semantics:
 Also note:
 
 - current v3 defaults disallow same-text reference but allow same-text paired target
+- when same-text reference is disallowed, source/reference items must also carry comparable text signatures so the runtime can prove they are different-text instead of assuming it
 - pair-manifest grouping can be used for grouped batching and controlled A/B comparisons
 
 For the maintained `rhythm_v3_minimal_v1_profile`, treat that as a hard data
@@ -244,6 +267,11 @@ contract:
 
 - **reference prompt**: same-speaker / different-text
 - **paired target supervision**: same-text projection target (`rhythm_v3_require_same_text_paired_target: true`), unless `unit_duration_tgt` is already explicitly cached in the sample
+
+`rhythm_v3_use_continuous_alignment: true` currently means
+`continuous_precomputed` only. If no precomputed frame/content alignment
+metadata is attached to the paired target, the maintained dataset path now
+fails fast instead of silently falling back to discrete projection.
 
 ---
 
@@ -531,6 +559,14 @@ This keeps the current workflow aligned with the falsification-first order:
 4. learned sanity
 5. prefix fine-tune
 
+Stop the run and reconsider the statistic/interface if any of these show up
+early on native-native sanity:
+
+- `delta_g` barely explains `c_star`
+- same-text looks good but cross-text collapses
+- analytic mode cannot produce slow < mid < fast control
+- coarse-only only helps by sharply worsening silence leakage or prefix drift
+
 If you want the narrower per-gate tables directly, read them from the
 `--review-dir` bundle that the same command writes:
 
@@ -547,6 +583,9 @@ from the maintained train/eval path with pair metadata still attached
 (`pair_id`, prompt ids, same-text flags, `lexical_mismatch`, `ref_len_sec`,
 `speech_ratio`). Pure inference bundles can still be summarized, but some slice
 plots will only provide partial evidence.
+When reading prefix/runtime audit, keep `projector_boundary_hit_rate` separate
+from `projector_boundary_decay_rate`: the first counts boundary events, the
+second counts only the subset where decay was actually applied.
 
 ---
 

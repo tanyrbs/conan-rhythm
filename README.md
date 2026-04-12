@@ -22,6 +22,8 @@ Use:
 - `rhythm_v3_minimal_v1_profile: true`
 - `rhythm_v3_rate_mode: simple_global`
 - `rhythm_v3_simple_global_stats: true`
+- `rhythm_v3_g_variant: raw_median`
+- `rhythm_v3_eval_mode: learned`
 
 In that default path, the writer is:
 
@@ -47,14 +49,28 @@ The maintained explanation is:
 - **global-stat prompt conditioning by default**
 - **prefix-level coarse correction over the analytic source/ref rate gap**
 - **strict-causal prefix-rate correction**
-- **carry-only integer projection**
+- **carry+budget integer projection core with exported boundary-side smoothing telemetry**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
 - **stable-lattice suppression of short flicker runs and micro-silence islands before retiming**
 - **silence runs follow the coarse/global bias (clipped) without a local residual, keeping them tied to the overall rate**
+- **minimal V1 keeps silence on a constant clip surface; short-gap / leading-silence scaling remains a non-minimal head feature**
 - **reference summary diagnostics remain available but are disabled in the default V1-G writer**
 - **paired-target supervision drawn from dedicated target data instead of prompt sidecars**
 - **same-text rule split by role: reference stays different-text, paired-target supervision stays same-text unless `unit_duration_tgt` is already cached**
 - **runtime enforces prefix unit-budget clamping while retaining raw open tail tokens**
+
+The structural mainline contract is therefore:
+
+- `prompt_summary + strict + simple_global`
+- explicit `prompt_speech_mask` on the prompt side
+- default runtime surface `raw_median + learned`
+
+For falsification work, `analytic`, `coarse_only`, and `learned` are three
+evaluation modes on that same runtime surface, not three separate systems.
+
+For falsification work, stay on that same structural path and only override the
+controlled analysis knobs (`analytic` / `coarse_only`, alternative `g_variant`)
+instead of opening a second runtime branch.
 
 ## What the default v3 path does
 
@@ -65,8 +81,9 @@ The maintained explanation is:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+- `prompt_speech_mask`
 - optional `prompt_valid_mask`
-- optional `prompt_speech_mask`
+- optional `prompt_silence_mask`
 - optional `prompt_spk_embed`
 
 It produces:
@@ -118,6 +135,14 @@ The projector stays deterministic:
 - explicit prefix unit-budget clamp that keeps `O_p = Σ(q_i - n_i)` within configured bounds
 - runtime keeps the raw uncommitted open tail appended to the retimed prefix so downstream code still sees unreleased units
 
+The current local executor still layers boundary-side smoothing heuristics
+(`boundary_carry_decay`, `since_last_boundary`) on top of that carry+budget
+core. Those signals are exported for audit, but they should be read as
+execution-side heuristics rather than as a second writer definition.
+`projector_boundary_hit` marks boundary/phrase-final events, while
+`projector_boundary_decay_applied` only marks the subset where decay was
+actually applied.
+
 ## Supported but non-default v3 modes
 
 `rhythm_v3` still contains additional comparative modes for ablation:
@@ -141,10 +166,21 @@ prompt-side diagnostics. Source-self fallback is disabled by default and
 becomes available only with the explicit `rhythm_v3_allow_source_self_target_fallback`
 escape hatch.
 
+For review/export, `unit_duration_proj_raw_tgt` is the explicit raw-projection
+alias and should be preferred when present. Training still consumes decomposed
+surfaces such as `global_shift_tgt`, `coarse_logstretch_tgt`,
+`local_residual_tgt`, and the clipped coarse-derived silence target rather than
+treating the raw projection surface as the final supervision object.
+
 For the maintained `rhythm_v3_minimal_v1_profile`, the pairing rule is:
 
 - **reference prompt**: same-speaker / different-text
 - **paired target supervision**: same-text target-to-source projection (`rhythm_v3_require_same_text_paired_target: true`), or an explicitly cached `unit_duration_tgt`
+
+`rhythm_v3_use_continuous_alignment: true` currently means
+`continuous_precomputed` only. If no precomputed frame/content-space alignment
+metadata is available, the maintained path now fails fast instead of silently
+falling back to discrete projection.
 
 The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
 compatibility alias that inherits the maintained `rhythm_v3` contract; it is no
@@ -158,12 +194,16 @@ Required public inputs:
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
+- `prompt_speech_mask`
 
 Optional prompt sidecars used by the maintained default:
 
 - `prompt_valid_mask`
-- `prompt_speech_mask`
+- `prompt_silence_mask` for compatibility-only validation
 - `prompt_spk_embed`
+
+For the maintained strict minimal path, `prompt_speech_mask` is no longer an
+optional sidecar. It is part of the explicit public conditioning contract.
 
 Required public outputs:
 
@@ -202,6 +242,18 @@ script plus two health checks:
 entrypoint. It writes the row summary CSV, the retained five-figure bundle, and
 the gate-oriented tables/figures from the same `utils/plot/rhythm_v3_viz/`
 util layer instead of keeping separate per-gate wrapper CLIs.
+The other two scripts stay on purpose:
+
+- `preflight_rhythm_v3.py`: config/data/cache contract checks
+- `smoke_test_rhythm_v3.py`: zero-data structural smoke run
+
+Some earlier cleanup ideas are already obsolete in the local codebase:
+
+- `modules/Conan/rhythm_v3/g_stats.py` is already the single `g` definition used
+  by training/runtime/review
+- `analytic | coarse_only | learned` already switch inside the same maintained runtime
+- projector drift/budget signals are already exported; the remaining job is to
+  audit them, not redesign projector semantics
 
 For Gate-0 and contamination-slice style review, prefer debug bundles exported
 from the maintained train/eval path with pair metadata still attached
@@ -209,6 +261,15 @@ from the maintained train/eval path with pair metadata still attached
 `speech_ratio`). Inference-only bundles can still be summarized, but some
 stability/cross-text panels may collapse to partial evidence rather than a full
 falsification readout.
+
+The row summary and gate bundle now also carry analysis-friendly aliases such as
+`same_speaker_reference`, `same_speaker_target`, `tempo_delta`, and
+`mono_triplet_ok`, so one export is enough for both row inspection and gate
+aggregation.
+
+The shared `g` implementation now stays fail-fast and speech-only: if prompt
+speech support disappears after mask/domain filtering, the maintained path
+raises instead of silently falling back to non-speech support.
 
 ## Training/task code layout
 

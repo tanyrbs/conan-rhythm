@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from modules.Conan.rhythm.policy import is_duration_operator_mode
+from modules.Conan.rhythm_v3.g_stats import normalize_global_rate_variant
 from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3 as build_source_rhythm_cache
 from tasks.Conan.rhythm.duration_v3.alignment_projection import (
     align_target_runs_to_source_discrete as _align_target_runs_to_source_discrete,
@@ -43,6 +44,56 @@ def _extract_object_scalar(value):
 
 
 class DurationV3DatasetMixin:
+    @staticmethod
+    def _build_prompt_global_weight(
+        *,
+        prompt_speech_mask: np.ndarray,
+        run_stability,
+    ) -> np.ndarray:
+        speech = np.asarray(prompt_speech_mask, dtype=np.float32)
+        stability = (
+            np.ones_like(speech, dtype=np.float32)
+            if run_stability is None
+            else np.asarray(run_stability, dtype=np.float32)
+        )
+        if stability.shape != speech.shape:
+            resized = np.ones_like(speech, dtype=np.float32)
+            limit = min(int(resized.shape[0]), int(stability.reshape(-1).shape[0]))
+            resized[:limit] = stability.reshape(-1)[:limit]
+            stability = resized
+        stability = stability.clip(0.0, 1.0)
+        return (speech * (0.25 + (0.75 * stability))).astype(np.float32)
+
+    def _attach_prompt_global_stats_sidecars(self, *, conditioning: dict, source_cache: dict) -> None:
+        prompt_duration_obs = np.asarray(conditioning["prompt_duration_obs"], dtype=np.float32)
+        prompt_speech_mask = np.asarray(conditioning["prompt_speech_mask"], dtype=np.float32)
+        conditioning["prompt_global_weight"] = self._build_prompt_global_weight(
+            prompt_speech_mask=prompt_speech_mask,
+            run_stability=source_cache.get("source_run_stability"),
+        )
+        g_variant = normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median"))
+        prompt_unit_log_prior = source_cache.get("prompt_unit_log_prior")
+        if prompt_unit_log_prior is None:
+            prompt_unit_log_prior = source_cache.get("unit_log_prior")
+        if prompt_unit_log_prior is not None:
+            prompt_unit_log_prior = np.asarray(prompt_unit_log_prior, dtype=np.float32).reshape(-1)
+            if prompt_unit_log_prior.shape != prompt_duration_obs.shape:
+                raise RuntimeError(
+                    "prompt_unit_log_prior must match prompt run shape for maintained prompt conditioning: "
+                    f"{prompt_unit_log_prior.shape} vs {prompt_duration_obs.shape}"
+                )
+            conditioning["prompt_unit_log_prior"] = prompt_unit_log_prior
+        elif g_variant == "unit_norm":
+            raise RuntimeError(
+                "rhythm_v3 g_variant=unit_norm requires prompt_unit_log_prior/unit_log_prior "
+                "matching prompt runs in prompt/reference conditioning."
+            )
+        if conditioning["prompt_global_weight"].shape != prompt_duration_obs.shape:
+            raise RuntimeError(
+                "prompt_global_weight shape mismatch with prompt_duration_obs: "
+                f"{conditioning['prompt_global_weight'].shape} vs {prompt_duration_obs.shape}"
+            )
+
     def _use_duration_v3_simple_global_stats(self) -> bool:
         if not self._use_duration_v3_dataset_contract():
             return False
@@ -165,6 +216,8 @@ class DurationV3DatasetMixin:
             "prompt_duration_obs",
             "prompt_unit_anchor_base",
             "prompt_log_base",
+            "prompt_global_weight",
+            "prompt_unit_log_prior",
             "prompt_source_boundary_cue",
             "prompt_phrase_group_pos",
             "prompt_phrase_final_mask",
@@ -193,7 +246,7 @@ class DurationV3DatasetMixin:
                 source_cache["source_silence_mask"] = prompt_item["source_silence_mask"]
             if "sep_hint" in prompt_item:
                 source_cache["sep_hint"] = prompt_item["sep_hint"]
-            for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
+            for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask", "source_run_stability", "unit_log_prior"):
                 if extra_key in prompt_item:
                     source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode != "cached_only" and "hubert" in prompt_item:
@@ -233,7 +286,7 @@ class DurationV3DatasetMixin:
                         source_cache[extra_key] = prompt_item[extra_key]
                 if "sep_hint" in prompt_item:
                     source_cache["sep_hint"] = prompt_item["sep_hint"]
-                for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
+                for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask", "source_run_stability", "unit_log_prior"):
                     if extra_key in prompt_item:
                         source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode == "cached_only" and explicit_silence and has_cached_prompt_source and not has_prompt_silence:
@@ -275,6 +328,10 @@ class DurationV3DatasetMixin:
             conditioning["prompt_unit_anchor_base"] = np.asarray(source_cache["unit_anchor_base"], dtype=np.float32)
         if use_log_base_rate and "unit_rate_log_base" in source_cache:
             conditioning["prompt_log_base"] = np.asarray(source_cache["unit_rate_log_base"], dtype=np.float32)
+        self._attach_prompt_global_stats_sidecars(
+            conditioning=conditioning,
+            source_cache=source_cache,
+        )
         return self._maybe_augment_prompt_unit_conditioning(
             conditioning,
             item_name=item_name,
@@ -312,6 +369,23 @@ class DurationV3DatasetMixin:
         if assigned_cost is None:
             assigned_cost = paired_target_conditioning.get("paired_target_assigned_cost")
         if assigned_source is None and assigned_cost is None:
+            return None
+        alignment_kind = paired_target_conditioning.get("paired_target_alignment_kind")
+        if alignment_kind is None:
+            alignment_kind = paired_target_conditioning.get("paired_target_alignment_mode")
+        normalized_kind = (
+            str(alignment_kind).strip().lower()
+            if alignment_kind is not None
+            else ""
+        )
+        alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_mode_id")
+        if alignment_mode_id is None:
+            alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_kind_id")
+        try:
+            normalized_mode_id = int(_extract_object_scalar(alignment_mode_id)) if alignment_mode_id is not None else None
+        except Exception:
+            normalized_mode_id = None
+        if normalized_kind != "continuous_precomputed" and normalized_mode_id != 1:
             return None
         return {
             "assigned_source": _as_int64_1d(assigned_source) if assigned_source is not None else None,
@@ -452,12 +526,33 @@ class DurationV3DatasetMixin:
             )
         return {
             "unit_duration_tgt": projected.astype(np.float32),
+            "unit_duration_proj_raw_tgt": projected.astype(np.float32),
             "unit_confidence_local_tgt": confidence_local.astype(np.float32),
             "unit_confidence_coarse_tgt": confidence_coarse.astype(np.float32),
             "unit_confidence_tgt": confidence_coarse.astype(np.float32),
             "unit_alignment_coverage_tgt": coverage.astype(np.float32),
             "unit_alignment_match_tgt": match_rate.astype(np.float32),
             "unit_alignment_cost_tgt": mean_cost.astype(np.float32),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray(
+                [float(projection.get("unmatched_speech_ratio", 0.0))],
+                dtype=np.float32,
+            ),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray(
+                [float(projection.get("mean_local_confidence_speech", 0.0))],
+                dtype=np.float32,
+            ),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray(
+                [float(projection.get("mean_coarse_confidence_speech", 0.0))],
+                dtype=np.float32,
+            ),
+            "unit_alignment_mode_id_tgt": np.asarray(
+                [
+                    1
+                    if str(projection.get("alignment_kind", "discrete")).strip().lower() == "continuous_precomputed"
+                    else 0
+                ],
+                dtype=np.int64,
+            ),
         }
 
     def _merge_duration_v3_rhythm_targets(self, item, source_cache, paired_target_conditioning, sample):
@@ -465,6 +560,8 @@ class DurationV3DatasetMixin:
             out = {
                 "unit_duration_tgt": np.asarray(sample["unit_duration_tgt"], dtype=np.float32),
             }
+            if "unit_duration_proj_raw_tgt" in sample:
+                out["unit_duration_proj_raw_tgt"] = np.asarray(sample["unit_duration_proj_raw_tgt"], dtype=np.float32)
             if "unit_confidence_local_tgt" in sample:
                 out["unit_confidence_local_tgt"] = np.asarray(sample["unit_confidence_local_tgt"], dtype=np.float32)
             if "unit_confidence_coarse_tgt" in sample:
@@ -481,14 +578,27 @@ class DurationV3DatasetMixin:
                 "unit_alignment_coverage_tgt",
                 "unit_alignment_match_tgt",
                 "unit_alignment_cost_tgt",
+                "unit_alignment_unmatched_speech_ratio_tgt",
+                "unit_alignment_mean_local_confidence_speech_tgt",
+                "unit_alignment_mean_coarse_confidence_speech_tgt",
+                "unit_alignment_mode_id_tgt",
             ):
                 if key in sample:
-                    out[key] = np.asarray(sample[key], dtype=np.float32)
+                    dtype = np.int64 if key.endswith("_mode_id_tgt") else np.float32
+                    out[key] = np.asarray(sample[key], dtype=dtype)
             return out
 
         minimal_v1_profile = self._is_enabled_flag(
             self.hparams.get("rhythm_v3_minimal_v1_profile", False)
         )
+        allow_source_self_target_fallback = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False)
+        )
+        if minimal_v1_profile and allow_source_self_target_fallback:
+            raise RuntimeError(
+                "minimal_v1_profile forbids source-self target fallback; "
+                "provide paired target projection or explicit cached unit_duration_tgt."
+            )
         require_same_text = bool(self._require_same_text_paired_target())
         source_item_name = str(item.get("item_name", "<unknown-item>")) if isinstance(item, dict) else "<unknown-item>"
         if isinstance(paired_target_conditioning, dict):
@@ -497,7 +607,7 @@ class DurationV3DatasetMixin:
                 paired_target_item_name = str(_extract_object_scalar(paired_target_item_name))
                 if (
                     paired_target_item_name == source_item_name
-                    and not self._is_enabled_flag(self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False))
+                    and not allow_source_self_target_fallback
                 ):
                     raise RuntimeError(
                         "Canonical duration_v3 training requires an external paired target item or explicit unit_duration_tgt. "
@@ -534,7 +644,7 @@ class DurationV3DatasetMixin:
         if paired is not None:
             return paired
 
-        if self._is_enabled_flag(self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False)):
+        if allow_source_self_target_fallback:
             target = np.asarray(source_cache["dur_anchor_src"], dtype=np.float32)
             return {
                 "unit_duration_tgt": target,
@@ -544,6 +654,9 @@ class DurationV3DatasetMixin:
                 "unit_alignment_coverage_tgt": np.ones_like(target, dtype=np.float32),
                 "unit_alignment_match_tgt": np.ones_like(target, dtype=np.float32),
                 "unit_alignment_cost_tgt": np.zeros_like(target, dtype=np.float32),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
             }
 
         raise RuntimeError(

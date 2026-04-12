@@ -88,6 +88,7 @@ class DurationV3LossTargets:
     unit_anchor_base: torch.Tensor
     unit_mask: torch.Tensor
     committed_mask: torch.Tensor
+    sample_confidence: Optional[torch.Tensor] = None
     speech_mask: Optional[torch.Tensor] = None
     silence_mask: Optional[torch.Tensor] = None
     committed_speech_mask: Optional[torch.Tensor] = None
@@ -1564,12 +1565,33 @@ def _build_duration_v3_bias_loss(
     pred_bias_scalar = getattr(execution, "global_bias_scalar", None)
     tgt_bias_scalar = targets.global_bias_tgt
     if isinstance(pred_bias_scalar, torch.Tensor) and isinstance(tgt_bias_scalar, torch.Tensor):
-        return F.smooth_l1_loss(
+        per_item = F.smooth_l1_loss(
             pred_bias_scalar.float().reshape(tgt_bias_scalar.shape),
             tgt_bias_scalar.float(),
             beta=0.25,
-            reduction="mean",
+            reduction="none",
+        ).reshape(tgt_bias_scalar.size(0), -1).mean(dim=1)
+        utterance_coarse_confidence = None
+        coarse_confidence = _resolve_duration_v3_coarse_confidence(targets)
+        committed_speech_mask = (
+            targets.committed_speech_mask.float()
+            if isinstance(targets.committed_speech_mask, torch.Tensor)
+            else (
+                targets.committed_mask.float()
+                if isinstance(targets.committed_mask, torch.Tensor)
+                else None
+            )
         )
+        if isinstance(coarse_confidence, torch.Tensor) and isinstance(committed_speech_mask, torch.Tensor):
+            conf_mass = (coarse_confidence.float() * committed_speech_mask).sum(dim=1)
+            conf_count = committed_speech_mask.sum(dim=1).clamp_min(1.0)
+            utterance_coarse_confidence = conf_mass / conf_count
+        batch_weight = _merge_batch_weight(
+            getattr(targets, "sample_confidence", None),
+            utterance_coarse_confidence,
+            per_item,
+        )
+        return _reduce_batch_loss(per_item, batch_weight)
     if bool(getattr(targets, "minimal_v1_profile", False)):
         raise ValueError(
             "rhythm_v3_minimal_v1_profile requires utterance-level scalar coarse bias "

@@ -360,9 +360,16 @@ class PromptDurationMemoryEncoder(nn.Module):
             valid_mask=valid_mask,
             drop_edge_runs=self.g_drop_edge_runs,
         )
+        support_has_mass = support_mask.any(dim=1, keepdim=True)
+        rate_speech_mask = speech_mask
+        if bool((~support_has_mass).any().item()):
+            # Generic prompt-summary pooling remains lenient for all-silence prompts:
+            # use valid support only to avoid a hard failure, then zero the
+            # speech-only pooled summary when requested.
+            rate_speech_mask = torch.where(support_has_mass, speech_mask, valid_mask)
         global_rate = compute_global_rate(
             log_dur=rate_logdur,
-            speech_mask=speech_mask,
+            speech_mask=rate_speech_mask,
             valid_mask=valid_mask,
             variant=self.g_variant,
             weight=prompt_global_weight,
@@ -371,7 +378,18 @@ class PromptDurationMemoryEncoder(nn.Module):
             unit_ids=prompt_content_units,
             unit_prior=prompt_unit_log_prior,
         )
-        ref_residual = (rate_logdur - global_rate) * support_mask
+        if self.summary_pool_speech_only:
+            global_rate = torch.where(support_has_mass, global_rate, torch.zeros_like(global_rate))
+        residual_mask = (
+            support_mask
+            if self.summary_pool_speech_only
+            else build_global_rate_support_mask(
+                speech_mask=rate_speech_mask,
+                valid_mask=valid_mask,
+                drop_edge_runs=self.g_drop_edge_runs,
+            )
+        )
+        ref_residual = (rate_logdur - global_rate) * residual_mask
         if self.simple_global_stats and not self.emit_prompt_diagnostics:
             operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
             return validate_reference_duration_memory(

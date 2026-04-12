@@ -37,8 +37,13 @@ def test_projection_debug_payload_exposes_alignment_trace():
         target_speech_mask=np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
     )
     assert payload["unit_duration_tgt"].shape == (3,)
+    assert payload["unit_duration_proj_raw_tgt"].shape == (3,)
+    assert payload["unit_alignment_mode_id_tgt"].shape == (1,)
     assert payload["unit_alignment_assigned_source_debug"].shape == (3,)
     assert payload["unit_alignment_source_valid_run_index_debug"].shape == (3,)
+    assert payload["unit_alignment_unmatched_speech_ratio_tgt"].shape == (1,)
+    assert payload["unit_alignment_mean_local_confidence_speech_tgt"].shape == (1,)
+    assert payload["unit_alignment_mean_coarse_confidence_speech_tgt"].shape == (1,)
     assert payload["paired_target_content_units_debug"].dtype == np.int64
 
 
@@ -60,6 +65,8 @@ def test_attach_projection_debug_keeps_record_outside_dataset_mixin():
         target_speech_mask=np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
     )
     assert enriched.unit_duration_tgt is not None
+    assert enriched.unit_duration_proj_raw_tgt is not None
+    assert enriched.unit_alignment_mode_id_tgt is not None
     assert enriched.unit_alignment_assigned_source_debug is not None
     assert enriched.paired_target_duration_obs_debug is not None
 
@@ -127,12 +134,21 @@ def test_build_debug_records_and_summary_from_runtime_objects():
             "rhythm_ref_conditioning": ref_memory,
             "rhythm_execution": execution,
             "rhythm_v3_g_variant": "raw_median",
+            "rhythm_debug_g_support_count": torch.tensor([[2.0]], dtype=torch.float32),
+            "rhythm_debug_g_speech_count": torch.tensor([[2.0]], dtype=torch.float32),
+            "rhythm_debug_g_valid_count": torch.tensor([[3.0]], dtype=torch.float32),
+            "rhythm_debug_g_support_ratio_vs_speech": torch.tensor([[1.0]], dtype=torch.float32),
+            "rhythm_debug_g_support_ratio_vs_valid": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+            "rhythm_debug_g_valid": torch.tensor([[1.0]], dtype=torch.float32),
+            "rhythm_debug_g_drop_edge_runs": torch.tensor([[1.0]], dtype=torch.float32),
+            "rhythm_debug_g_strict_speech_only": torch.tensor([[1.0]], dtype=torch.float32),
         },
         metadata={"phase": "unit-test"},
     )
     assert len(records) == 1
     assert records[0].projector_rounding_residual is not None
     assert records[0].metadata["g_variant"] == "raw_median"
+    assert records[0].metadata["g_support_count"] == 2.0
     summary = record_summary(records[0])
     assert summary["item_name"] == "demo_case"
     assert summary["reference_seconds"] > 0.0
@@ -143,9 +159,12 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["g_ref"])
     assert np.isfinite(summary["g_src_utt"])
     assert np.isfinite(summary["delta_g"])
+    assert summary["g_support_count"] == 2.0
+    assert np.isfinite(summary["g_support_ratio_vs_valid"])
     assert np.isfinite(summary["c_star"])
     assert np.isfinite(summary["tempo_src"])
     assert np.isfinite(summary["tempo_out"])
+    assert np.isfinite(summary["tempo_delta"])
     assert np.isfinite(summary["analytic_gap_abs_mean"])
     assert np.isfinite(summary["coarse_bias_abs_mean"])
     assert np.isfinite(summary["local_residual_abs_mean"])
@@ -181,6 +200,9 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
             "unit_duration_tgt": np.asarray([2.4, 3.5, 1.0], dtype=np.float32),
             "unit_confidence_tgt": np.asarray([1.0, 0.7, 0.2], dtype=np.float32),
             "unit_confidence_coarse_tgt": np.asarray([1.0, 0.7, 0.2], dtype=np.float32),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.85], dtype=np.float32),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.85], dtype=np.float32),
             "global_rate": 0.25,
             "source_rate_seq": np.asarray([0.08, 0.18, 0.18], dtype=np.float32),
             "global_shift_analytic": np.asarray([0.17, 0.07, 0.07], dtype=np.float32),
@@ -244,11 +266,17 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert "g_src_utt" in ref_crop_df.columns
     assert "g_src_prefix_mean" in ref_crop_df.columns
     assert "same_text_reference" in ref_crop_df.columns
+    assert "same_speaker_reference" in ref_crop_df.columns
     assert np.isfinite(ref_crop_df["delta_g"]).any()
+    summary = record_summary(mid)
+    assert np.isfinite(summary["alignment_unmatched_speech_ratio"])
+    assert np.isfinite(summary["alignment_mean_coarse_confidence_speech"])
     assert set(monotonicity_df["ref_bin"].tolist()) >= {"slow", "mid", "fast"}
+    assert "tempo_delta" in monotonicity_df.columns
     assert np.isfinite(monotonicity_df["mono_triplet_ok"]).any()
     assert "budget_hit_rate" in prefix_silence_df.columns
     assert "cumulative_drift" in prefix_silence_df.columns
     assert ladder_df.shape[0] == 1
     assert ladder_df.iloc[0]["eval_mode"] == "analytic"
     assert np.isfinite(ladder_df.iloc[0]["monotonicity_rate"])
+    assert "tempo_transfer_slope" in ladder_df.columns

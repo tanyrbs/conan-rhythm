@@ -253,18 +253,25 @@ class CommonRhythmDatasetMixin:
             "prompt_unit_mask": ("float", 0.0),
             "prompt_valid_mask": ("float", 0.0),
             "prompt_speech_mask": ("float", 0.0),
+            "prompt_global_weight": ("float", 0.0),
+            "prompt_unit_log_prior": ("float", 0.0),
             "prompt_unit_anchor_base": ("float", 0.0),
             "prompt_log_base": ("float", 0.0),
             "prompt_source_boundary_cue": ("float", 0.0),
             "prompt_phrase_group_pos": ("float", 0.0),
             "prompt_phrase_final_mask": ("float", 0.0),
             "unit_duration_tgt": ("float", 0.0),
+            "unit_duration_proj_raw_tgt": ("float", 0.0),
             "unit_confidence_tgt": ("float", 0.0),
             "unit_confidence_local_tgt": ("float", 0.0),
             "unit_confidence_coarse_tgt": ("float", 0.0),
             "unit_alignment_coverage_tgt": ("float", 0.0),
             "unit_alignment_match_tgt": ("float", 0.0),
             "unit_alignment_cost_tgt": ("float", 0.0),
+            "unit_alignment_unmatched_speech_ratio_tgt": ("float", 0.0),
+            "unit_alignment_mean_local_confidence_speech_tgt": ("float", 0.0),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": ("float", 0.0),
+            "unit_alignment_mode_id_tgt": ("long", 0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -671,12 +678,20 @@ class CommonRhythmDatasetMixin:
             and self._disallow_same_text_reference()
             and item is not None
             and ref_item is not None
-            and self._same_rhythm_text(item, ref_item)
         ):
-            raise RuntimeError(
-                "rhythm_v3 reference conditioning forbids same-text reference items by default. "
-                "Provide a different-text reference or set rhythm_v3_disallow_same_text_reference=false."
-            )
+            item_sig = self._rhythm_text_signature(item)
+            ref_sig = self._rhythm_text_signature(ref_item)
+            if item_sig is None or ref_sig is None:
+                raise RuntimeError(
+                    "rhythm_v3 reference conditioning requires comparable source/reference text signatures "
+                    "when same-text references are disabled. Provide explicit text tokens/text strings "
+                    "or set rhythm_v3_disallow_same_text_reference=false."
+                )
+            if item_sig == ref_sig:
+                raise RuntimeError(
+                    "rhythm_v3 reference conditioning forbids same-text reference items by default. "
+                    "Provide a different-text reference or set rhythm_v3_disallow_same_text_reference=false."
+                )
         prompt_conditioning = self._build_reference_prompt_unit_conditioning(
             ref_item if ref_item is not None else item,
             target_mode=target_mode,

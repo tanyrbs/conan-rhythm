@@ -84,8 +84,13 @@ if __name__ == "__main__":
         "rhythm_num_summary_slots": 1,
         "rhythm_v3_require_same_text_paired_target": True,
         "rhythm_v3_disallow_same_text_paired_target": False,
-        "rhythm_v3_short_gap_silence_scale": 1.0,
+        "rhythm_v3_short_gap_silence_scale": 0.35,
         "rhythm_v3_leading_silence_scale": 0.0,
+        "rhythm_v3_eval_mode": "analytic",
+        "rhythm_v3_g_variant": "raw_median",
+        "rhythm_v3_disable_local_residual": True,
+        "rhythm_v3_disable_coarse_bias": True,
+        "rhythm_v3_debug_export": True,
     }
 
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
@@ -95,6 +100,8 @@ if __name__ == "__main__":
     assert adapter.module.simple_global_stats is True
     assert adapter.module.use_log_base_rate is False
     assert adapter.module.use_learned_residual_gate is False
+    assert adapter.module.eval_mode == "analytic"
+    assert adapter.module.g_variant == "raw_median"
 
     ret = {}
     content = torch.tensor([[1, 1, 57, 57, 2, 2, 3, 3]], dtype=torch.long)
@@ -119,8 +126,12 @@ if __name__ == "__main__":
         speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
     )
     assert ret["rhythm_v3_runtime_mode"] == "prompt_summary"
+    assert ret["rhythm_v3_eval_mode"] == "analytic"
+    assert ret["rhythm_v3_g_variant"] == "raw_median"
     assert torch.isfinite(ret["speech_duration_exec"]).all()
     assert ret["rhythm_execution"].local_response is not None
     assert torch.isfinite(ret["rhythm_execution"].local_response).all()
     assert ret["rhythm_execution"].global_bias_scalar is not None
+    assert "rhythm_v3_debug" in ret
+    assert ret["rhythm_v3_debug"]["eval_mode"] == "analytic"
     print("rhythm_v3 smoke ok")

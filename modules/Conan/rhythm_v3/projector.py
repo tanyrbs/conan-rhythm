@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -137,9 +136,11 @@ class StreamingDurationProjector(nn.Module):
         max_prefix_budget: int = 0,
         boundary_carry_decay: float = 0.25,
         boundary_reset_thresh: float = 0.5,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, num_units = unit_duration_exec.shape
         projected = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        boundary_hit = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        boundary_decay_applied = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         residual_next = residual_prev.float().reshape(batch_size).clone()
         prefix_offset_next = prefix_unit_offset_prev.float().reshape(batch_size).clone()
         if isinstance(committed_units_prev, torch.Tensor):
@@ -176,13 +177,13 @@ class StreamingDurationProjector(nn.Module):
                     projected[batch_idx, :prefix] = cached_prev[batch_idx, :prefix]
                     start_unit = prefix
             carry = float(residual_next[batch_idx].item())
-            prefix_offset = int(round(float(prefix_offset_next[batch_idx].item())))
+            prefix_offset = float(prefix_offset_next[batch_idx].item())
             if start_unit >= committed_len:
                 residual_next[batch_idx] = carry
                 prefix_offset_next[batch_idx] = float(prefix_offset)
                 continue
             row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final = (
-                StreamingDurationProjector._extract_projection_row_numpy(
+                StreamingDurationProjector._extract_projection_row_torch(
                     batch_idx=batch_idx,
                     start_unit=start_unit,
                     committed_len=committed_len,
@@ -194,14 +195,18 @@ class StreamingDurationProjector(nn.Module):
                     phrase_final_mask=phrase_final_mask,
                 )
             )
-            row_projected = np.empty_like(row_exec, dtype=np.float32)
+            row_projected = row_exec.new_empty(row_exec.shape)
+            row_boundary_hit = row_exec.new_zeros(row_exec.shape)
+            row_boundary_decay = row_exec.new_zeros(row_exec.shape)
             for offset in range(int(row_exec.shape[0])):
-                exec_value = float(row_exec[offset])
-                source_count = int(max(0, int(row_source_rounded[offset])))
-                is_speech = bool(row_speech[offset])
-                is_coarse_only = bool(row_coarse is not None and row_coarse[offset])
+                exec_value = float(row_exec[offset].item())
+                source_count = int(max(0, int(row_source_rounded[offset].item())))
+                is_speech = bool(row_speech[offset].item())
+                is_coarse_only = bool(
+                    isinstance(row_coarse, torch.Tensor) and bool(row_coarse[offset].item())
+                )
                 if (not is_speech) and (not is_coarse_only):
-                    row_projected[offset] = np.float32(source_count)
+                    row_projected[offset] = float(source_count)
                     continue
                 total = max(0.0, float(exec_value) + carry)
                 frames = float(math.floor(total + 0.5))
@@ -210,28 +215,45 @@ class StreamingDurationProjector(nn.Module):
                 lower = max(1, int(math.ceil(float(anchor - (row_budget_neg + prefix_offset)))))
                 upper = max(lower, int(math.floor(float(anchor + (row_budget_pos - prefix_offset)))))
                 frames = float(min(max(int(frames), lower), upper))
-                row_projected[offset] = np.float32(frames)
-                prefix_offset += int(frames) - anchor
+                row_projected[offset] = frames
+                prefix_offset += float(frames) - float(anchor)
                 carry = total - frames
-                boundary_hit = False
-                if row_boundary is not None and bool(row_boundary[offset]):
-                    boundary_hit = True
-                if row_phrase_final is not None and bool(row_phrase_final[offset]):
-                    boundary_hit = True
-                if boundary_hit:
-                    carry = float(carry) * float(boundary_carry_decay)
-                    prefix_offset = int(round(float(prefix_offset) * float(boundary_carry_decay)))
-                    prefix_offset = max(-int(row_budget_neg), min(int(row_budget_pos), int(prefix_offset)))
-            projected[batch_idx, start_unit:committed_len] = torch.from_numpy(row_projected).to(
+                boundary_event = False
+                if isinstance(row_boundary, torch.Tensor) and float(row_boundary[offset].item()) >= float(boundary_reset_thresh):
+                    boundary_event = True
+                if isinstance(row_phrase_final, torch.Tensor) and bool(row_phrase_final[offset].item()):
+                    boundary_event = True
+                if boundary_event:
+                    row_boundary_hit[offset] = 1.0
+                    if float(boundary_carry_decay) < (1.0 - 1.0e-6):
+                        carry = float(carry) * float(boundary_carry_decay)
+                        prefix_offset = float(prefix_offset) * float(boundary_carry_decay)
+                        prefix_offset = max(-float(row_budget_neg), min(float(row_budget_pos), float(prefix_offset)))
+                        row_boundary_decay[offset] = 1.0
+            projected[batch_idx, start_unit:committed_len] = row_projected.to(
                 device=projected.device,
                 dtype=projected.dtype,
             )
+            boundary_hit[batch_idx, start_unit:committed_len] = row_boundary_hit.to(
+                device=boundary_hit.device,
+                dtype=boundary_hit.dtype,
+            )
+            boundary_decay_applied[batch_idx, start_unit:committed_len] = row_boundary_decay.to(
+                device=boundary_decay_applied.device,
+                dtype=boundary_decay_applied.dtype,
+            )
             residual_next[batch_idx] = carry
             prefix_offset_next[batch_idx] = float(prefix_offset)
-        return projected, residual_next.reshape(batch_size, 1), prefix_offset_next.reshape(batch_size, 1)
+        return (
+            projected,
+            residual_next.reshape(batch_size, 1),
+            prefix_offset_next.reshape(batch_size, 1),
+            boundary_hit,
+            boundary_decay_applied,
+        )
 
     @staticmethod
-    def _extract_projection_row_numpy(
+    def _extract_projection_row_torch(
         *,
         batch_idx: int,
         start_unit: int,
@@ -242,24 +264,24 @@ class StreamingDurationProjector(nn.Module):
         coarse_only_commit_mask: torch.Tensor | None,
         source_boundary_cue: torch.Tensor | None,
         phrase_final_mask: torch.Tensor | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         row_slice = slice(int(start_unit), int(committed_len))
-        row_exec = unit_duration_exec[batch_idx, row_slice].detach().float().cpu().numpy()
-        row_source = source_duration_obs[batch_idx, row_slice].detach().float().cpu().numpy()
-        row_source_rounded = np.rint(np.clip(row_source, a_min=0.0, a_max=None)).astype(np.int64, copy=False)
-        row_speech = speech_commit_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+        row_exec = unit_duration_exec[batch_idx, row_slice].detach().float()
+        row_source = source_duration_obs[batch_idx, row_slice].detach().float().clamp_min(0.0)
+        row_source_rounded = torch.round(row_source).to(dtype=torch.long)
+        row_speech = speech_commit_mask[batch_idx, row_slice].detach().float() > 0.5
         row_coarse = (
-            coarse_only_commit_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+            (coarse_only_commit_mask[batch_idx, row_slice].detach().float() > 0.5)
             if isinstance(coarse_only_commit_mask, torch.Tensor)
             else None
         )
         row_boundary = (
-            source_boundary_cue[batch_idx, row_slice].detach().cpu().numpy() >= 0.5
+            source_boundary_cue[batch_idx, row_slice].detach().float()
             if isinstance(source_boundary_cue, torch.Tensor)
             else None
         )
         row_phrase_final = (
-            phrase_final_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+            phrase_final_mask[batch_idx, row_slice].detach().float() > 0.5
             if isinstance(phrase_final_mask, torch.Tensor)
             else None
         )
@@ -350,8 +372,11 @@ class StreamingDurationProjector(nn.Module):
         global_bias_scalar: torch.Tensor | None = None,
         global_shift_analytic: torch.Tensor | None = None,
         coarse_logstretch: torch.Tensor | None = None,
+        coarse_path_logstretch: torch.Tensor | None = None,
         coarse_correction: torch.Tensor | None = None,
         local_residual: torch.Tensor | None = None,
+        speech_pred: torch.Tensor | None = None,
+        silence_pred: torch.Tensor | None = None,
         source_rate_seq: torch.Tensor | None = None,
         source_prefix_summary: torch.Tensor | None = None,
     ) -> DurationExecution:
@@ -364,7 +389,7 @@ class StreamingDurationProjector(nn.Module):
             init_state=self.init_state,
         )
         commit_mask = self._build_commit_mask(unit_mask=unit_mask, sealed_mask=sealed_mask)
-        projected_duration_exec, residual_next, prefix_unit_offset_next = self._project_duration_prefix(
+        projected_duration_exec, residual_next, prefix_unit_offset_next, boundary_hit, boundary_decay_applied = self._project_duration_prefix(
             unit_duration_exec=unit_duration_exec,
             source_duration_obs=source_duration_obs,
             commit_mask=commit_mask,
@@ -411,8 +436,33 @@ class StreamingDurationProjector(nn.Module):
             projected_duration_exec=projected_duration_exec,
             commit_mask=commit_mask,
         )
-        budget_hit_pos = prefix_unit_offset_next >= float(self.prefix_budget_pos - 1.0e-6)
-        budget_hit_neg = prefix_unit_offset_next <= -float(self.prefix_budget_neg - 1.0e-6)
+        committed_len = commit_mask.float().sum(dim=1).long()
+        budget_pos_used = prefix_unit_offset_next.new_zeros((batch_size, 1))
+        budget_neg_used = prefix_unit_offset_next.new_zeros((batch_size, 1))
+        for batch_idx in range(batch_size):
+            row_committed_len = int(committed_len[batch_idx].item())
+            budget_pos_used[batch_idx, 0] = float(
+                self._resolve_prefix_budget(
+                    source_duration_obs=source_duration_obs[batch_idx],
+                    committed_len=row_committed_len,
+                    static_budget=self.prefix_budget_pos,
+                    dynamic_budget_ratio=self.dynamic_budget_ratio,
+                    min_prefix_budget=self.min_prefix_budget,
+                    max_prefix_budget=self.max_prefix_budget,
+                )
+            )
+            budget_neg_used[batch_idx, 0] = float(
+                self._resolve_prefix_budget(
+                    source_duration_obs=source_duration_obs[batch_idx],
+                    committed_len=row_committed_len,
+                    static_budget=self.prefix_budget_neg,
+                    dynamic_budget_ratio=self.dynamic_budget_ratio,
+                    min_prefix_budget=self.min_prefix_budget,
+                    max_prefix_budget=self.max_prefix_budget,
+                )
+            )
+        budget_hit_pos = prefix_unit_offset_next >= (budget_pos_used - 1.0e-6)
+        budget_hit_neg = prefix_unit_offset_next <= -(budget_neg_used - 1.0e-6)
         return DurationExecution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=materialized_duration_exec,
@@ -432,12 +482,20 @@ class StreamingDurationProjector(nn.Module):
             global_bias_scalar=global_bias_scalar,
             global_shift_analytic=global_shift_analytic,
             coarse_logstretch=coarse_logstretch,
+            coarse_path_logstretch=coarse_path_logstretch if coarse_path_logstretch is not None else coarse_logstretch,
             coarse_correction=coarse_correction,
             local_residual=local_residual,
+            speech_pred=speech_pred,
+            silence_pred=silence_pred,
             source_rate_seq=source_rate_seq,
             source_prefix_summary=source_prefix_summary,
             prefix_unit_offset=prefix_unit_offset_next,
             projector_rounding_residual=residual_next.detach(),
+            projector_budget_pos_used=budget_pos_used.detach(),
+            projector_budget_neg_used=budget_neg_used.detach(),
             projector_budget_hit_pos=budget_hit_pos.detach(),
             projector_budget_hit_neg=budget_hit_neg.detach(),
+            projector_boundary_hit=boundary_hit.detach(),
+            projector_boundary_decay_applied=boundary_decay_applied.detach(),
+            projector_since_last_boundary=next_state.since_last_boundary.detach(),
         )

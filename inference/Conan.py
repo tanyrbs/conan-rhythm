@@ -12,6 +12,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from modules.Conan.Conan import Conan
+from modules.Conan.rhythm_v3.g_stats import normalize_global_rate_variant
 from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
 from modules.Conan.rhythm_v3.source_cache import (
     DURATION_V3_CACHE_META_KEY,
@@ -257,6 +258,45 @@ class StreamingVoiceConversion:
         return spk_embed
 
     @staticmethod
+    def _build_prompt_global_weight(
+        *,
+        prompt_speech_mask: torch.Tensor,
+        prompt_run_stability: torch.Tensor | None,
+    ) -> torch.Tensor:
+        speech = prompt_speech_mask.float().clamp(0.0, 1.0)
+        stability = (
+            torch.ones_like(speech)
+            if not isinstance(prompt_run_stability, torch.Tensor)
+            else prompt_run_stability.float().clamp(0.0, 1.0)
+        )
+        if tuple(stability.shape) != tuple(speech.shape):
+            resized = torch.ones_like(speech)
+            flat = stability.reshape(-1)
+            limit = min(int(resized.numel()), int(flat.numel()))
+            resized.reshape(-1)[:limit] = flat[:limit]
+            stability = resized
+        return speech * (0.25 + (0.75 * stability))
+
+    @staticmethod
+    def _resolve_uncommitted_eos_tail(
+        *,
+        last_mel_out: torch.Tensor,
+        prev_committed_len: int,
+        allow_tail_flush: bool,
+    ) -> tuple[torch.Tensor, int]:
+        unresolved = max(0, int(last_mel_out.shape[0]) - int(prev_committed_len))
+        if unresolved <= 0:
+            return last_mel_out.new_zeros((0, last_mel_out.size(-1))), 0
+        mel_tail = last_mel_out[int(prev_committed_len):]
+        if mel_tail.numel() <= 0:
+            return last_mel_out.new_zeros((0, last_mel_out.size(-1))), 0
+        if not bool(allow_tail_flush):
+            raise RuntimeError(
+                f"Final sealed pass left {unresolved} mel frames uncommitted; strict committed-only EOS requested."
+            )
+        return mel_tail, unresolved
+
+    @staticmethod
     def _make_prompt_conditioning_cache_key(ref_mel_batch: torch.Tensor, *, frontend_signature: str) -> str:
         ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
         array = ref_cpu.numpy()
@@ -348,6 +388,7 @@ class StreamingVoiceConversion:
         prompt_valid_mask = (prompt_duration_obs > 0).float()
         prompt_silence = cache.get("source_silence_mask")
         minimal_v1_profile = bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False))
+        g_variant = normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median"))
         if prompt_silence is not None:
             prompt_silence_mask = torch.tensor(prompt_silence, device=self.device, dtype=torch.float32).unsqueeze(0)
             prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clamp(0.0, 1.0))
@@ -381,6 +422,35 @@ class StreamingVoiceConversion:
                 dtype=torch.float32,
             ).unsqueeze(0),
         }
+        prompt_run_stability = torch.tensor(
+            cache.get("source_run_stability", np.ones_like(cache["dur_anchor_src"], dtype=np.float32)),
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        out["prompt_global_weight"] = self._build_prompt_global_weight(
+            prompt_speech_mask=prompt_speech_mask,
+            prompt_run_stability=prompt_run_stability,
+        )
+        prompt_unit_log_prior = cache.get("prompt_unit_log_prior")
+        if prompt_unit_log_prior is None:
+            prompt_unit_log_prior = cache.get("unit_log_prior")
+        if prompt_unit_log_prior is not None:
+            prompt_unit_log_prior_arr = np.asarray(prompt_unit_log_prior, dtype=np.float32).reshape(-1)
+            if prompt_unit_log_prior_arr.shape[0] != int(prompt_duration_obs.shape[1]):
+                raise RuntimeError(
+                    "prompt_unit_log_prior must match prompt run shape for maintained prompt conditioning: "
+                    f"{tuple(prompt_unit_log_prior_arr.shape)} vs {(int(prompt_duration_obs.shape[1])),}"
+                )
+            out["prompt_unit_log_prior"] = torch.tensor(
+                prompt_unit_log_prior_arr,
+                device=self.device,
+                dtype=torch.float32,
+            ).unsqueeze(0)
+        elif g_variant == "unit_norm":
+            raise RuntimeError(
+                "rhythm_v3 g_variant=unit_norm requires prompt_unit_log_prior/unit_log_prior "
+                "matching prompt runs in prompt conditioning."
+            )
         if prompt_silence is not None:
             out["prompt_silence_mask"] = prompt_silence_mask
         rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
@@ -479,6 +549,12 @@ class StreamingVoiceConversion:
         previous_resolved_frontier = None
         max_content_window_start = 0
         final_debug_bundle = None
+        allow_eos_tail_flush_fallback = bool(
+            self.hparams.get(
+                "rhythm_allow_eos_tail_flush_fallback",
+                True,
+            )
+        )
 
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
@@ -709,8 +785,13 @@ class StreamingVoiceConversion:
                 if len(wav_tail) > 0:
                     wav_chunks.append(wav_tail)
 
+        unresolved_eos_tail_frames = 0
         if prev_committed_len < int(last_mel_out.shape[0]):
-            mel_tail = last_mel_out[prev_committed_len:]
+            mel_tail, unresolved_eos_tail_frames = self._resolve_uncommitted_eos_tail(
+                last_mel_out=last_mel_out,
+                prev_committed_len=prev_committed_len,
+                allow_tail_flush=allow_eos_tail_flush_fallback,
+            )
             if mel_tail.numel() > 0:
                 mel_chunks.append(mel_tail)
                 wav_tail = self._render_vocoder_chunk(
@@ -751,7 +832,9 @@ class StreamingVoiceConversion:
                 "emformer_stateful_content_frontend": True,
                 "rhythm_incremental_source_cache": True,
                 "rhythm_final_tail_closed_eos": bool(eos_tail_closed),
-                "rhythm_final_tail_is_not_strictly_committed_only": bool(not eos_tail_closed),
+                "rhythm_final_tail_is_not_strictly_committed_only": bool(unresolved_eos_tail_frames > 0),
+                "rhythm_uncommitted_eos_tail_frames": int(unresolved_eos_tail_frames),
+                "rhythm_allow_eos_tail_flush_fallback": bool(allow_eos_tail_flush_fallback),
                 "content_history_windowing_enabled": True,
                 "content_history_left_context_tokens": int(content_window_left_tokens),
                 "content_history_max_trimmed_tokens": int(max_content_window_start),

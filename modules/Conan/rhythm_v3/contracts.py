@@ -325,8 +325,11 @@ class DurationExecution:
     global_bias_scalar: Optional[torch.Tensor] = None
     global_shift_analytic: Optional[torch.Tensor] = None
     coarse_logstretch: Optional[torch.Tensor] = None
+    coarse_path_logstretch: Optional[torch.Tensor] = None
     coarse_correction: Optional[torch.Tensor] = None
     local_residual: Optional[torch.Tensor] = None
+    speech_pred: Optional[torch.Tensor] = None
+    silence_pred: Optional[torch.Tensor] = None
     source_rate_seq: Optional[torch.Tensor] = None
     source_prefix_summary: Optional[torch.Tensor] = None
     g_ref: Optional[torch.Tensor] = None
@@ -336,8 +339,13 @@ class DurationExecution:
     prompt_valid_len: Optional[torch.Tensor] = None
     prefix_unit_offset: Optional[torch.Tensor] = None
     projector_rounding_residual: Optional[torch.Tensor] = None
+    projector_budget_pos_used: Optional[torch.Tensor] = None
+    projector_budget_neg_used: Optional[torch.Tensor] = None
     projector_budget_hit_pos: Optional[torch.Tensor] = None
     projector_budget_hit_neg: Optional[torch.Tensor] = None
+    projector_boundary_hit: Optional[torch.Tensor] = None
+    projector_boundary_decay_applied: Optional[torch.Tensor] = None
+    projector_since_last_boundary: Optional[torch.Tensor] = None
 
     @property
     def speech_duration_exec(self) -> torch.Tensor:

@@ -940,6 +940,11 @@ def build_duration_v3_loss_targets(
     if execution is None or unit_batch is None:
         return None
     unit_mask = unit_batch.unit_mask.float()
+    sample_confidence = _normalize_optional_confidence(
+        _detach_optional(sample.get("rhythm_target_confidence")),
+        batch_size=int(unit_mask.size(0)),
+        device=unit_mask.device,
+    )
     silence_mask = (
         getattr(unit_batch, "source_silence_mask", None).float().clamp(0.0, 1.0) * unit_mask
         if isinstance(getattr(unit_batch, "source_silence_mask", None), torch.Tensor)
@@ -1173,6 +1178,7 @@ def build_duration_v3_loss_targets(
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
         unit_anchor_base=unit_anchor_base.float().detach(),
+        sample_confidence=sample_confidence,
         speech_mask=speech_mask.float(),
         silence_mask=silence_mask.float(),
         committed_speech_mask=committed_speech_mask.float(),

@@ -210,7 +210,7 @@ def align_target_to_source(
     target_frame_states: np.ndarray | None = None,
     source_frame_to_run: np.ndarray | None = None,
     precomputed_alignment=None,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, str]:
     if use_continuous_alignment:
         continuous = align_target_frames_to_source_runs(
             source_units=source_units,
@@ -225,8 +225,11 @@ def align_target_to_source(
             precomputed_alignment=precomputed_alignment,
         )
         if continuous is not None:
-            return continuous
-    return align_target_runs_to_source_discrete(
+            return continuous[0], continuous[1], "continuous_precomputed"
+        raise RuntimeError(
+            "Continuous alignment requested but no frame-level/precomputed alignment is available."
+        )
+    assigned_source, assigned_cost = align_target_runs_to_source_discrete(
         source_units=source_units,
         source_durations=source_durations,
         source_silence=source_silence,
@@ -234,6 +237,7 @@ def align_target_to_source(
         target_durations=target_durations,
         target_silence=target_silence,
     )
+    return assigned_source, assigned_cost, "discrete"
 
 
 def project_target_runs_onto_source(
@@ -279,7 +283,7 @@ def project_target_runs_onto_source(
     if tgt_units_valid.size <= 0:
         raise RuntimeError("paired projection requires a non-empty paired target prompt lattice.")
 
-    assigned_source, assigned_cost = align_target_to_source(
+    assigned_source, assigned_cost, alignment_kind = align_target_to_source(
         source_units=src_units_valid,
         source_durations=src_durations_valid,
         source_silence=src_silence_valid,
@@ -382,7 +386,23 @@ def project_target_runs_onto_source(
     speech_zero = (~source_is_silence) & (projected <= 0.0)
     projected[speech_zero] = source_durations[speech_zero].astype(np.float32)
     confidence_local[speech_zero] = 0.0
-    confidence_coarse[speech_zero] = np.minimum(confidence_coarse[speech_zero], 0.20).astype(np.float32)
+    confidence_coarse[speech_zero] = 0.0
+    speech_run_count = int(np.count_nonzero(~source_is_silence))
+    unmatched_speech_ratio = (
+        float(np.count_nonzero(speech_zero)) / float(max(1, speech_run_count))
+        if speech_run_count > 0
+        else 0.0
+    )
+    mean_local_confidence_speech = (
+        float(np.mean(confidence_local[~source_is_silence], dtype=np.float32))
+        if speech_run_count > 0
+        else 0.0
+    )
+    mean_coarse_confidence_speech = (
+        float(np.mean(confidence_coarse[~source_is_silence], dtype=np.float32))
+        if speech_run_count > 0
+        else 0.0
+    )
     return {
         "projected": projected.astype(np.float32),
         "confidence_local": confidence_local.astype(np.float32),
@@ -390,6 +410,10 @@ def project_target_runs_onto_source(
         "coverage": coverage.astype(np.float32),
         "match_rate": match_rate.astype(np.float32),
         "mean_cost": mean_cost.astype(np.float32),
+        "unmatched_speech_ratio": np.float32(unmatched_speech_ratio),
+        "mean_local_confidence_speech": np.float32(mean_local_confidence_speech),
+        "mean_coarse_confidence_speech": np.float32(mean_coarse_confidence_speech),
+        "alignment_kind": alignment_kind,
         "assigned_source": assigned_source.astype(np.int64),
         "assigned_cost": assigned_cost.astype(np.float32),
         "source_valid_run_index": src_run_index.astype(np.int64),

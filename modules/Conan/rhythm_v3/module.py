@@ -156,6 +156,56 @@ def _resolve_duration_runtime_surface(
     return resolved_backbone, resolved_warp, False, runtime_mode
 
 
+def _enforce_minimal_v1_runtime_contract(
+    *,
+    minimal_v1_profile: bool,
+    rate_mode: str,
+    simple_global_stats: bool,
+    use_log_base_rate: bool,
+    use_reference_summary: bool,
+    use_learned_residual_gate: bool,
+    streaming_mode: str,
+    backbone_mode: str,
+    warp_mode: str,
+    allow_hybrid: bool,
+    source_residual_gain: float,
+    short_gap_silence_scale: float,
+    leading_silence_scale: float,
+) -> None:
+    if not minimal_v1_profile:
+        return
+    errors: list[str] = []
+    if str(rate_mode).strip().lower() != "simple_global":
+        errors.append("rate_mode must be simple_global")
+    if not bool(simple_global_stats):
+        errors.append("simple_global_stats must be true")
+    if bool(use_log_base_rate):
+        errors.append("use_log_base_rate must be false")
+    if bool(use_reference_summary):
+        errors.append("use_reference_summary must be false")
+    if bool(use_learned_residual_gate):
+        errors.append("use_learned_residual_gate must be false")
+    if str(streaming_mode).strip().lower() != "strict":
+        errors.append("streaming_mode must be strict")
+    if str(backbone_mode).strip().lower() != "prompt_summary":
+        errors.append("backbone_mode must resolve to prompt_summary")
+    if str(warp_mode).strip().lower() != "none":
+        errors.append("warp_mode must resolve to none")
+    if bool(allow_hybrid):
+        errors.append("allow_hybrid must be false")
+    if float(source_residual_gain) > 0.0:
+        errors.append("source_residual_gain must be 0")
+    if abs(float(short_gap_silence_scale) - 0.35) > 1.0e-6:
+        errors.append("short_gap_silence_scale must stay at the constant-clip default (0.35)")
+    if abs(float(leading_silence_scale) - 0.0) > 1.0e-6:
+        errors.append("leading_silence_scale must stay at the constant-clip default (0.0)")
+    if errors:
+        raise ValueError(
+            "rhythm_v3_minimal_v1_profile runtime contract violation: "
+            + "; ".join(errors)
+        )
+
+
 class DurationBackbone(nn.Module):
     backbone_mode = "global_only"
     warp_mode = "none"
@@ -478,6 +528,21 @@ class MixedEffectsDurationModule(nn.Module):
             allow_hybrid=allow_hybrid,
             source_residual_gain=self.source_residual_gain,
         )
+        _enforce_minimal_v1_runtime_contract(
+            minimal_v1_profile=self.minimal_v1_profile,
+            rate_mode=self.rate_mode,
+            simple_global_stats=self.simple_global_stats,
+            use_log_base_rate=self.use_log_base_rate,
+            use_reference_summary=self.use_reference_summary,
+            use_learned_residual_gate=self.use_learned_residual_gate,
+            streaming_mode=self.streaming_mode,
+            backbone_mode=self.backbone_mode,
+            warp_mode=self.warp_mode,
+            allow_hybrid=self.allow_hybrid,
+            source_residual_gain=self.source_residual_gain,
+            short_gap_silence_scale=short_gap_silence_scale,
+            leading_silence_scale=leading_silence_scale,
+        )
         effective_window_right = int(response_window_right)
         if self.streaming_mode == "strict":
             effective_window_right = 0
@@ -545,8 +610,6 @@ class MixedEffectsDurationModule(nn.Module):
                     local_cold_start_runs=local_cold_start_runs,
                     local_short_run_min_duration=local_short_run_min_duration,
                     local_rate_decay=local_rate_decay,
-                    short_gap_silence_scale=short_gap_silence_scale,
-                    leading_silence_scale=leading_silence_scale,
                     eval_mode=self.eval_mode,
                     disable_local_residual=self.disable_local_residual,
                     disable_coarse_bias=self.disable_coarse_bias,
@@ -1082,10 +1145,13 @@ class MixedEffectsDurationModule(nn.Module):
                 source_boundary_cue=getattr(source_batch, "source_boundary_cue", None),
                 phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
                 global_bias_scalar=role_plan.get("global_bias_scalar"),
-                global_shift_analytic=role_plan.get("unit_global_shift_analytic"),
-                coarse_logstretch=role_plan.get("unit_coarse_logstretch"),
-                coarse_correction=role_plan.get("unit_coarse_correction"),
-                local_residual=role_plan.get("unit_residual_logstretch"),
+                global_shift_analytic=role_plan.get("unit_analytic_logstretch", role_plan.get("unit_global_shift_analytic")),
+                coarse_logstretch=role_plan.get("unit_coarse_path_logstretch", role_plan.get("unit_coarse_logstretch")),
+                coarse_path_logstretch=role_plan.get("unit_coarse_path_logstretch", role_plan.get("unit_coarse_logstretch")),
+                coarse_correction=role_plan.get("unit_coarse_delta", role_plan.get("unit_coarse_correction")),
+                local_residual=role_plan.get("unit_local_residual_used", role_plan.get("unit_residual_logstretch")),
+                speech_pred=role_plan.get("unit_speech_pred"),
+                silence_pred=role_plan.get("unit_silence_pred"),
                 source_rate_seq=role_plan.get("source_rate_seq"),
                 source_prefix_summary=role_plan.get("source_prefix_summary"),
             )

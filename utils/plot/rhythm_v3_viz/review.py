@@ -16,6 +16,7 @@ from tasks.Conan.rhythm.duration_v3.metrics import (
     silence_leakage,
     tempo_explainability,
     tempo_monotonicity,
+    transfer_slope,
 )
 
 from .core import RhythmV3DebugRecord, derive_record, load_debug_records, weighted_median_np
@@ -361,7 +362,12 @@ def build_run_table(
             continue
         derived = derive_record(record, silence_tau=float(silence_tau))
         n_src = _safe_array(record.source_duration_obs, dtype=np.float32)
-        n_star = _safe_array(record.unit_duration_tgt, dtype=np.float32)
+        n_star = _safe_array(
+            record.unit_duration_proj_raw_tgt
+            if record.unit_duration_proj_raw_tgt is not None
+            else record.unit_duration_tgt,
+            dtype=np.float32,
+        )
         omega = _safe_array(record.unit_confidence_tgt, dtype=np.float32)
         if omega is None:
             omega = _safe_array(record.unit_confidence_local_tgt, dtype=np.float32)
@@ -525,6 +531,12 @@ def build_ref_crop_table(
         tgt_spk = _as_str(_meta(record, "tgt_spk", "target_speaker", default=""))
         if not tgt_spk:
             tgt_spk = _infer_speaker_id(_meta(record, "paired_target_item_name", "tgt_prompt_id", default=""))
+        same_speaker_reference = _meta(record, "same_speaker_reference", "same_speaker", default=None)
+        if same_speaker_reference is None and src_spk and ref_spk:
+            same_speaker_reference = int(src_spk == ref_spk)
+        same_speaker_target = _meta(record, "same_speaker_target", default=None)
+        if same_speaker_target is None and src_spk and tgt_spk:
+            same_speaker_target = int(src_spk == tgt_spk)
         rows.append(
             {
                 **ids,
@@ -541,6 +553,9 @@ def build_ref_crop_table(
                 "same_text": np.nan if same_text_reference is None else float(same_text_reference),
                 "same_text_reference": np.nan if same_text_reference is None else float(same_text_reference),
                 "same_text_target": np.nan if same_text_target is None else float(same_text_target),
+                "same_speaker": np.nan if same_speaker_reference is None else float(same_speaker_reference),
+                "same_speaker_reference": np.nan if same_speaker_reference is None else float(same_speaker_reference),
+                "same_speaker_target": np.nan if same_speaker_target is None else float(same_speaker_target),
                 "lexical_mismatch": _meta(record, "lexical_mismatch", default=np.nan),
                 "g_crop": g_ref,
                 "g_src": g_src,
@@ -910,6 +925,8 @@ def build_monotonicity_table(
     for index, record in enumerate(records):
         meta = dict(record.metadata or {})
         src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
+        sample_id = _as_str(meta.get("sample_id", record.item_name or src_id))
+        pair_id = _as_str(meta.get("pair_id", meta.get("rhythm_pair_group_id", sample_id)))
         ref_bin = _as_str(meta.get("ref_bin", meta.get("tempo_bin", ""))).strip().lower()
         if ref_bin not in {"slow", "mid", "fast"}:
             continue
@@ -952,6 +969,8 @@ def build_monotonicity_table(
             source_unit_ids=record.source_content_units,
         )
         grouped.setdefault((src_id, eval_mode), {})[ref_bin] = {
+            "sample_id": sample_id,
+            "pair_id": pair_id,
             "tempo_out": tempo_out,
             "tempo_src": tempo_src,
             "tempo_ref": tempo_ref,
@@ -959,6 +978,12 @@ def build_monotonicity_table(
             "g_src_utt": g_src_utt,
             "item_name": record.item_name or src_id,
             "same_text_reference": _as_float(meta.get("same_text_reference", meta.get("same_text", float("nan")))),
+            "same_speaker_reference": _as_float(
+                meta.get(
+                    "same_speaker_reference",
+                    meta.get("same_speaker", float("nan")),
+                )
+            ),
         }
     rows: list[dict[str, Any]] = []
     for (src_id, eval_mode), bins in grouped.items():
@@ -975,9 +1000,16 @@ def build_monotonicity_table(
             rows.append(
                 {
                     "src_id": src_id,
+                    "sample_id": payload["sample_id"],
+                    "pair_id": payload["pair_id"],
                     "ref_bin": ref_bin,
                     "tempo_out": payload["tempo_out"],
                     "tempo_src": payload["tempo_src"],
+                    "tempo_delta": (
+                        float(payload["tempo_out"] - payload["tempo_src"])
+                        if np.isfinite(payload["tempo_out"]) and np.isfinite(payload["tempo_src"])
+                        else float("nan")
+                    ),
                     "tempo_ref": payload["tempo_ref"],
                     "g_ref": payload["g_ref"],
                     "g_src_utt": payload["g_src_utt"],
@@ -988,6 +1020,7 @@ def build_monotonicity_table(
                     ),
                     "eval_mode": eval_mode,
                     "same_text_reference": payload["same_text_reference"],
+                    "same_speaker_reference": payload["same_speaker_reference"],
                     "mono_triplet_ok": mono,
                     "item_name": payload["item_name"],
                 }
@@ -1027,9 +1060,15 @@ def summarize_falsification_ladder(
                 gap = float(same_text_gap(same_metric["robust_slope"], cross_metric["robust_slope"]).item())
 
         mono_rate = float("nan")
+        tempo_transfer = {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+        }
         if not mono_mode.empty:
             unique_triplets = mono_mode.drop_duplicates(subset=["src_id", "eval_mode"])
             mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
+            tempo_transfer = transfer_slope(mono_mode.get("delta_g", []), mono_mode.get("tempo_delta", []))
 
         rows.append(
             {
@@ -1038,6 +1077,8 @@ def summarize_falsification_ladder(
                 "explainability_slope": float(explain["robust_slope"]),
                 "explainability_r2_like": float(explain["r2_like"]),
                 "monotonicity_rate": mono_rate,
+                "tempo_transfer_slope": float(tempo_transfer["robust_slope"]),
+                "tempo_transfer_spearman": float(tempo_transfer["spearman"]),
                 "same_text_gap": gap,
                 "silence_leakage": float(np.nanmean(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
                 "prefix_discrepancy": float(np.nanmean(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),

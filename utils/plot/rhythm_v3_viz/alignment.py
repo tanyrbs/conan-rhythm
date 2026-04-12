@@ -49,12 +49,29 @@ def build_projection_debug_payload(
     )
     return {
         "unit_duration_tgt": np.asarray(projection["projected"], dtype=np.float32),
+        "unit_duration_proj_raw_tgt": np.asarray(projection["projected"], dtype=np.float32),
         "unit_confidence_local_tgt": np.asarray(projection["confidence_local"], dtype=np.float32),
         "unit_confidence_coarse_tgt": np.asarray(projection["confidence_coarse"], dtype=np.float32),
         "unit_confidence_tgt": np.asarray(projection["confidence_coarse"], dtype=np.float32),
         "unit_alignment_coverage_tgt": np.asarray(projection["coverage"], dtype=np.float32),
         "unit_alignment_match_tgt": np.asarray(projection["match_rate"], dtype=np.float32),
         "unit_alignment_cost_tgt": np.asarray(projection["mean_cost"], dtype=np.float32),
+        "unit_alignment_unmatched_speech_ratio_tgt": np.asarray(
+            [projection["unmatched_speech_ratio"]],
+            dtype=np.float32,
+        ),
+        "unit_alignment_mean_local_confidence_speech_tgt": np.asarray(
+            [projection["mean_local_confidence_speech"]],
+            dtype=np.float32,
+        ),
+        "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray(
+            [projection["mean_coarse_confidence_speech"]],
+            dtype=np.float32,
+        ),
+        "unit_alignment_mode_id_tgt": np.asarray(
+            [1 if str(projection.get("alignment_kind", "discrete")).strip().lower() == "continuous_precomputed" else 0],
+            dtype=np.int64,
+        ),
         "paired_target_content_units_debug": np.asarray(target_units, dtype=np.int64),
         "paired_target_duration_obs_debug": np.asarray(target_durations, dtype=np.float32),
         "paired_target_valid_mask_debug": np.asarray(target_valid_mask, dtype=np.float32),

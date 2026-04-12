@@ -33,9 +33,21 @@ def _warn_sparse_review_metadata(frame) -> None:
     required = (
         "pair_id",
         "same_text_reference",
+        "same_text_target",
         "lexical_mismatch",
         "ref_len_sec",
         "speech_ratio",
+        "alignment_kind",
+        "target_duration_surface",
+        "g_support_count",
+        "g_support_ratio_vs_speech",
+        "g_support_ratio_vs_valid",
+        "g_valid",
+        "alignment_unmatched_speech_ratio",
+        "alignment_mean_local_confidence_speech",
+        "alignment_mean_coarse_confidence_speech",
+        "projector_boundary_hit_rate",
+        "projector_boundary_decay_rate",
     )
     issues = []
     for column in required:
@@ -50,7 +62,7 @@ def _warn_sparse_review_metadata(frame) -> None:
         print(
             "[rhythm_v3_debug_records] warning: review metadata is incomplete "
             f"({joined}). Summary export will still succeed, but Gate-0/Panel-C "
-            "style slices may be partially degenerate.",
+            "style slices or boundary/provenance review may be partially degenerate.",
             file=sys.stderr,
         )
 
@@ -171,6 +183,25 @@ def main() -> None:
             drop_edge_runs=args.drop_edge_runs,
         )
         if not monotonicity_df.empty:
+            merge_keys_triplet = [
+                key
+                for key in ("src_id", "eval_mode", "ref_bin")
+                if key in summary_df.columns and key in monotonicity_df.columns
+            ]
+            if merge_keys_triplet == ["src_id", "eval_mode", "ref_bin"]:
+                summary_df = summary_df.merge(
+                    monotonicity_df[
+                        [
+                            "src_id",
+                            "eval_mode",
+                            "ref_bin",
+                            "mono_triplet_ok",
+                            "tempo_delta",
+                        ]
+                    ].drop_duplicates(subset=["src_id", "eval_mode", "ref_bin"]),
+                    on=merge_keys_triplet,
+                    how="left",
+                )
             mono_summary = (
                 monotonicity_df.drop_duplicates(subset=["src_id", "eval_mode"])[["src_id", "eval_mode", "mono_triplet_ok"]]
                 .rename(columns={"mono_triplet_ok": "tempo_monotonicity_rate"})

@@ -27,6 +27,7 @@ def test_streaming_inference_extracts_prompt_units_for_v3_by_default():
     assert '"prompt_duration_obs"' in source
     assert '"prompt_unit_mask"' in source
     assert '"prompt_source_boundary_cue"' in source
+    assert '"prompt_global_weight"' in source
 
 
 def test_streaming_inference_reports_content_history_windowing_metadata():
@@ -49,6 +50,7 @@ def test_streaming_inference_can_return_rhythm_debug_bundle():
     assert "commit_frontier must be monotone non-decreasing" in source
     assert "Committed prefix was rewritten" in source
     assert "requires cached prompt source_silence_mask" in source
+    assert "rhythm_allow_eos_tail_flush_fallback" in source
 
 
 def test_run_streaming_latency_report_defaults_to_v3_config():
@@ -101,3 +103,24 @@ def test_streaming_inference_rewrite_guard_allows_open_tail_updates():
         prev_state=prev_state,
         next_state=next_state,
     )
+
+
+def test_streaming_inference_eos_tail_policy_returns_tail_when_fallback_enabled():
+    mel = torch.randn(5, 80)
+    tail, unresolved = StreamingVoiceConversion._resolve_uncommitted_eos_tail(
+        last_mel_out=mel,
+        prev_committed_len=3,
+        allow_tail_flush=True,
+    )
+    assert unresolved == 2
+    assert tail.shape == (2, 80)
+
+
+def test_streaming_inference_eos_tail_policy_rejects_tail_when_strict():
+    mel = torch.randn(4, 80)
+    with pytest.raises(RuntimeError, match="strict committed-only EOS"):
+        StreamingVoiceConversion._resolve_uncommitted_eos_tail(
+            last_mel_out=mel,
+            prev_committed_len=1,
+            allow_tail_flush=False,
+        )

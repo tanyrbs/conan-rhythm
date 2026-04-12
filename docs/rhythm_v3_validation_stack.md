@@ -43,6 +43,14 @@ This remains the shared projection module for:
 - dataset target construction
 - offline audit/debug reconstruction
 
+`use_continuous_alignment=True` currently means `continuous_precomputed` only.
+If no precomputed frame/content-space alignment metadata is available, the
+maintained path now fails fast instead of silently falling back to discrete
+projection.
+Paired target alignment arrays are only accepted for this path when the cache
+also explicitly marks them as `continuous_precomputed`; arrays without
+provenance no longer count as continuous metadata.
+
 ### 2.2 Debug-record schema
 
 Files:
@@ -51,6 +59,14 @@ Files:
 - `utils/plot/rhythm_v3_viz/alignment.py`
 
 These are still the stable bridge between runtime/data code and later review.
+The maintained debug/summary surface now includes both:
+
+- `g` support certificates such as `g_support_count`, `g_support_ratio_vs_speech`,
+  `g_support_ratio_vs_valid`, and `g_valid`
+- alignment-quality certificates such as
+  `alignment_unmatched_speech_ratio`,
+  `alignment_mean_local_confidence_speech`, and
+  `alignment_mean_coarse_confidence_speech`
 
 ### 2.3 Five-figure review util
 
@@ -76,6 +92,14 @@ The project was intentionally simplified here:
 - the maintained CLI should stay singular: `scripts/rhythm_v3_debug_records.py`
   exports the shared review/gate bundle, while narrower gate inspection should
   come from the emitted CSVs or direct util calls instead of extra wrapper CLIs
+
+Some earlier implementation suggestions are therefore already outdated in this
+workspace:
+
+- no new `g_stats.py` is needed because the shared helper already exists
+- no separate per-gate wrapper CLIs are kept anymore
+- no second runtime surface is needed because `analytic / coarse_only / learned`
+  already switch inside the maintained `rhythm_v3` path
 
 ## 3. Unified analysis tables
 
@@ -104,7 +128,9 @@ Key columns:
 
 - `pair_id`, `crop_id`
 - `ref_len_sec`, `speech_ratio`
-- `same_text_reference`, `same_text_target`, `lexical_mismatch`
+- `same_text_reference`, `same_text_target`
+- `same_speaker_reference`, `same_speaker_target`
+- `lexical_mismatch`
 - `g_crop`, `g_full`, `g_src_utt`, `g_src_prefix_mean`, `delta_g`
 - `c_star`, `zbar_sp_star`
 
@@ -128,6 +154,14 @@ keeps three gate-oriented tables for rapid falsification:
 - `monotonicity_table`
 - `prefix_silence_review_table`
 - `mode_ladder_table`
+
+Important convenience fields now emitted by the single export path:
+
+- row summary: `same_speaker_reference`, `same_speaker_target`, `tempo_delta`,
+  `alignment_kind`, `target_duration_surface`, `projector_boundary_hit_rate`,
+  `projector_boundary_decay_rate`
+- monotonicity table: `sample_id`, `pair_id`, `tempo_delta`, `mono_triplet_ok`
+- ladder table: `tempo_transfer_slope`
 
 ## 4. Review util entry points
 
@@ -191,9 +225,12 @@ carries:
 - `pair_id`
 - prompt ids or source/reference signatures
 - `same_text_reference`
+- `same_text_target`
 - `lexical_mismatch`
 - `ref_len_sec`
 - `speech_ratio`
+- `unit_duration_proj_raw_tgt` or another explicit raw target-surface alias
+- `unit_alignment_mode_id_tgt` when paired-target provenance is available
 
 If those fields are missing, the scripts still export tables and figures, but
 you should read the result as a partial audit rather than a full falsification
@@ -226,9 +263,30 @@ util keeps the field but does not pretend the stability question was answered.
 For the maintained prompt-summary / minimal-V1 line, `prompt_speech_mask` is no
 longer treated as an optional convenience field. It is part of the explicit
 speech-only `g` contract, and the config/runtime surfaces should keep that
-visible.
+visible. In the current strict minimal runtime, silence-token fallback should
+not be treated as equivalent evidence; `prompt_silence_mask` remains useful for
+consistency checks, but it does not replace explicit `prompt_speech_mask`.
 
-### 5.4 Closed and committed are different
+### 5.4 Projector debug now distinguishes carry from boundary-side smoothing
+
+The maintained projector surface should be read in two layers:
+
+- core carry + budget execution
+- boundary-side smoothing heuristics exported for audit
+
+So when reviewing prefix drift, prefer keeping these signals together:
+
+- `projector_rounding_residual`
+- `projector_budget_hit_pos` / `projector_budget_hit_neg`
+- `projector_boundary_hit`
+- `projector_boundary_decay_applied`
+- `projector_since_last_boundary`
+
+`projector_boundary_hit` marks boundary/phrase-final events, while
+`projector_boundary_decay_applied` only marks the subset where decay was
+actually applied.
+
+### 5.5 Closed and committed are different
 
 Figure A uses `is_closed`.
 Figure E uses `is_committed`.

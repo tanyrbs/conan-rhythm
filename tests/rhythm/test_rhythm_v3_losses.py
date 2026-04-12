@@ -991,6 +991,88 @@ def test_rhythm_v3_bias_loss_prefers_global_bias_scalar_when_available():
     assert torch.allclose(losses["rhythm_v3_bias"], torch.tensor(0.0))
 
 
+def test_rhythm_v3_bias_loss_downweights_low_coarse_confidence_utterances():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((2, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((2, 2), dtype=torch.float32),
+            "local_residual": torch.zeros((2, 2), dtype=torch.float32),
+            "coarse_logstretch": torch.zeros((2, 2), dtype=torch.float32),
+            "global_bias_scalar": torch.zeros((2, 1), dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    base_targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((2, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((2, 2), dtype=torch.float32),
+        prediction_anchor=torch.ones((2, 2), dtype=torch.float32),
+        unit_mask=torch.ones((2, 2), dtype=torch.float32),
+        committed_mask=torch.ones((2, 2), dtype=torch.float32),
+        committed_speech_mask=torch.ones((2, 2), dtype=torch.float32),
+        global_bias_tgt=torch.tensor([[1.0], [4.0]], dtype=torch.float32),
+        unit_confidence_local_tgt=torch.ones((2, 2), dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((2, 2), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        lambda_bias=1.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+    )
+    downweighted_targets = replace(
+        base_targets,
+        unit_confidence_coarse_tgt=torch.tensor([[1.0, 1.0], [0.1, 0.1]], dtype=torch.float32),
+    )
+    base_losses = build_rhythm_loss_dict(execution, base_targets)
+    downweighted_losses = build_rhythm_loss_dict(execution, downweighted_targets)
+    assert downweighted_losses["rhythm_v3_bias"] < base_losses["rhythm_v3_bias"]
+
+
+def test_rhythm_v3_bias_loss_multiplies_sample_and_coarse_confidence():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((2, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((2, 2), dtype=torch.float32),
+            "local_residual": torch.zeros((2, 2), dtype=torch.float32),
+            "coarse_logstretch": torch.zeros((2, 2), dtype=torch.float32),
+            "global_bias_scalar": torch.zeros((2, 1), dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((2, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((2, 2), dtype=torch.float32),
+        prediction_anchor=torch.ones((2, 2), dtype=torch.float32),
+        unit_mask=torch.ones((2, 2), dtype=torch.float32),
+        committed_mask=torch.ones((2, 2), dtype=torch.float32),
+        committed_speech_mask=torch.ones((2, 2), dtype=torch.float32),
+        global_bias_tgt=torch.tensor([[1.0], [4.0]], dtype=torch.float32),
+        unit_confidence_local_tgt=torch.ones((2, 2), dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((2, 2), dtype=torch.float32),
+        sample_confidence=torch.tensor([[1.0], [0.0]], dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        lambda_bias=1.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    expected = torch.nn.functional.smooth_l1_loss(
+        torch.tensor([0.0]),
+        torch.tensor([1.0]),
+        beta=0.25,
+        reduction="mean",
+    )
+    assert torch.allclose(losses["rhythm_v3_bias"], expected)
+
+
 def test_rhythm_v3_minimal_profile_loss_builder_rejects_prompt_operator_surface():
     execution = type(
         "DummyExec",

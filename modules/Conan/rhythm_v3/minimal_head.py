@@ -34,13 +34,23 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         codebook=None,
     ) -> None:
         super().__init__()
-        del num_slots, short_gap_silence_scale, leading_silence_scale, codebook
+        del num_slots, codebook
         if not bool(simple_global_stats):
             raise ValueError("MinimalStreamingDurationHeadV1G requires simple_global_stats=true.")
         if bool(use_log_base_rate):
             raise ValueError("MinimalStreamingDurationHeadV1G requires use_log_base_rate=false.")
         if bool(use_learned_residual_gate):
             raise ValueError("MinimalStreamingDurationHeadV1G forbids learned residual gates.")
+        if abs(float(short_gap_silence_scale) - 0.35) > 1.0e-6:
+            raise ValueError(
+                "MinimalStreamingDurationHeadV1G uses a constant silence clip; "
+                "short_gap_silence_scale is not part of the minimal runtime surface."
+            )
+        if abs(float(leading_silence_scale) - 0.0) > 1.0e-6:
+            raise ValueError(
+                "MinimalStreamingDurationHeadV1G uses a constant silence clip; "
+                "leading_silence_scale is not part of the minimal runtime surface."
+            )
         self.rate_mode = "simple_global"
         self.simple_global_stats = True
         self.use_log_base_rate = False
@@ -220,27 +230,42 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         pred_silence = pred_silence * silence_commit_mask
         pred = pred_speech + pred_silence
         global_bias_scalar = coarse_scalar.reshape(-1, 1)
+        analytic_term = global_shift_analytic * mask
+        coarse_delta = coarse_correction * mask
+        coarse_delta_pred = predicted_coarse * mask
+        coarse_path = global_term * mask
+        residual_used = residual * mask
+        residual_pred = predicted_residual * mask
 
         return {
             "unit_logstretch": pred,
-            "unit_global_shift": global_term * mask,
-            "unit_global_shift_analytic": global_shift_analytic * mask,
+            "unit_global_shift": coarse_path,
+            "unit_global_shift_analytic": analytic_term,
+            "unit_analytic_gap": analytic_term,
+            "unit_analytic_logstretch": analytic_term,
             "global_bias_scalar": global_bias_scalar,
-            "unit_coarse_logstretch": global_term * mask,
-            "unit_coarse_correction": coarse_correction * mask,
-            "unit_coarse_correction_pred": predicted_coarse * mask,
-            "unit_residual_logstretch": residual * mask,
-            "unit_residual_logstretch_pred": predicted_residual * mask,
+            "unit_coarse_logstretch": coarse_path,
+            "unit_coarse_path_logstretch": coarse_path,
+            "unit_coarse_correction": coarse_delta,
+            "unit_coarse_correction_used": coarse_delta,
+            "unit_coarse_delta": coarse_delta,
+            "unit_coarse_correction_pred": coarse_delta_pred,
+            "unit_coarse_correction_predicted": coarse_delta_pred,
+            "unit_residual_logstretch": residual_used,
+            "unit_local_residual_used": residual_used,
+            "unit_residual_logstretch_pred": residual_pred,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
             "unit_silence_tau": silence_tau * silence_commit_mask,
+            "unit_speech_pred": pred_speech,
+            "unit_silence_pred": pred_silence,
             "role_attn_unit": mask.unsqueeze(-1),
             "role_value_unit": mask.new_zeros(mask.shape),
             "role_var_unit": mask.new_zeros(mask.shape),
             "role_conf_unit": mask.new_zeros(mask.shape),
             "role_query_unit": query,
-            "local_response": residual * mask,
-            "local_response_pred": predicted_residual * mask,
+            "local_response": residual_used,
+            "local_response_pred": residual_pred,
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,

@@ -66,10 +66,6 @@ def _normalize_drop_edge_runs(value) -> int:
     return max(0, int(value or 0))
 
 
-def _full_support_mask(mask: torch.Tensor) -> torch.Tensor:
-    return torch.ones_like(mask, dtype=torch.bool)
-
-
 def _drop_edge_support_1d(mask: torch.Tensor, *, drop_edge_runs: int) -> torch.Tensor:
     keep = mask.bool().clone()
     drop = _normalize_drop_edge_runs(drop_edge_runs)
@@ -91,18 +87,14 @@ def _build_single_support_mask(
     drop_edge_runs: int,
 ) -> torch.Tensor:
     speech = speech_mask.bool()
-    valid = _full_support_mask(speech) if valid_mask is None else valid_mask.bool()
+    valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
     speech_valid = speech & valid
-    if bool(speech_valid.any().item()):
-        support = _drop_edge_support_1d(speech_valid, drop_edge_runs=drop_edge_runs)
-        if bool(support.any().item()):
-            return support
-        return speech_valid
-    if bool(valid.any().item()):
-        return valid
-    if bool(speech.any().item()):
-        return speech
-    return _full_support_mask(speech)
+    if not bool(speech_valid.any().item()):
+        return torch.zeros_like(speech_valid, dtype=torch.bool)
+    support = _drop_edge_support_1d(speech_valid, drop_edge_runs=drop_edge_runs)
+    if bool(support.any().item()):
+        return support
+    return speech_valid
 
 
 def build_global_rate_support_mask(

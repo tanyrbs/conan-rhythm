@@ -36,6 +36,10 @@ rhythm_v3_use_log_base_rate: false
 rhythm_v3_use_reference_summary: false
 rhythm_v3_use_learned_residual_gate: false
 rhythm_v3_disable_learned_gate: true
+# Maintained runtime default stays `learned`, but falsification should override:
+# Gate 0 / Gate 1: analytic + disable_local_residual + disable_coarse_bias
+# Gate 2: coarse_only + disable_local_residual
+# Only after those pass should full learned / prefix fine-tune be enabled.
 rhythm_v3_eval_mode: learned
 rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
@@ -94,10 +98,11 @@ rhythm_v3_local_cold_start_runs: 2
 rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
-rhythm_v3_short_gap_silence_scale: 0.35
-rhythm_v3_leading_silence_scale: 0.0
+# Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
+# shaping remain non-minimal-only knobs and are intentionally omitted here.
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
+rhythm_allow_eos_tail_flush_fallback: false
 rhythm_v3_disallow_same_text_reference: true
 rhythm_v3_disallow_same_text_paired_target: false
 rhythm_v3_require_same_text_paired_target: true
@@ -117,7 +122,7 @@ rhythm_v3_silence_coarse_weight: 0.0
 rhythm_v3_silence_max_logstretch: 0.25
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_bias: 0.20  # coarse scalar supervision
+lambda_rhythm_bias: 0.20  # maintained default; Gate 1 analytic falsification should override this to 0.0
 lambda_rhythm_summary: 0.0
 # canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
 lambda_rhythm_pref: 0.0  # phase-0 falsification runs should not mix in prefix discipline

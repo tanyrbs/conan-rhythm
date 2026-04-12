@@ -82,6 +82,8 @@ class RhythmDatasetSampleAssembler:
             "dur_anchor_src",
             "prompt_duration_obs",
             "prompt_unit_mask",
+            "prompt_global_weight",
+            "prompt_unit_log_prior",
             "unit_duration_tgt",
             "unit_confidence_tgt",
             "unit_confidence_local_tgt",
@@ -89,6 +91,9 @@ class RhythmDatasetSampleAssembler:
             "unit_alignment_coverage_tgt",
             "unit_alignment_match_tgt",
             "unit_alignment_cost_tgt",
+            "unit_alignment_unmatched_speech_ratio_tgt",
+            "unit_alignment_mean_local_confidence_speech_tgt",
+            "unit_alignment_mean_coarse_confidence_speech_tgt",
         }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:

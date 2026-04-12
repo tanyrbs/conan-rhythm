@@ -48,6 +48,7 @@ The maintained v3 inference story is:
 - raw uncommitted open-tail units are kept intact and appended after the retimed prefix before the main model consumes them
 - `rhythm_v3_emit_silence_runs` exposes `source_silence_mask` so the runtime can distinguish speech runs from intentional pauses
 - `rhythm_v3_summary_pool_speech_only` keeps any optional summary pooling speech-only so global-rate conditioning remains clean
+- `weighted_median` prompt conditioning can now consume an explicit `prompt_global_weight` sidecar derived from prompt run stability when available
 
 Silence-like runs remain in the emitted sequence, but they no longer rely on a separate pause planner or on a full local residual. Instead their log-stretch prediction is clipped around the coarse bias term, and the silence contribution to loss is down-weighted via `rhythm_v3_silence_coarse_weight` while the clip range is governed by `rhythm_v3_silence_max_logstretch`. Global rate statistics (`g_ref` / `g_src`) remain speech-only, so the coarse-only policy keeps speech and silence aligned without overfitting noisy pause labels.
 
@@ -58,7 +59,11 @@ stable-lattice frontend contract, not to the duration writer. Training cache
 construction and inference prompt extraction now use the same `rhythm_v3`
 source-cache builder so that the lattice contract does not drift across phases.
 
-The rhythm frontend is incremental, but the final tail is still flushed from the last full-prefix pass rather than from a separate strict committed-only seal step. In other words, incremental run-lattice state is real, while the final end-of-utterance tail remains a pragmatic last-pass flush.
+The rhythm frontend is incremental. For maintained `rhythm_v3` validation, the
+recommended config now sets `rhythm_allow_eos_tail_flush_fallback: false`, so a
+final sealed pass must close the EOS tail instead of silently appending
+uncommitted mel frames. Compatibility/runtime experiments can still opt back
+into the old last-pass flush by setting that flag to `true`.
 
 ## What this directory currently serves
 

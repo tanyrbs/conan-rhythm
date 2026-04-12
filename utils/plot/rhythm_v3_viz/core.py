@@ -53,6 +53,16 @@ def _as_object_scalar(value: Any) -> Any:
     return value
 
 
+def _as_float(value: Any, *, default: float = np.nan) -> float:
+    scalar = _as_object_scalar(value)
+    if scalar is None:
+        return float(default)
+    try:
+        return float(scalar)
+    except Exception:
+        return float(default)
+
+
 def _as_optional_array(
     value: Any,
     *,
@@ -257,12 +267,17 @@ class RhythmV3DebugRecord:
     prompt_log_duration: Optional[np.ndarray] = None
     prompt_log_residual: Optional[np.ndarray] = None
     unit_duration_tgt: Optional[np.ndarray] = None
+    unit_duration_proj_raw_tgt: Optional[np.ndarray] = None
+    unit_alignment_mode_id_tgt: Optional[np.ndarray] = None
     unit_confidence_tgt: Optional[np.ndarray] = None
     unit_confidence_local_tgt: Optional[np.ndarray] = None
     unit_confidence_coarse_tgt: Optional[np.ndarray] = None
     unit_alignment_coverage_tgt: Optional[np.ndarray] = None
     unit_alignment_match_tgt: Optional[np.ndarray] = None
     unit_alignment_cost_tgt: Optional[np.ndarray] = None
+    unit_alignment_unmatched_speech_ratio_tgt: Optional[np.ndarray] = None
+    unit_alignment_mean_local_confidence_speech_tgt: Optional[np.ndarray] = None
+    unit_alignment_mean_coarse_confidence_speech_tgt: Optional[np.ndarray] = None
     paired_target_content_units_debug: Optional[np.ndarray] = None
     paired_target_duration_obs_debug: Optional[np.ndarray] = None
     paired_target_valid_mask_debug: Optional[np.ndarray] = None
@@ -285,6 +300,8 @@ class RhythmV3DebugRecord:
     projector_rounding_residual: Optional[np.ndarray] = None
     projector_budget_hit_pos: Optional[np.ndarray] = None
     projector_budget_hit_neg: Optional[np.ndarray] = None
+    projector_boundary_hit: Optional[np.ndarray] = None
+    projector_boundary_decay_applied: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -335,11 +352,29 @@ def build_debug_record(
             "lexical_mismatch",
             "ref_len_sec",
             "speech_ratio",
+            "alignment_kind",
+            "target_duration_surface",
             "ref_bin",
             "tempo_bin",
+            "g_support_count",
+            "g_speech_count",
+            "g_valid_count",
+            "g_support_ratio_vs_speech",
+            "g_support_ratio_vs_valid",
+            "g_valid",
+            "g_drop_edge_runs",
+            "g_strict_speech_only",
         ):
             value = _extract_mapping_value(sample, key, batch_index)
             scalar = _as_object_scalar(value)
+            if scalar is not None:
+                meta.setdefault(key, scalar)
+        for key in (
+            "unit_alignment_unmatched_speech_ratio_tgt",
+            "unit_alignment_mean_local_confidence_speech_tgt",
+            "unit_alignment_mean_coarse_confidence_speech_tgt",
+        ):
+            scalar = _as_object_scalar(_extract_mapping_value(sample, key, batch_index))
             if scalar is not None:
                 meta.setdefault(key, scalar)
         pair_group = _as_object_scalar(_extract_mapping_value(sample, "rhythm_pair_group_id", batch_index))
@@ -387,12 +422,33 @@ def build_debug_record(
         if item_name is not None:
             _maybe_set_meta(meta, "src_spk", _infer_speaker_id(item_name))
             _maybe_set_meta(meta, "src_prompt_id", item_name)
+        alignment_mode_id = _as_object_scalar(_extract_mapping_value(sample, "unit_alignment_mode_id_tgt", batch_index))
+        if alignment_mode_id is not None:
+            try:
+                alignment_mode_id = int(alignment_mode_id)
+            except Exception:
+                alignment_mode_id = 0
+            _maybe_set_meta(
+                meta,
+                "alignment_kind",
+                "continuous_precomputed" if alignment_mode_id == 1 else "discrete",
+            )
+        if _extract_mapping_value(sample, "unit_duration_proj_raw_tgt", batch_index) is not None:
+            _maybe_set_meta(meta, "target_duration_surface", "projection_raw")
         ref_name = meta.get("ref_item_name") or meta.get("ref_prompt_id")
         if ref_name is not None:
             _maybe_set_meta(meta, "ref_spk", _infer_speaker_id(ref_name))
         tgt_name = meta.get("paired_target_item_name") or meta.get("tgt_prompt_id")
         if tgt_name is not None:
             _maybe_set_meta(meta, "tgt_spk", _infer_speaker_id(tgt_name))
+        src_spk = meta.get("src_spk")
+        ref_spk = meta.get("ref_spk")
+        tgt_spk = meta.get("tgt_spk")
+        if src_spk is not None and ref_spk is not None:
+            _maybe_set_meta(meta, "same_speaker_reference", int(str(src_spk) == str(ref_spk)))
+            _maybe_set_meta(meta, "same_speaker", int(str(src_spk) == str(ref_spk)))
+        if src_spk is not None and tgt_spk is not None:
+            _maybe_set_meta(meta, "same_speaker_target", int(str(src_spk) == str(tgt_spk)))
     eval_mode = _as_object_scalar(_extract_attr_or_key(execution, "eval_mode", batch_index))
     if eval_mode is not None:
         _maybe_set_meta(meta, "eval_mode", eval_mode)
@@ -403,6 +459,20 @@ def build_debug_record(
         eval_mode_value = model_output.get("rhythm_v3_eval_mode")
         if eval_mode_value is not None:
             _maybe_set_meta(meta, "rhythm_v3_eval_mode", _as_object_scalar(eval_mode_value))
+        for key, meta_key in (
+            ("rhythm_debug_g_support_count", "g_support_count"),
+            ("rhythm_debug_g_speech_count", "g_speech_count"),
+            ("rhythm_debug_g_valid_count", "g_valid_count"),
+            ("rhythm_debug_g_support_ratio_vs_speech", "g_support_ratio_vs_speech"),
+            ("rhythm_debug_g_support_ratio_vs_valid", "g_support_ratio_vs_valid"),
+            ("rhythm_debug_g_valid", "g_valid"),
+            ("rhythm_debug_g_drop_edge_runs", "g_drop_edge_runs"),
+            ("rhythm_debug_g_strict_speech_only", "g_strict_speech_only"),
+        ):
+            value = model_output.get(key)
+            scalar = _as_object_scalar(_to_numpy(value) if value is not None else None)
+            if scalar is not None:
+                _maybe_set_meta(meta, meta_key, scalar)
 
     return RhythmV3DebugRecord(
         item_name=None if item_name is None else str(item_name),
@@ -461,12 +531,26 @@ def build_debug_record(
         prompt_log_duration=_as_optional_vector(_extract_attr_or_key(ref_memory, "prompt_log_duration", batch_index)),
         prompt_log_residual=_as_optional_vector(_extract_attr_or_key(ref_memory, "prompt_log_residual", batch_index)),
         unit_duration_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_duration_tgt", batch_index)),
+        unit_duration_proj_raw_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_duration_proj_raw_tgt", batch_index)),
+        unit_alignment_mode_id_tgt=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_mode_id_tgt", batch_index),
+            dtype=np.int64,
+        ),
         unit_confidence_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_tgt", batch_index)),
         unit_confidence_local_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_local_tgt", batch_index)),
         unit_confidence_coarse_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_coarse_tgt", batch_index)),
         unit_alignment_coverage_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_coverage_tgt", batch_index)),
         unit_alignment_match_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_match_tgt", batch_index)),
         unit_alignment_cost_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_cost_tgt", batch_index)),
+        unit_alignment_unmatched_speech_ratio_tgt=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_unmatched_speech_ratio_tgt", batch_index)
+        ),
+        unit_alignment_mean_local_confidence_speech_tgt=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_mean_local_confidence_speech_tgt", batch_index)
+        ),
+        unit_alignment_mean_coarse_confidence_speech_tgt=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_mean_coarse_confidence_speech_tgt", batch_index)
+        ),
         paired_target_content_units_debug=_as_optional_vector(
             _extract_mapping_value(sample, "paired_target_content_units_debug", batch_index),
             dtype=np.int64,
@@ -525,6 +609,10 @@ def build_debug_record(
         ),
         projector_budget_hit_pos=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index)),
         projector_budget_hit_neg=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index)),
+        projector_boundary_hit=_as_optional_vector(_extract_attr_or_key(execution, "projector_boundary_hit", batch_index)),
+        projector_boundary_decay_applied=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_boundary_decay_applied", batch_index)
+        ),
     )
 
 
@@ -610,8 +698,9 @@ def derive_record(
         analytic_shift = (float(global_rate) - source_rate_seq).astype(np.float32)
 
     target_logstretch = None
-    if record.unit_duration_tgt is not None and source_duration is not None:
-        target_logstretch = _safe_log(record.unit_duration_tgt) - _safe_log(source_duration)
+    raw_target_duration = record.unit_duration_proj_raw_tgt if record.unit_duration_proj_raw_tgt is not None else record.unit_duration_tgt
+    if raw_target_duration is not None and source_duration is not None:
+        target_logstretch = _safe_log(raw_target_duration) - _safe_log(source_duration)
 
     oracle_bias = None
     oracle_local = None
@@ -679,7 +768,8 @@ def record_summary(
         else float(np.sum(record.prompt_duration_obs * derived.prompt_speech_mask))
     )
     source_total = 0.0 if record.source_duration_obs is None else float(np.sum(record.source_duration_obs))
-    target_total = 0.0 if record.unit_duration_tgt is None else float(np.sum(record.unit_duration_tgt))
+    raw_target_duration = record.unit_duration_proj_raw_tgt if record.unit_duration_proj_raw_tgt is not None else record.unit_duration_tgt
+    target_total = 0.0 if raw_target_duration is None else float(np.sum(raw_target_duration))
     exec_total = 0.0 if record.unit_duration_exec is None else float(np.sum(record.unit_duration_exec))
     speech_valid = derived.speech_mask > 0.5
     silence_valid = derived.silence_mask > 0.5
@@ -797,6 +887,12 @@ def record_summary(
             same_text_target = int(source_sig == tgt_sig)
         elif src_prompt_id and tgt_prompt_id:
             same_text_target = int(src_prompt_id == tgt_prompt_id)
+    same_speaker_reference = meta.get("same_speaker_reference", meta.get("same_speaker", None))
+    if same_speaker_reference is None and src_spk and ref_spk:
+        same_speaker_reference = int(src_spk == ref_spk)
+    same_speaker_target = meta.get("same_speaker_target", None)
+    if same_speaker_target is None and src_spk and tgt_spk:
+        same_speaker_target = int(src_spk == tgt_spk)
     lexical_mismatch = np.nan
     if meta.get("lexical_mismatch") is not None:
         try:
@@ -826,14 +922,33 @@ def record_summary(
         "g_src_utt": g_src_utt,
         "g_src_prefix_mean": g_src_prefix_mean,
         "delta_g": delta_g,
+        "g_support_count": _as_float(meta.get("g_support_count"), default=np.nan),
+        "g_speech_count": _as_float(meta.get("g_speech_count"), default=np.nan),
+        "g_valid_count": _as_float(meta.get("g_valid_count"), default=np.nan),
+        "g_support_ratio_vs_speech": _as_float(meta.get("g_support_ratio_vs_speech"), default=np.nan),
+        "g_support_ratio_vs_valid": _as_float(meta.get("g_support_ratio_vs_valid"), default=np.nan),
+        "g_valid": _as_float(meta.get("g_valid"), default=np.nan),
+        "g_drop_edge_runs": _as_float(meta.get("g_drop_edge_runs"), default=np.nan),
+        "g_strict_speech_only": _as_float(meta.get("g_strict_speech_only"), default=np.nan),
         "c_star": c_star,
         "zbar_sp_star": zbar_sp_star,
         "tempo_src": tempo_src,
         "tempo_out": tempo_out,
+        "tempo_delta": (
+            float(tempo_out - tempo_src)
+            if np.isfinite(tempo_out) and np.isfinite(tempo_src)
+            else float("nan")
+        ),
         "ref_len_sec": float(prompt_total * float(unit_step_ms) / 1000.0),
         "speech_ratio": float(prompt_speech / max(prompt_total, 1.0e-6)),
+        "same_text": np.nan if same_text_reference is None else float(same_text_reference),
         "same_text_reference": np.nan if same_text_reference is None else float(same_text_reference),
         "same_text_target": np.nan if same_text_target is None else float(same_text_target),
+        "same_speaker": np.nan if same_speaker_reference is None else float(same_speaker_reference),
+        "same_speaker_reference": np.nan if same_speaker_reference is None else float(same_speaker_reference),
+        "same_speaker_target": np.nan if same_speaker_target is None else float(same_speaker_target),
+        "alignment_kind": str(meta.get("alignment_kind", "")),
+        "target_duration_surface": str(meta.get("target_duration_surface", "")),
         "lexical_mismatch": lexical_mismatch,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,
@@ -842,6 +957,17 @@ def record_summary(
         "prefix_discrepancy": float(meta.get("prefix_discrepancy")) if meta.get("prefix_discrepancy") is not None else np.nan,
         "budget_hit_pos_rate": budget_hit_pos_rate,
         "budget_hit_neg_rate": budget_hit_neg_rate,
+        "projector_boundary_hit_rate": (
+            float(np.mean(record.projector_boundary_hit.reshape(-1) > 0.5))
+            if record.projector_boundary_hit is not None and record.projector_boundary_hit.size > 0
+            else np.nan
+        ),
+        "projector_boundary_decay_rate": (
+            float(np.mean(record.projector_boundary_decay_applied.reshape(-1) > 0.5))
+            if getattr(record, "projector_boundary_decay_applied", None) is not None
+            and record.projector_boundary_decay_applied.size > 0
+            else np.nan
+        ),
         "cumulative_drift": cumulative_prefix_drift,
         "item_name": record.item_name or "",
         "split": record.split or "",
@@ -871,6 +997,21 @@ def record_summary(
             np.nan
             if record.unit_alignment_cost_tgt is None
             else float(np.mean(record.unit_alignment_cost_tgt))
+        ),
+        "alignment_unmatched_speech_ratio": (
+            np.nan
+            if record.unit_alignment_unmatched_speech_ratio_tgt is None
+            else float(np.asarray(record.unit_alignment_unmatched_speech_ratio_tgt).reshape(-1)[0])
+        ),
+        "alignment_mean_local_confidence_speech": (
+            np.nan
+            if record.unit_alignment_mean_local_confidence_speech_tgt is None
+            else float(np.asarray(record.unit_alignment_mean_local_confidence_speech_tgt).reshape(-1)[0])
+        ),
+        "alignment_mean_coarse_confidence_speech": (
+            np.nan
+            if record.unit_alignment_mean_coarse_confidence_speech_tgt is None
+            else float(np.asarray(record.unit_alignment_mean_coarse_confidence_speech_tgt).reshape(-1)[0])
         ),
         "global_rate": g_ref,
         "oracle_bias": c_star,
