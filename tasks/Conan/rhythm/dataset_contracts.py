@@ -264,6 +264,8 @@ class RhythmDatasetCacheContract:
         }
         if "source_silence_mask" in cache:
             lengths["source_silence_mask"] = int(np.asarray(cache["source_silence_mask"]).reshape(-1).shape[0])
+        if "source_run_stability" in cache:
+            lengths["source_run_stability"] = int(np.asarray(cache["source_run_stability"]).reshape(-1).shape[0])
         if len(set(lengths.values())) != 1:
             raise RuntimeError(
                 f"Rhythm source cache shape mismatch in {item_name}: {lengths}. Re-binarize the dataset."
@@ -415,6 +417,13 @@ class RhythmDatasetCacheContract:
 
     def validate_target_shapes(self, targets, *, item_name: str, expected_units: int):
         unit_keys = [
+            "unit_duration_tgt",
+            "unit_confidence_tgt",
+            "unit_confidence_local_tgt",
+            "unit_confidence_coarse_tgt",
+            "unit_alignment_coverage_tgt",
+            "unit_alignment_match_tgt",
+            "unit_alignment_cost_tgt",
             "rhythm_speech_exec_tgt",
             "rhythm_pause_exec_tgt",
             "rhythm_blank_exec_tgt",

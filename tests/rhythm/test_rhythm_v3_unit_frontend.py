@@ -52,6 +52,30 @@ def test_duration_unit_frontend_emits_explicit_silence_runs_into_source_batch():
     assert torch.allclose(batch.source_silence_mask, torch.tensor([[0.0, 1.0, 0.0, 1.0]], dtype=torch.float32))
 
 
+def test_duration_unit_frontend_from_precomputed_preserves_float_source_duration_obs():
+    frontend = DurationUnitFrontend(vocab_size=64, silent_token=57, emit_silence_runs=True)
+    batch = frontend.from_precomputed(
+        content_units=torch.tensor([[1, 57, 2]], dtype=torch.long),
+        source_duration_obs=torch.tensor([[1.5, 2.25, 3.75]], dtype=torch.float32),
+        unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        source_silence_mask=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+    )
+    assert batch.source_duration_obs.dtype == torch.float32
+    assert torch.allclose(batch.source_duration_obs, torch.tensor([[1.5, 2.25, 3.75]], dtype=torch.float32))
+
+
+def test_duration_unit_frontend_from_precomputed_preserves_source_run_stability():
+    frontend = DurationUnitFrontend(vocab_size=64, silent_token=57, emit_silence_runs=True)
+    batch = frontend.from_precomputed(
+        content_units=torch.tensor([[1, 57, 2]], dtype=torch.long),
+        source_duration_obs=torch.tensor([[1.5, 2.25, 3.75]], dtype=torch.float32),
+        unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        source_silence_mask=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+        source_run_stability=torch.tensor([[0.9, 0.2, 0.8]], dtype=torch.float32),
+    )
+    assert torch.allclose(batch.source_run_stability, torch.tensor([[0.9, 0.2, 0.8]], dtype=torch.float32))
+
+
 def test_shared_source_cache_builder_can_materialize_explicit_silence_runs():
     cache = build_source_rhythm_cache(
         [1, 1, 57, 57, 2, 57, 57, 3],
@@ -61,3 +85,84 @@ def test_shared_source_cache_builder_can_materialize_explicit_silence_runs():
     assert cache["content_units"].tolist() == [1, 57, 2, 57, 3]
     assert cache["dur_anchor_src"].tolist() == [2, 2, 1, 2, 1]
     assert cache["source_silence_mask"].tolist() == [0.0, 1.0, 0.0, 1.0, 0.0]
+    assert "source_run_stability" in cache
+    assert len(cache["source_run_stability"].tolist()) == len(cache["content_units"].tolist())
+
+
+def test_duration_unit_frontend_marks_short_open_runs_less_stable_than_long_sealed_runs():
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=1,
+        debounce_min_run_frames=2,
+    )
+    batch = frontend.from_content_tensor(
+        torch.tensor([[1, 1, 2]], dtype=torch.long),
+        mark_last_open=True,
+    )
+    assert batch.source_run_stability.shape == batch.source_duration_obs.shape
+    assert float(batch.source_run_stability[0, 0].item()) > float(batch.source_run_stability[0, 1].item())
+
+
+
+def test_shared_source_cache_builder_debounces_short_silence_flicker_in_offline_path():
+    cache = build_source_rhythm_cache(
+        [1, 57, 1],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+    assert cache["content_units"].tolist() == [1]
+    assert cache["dur_anchor_src"].tolist() == [3]
+    assert cache["source_silence_mask"].tolist() == [0.0]
+
+
+def test_duration_unit_frontend_stream_state_debounces_short_tail_silence_flicker():
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=2,
+        debounce_min_run_frames=2,
+    )
+    state = frontend.init_stream_state(batch_size=1)
+    _, state = frontend.step_content_tensor(
+        torch.tensor([[1]], dtype=torch.long),
+        state,
+        content_lengths=torch.tensor([1], dtype=torch.long),
+        mark_last_open=True,
+    )
+    batch, state = frontend.step_content_tensor(
+        torch.tensor([[57, 1]], dtype=torch.long),
+        state,
+        content_lengths=torch.tensor([2], dtype=torch.long),
+        mark_last_open=True,
+    )
+    assert torch.equal(state.rows[0].units.cpu(), torch.tensor([1], dtype=torch.long))
+    assert torch.equal(state.rows[0].durations.cpu(), torch.tensor([3], dtype=torch.long))
+    assert torch.equal(batch.content_units, torch.tensor([[1]], dtype=torch.long))
+    assert torch.allclose(batch.source_duration_obs, torch.tensor([[3.0]], dtype=torch.float32))
+    assert torch.allclose(batch.source_silence_mask, torch.tensor([[0.0]], dtype=torch.float32))
+
+
+def test_duration_unit_frontend_matches_offline_source_cache_after_debounce():
+    tokens = torch.tensor([[1, 57, 1, 2]], dtype=torch.long)
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=2,
+        debounce_min_run_frames=2,
+    )
+    batch = frontend.from_content_tensor(tokens, mark_last_open=False)
+    cache = build_source_rhythm_cache(
+        [1, 57, 1, 2],
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=2,
+        debounce_min_run_frames=2,
+    )
+    assert batch.content_units[0, :2].tolist() == cache["content_units"].tolist()
+    assert batch.source_duration_obs[0, :2].tolist() == cache["dur_anchor_src"].tolist()
+    assert batch.source_silence_mask[0, :2].tolist() == cache["source_silence_mask"].tolist()

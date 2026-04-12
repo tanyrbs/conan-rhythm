@@ -46,7 +46,9 @@ class RhythmDatasetSampleAssembler:
             "prompt_phrase_group_pos",
             "prompt_phrase_final_mask",
             "source_silence_mask",
+            "source_run_stability",
             "rhythm_offline_source_silence_mask",
+            "rhythm_offline_source_run_stability",
             "slow_rhythm_summary",
             "planner_slow_rhythm_summary",
             "selector_meta_scores",
@@ -81,6 +83,12 @@ class RhythmDatasetSampleAssembler:
             "prompt_duration_obs",
             "prompt_unit_mask",
             "unit_duration_tgt",
+            "unit_confidence_tgt",
+            "unit_confidence_local_tgt",
+            "unit_confidence_coarse_tgt",
+            "unit_alignment_coverage_tgt",
+            "unit_alignment_match_tgt",
+            "unit_alignment_cost_tgt",
         }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:

@@ -9,13 +9,57 @@ from utils.commons.dataset_utils import collate_1d_or_2d
 
 from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
 from modules.Conan.rhythm.supervision import RHYTHM_CACHE_VERSION, build_source_rhythm_cache
-from modules.Conan.rhythm.unitizer import estimate_boundary_confidence
+from modules.Conan.rhythm.unitizer import estimate_boundary_confidence, estimate_run_stability
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
 
 
 class CommonRhythmDatasetMixin:
+    @staticmethod
+    def _rhythm_text_signature(item) -> tuple | str | None:
+        if not isinstance(item, dict):
+            return None
+        for key in ("ph_token", "txt_token", "txt_tokens", "word_token", "word_tokens"):
+            value = item.get(key)
+            if value is None:
+                continue
+            arr = np.asarray(value).reshape(-1)
+            if arr.size > 0:
+                return (key, tuple(arr.tolist()))
+        for key in ("ph", "txt", "word", "words"):
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return (key, text)
+        return None
+
+    def _same_rhythm_text(self, item_a, item_b) -> bool:
+        sig_a = self._rhythm_text_signature(item_a)
+        sig_b = self._rhythm_text_signature(item_b)
+        return sig_a is not None and sig_b is not None and sig_a == sig_b
+
+    def _disallow_same_text_reference(self) -> bool:
+        return bool(
+            self.hparams.get(
+                "rhythm_v3_disallow_same_text_reference",
+                self.hparams.get("rhythm_disallow_same_text_reference", True),
+            )
+        )
+
+    def _disallow_same_text_paired_target(self) -> bool:
+        return bool(
+            self.hparams.get(
+                "rhythm_v3_disallow_same_text_paired_target",
+                self.hparams.get(
+                    "rhythm_disallow_same_text_paired_target",
+                    self._disallow_same_text_reference(),
+                ),
+            )
+        )
+
     def _should_emit_explicit_silence_runs(self) -> bool:
         resolver = getattr(self, "_should_emit_duration_v3_silence_runs", None)
         if callable(resolver):
@@ -164,11 +208,14 @@ class CommonRhythmDatasetMixin:
         return {
             "content_units": ("long", 0),
             "dur_anchor_src": ("float", 0.0),
+            "unit_anchor_base": ("float", 0.0),
+            "unit_rate_log_base": ("float", 0.0),
             "open_run_mask": ("long", 0),
             "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
             "boundary_confidence": ("float", 0.0),
             "source_silence_mask": ("float", 0.0),
+            "source_run_stability": ("float", 0.0),
             "source_boundary_cue": ("float", 0.0),
             "phrase_group_index": ("long", 0),
             "phrase_group_pos": ("float", 0.0),
@@ -176,6 +223,7 @@ class CommonRhythmDatasetMixin:
             "rhythm_offline_content_units": ("long", 0),
             "rhythm_offline_dur_anchor_src": ("long", 0),
             "rhythm_offline_source_silence_mask": ("float", 0.0),
+            "rhythm_offline_source_run_stability": ("float", 0.0),
             "rhythm_offline_open_run_mask": ("long", 0),
             "rhythm_offline_sealed_mask": ("float", 0.0),
             "rhythm_offline_sep_hint": ("long", 0),
@@ -191,11 +239,18 @@ class CommonRhythmDatasetMixin:
             "prompt_unit_mask": ("float", 0.0),
             "prompt_valid_mask": ("float", 0.0),
             "prompt_speech_mask": ("float", 0.0),
+            "prompt_unit_anchor_base": ("float", 0.0),
+            "prompt_log_base": ("float", 0.0),
             "prompt_source_boundary_cue": ("float", 0.0),
             "prompt_phrase_group_pos": ("float", 0.0),
             "prompt_phrase_final_mask": ("float", 0.0),
             "unit_duration_tgt": ("float", 0.0),
             "unit_confidence_tgt": ("float", 0.0),
+            "unit_confidence_local_tgt": ("float", 0.0),
+            "unit_confidence_coarse_tgt": ("float", 0.0),
+            "unit_alignment_coverage_tgt": ("float", 0.0),
+            "unit_alignment_match_tgt": ("float", 0.0),
+            "unit_alignment_cost_tgt": ("float", 0.0),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -413,6 +468,18 @@ class CommonRhythmDatasetMixin:
             estimate_boundary_confidence(out_durations, out_sep, open_run_mask.tolist()),
             dtype=np.float32,
         )
+        run_stability = np.asarray(
+            estimate_run_stability(
+                out_durations,
+                out_silence,
+                open_run_mask.tolist(),
+                sep_hint=out_sep,
+                boundary_confidence=boundary_confidence.tolist(),
+                min_speech_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
+                min_silence_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
+            ),
+            dtype=np.float32,
+        )
         adapted = {
             "content_units": np.asarray(out_units, dtype=np.int64),
             "dur_anchor_src": np.asarray(out_durations, dtype=np.int64),
@@ -420,6 +487,7 @@ class CommonRhythmDatasetMixin:
             "sealed_mask": sealed_mask,
             "sep_hint": np.asarray(out_sep, dtype=np.int64),
             "boundary_confidence": boundary_confidence,
+            "source_run_stability": run_stability,
         }
         if full_silence is not None:
             adapted["source_silence_mask"] = np.asarray(out_silence, dtype=np.float32)
@@ -513,6 +581,8 @@ class CommonRhythmDatasetMixin:
             cache = {key: item[key] for key in cache_keys}
             if has_source_silence_cache:
                 cache["source_silence_mask"] = item["source_silence_mask"]
+            if "source_run_stability" in item:
+                cache["source_run_stability"] = item["source_run_stability"]
             self._validate_source_cache_shapes(
                 cache,
                 item_name=str(item.get("item_name", "<unknown-item>")),
@@ -542,6 +612,7 @@ class CommonRhythmDatasetMixin:
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
             emit_silence_runs=explicit_silence,
+            debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
 
@@ -571,6 +642,27 @@ class CommonRhythmDatasetMixin:
         )
 
     def _get_reference_rhythm_conditioning(self, ref_item, sample, *, target_mode: str, item=None):
+        if (
+            self._use_duration_v3_dataset_contract()
+            and self._disallow_same_text_reference()
+            and item is not None
+            and ref_item is None
+        ):
+            raise RuntimeError(
+                "rhythm_v3 prompt conditioning resolved to self-reference, which is disabled by default for cross-text training. "
+                "Provide an external different-text reference or set rhythm_v3_disallow_same_text_reference=false."
+            )
+        if (
+            self._use_duration_v3_dataset_contract()
+            and self._disallow_same_text_reference()
+            and item is not None
+            and ref_item is not None
+            and self._same_rhythm_text(item, ref_item)
+        ):
+            raise RuntimeError(
+                "rhythm_v3 reference conditioning forbids same-text reference items by default. "
+                "Provide a different-text reference or set rhythm_v3_disallow_same_text_reference=false."
+            )
         prompt_conditioning = self._build_reference_prompt_unit_conditioning(
             ref_item if ref_item is not None else item,
             target_mode=target_mode,
@@ -587,7 +679,7 @@ class CommonRhythmDatasetMixin:
         )
 
     def _build_paired_target_rhythm_conditioning(self, paired_target_item, sample, *, target_mode: str, item=None):
-        del sample, item
+        del sample
         if not self._use_duration_v3_dataset_contract():
             return {}
         builder = getattr(self, "_build_paired_target_projection_conditioning", None)
@@ -596,6 +688,7 @@ class CommonRhythmDatasetMixin:
         return builder(
             paired_target_item,
             target_mode=target_mode,
+            source_item=item,
         )
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, paired_target_conditioning, sample):

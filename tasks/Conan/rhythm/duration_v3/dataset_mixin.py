@@ -29,92 +29,94 @@ def _resolve_run_silence_mask(*, size: int, silence_mask=None) -> np.ndarray:
     return out
 
 
-def _expand_run_sequence(
+def _filter_valid_runs(
     *,
     units: np.ndarray,
     durations: np.ndarray,
     silence_mask: np.ndarray,
     valid_mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    token_ids: list[int] = []
-    token_run_index: list[int] = []
-    token_silence: list[int] = []
-    for run_idx, (unit_id, duration, silence_flag) in enumerate(zip(units.tolist(), durations.tolist(), silence_mask.tolist())):
-        if valid_mask is not None and (run_idx >= len(valid_mask) or float(valid_mask[run_idx]) <= 0.5):
-            continue
-        count = int(max(0, round(float(duration))))
-        if count <= 0:
-            continue
-        token_ids.extend([int(unit_id)] * count)
-        token_run_index.extend([int(run_idx)] * count)
-        token_silence.extend([1 if float(silence_flag) > 0.5 else 0] * count)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    keep = np.asarray(durations, dtype=np.float32).reshape(-1) > 0.0
+    if valid_mask is not None:
+        keep = keep & (_as_float32_1d(valid_mask) > 0.5)
+    indices = np.nonzero(keep)[0].astype(np.int64)
     return (
-        np.asarray(token_ids, dtype=np.int64),
-        np.asarray(token_run_index, dtype=np.int64),
-        np.asarray(token_silence, dtype=np.int64),
+        _as_int64_1d(units)[indices],
+        _as_float32_1d(durations)[indices],
+        _as_float32_1d(silence_mask)[indices],
+        indices,
     )
 
 
-def _align_target_tokens_to_source(
+def _align_target_runs_to_source(
     *,
-    source_tokens: np.ndarray,
+    source_units: np.ndarray,
+    source_durations: np.ndarray,
     source_silence: np.ndarray,
-    target_tokens: np.ndarray,
+    target_units: np.ndarray,
+    target_durations: np.ndarray,
     target_silence: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    num_source = int(source_tokens.shape[0])
-    num_target = int(target_tokens.shape[0])
+    num_source = int(source_units.shape[0])
+    num_target = int(target_units.shape[0])
     if num_source <= 0 or num_target <= 0:
-        raise RuntimeError("paired projection requires non-empty expanded source and target token streams.")
+        raise RuntimeError("paired projection requires non-empty source and target run lattices.")
 
-    local_cost = np.zeros((num_source, num_target), dtype=np.float32)
-    gap_penalty = np.float32(0.10)
-    for src_idx in range(num_source):
-        src_token = int(source_tokens[src_idx])
-        src_is_sil = bool(source_silence[src_idx] > 0)
-        src_pos = float(src_idx + 1) / float(max(1, num_source))
-        for tgt_idx in range(num_target):
-            tgt_token = int(target_tokens[tgt_idx])
-            tgt_is_sil = bool(target_silence[tgt_idx] > 0)
-            tgt_pos = float(tgt_idx + 1) / float(max(1, num_target))
-            if src_token == tgt_token and src_is_sil == tgt_is_sil:
-                base = 0.0
-            elif src_is_sil != tgt_is_sil:
-                base = 1.60
-            elif src_token == tgt_token:
-                base = 0.15
-            else:
-                base = 0.90
-            local_cost[src_idx, tgt_idx] = np.float32(base + (0.15 * abs(src_pos - tgt_pos)))
+    gap_penalty = np.float32(0.40)
+    src_pos = (np.arange(num_source, dtype=np.float32) + 1.0) / float(max(1, num_source))
+    tgt_pos = (np.arange(num_target, dtype=np.float32) + 1.0) / float(max(1, num_target))
+    token_match = source_units[:, None] == target_units[None, :]
+    sil_match = (source_silence[:, None] > 0.5) == (target_silence[None, :] > 0.5)
+    log_duration_delta = np.abs(
+        np.log(source_durations[:, None].clip(min=1.0e-4))
+        - np.log(target_durations[None, :].clip(min=1.0e-4))
+    ).astype(np.float32)
+    local_cost = np.where(
+        token_match & sil_match,
+        0.0,
+        np.where(
+            ~sil_match,
+            1.60,
+            np.where(token_match, 0.15, 0.90),
+        ),
+    ).astype(np.float32)
+    local_cost += (0.20 * log_duration_delta).astype(np.float32)
+    local_cost += (0.15 * np.abs(src_pos[:, None] - tgt_pos[None, :])).astype(np.float32)
 
-    dp = np.full((num_source + 1, num_target + 1), np.inf, dtype=np.float32)
     back = np.zeros((num_source + 1, num_target + 1), dtype=np.uint8)
-    dp[0, 0] = 0.0
-    for src_idx in range(1, num_source + 1):
-        dp[src_idx, 0] = dp[src_idx - 1, 0] + 1.0
-        back[src_idx, 0] = 1
+    dp_prev = np.full((num_target + 1,), np.inf, dtype=np.float32)
+    dp_curr = np.full((num_target + 1,), np.inf, dtype=np.float32)
+    dp_prev[0] = 0.0
     for tgt_idx in range(1, num_target + 1):
-        dp[0, tgt_idx] = dp[0, tgt_idx - 1] + 1.0
+        dp_prev[tgt_idx] = dp_prev[tgt_idx - 1] + gap_penalty
         back[0, tgt_idx] = 2
 
+    band = int(max(8, round(0.15 * max(num_source, num_target))))
     for src_idx in range(1, num_source + 1):
-        for tgt_idx in range(1, num_target + 1):
+        dp_curr.fill(np.inf)
+        dp_curr[0] = dp_prev[0] + gap_penalty
+        back[src_idx, 0] = 1
+        center = int(round((src_idx - 1) * num_target / float(max(1, num_source))))
+        left = max(1, center - band)
+        right = min(num_target + 1, center + band + 1)
+        for tgt_idx in range(left, right):
             cost = local_cost[src_idx - 1, tgt_idx - 1]
-            diag = dp[src_idx - 1, tgt_idx - 1]
-            up = dp[src_idx - 1, tgt_idx] + gap_penalty
-            left = dp[src_idx, tgt_idx - 1] + gap_penalty
-            if diag <= up and diag <= left:
-                dp[src_idx, tgt_idx] = cost + diag
+            diag = dp_prev[tgt_idx - 1]
+            up = dp_prev[tgt_idx] + gap_penalty
+            left_cost = dp_curr[tgt_idx - 1] + gap_penalty
+            if diag <= up and diag <= left_cost:
+                dp_curr[tgt_idx] = cost + diag
                 back[src_idx, tgt_idx] = 0
-            elif up <= left:
-                dp[src_idx, tgt_idx] = cost + up
+            elif up <= left_cost:
+                dp_curr[tgt_idx] = cost + up
                 back[src_idx, tgt_idx] = 1
             else:
-                dp[src_idx, tgt_idx] = cost + left
+                dp_curr[tgt_idx] = cost + left_cost
                 back[src_idx, tgt_idx] = 2
+        dp_prev, dp_curr = dp_curr, dp_prev
 
-    assigned_source = np.zeros((num_target,), dtype=np.int64)
-    assigned_cost = np.zeros((num_target,), dtype=np.float32)
+    assigned_source = np.full((num_target,), -1, dtype=np.int64)
+    assigned_cost = np.full((num_target,), gap_penalty, dtype=np.float32)
     src_idx = num_source
     tgt_idx = num_target
     while src_idx > 0 or tgt_idx > 0:
@@ -127,8 +129,9 @@ def _align_target_tokens_to_source(
         elif move == 1:
             src_idx -= 1
         else:
-            assigned_source[tgt_idx - 1] = max(0, src_idx - 1)
-            assigned_cost[tgt_idx - 1] = local_cost[max(0, src_idx - 1), tgt_idx - 1]
+            if src_idx > 0:
+                assigned_source[tgt_idx - 1] = src_idx - 1
+                assigned_cost[tgt_idx - 1] = local_cost[src_idx - 1, tgt_idx - 1]
             tgt_idx -= 1
     return assigned_source, assigned_cost
 
@@ -142,30 +145,42 @@ def _project_target_runs_onto_source(
     target_durations: np.ndarray,
     target_valid_mask: np.ndarray,
     target_speech_mask: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+ ) -> dict[str, np.ndarray]:
     source_silence_mask = _resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
     target_silence_mask = ((target_valid_mask > 0.5) & ~(target_speech_mask > 0.5)).astype(np.float32)
-    src_tokens, src_token_to_run, src_token_silence = _expand_run_sequence(
+    (
+        src_units_valid,
+        src_durations_valid,
+        src_silence_valid,
+        src_run_index,
+    ) = _filter_valid_runs(
         units=source_units,
         durations=source_durations,
         silence_mask=source_silence_mask,
     )
-    tgt_tokens, _, tgt_token_silence = _expand_run_sequence(
+    (
+        tgt_units_valid,
+        tgt_durations_valid,
+        tgt_silence_valid,
+        _,
+    ) = _filter_valid_runs(
         units=target_units,
         durations=target_durations,
         silence_mask=target_silence_mask,
         valid_mask=target_valid_mask,
     )
-    if src_tokens.size <= 0:
+    if src_units_valid.size <= 0:
         raise RuntimeError("paired projection requires a non-empty source run lattice.")
-    if tgt_tokens.size <= 0:
+    if tgt_units_valid.size <= 0:
         raise RuntimeError("paired projection requires a non-empty paired target prompt lattice.")
 
-    assigned_source, assigned_cost = _align_target_tokens_to_source(
-        source_tokens=src_tokens,
-        source_silence=src_token_silence,
-        target_tokens=tgt_tokens,
-        target_silence=tgt_token_silence,
+    assigned_source, assigned_cost = _align_target_runs_to_source(
+        source_units=src_units_valid,
+        source_durations=src_durations_valid,
+        source_silence=src_silence_valid,
+        target_units=tgt_units_valid,
+        target_durations=tgt_durations_valid,
+        target_silence=tgt_silence_valid,
     )
 
     num_source_runs = int(source_units.shape[0])
@@ -173,14 +188,20 @@ def _project_target_runs_onto_source(
     aligned_target = np.zeros((num_source_runs,), dtype=np.float32)
     exact_match = np.zeros((num_source_runs,), dtype=np.float32)
     cost_mass = np.zeros((num_source_runs,), dtype=np.float32)
-    source_support = np.bincount(src_token_to_run, minlength=num_source_runs).astype(np.float32)
+    source_support = np.zeros((num_source_runs,), dtype=np.float32)
+    source_support[src_run_index] = 1.0
 
     for tgt_idx, src_token_idx in enumerate(assigned_source.tolist()):
-        safe_src_token_idx = int(max(0, min(src_token_idx, int(src_tokens.shape[0]) - 1)))
-        run_idx = int(src_token_to_run[safe_src_token_idx])
-        projected[run_idx] += 1.0
+        if src_token_idx < 0 or src_token_idx >= int(src_run_index.shape[0]):
+            continue
+        safe_src_token_idx = int(src_token_idx)
+        run_idx = int(src_run_index[safe_src_token_idx])
+        projected[run_idx] += float(tgt_durations_valid[tgt_idx])
         aligned_target[run_idx] += 1.0
-        if int(src_tokens[safe_src_token_idx]) == int(tgt_tokens[tgt_idx]) and int(src_token_silence[safe_src_token_idx]) == int(tgt_token_silence[tgt_idx]):
+        if (
+            int(src_units_valid[safe_src_token_idx]) == int(tgt_units_valid[tgt_idx])
+            and int(src_silence_valid[safe_src_token_idx] > 0.5) == int(tgt_silence_valid[tgt_idx] > 0.5)
+        ):
             exact_match[run_idx] += 1.0
         cost_mass[run_idx] += float(assigned_cost[tgt_idx])
 
@@ -190,6 +211,7 @@ def _project_target_runs_onto_source(
         out=np.zeros_like(aligned_target),
         where=source_support > 0.0,
     )
+    coverage = np.clip(coverage, 0.0, 1.0).astype(np.float32)
     match_rate = np.divide(
         exact_match,
         np.clip(aligned_target, 1.0, None),
@@ -202,20 +224,40 @@ def _project_target_runs_onto_source(
         out=np.zeros_like(cost_mass),
         where=aligned_target > 0.0,
     )
-    confidence = np.clip(
-        0.20 + (0.40 * coverage) + (0.25 * match_rate) + (0.15 * np.exp(-mean_cost)),
-        0.05,
+    mass_agree = np.divide(
+        np.minimum(projected, source_durations.astype(np.float32)),
+        np.maximum(np.maximum(projected, source_durations.astype(np.float32)), 1.0),
+        out=np.zeros_like(projected),
+        where=(projected > 0.0) | (source_durations.astype(np.float32) > 0.0),
+    )
+    confidence_coarse = np.clip(
+        (0.70 * np.sqrt(np.clip(mass_agree, 0.0, 1.0))) + (0.15 * coverage) + (0.15 * np.exp(-0.5 * mean_cost)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    confidence_local = np.clip(
+        (0.55 * mass_agree) + (0.30 * match_rate) + (0.15 * np.exp(-mean_cost)),
+        0.0,
         1.0,
     ).astype(np.float32)
 
     source_is_silence = source_silence_mask > 0.5
-    projected[source_is_silence] = source_durations[source_is_silence].astype(np.float32)
-    confidence[source_is_silence] = np.maximum(confidence[source_is_silence], 1.0)
+    projected[source_is_silence] = np.maximum(projected[source_is_silence], 1.0).astype(np.float32)
+    confidence_local[source_is_silence] = 0.0
+    confidence_coarse[source_is_silence] = 0.0
 
     speech_zero = (~source_is_silence) & (projected <= 0.0)
-    projected[speech_zero] = 1.0
-    confidence[speech_zero] = np.minimum(confidence[speech_zero], 0.10)
-    return projected.astype(np.float32), confidence.astype(np.float32)
+    projected[speech_zero] = source_durations[speech_zero].astype(np.float32)
+    confidence_local[speech_zero] = 0.0
+    confidence_coarse[speech_zero] = np.minimum(confidence_coarse[speech_zero], 0.20).astype(np.float32)
+    return {
+        "projected": projected.astype(np.float32),
+        "confidence_local": confidence_local.astype(np.float32),
+        "confidence_coarse": confidence_coarse.astype(np.float32),
+        "coverage": coverage.astype(np.float32),
+        "match_rate": match_rate.astype(np.float32),
+        "mean_cost": mean_cost.astype(np.float32),
+    }
 
 
 class DurationV3DatasetMixin:
@@ -329,7 +371,14 @@ class DurationV3DatasetMixin:
         augmented["prompt_unit_mask"] = keep_np
         augmented["prompt_valid_mask"] = keep_np
         augmented["prompt_speech_mask"] = prompt_speech_mask * keep_np
-        for key in ("prompt_duration_obs", "prompt_source_boundary_cue", "prompt_phrase_group_pos", "prompt_phrase_final_mask"):
+        for key in (
+            "prompt_duration_obs",
+            "prompt_unit_anchor_base",
+            "prompt_log_base",
+            "prompt_source_boundary_cue",
+            "prompt_phrase_group_pos",
+            "prompt_phrase_final_mask",
+        ):
             if key in augmented:
                 augmented[key] = np.asarray(augmented[key], dtype=np.float32) * keep_np
         return augmented
@@ -347,6 +396,9 @@ class DurationV3DatasetMixin:
                 "content_units": prompt_item["content_units"],
                 "dur_anchor_src": prompt_item["dur_anchor_src"],
             }
+            for extra_key in ("unit_anchor_base", "unit_rate_log_base"):
+                if extra_key in prompt_item:
+                    source_cache[extra_key] = prompt_item[extra_key]
             if has_prompt_silence:
                 source_cache["source_silence_mask"] = prompt_item["source_silence_mask"]
             if "sep_hint" in prompt_item:
@@ -361,6 +413,7 @@ class DurationV3DatasetMixin:
                 separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
                 tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
                 emit_silence_runs=explicit_silence,
+                debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             )
         elif has_cached_prompt_source and target_mode != "cached_only":
@@ -372,6 +425,7 @@ class DurationV3DatasetMixin:
                         separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
                         tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
                         emit_silence_runs=True,
+                        debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                     )
                 else:
@@ -384,6 +438,9 @@ class DurationV3DatasetMixin:
                     "content_units": prompt_item["content_units"],
                     "dur_anchor_src": prompt_item["dur_anchor_src"],
                 }
+                for extra_key in ("unit_anchor_base", "unit_rate_log_base"):
+                    if extra_key in prompt_item:
+                        source_cache[extra_key] = prompt_item[extra_key]
                 if "sep_hint" in prompt_item:
                     source_cache["sep_hint"] = prompt_item["sep_hint"]
                 for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask"):
@@ -404,26 +461,31 @@ class DurationV3DatasetMixin:
             silence_mask=source_cache.get("source_silence_mask"),
         )
         prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clip(0.0, 1.0))
+        conditioning = {
+            "prompt_content_units": prompt_content_units,
+            "prompt_duration_obs": prompt_duration_obs,
+            "prompt_unit_mask": prompt_valid_mask,
+            "prompt_valid_mask": prompt_valid_mask,
+            "prompt_speech_mask": prompt_speech_mask,
+            "prompt_source_boundary_cue": np.asarray(
+                source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
+            "prompt_phrase_group_pos": np.asarray(
+                source_cache.get("phrase_group_pos", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
+            "prompt_phrase_final_mask": np.asarray(
+                source_cache.get("phrase_final_mask", np.zeros_like(prompt_duration_obs)),
+                dtype=np.float32,
+            ),
+        }
+        if "unit_anchor_base" in source_cache:
+            conditioning["prompt_unit_anchor_base"] = np.asarray(source_cache["unit_anchor_base"], dtype=np.float32)
+        if "unit_rate_log_base" in source_cache:
+            conditioning["prompt_log_base"] = np.asarray(source_cache["unit_rate_log_base"], dtype=np.float32)
         return self._maybe_augment_prompt_unit_conditioning(
-            {
-                "prompt_content_units": prompt_content_units,
-                "prompt_duration_obs": prompt_duration_obs,
-                "prompt_unit_mask": prompt_valid_mask,
-                "prompt_valid_mask": prompt_valid_mask,
-                "prompt_speech_mask": prompt_speech_mask,
-                "prompt_source_boundary_cue": np.asarray(
-                    source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
-                    dtype=np.float32,
-                ),
-                "prompt_phrase_group_pos": np.asarray(
-                    source_cache.get("phrase_group_pos", np.zeros_like(prompt_duration_obs)),
-                    dtype=np.float32,
-                ),
-                "prompt_phrase_final_mask": np.asarray(
-                    source_cache.get("phrase_final_mask", np.zeros_like(prompt_duration_obs)),
-                    dtype=np.float32,
-                ),
-            },
+            conditioning,
             item_name=item_name,
         )
 
@@ -446,7 +508,7 @@ class DurationV3DatasetMixin:
             _as_float32_1d(target_speech),
         )
 
-    def _build_paired_target_projection_conditioning(self, paired_target_item, *, target_mode: str):
+    def _build_paired_target_projection_conditioning(self, paired_target_item, *, target_mode: str, source_item=None):
         if paired_target_item is None:
             return {}
         source_cache = None
@@ -475,6 +537,7 @@ class DurationV3DatasetMixin:
                 separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
                 tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
                 emit_silence_runs=explicit_silence,
+                debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             )
         elif has_cached_target_source and target_mode != "cached_only":
@@ -486,6 +549,7 @@ class DurationV3DatasetMixin:
                         separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
                         tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
                         emit_silence_runs=True,
+                        debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                     )
                 else:
@@ -519,6 +583,14 @@ class DurationV3DatasetMixin:
             "paired_target_valid_mask": paired_target_valid_mask,
             "paired_target_speech_mask": paired_target_speech_mask,
             "paired_target_item_name": np.asarray([item_name], dtype=object),
+            "paired_target_text_signature": np.asarray(
+                [self._rhythm_text_signature(paired_target_item if isinstance(paired_target_item, dict) else None)],
+                dtype=object,
+            ),
+            "source_text_signature": np.asarray(
+                [self._rhythm_text_signature(source_item if isinstance(source_item, dict) else None)],
+                dtype=object,
+            ),
         }
 
     def _build_paired_duration_v3_targets(self, *, item, source_cache, paired_target_conditioning):
@@ -534,7 +606,7 @@ class DurationV3DatasetMixin:
         )
         target_units, target_duration, target_valid, target_speech = projection_inputs
         try:
-            projected, confidence = _project_target_runs_onto_source(
+            projection = _project_target_runs_onto_source(
                 source_units=source_units,
                 source_durations=source_duration,
                 source_silence_mask=source_silence,
@@ -545,14 +617,30 @@ class DurationV3DatasetMixin:
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to build paired duration_v3 targets for {item_name}: {exc}") from exc
-        if projected.shape[0] != source_duration.shape[0] or confidence.shape[0] != source_duration.shape[0]:
+        projected = np.asarray(projection["projected"], dtype=np.float32)
+        confidence_local = np.asarray(projection["confidence_local"], dtype=np.float32)
+        confidence_coarse = np.asarray(projection["confidence_coarse"], dtype=np.float32)
+        coverage = np.asarray(projection["coverage"], dtype=np.float32)
+        match_rate = np.asarray(projection["match_rate"], dtype=np.float32)
+        mean_cost = np.asarray(projection["mean_cost"], dtype=np.float32)
+        if (
+            projected.shape[0] != source_duration.shape[0]
+            or confidence_local.shape[0] != source_duration.shape[0]
+            or confidence_coarse.shape[0] != source_duration.shape[0]
+        ):
             raise RuntimeError(
                 f"Paired duration_v3 projection length mismatch for {item_name}: "
-                f"source={source_duration.shape[0]}, projected={projected.shape[0]}, confidence={confidence.shape[0]}"
+                f"source={source_duration.shape[0]}, projected={projected.shape[0]}, "
+                f"confidence_local={confidence_local.shape[0]}, confidence_coarse={confidence_coarse.shape[0]}"
             )
         return {
             "unit_duration_tgt": projected.astype(np.float32),
-            "unit_confidence_tgt": confidence.astype(np.float32),
+            "unit_confidence_local_tgt": confidence_local.astype(np.float32),
+            "unit_confidence_coarse_tgt": confidence_coarse.astype(np.float32),
+            "unit_confidence_tgt": confidence_coarse.astype(np.float32),
+            "unit_alignment_coverage_tgt": coverage.astype(np.float32),
+            "unit_alignment_match_tgt": match_rate.astype(np.float32),
+            "unit_alignment_cost_tgt": mean_cost.astype(np.float32),
         }
 
     def _merge_duration_v3_rhythm_targets(self, item, source_cache, paired_target_conditioning, sample):
@@ -560,8 +648,25 @@ class DurationV3DatasetMixin:
             out = {
                 "unit_duration_tgt": np.asarray(sample["unit_duration_tgt"], dtype=np.float32),
             }
+            if "unit_confidence_local_tgt" in sample:
+                out["unit_confidence_local_tgt"] = np.asarray(sample["unit_confidence_local_tgt"], dtype=np.float32)
+            if "unit_confidence_coarse_tgt" in sample:
+                out["unit_confidence_coarse_tgt"] = np.asarray(sample["unit_confidence_coarse_tgt"], dtype=np.float32)
             if "unit_confidence_tgt" in sample:
                 out["unit_confidence_tgt"] = np.asarray(sample["unit_confidence_tgt"], dtype=np.float32)
+            if "unit_confidence_tgt" in out:
+                out.setdefault("unit_confidence_local_tgt", out["unit_confidence_tgt"])
+                out.setdefault("unit_confidence_coarse_tgt", out["unit_confidence_tgt"])
+            elif "unit_confidence_coarse_tgt" in out:
+                out["unit_confidence_tgt"] = np.asarray(out["unit_confidence_coarse_tgt"], dtype=np.float32)
+                out.setdefault("unit_confidence_local_tgt", out["unit_confidence_coarse_tgt"])
+            for key in (
+                "unit_alignment_coverage_tgt",
+                "unit_alignment_match_tgt",
+                "unit_alignment_cost_tgt",
+            ):
+                if key in sample:
+                    out[key] = np.asarray(sample[key], dtype=np.float32)
             return out
 
         source_item_name = str(item.get("item_name", "<unknown-item>")) if isinstance(item, dict) else "<unknown-item>"
@@ -577,6 +682,17 @@ class DurationV3DatasetMixin:
                         "Canonical duration_v3 training requires an external paired target item or explicit unit_duration_tgt. "
                         "Self paired-target projection is disabled unless rhythm_v3_allow_source_self_target_fallback=true."
                     )
+            if self._disallow_same_text_paired_target():
+                paired_target_text_signature = paired_target_conditioning.get("paired_target_text_signature")
+                source_text_signature = paired_target_conditioning.get("source_text_signature")
+                if paired_target_text_signature is not None and source_text_signature is not None:
+                    paired_sig = np.asarray(paired_target_text_signature, dtype=object).reshape(-1)[0]
+                    source_sig = np.asarray(source_text_signature, dtype=object).reshape(-1)[0]
+                    if paired_sig is not None and source_sig is not None and paired_sig == source_sig:
+                        raise RuntimeError(
+                            "rhythm_v3 paired-target projection forbids same-text targets by default. "
+                            "Provide a different-text paired target or set rhythm_v3_disallow_same_text_paired_target=false."
+                        )
 
         paired = self._build_paired_duration_v3_targets(
             item=item,
@@ -590,7 +706,12 @@ class DurationV3DatasetMixin:
             target = np.asarray(source_cache["dur_anchor_src"], dtype=np.float32)
             return {
                 "unit_duration_tgt": target,
+                "unit_confidence_local_tgt": np.ones_like(target, dtype=np.float32),
+                "unit_confidence_coarse_tgt": np.ones_like(target, dtype=np.float32),
                 "unit_confidence_tgt": np.ones_like(target, dtype=np.float32),
+                "unit_alignment_coverage_tgt": np.ones_like(target, dtype=np.float32),
+                "unit_alignment_match_tgt": np.ones_like(target, dtype=np.float32),
+                "unit_alignment_cost_tgt": np.zeros_like(target, dtype=np.float32),
             }
 
         raise RuntimeError(

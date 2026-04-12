@@ -10,8 +10,16 @@ from .unitizer import (
     StreamingUnitizerRowState,
     StreamingUnitizerState,
     _estimate_boundary_confidence_tensor,
+    _estimate_run_stability_tensor,
     build_compressed_sequence,
 )
+
+
+def _torch_load_weights_only(path):
+    try:
+        return torch.load(str(path), map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(str(path), map_location="cpu")
 
 
 @dataclass
@@ -24,6 +32,7 @@ class RhythmUnitBatch:
     sealed_mask: torch.Tensor
     sep_hint: torch.Tensor
     boundary_confidence: torch.Tensor
+    run_stability: torch.Tensor
 
 
 class RhythmUnitFrontend:
@@ -46,6 +55,7 @@ class RhythmUnitFrontend:
         separator_aware: bool = True,
         tail_open_units: int = 1,
         emit_silence_runs: bool = False,
+        debounce_min_run_frames: int = 1,
     ) -> None:
         self.silent_token = silent_token
         self.separator_aware = bool(separator_aware)
@@ -56,6 +66,7 @@ class RhythmUnitFrontend:
             separator_aware=separator_aware,
             tail_open_units=tail_open_units,
             emit_silence_runs=emit_silence_runs,
+            debounce_min_run_frames=debounce_min_run_frames,
         )
 
     @staticmethod
@@ -86,6 +97,7 @@ class RhythmUnitFrontend:
         sealed_list = [torch.tensor(item.sealed_mask, dtype=torch.long) for item in compressed_list]
         sep_list = [torch.tensor(item.sep_hint, dtype=torch.long) for item in compressed_list]
         boundary_list = [torch.tensor(item.boundary_confidence, dtype=torch.float32) for item in compressed_list]
+        stability_list = [torch.tensor(item.run_stability, dtype=torch.float32) for item in compressed_list]
         return self._batch_from_tensors(
             unit_list=unit_list,
             dur_list=dur_list,
@@ -94,6 +106,7 @@ class RhythmUnitFrontend:
             sealed_list=sealed_list,
             sep_list=sep_list,
             boundary_list=boundary_list,
+            stability_list=stability_list,
             device=device,
         )
 
@@ -111,8 +124,9 @@ class RhythmUnitFrontend:
         sealed_list: list[torch.Tensor] = []
         sep_list: list[torch.Tensor] = []
         boundary_list: list[torch.Tensor] = []
+        stability_list: list[torch.Tensor] = []
         for row in row_states:
-            units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence = self.unitizer._export_row_tensors(
+            units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence, run_stability = self.unitizer._export_row_tensors(
                 row,
                 mark_last_open=mark_last_open,
             )
@@ -123,6 +137,7 @@ class RhythmUnitFrontend:
             sealed_list.append(sealed_mask)
             sep_list.append(sep_hint)
             boundary_list.append(boundary_confidence)
+            stability_list.append(run_stability)
         return self._batch_from_tensors(
             unit_list=unit_list,
             dur_list=dur_list,
@@ -131,6 +146,7 @@ class RhythmUnitFrontend:
             sealed_list=sealed_list,
             sep_list=sep_list,
             boundary_list=boundary_list,
+            stability_list=stability_list,
             device=device,
         )
 
@@ -144,6 +160,7 @@ class RhythmUnitFrontend:
         sealed_list: list[torch.Tensor],
         sep_list: list[torch.Tensor],
         boundary_list: list[torch.Tensor],
+        stability_list: list[torch.Tensor],
         device: torch.device | None = None,
     ) -> RhythmUnitBatch:
         mask_list = [torch.ones_like(unit_tensor, dtype=torch.float32) for unit_tensor in unit_list]
@@ -154,6 +171,7 @@ class RhythmUnitFrontend:
         sealed_mask = self._pad(sealed_list, pad_value=0, dtype=torch.long)
         sep_hint = self._pad(sep_list, pad_value=0, dtype=torch.long)
         boundary_confidence = self._pad(boundary_list, pad_value=0, dtype=torch.float32)
+        run_stability = self._pad(stability_list, pad_value=0, dtype=torch.float32)
         unit_mask = self._pad([m.long() for m in mask_list], pad_value=0, dtype=torch.long).float()
 
         if device is not None:
@@ -164,6 +182,7 @@ class RhythmUnitFrontend:
             sealed_mask = sealed_mask.to(device)
             sep_hint = sep_hint.to(device)
             boundary_confidence = boundary_confidence.to(device)
+            run_stability = run_stability.to(device)
             unit_mask = unit_mask.to(device)
 
         return RhythmUnitBatch(
@@ -175,6 +194,7 @@ class RhythmUnitFrontend:
             sealed_mask=sealed_mask.float(),
             sep_hint=sep_hint,
             boundary_confidence=boundary_confidence,
+            run_stability=run_stability * unit_mask,
         )
 
     def from_token_lists(
@@ -194,6 +214,7 @@ class RhythmUnitFrontend:
                     tail_open_units=self.tail_open_units,
                     mark_last_open=mark_last_open,
                     emit_silence_runs=self.emit_silence_runs,
+                    debounce_min_run_frames=self.unitizer.debounce_min_run_frames,
                 )
             )
         return self._batch_from_compressed(compressed_list, device=device)
@@ -250,6 +271,36 @@ class RhythmUnitFrontend:
             rebuilt_rows.append(row)
         return torch.stack(rebuilt_rows, dim=0) * unit_mask.float()
 
+    @staticmethod
+    def _rebuild_run_stability_from_cache(
+        *,
+        dur_anchor_src: torch.Tensor,
+        unit_mask: torch.Tensor,
+        silence_mask: torch.Tensor,
+        open_run_mask: torch.Tensor,
+        sep_hint: torch.Tensor,
+        boundary_confidence: torch.Tensor,
+        min_run_frames: int,
+    ) -> torch.Tensor:
+        rebuilt_rows = []
+        total_units = int(dur_anchor_src.size(1))
+        for batch_idx in range(dur_anchor_src.size(0)):
+            visible = int(unit_mask[batch_idx].sum().item())
+            row = dur_anchor_src.new_zeros((total_units,), dtype=torch.float32)
+            if visible > 0:
+                rebuilt = _estimate_run_stability_tensor(
+                    dur_anchor_src[batch_idx, :visible],
+                    silence_mask[batch_idx, :visible],
+                    open_run_mask[batch_idx, :visible],
+                    sep_hint=sep_hint[batch_idx, :visible],
+                    boundary_confidence=boundary_confidence[batch_idx, :visible],
+                    min_speech_frames=min_run_frames,
+                    min_silence_frames=min_run_frames,
+                ).to(device=dur_anchor_src.device, dtype=torch.float32)
+                row[:visible] = rebuilt
+            rebuilt_rows.append(row)
+        return torch.stack(rebuilt_rows, dim=0) * unit_mask.float()
+
     def _rebuild_open_and_sealed_from_cache(
         self,
         *,
@@ -276,9 +327,10 @@ class RhythmUnitFrontend:
         sealed_mask: torch.Tensor | None = None,
         sep_hint: torch.Tensor | None = None,
         boundary_confidence: torch.Tensor | None = None,
+        run_stability: torch.Tensor | None = None,
     ) -> RhythmUnitBatch:
         content_units = content_units.long()
-        dur_anchor_src = dur_anchor_src.long()
+        dur_anchor_src = dur_anchor_src.float().clamp_min(0.0)
         if unit_mask is None:
             unit_mask = dur_anchor_src.gt(0).float()
         else:
@@ -309,6 +361,18 @@ class RhythmUnitFrontend:
             )
         else:
             boundary_confidence = boundary_confidence.float() * unit_mask.float()
+        if run_stability is None:
+            run_stability = self._rebuild_run_stability_from_cache(
+                dur_anchor_src=dur_anchor_src,
+                unit_mask=unit_mask,
+                silence_mask=silence_mask,
+                open_run_mask=open_run_mask.long(),
+                sep_hint=sep_hint.long(),
+                boundary_confidence=boundary_confidence,
+                min_run_frames=self.unitizer.debounce_min_run_frames,
+            )
+        else:
+            run_stability = run_stability.float() * unit_mask.float()
         return RhythmUnitBatch(
             content_units=content_units,
             dur_anchor_src=dur_anchor_src,
@@ -318,6 +382,7 @@ class RhythmUnitFrontend:
             sealed_mask=sealed_mask,
             sep_hint=sep_hint.long(),
             boundary_confidence=boundary_confidence,
+            run_stability=run_stability,
         )
 
     def init_stream_state(

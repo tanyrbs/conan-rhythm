@@ -70,12 +70,14 @@ def _cached_frontend(
     separator_aware: bool,
     tail_open_units: int,
     emit_silence_runs: bool,
+    debounce_min_run_frames: int,
 ) -> RhythmUnitFrontend:
     return RhythmUnitFrontend(
         silent_token=silent_token,
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
         emit_silence_runs=emit_silence_runs,
+        debounce_min_run_frames=debounce_min_run_frames,
     )
 
 
@@ -103,6 +105,7 @@ def build_source_rhythm_cache(
     separator_aware: bool = True,
     tail_open_units: int = 1,
     emit_silence_runs: bool = False,
+    debounce_min_run_frames: int = 1,
     phrase_boundary_threshold: float = 0.55,
 ) -> dict[str, np.ndarray]:
     frontend = _cached_frontend(
@@ -110,6 +113,7 @@ def build_source_rhythm_cache(
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
         emit_silence_runs=emit_silence_runs,
+        debounce_min_run_frames=debounce_min_run_frames,
     )
     batch = frontend.from_token_lists(
         [_as_token_list(content_tokens)],
@@ -123,6 +127,7 @@ def build_source_rhythm_cache(
         "sealed_mask": batch.sealed_mask[0].cpu().numpy().astype(np.int64),
         "sep_hint": batch.sep_hint[0].cpu().numpy().astype(np.int64),
         "boundary_confidence": batch.boundary_confidence[0].cpu().numpy().astype(np.float32),
+        "source_run_stability": batch.run_stability[0].cpu().numpy().astype(np.float32),
     }
     source_cache.update(
         build_source_phrase_cache(

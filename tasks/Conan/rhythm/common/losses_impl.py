@@ -94,6 +94,8 @@ class DurationV3LossTargets:
     committed_silence_mask: Optional[torch.Tensor] = None
     silence_coarse_weight: float = 0.25
     unit_confidence_tgt: Optional[torch.Tensor] = None
+    unit_confidence_local_tgt: Optional[torch.Tensor] = None
+    unit_confidence_coarse_tgt: Optional[torch.Tensor] = None
     prediction_anchor: Optional[torch.Tensor] = None
     baseline_duration_tgt: Optional[torch.Tensor] = None
     baseline_mask: Optional[torch.Tensor] = None
@@ -102,6 +104,7 @@ class DurationV3LossTargets:
     global_shift_tgt: Optional[torch.Tensor] = None
     coarse_logstretch_tgt: Optional[torch.Tensor] = None
     coarse_correction_tgt: Optional[torch.Tensor] = None
+    coarse_duration_tgt: Optional[torch.Tensor] = None
     residual_logstretch_tgt: Optional[torch.Tensor] = None
     global_bias_tgt: Optional[torch.Tensor] = None
     local_residual_tgt: Optional[torch.Tensor] = None
@@ -174,6 +177,22 @@ def _reduce_batch_loss_with_scale(
         return (loss * loss_scale).mean()
     batch_weight = _prepare_batch_weight(batch_weight, loss)
     return (loss * batch_weight * loss_scale).sum() / batch_weight.sum().clamp_min(1e-6)
+
+
+def _resolve_duration_v3_local_confidence(targets: DurationV3LossTargets) -> Optional[torch.Tensor]:
+    if isinstance(targets.unit_confidence_local_tgt, torch.Tensor):
+        return targets.unit_confidence_local_tgt.float()
+    if isinstance(targets.unit_confidence_tgt, torch.Tensor):
+        return targets.unit_confidence_tgt.float()
+    return None
+
+
+def _resolve_duration_v3_coarse_confidence(targets: DurationV3LossTargets) -> Optional[torch.Tensor]:
+    if isinstance(targets.unit_confidence_coarse_tgt, torch.Tensor):
+        return targets.unit_confidence_coarse_tgt.float()
+    if isinstance(targets.unit_confidence_tgt, torch.Tensor):
+        return targets.unit_confidence_tgt.float()
+    return None
 
 
 def _resolve_component_batch_weight(
@@ -1266,11 +1285,12 @@ def _build_duration_v3_duration_loss(
         isinstance(pred_residual, torch.Tensor)
         and isinstance(targets.local_residual_tgt, torch.Tensor)
     ):
+        local_confidence = _resolve_duration_v3_local_confidence(targets)
         return _weighted_masked_huber(
             pred_residual.float(),
             targets.local_residual_tgt.float(),
             speech_commit_mask,
-            weight=targets.unit_confidence_tgt,
+            weight=local_confidence,
             beta=0.25,
             batch_weight=None,
         )
@@ -1282,10 +1302,11 @@ def _build_duration_v3_duration_loss(
     prediction_anchor = prediction_anchor.float().clamp_min(1.0e-6)
     pred_logstretch = execution.unit_logstretch.float()
     tgt_logstretch = torch.log(targets.unit_duration_tgt.float().clamp_min(1.0e-6)) - torch.log(prediction_anchor)
-    return _masked_huber(
+    return _weighted_masked_huber(
         pred_logstretch,
         tgt_logstretch,
         speech_commit_mask,
+        weight=_resolve_duration_v3_local_confidence(targets),
         beta=0.25,
         batch_weight=None,
     )
@@ -1434,18 +1455,32 @@ def _build_duration_v3_stream_losses(
         else committed_mask.new_zeros(committed_mask.shape)
     )
     silence_scale = float(max(0.0, targets.silence_coarse_weight))
-    prefix_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
-    pred_prefix = torch.cumsum(pred_speech * prefix_weight, dim=1)
-    tgt_prefix_surface = (
-        targets.prefix_duration_tgt.float()
-        if isinstance(targets.prefix_duration_tgt, torch.Tensor)
-        else targets.unit_duration_tgt.float()
-    )
-    tgt_prefix = torch.cumsum(tgt_prefix_surface * prefix_weight, dim=1)
-    l_pref = _masked_huber(
+    prefix_base_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
+    pred_prefix = torch.cumsum(pred_speech * prefix_base_weight, dim=1)
+    if isinstance(targets.coarse_duration_tgt, torch.Tensor):
+        tgt_prefix_surface = targets.coarse_duration_tgt.float()
+    elif isinstance(targets.prefix_duration_tgt, torch.Tensor):
+        tgt_prefix_surface = targets.prefix_duration_tgt.float()
+    else:
+        anchor = (
+            targets.prediction_anchor.float()
+            if isinstance(targets.prediction_anchor, torch.Tensor)
+            else targets.unit_anchor_base.float()
+        )
+        speech_surface = targets.unit_duration_tgt.float() * speech_commit_mask
+        silence_surface = anchor * silence_commit_mask
+        tgt_prefix_surface = speech_surface + silence_surface
+    tgt_prefix = torch.cumsum(tgt_prefix_surface * prefix_base_weight, dim=1)
+    prefix_loss_weight = _resolve_duration_v3_coarse_confidence(targets)
+    if isinstance(prefix_loss_weight, torch.Tensor):
+        prefix_loss_weight = prefix_loss_weight * prefix_base_weight
+    else:
+        prefix_loss_weight = prefix_base_weight
+    l_pref = _weighted_masked_huber(
         pred_prefix,
         tgt_prefix,
         committed_mask,
+        weight=prefix_loss_weight,
         beta=1.0,
         batch_weight=None,
     )
@@ -1455,7 +1490,8 @@ def _build_duration_v3_stream_losses(
         and targets.consistency_duration_tgt is not None
         and targets.consistency_mask is not None
     ):
-        consistency_weight = targets.unit_confidence_tgt
+        consistency_weight = _resolve_duration_v3_coarse_confidence(targets)
+        local_consistency_weight = _resolve_duration_v3_local_confidence(targets)
         if isinstance(targets.consistency_mask, torch.Tensor):
             speech_consistency_mask = (
                 targets.consistency_mask.float() * targets.speech_mask.float()
@@ -1468,8 +1504,15 @@ def _build_duration_v3_stream_losses(
                 else None
             )
             if speech_consistency_mask is not None:
+                if silence_consistency_mask is None:
+                    silence_consistency_mask = speech_consistency_mask.new_zeros(speech_consistency_mask.shape)
                 base_weight = speech_consistency_mask + (float(max(0.0, targets.silence_coarse_weight)) * silence_consistency_mask)
                 consistency_weight = base_weight if consistency_weight is None else consistency_weight * base_weight
+                local_consistency_weight = (
+                    speech_consistency_mask
+                    if local_consistency_weight is None
+                    else local_consistency_weight * speech_consistency_mask
+                )
         pred_cons_logstretch = getattr(execution, "unit_logstretch_raw", None)
         if not isinstance(pred_cons_logstretch, torch.Tensor):
             pred_cons_logstretch = execution.unit_logstretch
@@ -1491,7 +1534,7 @@ def _build_duration_v3_stream_losses(
                 getattr(execution, "local_residual", getattr(execution, "local_response", None)).float(),
                 targets.consistency_local_residual_tgt.float(),
                 targets.consistency_mask.float(),
-                weight=targets.unit_confidence_tgt,
+                weight=local_consistency_weight,
                 beta=0.25,
                 batch_weight=None,
             )
@@ -1499,10 +1542,11 @@ def _build_duration_v3_stream_losses(
             pred_cons = getattr(execution, "unit_duration_raw", None)
             if not isinstance(pred_cons, torch.Tensor):
                 pred_cons = pred_speech
-            l_cons = _masked_huber(
+            l_cons = _weighted_masked_huber(
                 pred_cons.float(),
                 targets.consistency_duration_tgt.float(),
                 targets.consistency_mask.float(),
+                weight=consistency_weight,
                 beta=0.25,
                 batch_weight=None,
             )
@@ -1531,8 +1575,9 @@ def _build_duration_v3_bias_loss(
         else committed_mask.new_zeros(committed_mask.shape)
     )
     coarse_weight = None
-    if isinstance(targets.unit_confidence_tgt, torch.Tensor):
-        coarse_weight = targets.unit_confidence_tgt.float()
+    coarse_confidence = _resolve_duration_v3_coarse_confidence(targets)
+    if isinstance(coarse_confidence, torch.Tensor):
+        coarse_weight = coarse_confidence.float()
     if speech_commit_mask is not None:
         silence_scale = float(max(0.0, targets.silence_coarse_weight))
         base_weight = speech_commit_mask + (silence_scale * silence_commit_mask)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import torch
 
+from modules.Conan.rhythm_v3.math_utils import build_causal_local_rate_seq
 from .losses_impl import DurationV3LossTargets, RhythmLossTargets
 
 
@@ -93,6 +95,8 @@ class DurationV3TargetBuildConfig:
     baseline_train_mode: str = "joint"
     silence_coarse_weight: float = 0.25
     silence_logstretch_max: float = 0.35
+    local_rate_decay: float = 0.95
+    silence_short_gap_scale: float = 0.35
 
     @property
     def lambda_mem(self) -> float:
@@ -957,22 +961,33 @@ def build_duration_v3_loss_targets(
         lambda_zero=(0.0 if baseline_pretrain_only else float(config.lambda_zero)),
         lambda_ortho=(0.0 if baseline_pretrain_only else float(config.lambda_ortho)),
     )
-    unit_confidence_tgt = None
-    if "unit_confidence_tgt" in sample:
-        raw_confidence = sample.get("unit_confidence_tgt")
-        confidence_tensor = raw_confidence if isinstance(raw_confidence, torch.Tensor) else torch.as_tensor(
-            raw_confidence,
+    def _resolve_optional_unit_surface(key: str) -> torch.Tensor | None:
+        if key not in sample:
+            return None
+        raw_value = sample.get(key)
+        value_tensor = raw_value if isinstance(raw_value, torch.Tensor) else torch.as_tensor(
+            raw_value,
             dtype=torch.float32,
             device=unit_mask.device,
         )
-        unit_confidence_tgt = _align_duration_v3_surface(
-            tensor=confidence_tensor,
+        return _align_duration_v3_surface(
+            tensor=value_tensor,
             unit_mask=unit_mask,
             strict_target_alignment=False,
         ).float()
+
+    unit_confidence_shared_tgt = _resolve_optional_unit_surface("unit_confidence_tgt")
+    unit_confidence_local_tgt = _resolve_optional_unit_surface("unit_confidence_local_tgt")
+    unit_confidence_coarse_tgt = _resolve_optional_unit_surface("unit_confidence_coarse_tgt")
+    if unit_confidence_local_tgt is None:
+        unit_confidence_local_tgt = unit_confidence_shared_tgt
+    if unit_confidence_coarse_tgt is None:
+        unit_confidence_coarse_tgt = unit_confidence_shared_tgt
+    unit_confidence_tgt = unit_confidence_coarse_tgt
     global_shift_tgt = None
     coarse_logstretch_tgt = None
     coarse_correction_tgt = None
+    coarse_duration_tgt = None
     residual_logstretch_tgt = None
     global_bias_tgt = None
     local_residual_tgt = None
@@ -985,13 +1000,18 @@ def build_duration_v3_loss_targets(
     if state_prev is not None and isinstance(getattr(state_prev, "local_rate_ema", None), torch.Tensor):
         init_local_rate = state_prev.local_rate_ema.float().detach()
     if isinstance(prompt_targets["global_rate"], torch.Tensor):
+        if isinstance(getattr(unit_batch, "unit_rate_log_base", None), torch.Tensor):
+            log_rate_base = getattr(unit_batch, "unit_rate_log_base").float().detach()
+        else:
+            log_rate_base = torch.log(unit_anchor_base.float().detach().clamp_min(1.0e-6))
         log_anchor = torch.log(prediction_anchor.float().clamp_min(1.0e-6))
-        local_rate_seq_tgt = _build_duration_v3_causal_local_rate_seq(
-            log_anchor=log_anchor,
+        normalized_log_anchor = (log_anchor - log_rate_base) * unit_mask.float()
+        local_rate_seq_tgt, _ = build_causal_local_rate_seq(
+            observed_log=normalized_log_anchor,
             speech_mask=committed_speech_mask.float(),
-            init_local_rate=init_local_rate,
+            init_rate=init_local_rate,
             default_init_rate=default_init_rate,
-            decay=0.95,
+            decay=float(config.local_rate_decay),
         )
         global_shift_tgt = (prompt_targets["global_rate"].float().detach() - local_rate_seq_tgt) * committed_mask.float()
         full_logstretch_tgt = (
@@ -1004,14 +1024,30 @@ def build_duration_v3_loss_targets(
             values=coarse_residual_tgt,
             update_mask=committed_speech_mask.float(),
             output_mask=committed_mask.float(),
-            weight=unit_confidence_tgt,
+            weight=unit_confidence_coarse_tgt,
         )
         coarse_logstretch_tgt = (global_shift_tgt + coarse_correction_tgt) * committed_mask.float()
-        prefix_duration_tgt = unit_duration_tgt.float() * committed_speech_mask.float()
+        silence_tau_tgt = _build_duration_v3_silence_tau(
+            prediction_anchor=prediction_anchor.float(),
+            committed_silence_mask=committed_silence_mask.float(),
+            sep_hint=(
+                getattr(unit_batch, "sep_mask", None).float()
+                if isinstance(getattr(unit_batch, "sep_mask", None), torch.Tensor)
+                else None
+            ),
+            boundary_cue=(
+                getattr(unit_batch, "source_boundary_cue", None).float()
+                if isinstance(getattr(unit_batch, "source_boundary_cue", None), torch.Tensor)
+                else None
+            ),
+            max_silence_logstretch=float(config.silence_logstretch_max),
+            short_gap_scale=float(config.silence_short_gap_scale),
+        )
         if bool((committed_silence_mask > 0.5).any().item()):
-            silence_coarse_tgt = coarse_logstretch_tgt.clamp(
-                min=-float(config.silence_logstretch_max),
-                max=float(config.silence_logstretch_max),
+            silence_coarse_tgt = torch.clamp(
+                coarse_logstretch_tgt,
+                min=-silence_tau_tgt,
+                max=silence_tau_tgt,
             ) * committed_silence_mask.float()
             coarse_logstretch_tgt = (
                 coarse_logstretch_tgt * committed_speech_mask.float()
@@ -1020,25 +1056,27 @@ def build_duration_v3_loss_targets(
             coarse_correction_tgt = (
                 (coarse_logstretch_tgt - global_shift_tgt) * committed_mask.float()
             )
-            prefix_duration_tgt = (
-                prefix_duration_tgt
-                + (
-                    prediction_anchor.float()
-                    * torch.exp(coarse_logstretch_tgt.float())
-                    * committed_silence_mask.float()
-                )
-            )
-        else:
-            prefix_duration_tgt = prefix_duration_tgt + (
-                unit_duration_tgt.float() * committed_silence_mask.float()
-            )
+        coarse_duration_tgt = (
+            prediction_anchor.float()
+            * torch.exp(coarse_logstretch_tgt.float())
+            * committed_mask.float()
+        )
+        prefix_duration_tgt = coarse_duration_tgt.detach()
         global_bias_tgt = _masked_duration_v3_median(
             coarse_correction_tgt,
             committed_speech_mask.float(),
-            weight=unit_confidence_tgt,
+            weight=unit_confidence_coarse_tgt,
         )
         local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
-        prefix_duration_tgt = prefix_duration_tgt.detach()
+    if prefix_duration_tgt is None:
+        prefix_duration_tgt = (
+            unit_duration_tgt.float() * committed_speech_mask.float()
+            + prediction_anchor.float() * committed_silence_mask.float()
+        ).detach()
+    if coarse_duration_tgt is None:
+        coarse_duration_tgt = prefix_duration_tgt.detach()
+    else:
+        coarse_duration_tgt = coarse_duration_tgt.detach()
     consistency_duration_tgt = None
     consistency_mask = None
     if float(config.lambda_cons) > 0.0 and not baseline_pretrain_only:
@@ -1058,10 +1096,27 @@ def build_duration_v3_loss_targets(
             ) * consistency_mask.float()
             consistency_logstretch_tgt = consistency_full * (consistency_mask.float() * speech_mask.float())
             if isinstance(coarse_logstretch_tgt, torch.Tensor):
+                silence_tau_cons = _build_duration_v3_silence_tau(
+                    prediction_anchor=prediction_anchor.float(),
+                    committed_silence_mask=(consistency_mask.float() * silence_mask.float()),
+                    sep_hint=(
+                        getattr(unit_batch, "sep_mask", None).float()
+                        if isinstance(getattr(unit_batch, "sep_mask", None), torch.Tensor)
+                        else None
+                    ),
+                    boundary_cue=(
+                        getattr(unit_batch, "source_boundary_cue", None).float()
+                        if isinstance(getattr(unit_batch, "source_boundary_cue", None), torch.Tensor)
+                        else None
+                    ),
+                    max_silence_logstretch=float(config.silence_logstretch_max),
+                    short_gap_scale=float(config.silence_short_gap_scale),
+                )
                 consistency_logstretch_tgt = consistency_logstretch_tgt + (
-                    coarse_logstretch_tgt.float().clamp(
-                        min=-float(config.silence_logstretch_max),
-                        max=float(config.silence_logstretch_max),
+                    torch.clamp(
+                        coarse_logstretch_tgt.float(),
+                        min=-silence_tau_cons,
+                        max=silence_tau_cons,
                     )
                     * (consistency_mask.float() * silence_mask.float())
                 )
@@ -1081,6 +1136,8 @@ def build_duration_v3_loss_targets(
         committed_speech_mask=committed_speech_mask.float(),
         committed_silence_mask=committed_silence_mask.float(),
         silence_coarse_weight=float(config.silence_coarse_weight),
+        unit_confidence_local_tgt=unit_confidence_local_tgt,
+        unit_confidence_coarse_tgt=unit_confidence_coarse_tgt,
         unit_confidence_tgt=unit_confidence_tgt,
         prediction_anchor=prediction_anchor.float().detach(),
         unit_mask=unit_mask,
@@ -1092,6 +1149,7 @@ def build_duration_v3_loss_targets(
         global_shift_tgt=global_shift_tgt,
         coarse_logstretch_tgt=coarse_logstretch_tgt,
         coarse_correction_tgt=coarse_correction_tgt,
+        coarse_duration_tgt=coarse_duration_tgt,
         residual_logstretch_tgt=residual_logstretch_tgt,
         global_bias_tgt=global_bias_tgt,
         local_residual_tgt=local_residual_tgt,
@@ -1185,6 +1243,33 @@ def _build_duration_v3_prefix_median_seq(
             median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
             seq[batch_idx, unit_idx] = sorted_values[median_idx]
     return seq * output_mask.float()
+
+
+def _build_duration_v3_silence_tau(
+    *,
+    prediction_anchor: torch.Tensor,
+    committed_silence_mask: torch.Tensor,
+    sep_hint: torch.Tensor | None,
+    boundary_cue: torch.Tensor | None,
+    max_silence_logstretch: float,
+    short_gap_scale: float = 0.35,
+) -> torch.Tensor:
+    silence_mask = committed_silence_mask.float().clamp(0.0, 1.0)
+    if silence_mask.numel() <= 0:
+        return silence_mask
+    log_anchor = torch.log(prediction_anchor.float().clamp_min(1.0e-4))
+    pause_shape = torch.sigmoid(log_anchor - math.log(3.0))
+    edge = (
+        boundary_cue.float().clamp(0.0, 1.0)
+        if isinstance(boundary_cue, torch.Tensor)
+        else torch.zeros_like(pause_shape)
+    )
+    if isinstance(sep_hint, torch.Tensor):
+        edge = torch.maximum(edge, sep_hint.float().clamp(0.0, 1.0))
+    silence_shape = torch.maximum(pause_shape, edge)
+    scale = float(max(0.0, min(1.0, short_gap_scale)))
+    tau = float(max(1.0e-4, max_silence_logstretch)) * (scale + ((1.0 - scale) * silence_shape))
+    return tau * silence_mask
 
 
 def _build_duration_v3_baseline_targets(
@@ -1285,36 +1370,14 @@ def _build_duration_v3_causal_local_rate_seq(
     default_init_rate: torch.Tensor | float | None = None,
     decay: float = 0.95,
 ) -> torch.Tensor:
-    batch_size, num_units = log_anchor.shape
-    if init_local_rate is None:
-        if isinstance(default_init_rate, torch.Tensor):
-            prev = default_init_rate.to(device=log_anchor.device, dtype=log_anchor.dtype).reshape(-1)
-            if prev.numel() == 1:
-                prev = prev.view(1, 1).expand(batch_size, 1)
-            elif prev.numel() == batch_size:
-                prev = prev.reshape(batch_size, 1)
-            else:
-                raise ValueError(
-                    f"default_init_rate must be scalar or batch-sized tensor, got shape={tuple(default_init_rate.shape)}"
-                )
-        elif default_init_rate is None:
-            prev = log_anchor.new_zeros((batch_size, 1))
-        else:
-            prev = log_anchor.new_full((batch_size, 1), float(default_init_rate))
-    else:
-        prev = init_local_rate.float().reshape(batch_size, 1)
-    decay = float(max(0.0, min(0.999, decay)))
-
-    seq: list[torch.Tensor] = []
-    for unit_idx in range(num_units):
-        seq.append(prev)
-        use_t = speech_mask[:, unit_idx : unit_idx + 1] > 0.5
-        cur_t = log_anchor[:, unit_idx : unit_idx + 1]
-        prev = torch.where(use_t, decay * prev + (1.0 - decay) * cur_t, prev)
-
-    if not seq:
-        return log_anchor.new_zeros((batch_size, 0))
-    return torch.cat(seq, dim=1)
+    seq, _ = build_causal_local_rate_seq(
+        observed_log=log_anchor,
+        speech_mask=speech_mask,
+        init_rate=init_local_rate,
+        default_init_rate=default_init_rate,
+        decay=decay,
+    )
+    return seq
 
 
 def _resolve_duration_v3_prompt_targets(

@@ -16,6 +16,7 @@ class CompressedUnitSequence:
     open_run_mask: list[int]
     sealed_mask: list[int]
     boundary_confidence: list[float]
+    run_stability: list[float]
     tail_buffer: list[int]
 
 
@@ -69,6 +70,105 @@ def compress_token_sequence(
         prev_token = token
         saw_separator = False
     return units, durations, silence_mask, sep_hint
+
+
+def _merge_short_flicker_runs(
+    units: list[int],
+    durations: list[int],
+    silence_mask: list[int],
+    sep_hint: list[int],
+    *,
+    min_speech_frames: int = 2,
+    min_silence_frames: int = 2,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    min_speech_frames = int(max(1, min_speech_frames))
+    min_silence_frames = int(max(1, min_silence_frames))
+    if len(units) < 3 or (min_speech_frames <= 1 and min_silence_frames <= 1):
+        return units, durations, silence_mask, sep_hint
+    changed = True
+    while changed and len(units) >= 3:
+        changed = False
+        idx = 1
+        while idx < len(units) - 1:
+            min_run_frames = min_silence_frames if int(silence_mask[idx]) > 0 else min_speech_frames
+            bridgeable = (
+                int(units[idx - 1]) == int(units[idx + 1])
+                and int(silence_mask[idx - 1]) == int(silence_mask[idx + 1])
+                and int(sep_hint[idx - 1]) == 0
+                and int(sep_hint[idx]) == 0
+            )
+            if int(durations[idx]) <= min_run_frames and bridgeable:
+                durations[idx - 1] += int(durations[idx]) + int(durations[idx + 1])
+                sep_hint[idx - 1] = int(bool(sep_hint[idx - 1] or sep_hint[idx + 1]))
+                del units[idx : idx + 2]
+                del durations[idx : idx + 2]
+                del silence_mask[idx : idx + 2]
+                del sep_hint[idx : idx + 2]
+                changed = True
+                idx = max(1, idx - 1)
+                continue
+            idx += 1
+    return units, durations, silence_mask, sep_hint
+
+
+def _merge_short_jitter_runs(
+    units: list[int],
+    durations: list[int],
+    silence_mask: list[int],
+    sep_hint: list[int],
+    *,
+    min_run_frames: int = 2,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    return _merge_short_flicker_runs(
+        units,
+        durations,
+        silence_mask,
+        sep_hint,
+        min_speech_frames=min_run_frames,
+        min_silence_frames=min_run_frames,
+    )
+
+
+def _debounce_tail_tensors(
+    units: torch.Tensor,
+    durations: torch.Tensor,
+    silence_mask: torch.Tensor,
+    sep_hint: torch.Tensor,
+    *,
+    mutable_start: int = 0,
+    min_speech_frames: int = 2,
+    min_silence_frames: int = 2,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if units.numel() < 3:
+        return units, durations, silence_mask, sep_hint
+    prefix_len = max(0, min(int(mutable_start), int(units.numel())))
+    if int(units.numel()) - prefix_len < 3:
+        return units, durations, silence_mask, sep_hint
+    tail_units = units[prefix_len:].detach().cpu().tolist()
+    tail_durations = durations[prefix_len:].detach().cpu().tolist()
+    tail_silence = silence_mask[prefix_len:].detach().cpu().tolist()
+    tail_sep = sep_hint[prefix_len:].detach().cpu().tolist()
+    tail_units, tail_durations, tail_silence, tail_sep = _merge_short_flicker_runs(
+        tail_units,
+        tail_durations,
+        tail_silence,
+        tail_sep,
+        min_speech_frames=min_speech_frames,
+        min_silence_frames=min_silence_frames,
+    )
+    device = units.device
+    tail_units_tensor = torch.tensor(tail_units, dtype=units.dtype, device=device)
+    tail_durations_tensor = torch.tensor(tail_durations, dtype=durations.dtype, device=device)
+    tail_silence_tensor = torch.tensor(tail_silence, dtype=silence_mask.dtype, device=device)
+    tail_sep_tensor = torch.tensor(tail_sep, dtype=sep_hint.dtype, device=device)
+    if prefix_len <= 0:
+        return tail_units_tensor, tail_durations_tensor, tail_silence_tensor, tail_sep_tensor
+    return (
+        torch.cat([units[:prefix_len], tail_units_tensor], dim=0),
+        torch.cat([durations[:prefix_len], tail_durations_tensor], dim=0),
+        torch.cat([silence_mask[:prefix_len], tail_silence_tensor], dim=0),
+        torch.cat([sep_hint[:prefix_len], tail_sep_tensor], dim=0),
+    )
 
 
 def _standardize_1d(values: torch.Tensor) -> torch.Tensor:
@@ -128,6 +228,71 @@ def estimate_boundary_confidence(
     return _estimate_boundary_confidence_tensor(durations, sep_hint, open_run_mask).tolist()
 
 
+def _estimate_run_stability_tensor(
+    durations: Sequence[int] | Sequence[float] | torch.Tensor,
+    silence_mask: Sequence[int] | Sequence[float] | torch.Tensor,
+    open_run_mask: Sequence[int] | Sequence[float] | torch.Tensor,
+    *,
+    sep_hint: Sequence[int] | Sequence[float] | torch.Tensor | None = None,
+    boundary_confidence: Sequence[float] | torch.Tensor | None = None,
+    min_speech_frames: int = 2,
+    min_silence_frames: int = 2,
+) -> torch.Tensor:
+    device = None
+    for candidate in (durations, silence_mask, open_run_mask, sep_hint, boundary_confidence):
+        if isinstance(candidate, torch.Tensor):
+            device = candidate.device
+            break
+    dur = _to_1d_tensor(durations, dtype=torch.float32, device=device)
+    if dur.numel() <= 0:
+        return dur
+    silence = _to_1d_tensor(silence_mask, dtype=torch.float32, device=dur.device)
+    open_mask = _to_1d_tensor(open_run_mask, dtype=torch.float32, device=dur.device)
+    sep = (
+        _to_1d_tensor(sep_hint, dtype=torch.float32, device=dur.device)
+        if sep_hint is not None
+        else torch.zeros_like(dur)
+    )
+    boundary = (
+        _to_1d_tensor(boundary_confidence, dtype=torch.float32, device=dur.device)
+        if boundary_confidence is not None
+        else _estimate_boundary_confidence_tensor(dur, sep, open_mask)
+    ).clamp(0.0, 1.0)
+    min_speech = float(max(1, int(min_speech_frames)))
+    min_silence = float(max(1, int(min_silence_frames)))
+    min_frames = torch.where(
+        silence > 0.5,
+        torch.full_like(dur, min_silence),
+        torch.full_like(dur, min_speech),
+    )
+    length_term = torch.clamp(dur / min_frames.clamp_min(1.0), min=0.0, max=1.0)
+    boundary_term = torch.maximum(boundary, sep.clamp(0.0, 1.0))
+    stability = 0.20 + 0.60 * length_term + 0.20 * boundary_term
+    stability = stability * (1.0 - 0.35 * open_mask.clamp(0.0, 1.0))
+    return stability.clamp(0.05, 1.0)
+
+
+def estimate_run_stability(
+    durations: Sequence[int] | Sequence[float],
+    silence_mask: Sequence[int] | Sequence[float],
+    open_run_mask: Sequence[int] | Sequence[float],
+    *,
+    sep_hint: Sequence[int] | Sequence[float] | None = None,
+    boundary_confidence: Sequence[float] | None = None,
+    min_speech_frames: int = 2,
+    min_silence_frames: int = 2,
+) -> list[float]:
+    return _estimate_run_stability_tensor(
+        durations,
+        silence_mask,
+        open_run_mask,
+        sep_hint=sep_hint,
+        boundary_confidence=boundary_confidence,
+        min_speech_frames=min_speech_frames,
+        min_silence_frames=min_silence_frames,
+    ).tolist()
+
+
 def build_compressed_sequence(
     token_sequence: Sequence[int],
     *,
@@ -136,6 +301,7 @@ def build_compressed_sequence(
     tail_open_units: int = 1,
     mark_last_open: bool = True,
     emit_silence_runs: bool = False,
+    debounce_min_run_frames: int = 1,
 ) -> CompressedUnitSequence:
     units, durations, silence_mask, sep_hint = compress_token_sequence(
         token_sequence,
@@ -143,14 +309,47 @@ def build_compressed_sequence(
         separator_aware=separator_aware,
         emit_silence_runs=emit_silence_runs,
     )
+    open_tail = min(len(units), max(0, int(tail_open_units)) if mark_last_open else 0)
+    sealed_limit = max(0, len(units) - open_tail)
+    if sealed_limit > 0:
+        prefix_units, prefix_durations, prefix_silence, prefix_sep = _merge_short_flicker_runs(
+            units[:sealed_limit],
+            durations[:sealed_limit],
+            silence_mask[:sealed_limit],
+            sep_hint[:sealed_limit],
+            min_speech_frames=debounce_min_run_frames,
+            min_silence_frames=debounce_min_run_frames,
+        )
+        units = prefix_units + units[sealed_limit:]
+        durations = prefix_durations + durations[sealed_limit:]
+        silence_mask = prefix_silence + silence_mask[sealed_limit:]
+        sep_hint = prefix_sep + sep_hint[sealed_limit:]
+    elif not mark_last_open:
+        units, durations, silence_mask, sep_hint = _merge_short_flicker_runs(
+            units,
+            durations,
+            silence_mask,
+            sep_hint,
+            min_speech_frames=debounce_min_run_frames,
+            min_silence_frames=debounce_min_run_frames,
+    )
     open_run_mask = [0 for _ in units]
     if mark_last_open and len(open_run_mask) > 0:
-        keep_open_from = max(0, len(open_run_mask) - max(1, int(tail_open_units)))
+        keep_open_from = max(0, len(open_run_mask) - open_tail)
         for idx in range(keep_open_from, len(open_run_mask)):
             open_run_mask[idx] = 1
     sealed_mask = [1 - x for x in open_run_mask]
     boundary_confidence = estimate_boundary_confidence(durations, sep_hint, open_run_mask)
-    tail_buffer = units[max(0, len(units) - max(1, int(tail_open_units))):] if mark_last_open else []
+    run_stability = estimate_run_stability(
+        durations,
+        silence_mask,
+        open_run_mask,
+        sep_hint=sep_hint,
+        boundary_confidence=boundary_confidence,
+        min_speech_frames=debounce_min_run_frames,
+        min_silence_frames=debounce_min_run_frames,
+    )
+    tail_buffer = units[max(0, len(units) - open_tail):] if (mark_last_open and open_tail > 0) else []
     return CompressedUnitSequence(
         units=units,
         durations=durations,
@@ -159,6 +358,7 @@ def build_compressed_sequence(
         open_run_mask=open_run_mask,
         sealed_mask=sealed_mask,
         boundary_confidence=boundary_confidence,
+        run_stability=run_stability,
         tail_buffer=tail_buffer,
     )
 
@@ -171,11 +371,13 @@ class StreamingRunLengthUnitizer:
         separator_aware: bool = True,
         tail_open_units: int = 1,
         emit_silence_runs: bool = False,
+        debounce_min_run_frames: int = 1,
     ) -> None:
         self.silent_token = silent_token
         self.separator_aware = bool(separator_aware)
         self.tail_open_units = max(1, int(tail_open_units))
         self.emit_silence_runs = bool(emit_silence_runs)
+        self.debounce_min_run_frames = int(max(1, debounce_min_run_frames))
 
     @staticmethod
     def _empty_row_state(device: torch.device | None = None) -> StreamingUnitizerRowState:
@@ -210,6 +412,7 @@ class StreamingRunLengthUnitizer:
             tail_open_units=self.tail_open_units,
             mark_last_open=mark_last_open,
             emit_silence_runs=self.emit_silence_runs,
+            debounce_min_run_frames=self.debounce_min_run_frames,
         )
 
     def _export_row_tensors(
@@ -217,19 +420,51 @@ class StreamingRunLengthUnitizer:
         row_state: StreamingUnitizerRowState,
         *,
         mark_last_open: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        units = row_state.units
-        durations = row_state.durations
-        silence_mask = row_state.silence_mask
-        sep_hint = row_state.sep_hint
-        device = units.device if units.numel() > 0 else durations.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        units_list = row_state.units.detach().cpu().tolist()
+        durations_list = row_state.durations.detach().cpu().tolist()
+        silence_list = row_state.silence_mask.detach().cpu().tolist()
+        sep_list = row_state.sep_hint.detach().cpu().tolist()
+        open_tail = min(len(units_list), self.tail_open_units if mark_last_open else 0)
+        sealed_limit = max(0, len(units_list) - open_tail)
+        if sealed_limit > 0:
+            prefix_units = units_list[:sealed_limit]
+            prefix_durations = durations_list[:sealed_limit]
+            prefix_silence = silence_list[:sealed_limit]
+            prefix_sep = sep_list[:sealed_limit]
+            prefix_units, prefix_durations, prefix_silence, prefix_sep = _merge_short_flicker_runs(
+                prefix_units,
+                prefix_durations,
+                prefix_silence,
+                prefix_sep,
+                min_speech_frames=self.debounce_min_run_frames,
+                min_silence_frames=self.debounce_min_run_frames,
+            )
+            units_list = prefix_units + units_list[sealed_limit:]
+            durations_list = prefix_durations + durations_list[sealed_limit:]
+            silence_list = prefix_silence + silence_list[sealed_limit:]
+            sep_list = prefix_sep + sep_list[sealed_limit:]
+        device = row_state.units.device if row_state.units.numel() > 0 else row_state.durations.device
+        units = torch.tensor(units_list, dtype=torch.long, device=device)
+        durations = torch.tensor(durations_list, dtype=torch.long, device=device)
+        silence_mask = torch.tensor(silence_list, dtype=torch.long, device=device)
+        sep_hint = torch.tensor(sep_list, dtype=torch.long, device=device)
         open_run_mask = torch.zeros_like(units, dtype=torch.long, device=device)
         if mark_last_open and open_run_mask.numel() > 0:
             keep_open_from = max(0, open_run_mask.numel() - self.tail_open_units)
             open_run_mask[keep_open_from:] = 1
         sealed_mask = (1 - open_run_mask).clamp_min(0)
         boundary_confidence = _estimate_boundary_confidence_tensor(durations, sep_hint, open_run_mask)
-        return units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence
+        run_stability = _estimate_run_stability_tensor(
+            durations,
+            silence_mask,
+            open_run_mask,
+            sep_hint=sep_hint,
+            boundary_confidence=boundary_confidence,
+            min_speech_frames=self.debounce_min_run_frames,
+            min_silence_frames=self.debounce_min_run_frames,
+        )
+        return units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence, run_stability
 
     def _export_row(
         self,
@@ -237,7 +472,7 @@ class StreamingRunLengthUnitizer:
         *,
         mark_last_open: bool = True,
     ) -> CompressedUnitSequence:
-        units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence = self._export_row_tensors(
+        units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence, run_stability = self._export_row_tensors(
             row_state,
             mark_last_open=mark_last_open,
         )
@@ -250,6 +485,7 @@ class StreamingRunLengthUnitizer:
             open_run_mask=open_run_mask.tolist(),
             sealed_mask=sealed_mask.tolist(),
             boundary_confidence=boundary_confidence.tolist(),
+            run_stability=run_stability.tolist(),
             tail_buffer=tail_buffer,
         )
 
@@ -265,6 +501,7 @@ class StreamingRunLengthUnitizer:
         durations = row.durations
         silence_mask = row.silence_mask
         sep_hint = row.sep_hint
+        prev_units_len = int(units.numel())
         last_token = int(row.last_token)
         pending_separator = bool(row.pending_separator)
         appended_units: list[int] = []
@@ -337,6 +574,16 @@ class StreamingRunLengthUnitizer:
             durations = torch.cat([durations, new_durations], dim=0) if durations.numel() > 0 else new_durations
             silence_mask = torch.cat([silence_mask, new_silence], dim=0) if silence_mask.numel() > 0 else new_silence
             sep_hint = torch.cat([sep_hint, new_sep_hint], dim=0) if sep_hint.numel() > 0 else new_sep_hint
+
+        units, durations, silence_mask, sep_hint = _debounce_tail_tensors(
+            units,
+            durations,
+            silence_mask,
+            sep_hint,
+            mutable_start=max(0, prev_units_len - self.tail_open_units),
+            min_speech_frames=self.debounce_min_run_frames,
+            min_silence_frames=self.debounce_min_run_frames,
+        )
 
         row.units = units
         row.durations = durations

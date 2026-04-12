@@ -4,10 +4,12 @@ mel_losses: "l1:1.0"
 binarization_args:
   with_rhythm_cache: true
 
-# Recommended maintained mainline:
-# explicit silence-run frontend + paired target projection + source-observed anchor
-# + unit-run stretch writer (analytic rate gap + prefix coarse + local residual)
-# + coarse-only silence control + prefix unit-budget clamp.
+# Recommended maintained V1:
+# Layer 0 = stable lattice interface:
+# explicit silence runs + causal debounce + commit-safe closed/open run contract.
+# Layer 1 = minimal source-anchored retimer:
+# analytic global rate gap + one coarse scalar + speech-only local residual.
+# Silence is a clipped coarse follower; execution uses carry rounding + prefix budget.
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
@@ -61,12 +63,29 @@ rhythm_streaming_prefix_min_ratio: 0.50
 rhythm_streaming_prefix_max_ratio: 0.95
 rhythm_streaming_prefix_min_tokens: 8
 rhythm_streaming_prefix_multiple: 4
+rhythm_tail_open_units: 2
+rhythm_prefix_tail_open_units: 2
 rhythm_v3_emit_silence_runs: true
 rhythm_v3_prefix_budget_pos: 24
 rhythm_v3_prefix_budget_neg: 24
+rhythm_v3_dynamic_budget_ratio: 0.15
+rhythm_v3_min_prefix_budget: 12
+rhythm_v3_max_prefix_budget: 48
 rhythm_prompt_dropout: 0.20
 rhythm_prompt_truncation: 0.50
 rhythm_v3_summary_pool_speech_only: true
+rhythm_v3_summary_use_unit_embedding: false
+rhythm_v3_debounce_min_run_frames: 2
+rhythm_v3_local_cold_start_runs: 2
+rhythm_v3_local_short_run_min_duration: 2.0
+rhythm_max_logstretch: 1.2
+rhythm_v3_local_rate_decay: 0.95
+rhythm_v3_short_gap_silence_scale: 0.35
+rhythm_v3_leading_silence_scale: 0.0
+rhythm_v3_boundary_carry_decay: 0.25
+rhythm_v3_boundary_reset_thresh: 0.55
+rhythm_v3_disallow_same_text_reference: true
+rhythm_v3_disallow_same_text_paired_target: true
 pseudo_source_duration_perturbation: false
 # Canonical paired training should not silently fall back to source-self
 # duration targets. Only enable this for bootstrap/pretrain.
@@ -78,16 +97,17 @@ rhythm_pseudo_source_local_scale_min: 0.70
 rhythm_pseudo_source_local_scale_max: 1.30
 rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.0
+# Silence has no independent writer in V1; any auxiliary silence target must stay coarse-derived.
 rhythm_v3_silence_coarse_weight: 0.25
 rhythm_v3_silence_max_logstretch: 0.25
 
 lambda_rhythm_dur: 1.0
-lambda_rhythm_bias: 0.20  # prefix-coarse supervision (compat metric still exports global_bias_scalar)
+lambda_rhythm_bias: 0.20  # coarse scalar supervision
 lambda_rhythm_summary: 0.0
 # canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
-lambda_rhythm_pref: 0.10
+lambda_rhythm_pref: 0.10  # prefix target must remain coarse-derived for silence
 lambda_rhythm_base: 0.0
-lambda_rhythm_cons: 0.10
+lambda_rhythm_cons: 0.10  # committed-prefix consistency for strict-causal fine-tuning
 lambda_rhythm_zero: 0.0
 lambda_rhythm_ortho: 0.0
 

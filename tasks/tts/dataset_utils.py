@@ -36,6 +36,7 @@ class BaseSpeechDataset(BaseDataset):
         self._spk_map_ready = False
         self._pair_entries = None
         self._pair_group_to_indices = None
+        self._text_signature_cache = {}
         self._maybe_enable_pair_manifest()
 
     def _open_indexed_ds_if_needed(self):
@@ -148,9 +149,45 @@ class BaseSpeechDataset(BaseDataset):
         return spec[:max_frames]
 
     @staticmethod
-    def _sample_reference_local_index(candidates, index: int) -> int:
+    def _extract_text_signature(item):
+        if not isinstance(item, dict):
+            return None
+        for key in ("ph_token", "txt_token", "txt_tokens", "word_token", "word_tokens"):
+            value = item.get(key)
+            if value is None:
+                continue
+            arr = np.asarray(value).reshape(-1)
+            if arr.size > 0:
+                return (key, tuple(arr.tolist()))
+        for key in ("ph", "txt", "word", "words"):
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return (key, text)
+        return None
+
+    def _get_text_signature(self, local_idx: int):
+        local_idx = int(local_idx)
+        if local_idx not in self._text_signature_cache:
+            self._text_signature_cache[local_idx] = self._extract_text_signature(self._get_item(local_idx))
+        return self._text_signature_cache[local_idx]
+
+    def _sample_reference_local_index(self, candidates, index: int) -> int:
         if len(candidates) <= 1:
             return index
+        if bool(
+            self.hparams.get(
+                "rhythm_v3_disallow_same_text_reference",
+                self.hparams.get("rhythm_disallow_same_text_reference", True),
+            )
+        ):
+            source_sig = self._get_text_signature(index)
+            if source_sig is not None:
+                filtered = [cand for cand in candidates if int(cand) != int(index) and self._get_text_signature(int(cand)) != source_sig]
+                if filtered:
+                    candidates = filtered
         ref_local = random.choice(candidates)
         if ref_local != index:
             return ref_local

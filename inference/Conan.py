@@ -168,6 +168,7 @@ class StreamingVoiceConversion:
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
             emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
+            debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
         prompt_content_units = torch.tensor(cache["content_units"], device=self.device, dtype=torch.long).unsqueeze(0)
@@ -185,7 +186,29 @@ class StreamingVoiceConversion:
             "prompt_unit_mask": prompt_valid_mask,
             "prompt_valid_mask": prompt_valid_mask,
             "prompt_speech_mask": prompt_speech_mask,
+            "prompt_source_boundary_cue": torch.tensor(
+                cache.get("source_boundary_cue", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+                device=self.device,
+                dtype=torch.float32,
+            ).unsqueeze(0),
+            "prompt_phrase_group_pos": torch.tensor(
+                cache.get("phrase_group_pos", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+                device=self.device,
+                dtype=torch.float32,
+            ).unsqueeze(0),
+            "prompt_phrase_final_mask": torch.tensor(
+                cache.get("phrase_final_mask", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+                device=self.device,
+                dtype=torch.float32,
+            ).unsqueeze(0),
         }
+        rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
+        if rhythm_frontend is not None:
+            out["prompt_log_base"] = rhythm_frontend.compute_rate_log_base(
+                prompt_content_units,
+                prompt_valid_mask,
+                stop_gradient=True,
+            ).detach()
         if prepared_spk_embed is not None:
             prompt_spk = prepared_spk_embed
             if prompt_spk.dim() == 3 and prompt_spk.size(-1) == 1:
@@ -225,6 +248,7 @@ class StreamingVoiceConversion:
     def infer_once(self, inp: Dict, spk_embed=None, return_metadata: bool = False):
         if hasattr(self.vocoder, "reset_stream"):
             self.vocoder.reset_stream()
+            self._vocoder_warm_zero()
 
         ref_mel_np = self._wav_to_mel(inp["ref_wav"])
         ref_mel = torch.from_numpy(ref_mel_np).float().to(self.device)
@@ -254,6 +278,7 @@ class StreamingVoiceConversion:
         decoder_cache = None
         rhythm_ref_conditioning = None
         last_mel_out = None
+        eos_tail_closed = False
 
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
@@ -321,6 +346,11 @@ class StreamingVoiceConversion:
                     for key, value in export_duration_v3_source_cache(unit_batch).items()
                     if value is not None
                 }
+                cache_total = int(rhythm_source_cache["source_duration_obs"].sum().item())
+                if cache_total != int(all_codes.size(1)):
+                    raise RuntimeError(
+                        f"Incremental rhythm source cache drifted from all_codes: cache_total={cache_total}, all_codes={int(all_codes.size(1))}"
+                    )
 
             with torch.no_grad():
                 out = self.model(
@@ -360,6 +390,50 @@ class StreamingVoiceConversion:
 
         if last_mel_out is None:
             raise RuntimeError("Streaming inference produced no mel output.")
+
+        if (
+            prev_committed_len < int(last_mel_out.shape[0])
+            and isinstance(rhythm_source_cache, dict)
+            and isinstance(rhythm_source_cache.get("unit_mask"), torch.Tensor)
+        ):
+            final_cache = {
+                key: (value.clone() if isinstance(value, torch.Tensor) else value)
+                for key, value in rhythm_source_cache.items()
+            }
+            final_cache["sealed_mask"] = final_cache["unit_mask"].clone().float()
+            with torch.no_grad():
+                final_out = self.model(
+                    content=all_codes,
+                    spk_embed=prepared_spk_embed,
+                    target=None,
+                    ref=ref_mel_batch if require_runtime_ref else None,
+                    f0=None,
+                    uv=None,
+                    infer=True,
+                    global_steps=200000,
+                    content_lengths=torch.tensor([all_codes.size(1)], device=self.device),
+                    rhythm_state=rhythm_state,
+                    rhythm_ref_conditioning=rhythm_ref_conditioning,
+                    rhythm_source_cache=final_cache,
+                    decoder_cache=decoder_cache,
+                )
+            rhythm_state = final_out.get("rhythm_state_next", rhythm_state)
+            decoder_cache = final_out.get("decoder_cache", decoder_cache)
+            last_mel_out = final_out["mel_out"][0]
+            final_mel_new, prev_committed_len = extract_incremental_committed_mel(
+                final_out,
+                prev_committed_len=prev_committed_len,
+                batch_index=0,
+            )
+            if final_mel_new.numel() > 0:
+                eos_tail_closed = True
+                mel_chunks.append(final_mel_new)
+                wav_tail = self._render_vocoder_chunk(
+                    final_mel_new,
+                    mel_context_buffer=mel_context_buffer,
+                )
+                if len(wav_tail) > 0:
+                    wav_chunks.append(wav_tail)
 
         if prev_committed_len < int(last_mel_out.shape[0]):
             mel_tail = last_mel_out[prev_committed_len:]
@@ -401,6 +475,9 @@ class StreamingVoiceConversion:
                 "vocoder_left_context_source": str(self.vocoder_left_context_source),
                 "vocoder_native_streaming_capable": bool(self.vocoder_native_streaming_capable),
                 "emformer_stateful_content_frontend": True,
+                "rhythm_incremental_source_cache": True,
+                "rhythm_final_tail_closed_eos": bool(eos_tail_closed),
+                "rhythm_final_tail_is_not_strictly_committed_only": bool(not eos_tail_closed),
                 "full_end_to_end_stateful_streaming": False,
             }
         )

@@ -1125,8 +1125,10 @@ def _build_duration_v3_metric_sections(
         commit_mask = getattr(unit_batch, "sealed_mask", unit_mask)
     commit_mask = commit_mask.float() * unit_mask
     speech_commit_mask = commit_mask
+    silence_commit_mask = torch.zeros_like(commit_mask)
     if unit_batch is not None and isinstance(getattr(unit_batch, "source_silence_mask", None), torch.Tensor):
-        speech_commit_mask = commit_mask * (1.0 - unit_batch.source_silence_mask.float().clamp(0.0, 1.0))
+        silence_commit_mask = commit_mask * unit_batch.source_silence_mask.float().clamp(0.0, 1.0)
+        speech_commit_mask = commit_mask * (1.0 - silence_commit_mask)
     total_exec = (public_speech_exec * speech_commit_mask).sum(dim=1)
     visible_units = unit_mask.sum(dim=1).clamp_min(1.0)
     committed_units = commit_mask.sum(dim=1).clamp_min(1.0)
@@ -1181,6 +1183,11 @@ def _build_duration_v3_metric_sections(
             coarse_logstretch.float().abs(),
             speech_commit_mask,
         )
+        if bool((silence_commit_mask > 0.0).any().item()):
+            core_metrics["rhythm_metric_silence_coarse_logstretch_abs_mean"] = _masked_mean(
+                coarse_logstretch.float().abs(),
+                silence_commit_mask,
+            )
     coarse_correction = getattr(execution, "coarse_correction", None)
     if isinstance(coarse_correction, torch.Tensor):
         core_metrics["rhythm_metric_coarse_correction_abs_mean"] = _masked_mean(
@@ -1258,6 +1265,26 @@ def _build_duration_v3_metric_sections(
     role_conf_unit = getattr(execution, "role_conf_unit", None)
     if isinstance(role_conf_unit, torch.Tensor):
         core_metrics["rhythm_metric_role_conf_mean"] = _masked_mean(role_conf_unit.float(), speech_commit_mask)
+    if bool((silence_commit_mask > 0.0).any().item()):
+        core_metrics["rhythm_metric_silence_logstretch_abs_mean"] = _masked_mean(
+            execution.unit_logstretch.float().abs(),
+            silence_commit_mask,
+        )
+        source_duration_obs = None
+        if unit_batch is not None:
+            source_duration_obs = getattr(unit_batch, "source_duration_obs", None)
+            if source_duration_obs is None:
+                source_duration_obs = getattr(unit_batch, "dur_anchor_src", None)
+        if isinstance(source_duration_obs, torch.Tensor):
+            silence_ratio = torch.where(
+                source_duration_obs.float() > 0.0,
+                public_speech_exec / source_duration_obs.float().clamp_min(1.0e-6),
+                torch.ones_like(public_speech_exec),
+            )
+            core_metrics["rhythm_metric_silence_exec_ratio_mean"] = _masked_mean(
+                silence_ratio,
+                silence_commit_mask,
+            )
     source_residual_gain = _optional_scalar(output.get("rhythm_v3_source_residual_gain"), device)
     if source_residual_gain is not None:
         core_metrics["rhythm_metric_source_residual_gain"] = source_residual_gain
@@ -1275,6 +1302,14 @@ def _build_duration_v3_metric_sections(
         pred_prefix = torch.cumsum(public_speech_exec * speech_commit_mask, dim=1)
         tgt_prefix = torch.cumsum(target * speech_commit_mask, dim=1)
         core_metrics["rhythm_metric_prefix_drift_l1"] = _masked_l1(pred_prefix, tgt_prefix, speech_commit_mask)
+        if bool((silence_commit_mask > 0.0).any().item()):
+            pred_silence_prefix = torch.cumsum(public_speech_exec * silence_commit_mask, dim=1)
+            tgt_silence_prefix = torch.cumsum(target * silence_commit_mask, dim=1)
+            core_metrics["rhythm_metric_silence_prefix_drift_l1"] = _masked_l1(
+                pred_silence_prefix,
+                tgt_silence_prefix,
+                silence_commit_mask,
+            )
     for loss_key in (
         "rhythm_total",
         "rhythm_v3_base",

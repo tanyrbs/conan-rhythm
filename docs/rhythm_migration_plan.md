@@ -1,183 +1,390 @@
-# Rhythm Migration Plan / Current Architecture Note (2026-04-11)
+# Rhythm Migration Plan / Maintained V1 Spec (2026-04-12)
 
-This file describes only the **current maintained rhythm architecture**.
+This file is the canonical architecture note for the maintained `rhythm_v3` line.
 
-## 1. Current maintained branch reading
+## 1. Current maintained reading
 
 The maintained line is **`rhythm_v3`**.
 
-The maintained default is:
+The final maintained V1 is a **two-layer system**:
+
+- **Layer 0: Stable Lattice Interface**
+  - turns the raw unit stream into a stable, causal, commit-safe run interface
+  - keeps training cache generation and runtime frontends on the same stabilizer reading
+- **Layer 1: Minimal Retimer**
+  - learns only a source-anchored relative retiming on top of the stable run lattice
+  - keeps explanation power limited to analytic global rate gap, one coarse scalar, and speech-only local residual
+
+The maintained default remains:
 
 - explicit prompt units
-- source-observed duration anchors for sealed speech units
+- source-observed anchors
+- explicit silence runs
 - speech-only prompt global-rate estimation
-- prefix-level coarse correction around the analytic source/ref rate gap
-- strict-causal source prefix-rate EMA
-- static prompt summary memory
-- single duration writer
-- deterministic projector with residual carry
-- explicit silence-run frontend that exports `source_silence_mask`
-- paired-target supervision is built from a dedicated target item/sequence, keeping training signals off the prompt-conditioning chain
+- shared train/infer lattice stabilizer
+- prompt summary memory with low-leakage rhythm summary
+- deterministic carry-rounding projector with prefix budget
+- paired-target supervision projected back onto the source lattice with split local/coarse confidence
 
-Recommended config:
+Recommended config surface:
 
 - `egs/conan_emformer_rhythm_v3.yaml`
 - `rhythm_v3_backbone: unit_run` (`prompt_summary` / `role_memory` remain accepted aliases)
 - `rhythm_v3_warp_mode: none`
 - `rhythm_v3_anchor_mode: source_observed`
+- `rhythm_v3_emit_silence_runs: true`
+- `rhythm_tail_open_units: 2`
+- `rhythm_v3_debounce_min_run_frames: 2`
 
-Canonical training intentionally keeps the prompt-summary auxiliary loss disabled (`lambda_rhythm_summary=0`) so the maintained path focuses on duration/bias supervision plus the optional prefix consistency term.
+One-sentence summary:
 
-## 1.1 External rationale checkpoints
+> V1 first converts the raw unit stream into a stable, reliability-aware, commit-safe run lattice, then learns a minimal source-anchored retimer whose only learned freedoms are one utterance-level coarse correction and speech-only local residuals; silence remains a clipped coarse follower rather than an independent pause planner.
 
-The maintained narrowing of this branch is aligned with a few external anchors:
+## 2. External rationale checkpoints
 
-- Conan paper: discrete content labels are the controllable interface, so the retimer is attached on the content-code stream instead of the chunk scheduler — https://arxiv.org/abs/2507.14534
-- R-VC: explicit token-level duration modeling is useful; their ablations report that sentence-level duration is less stable and that removing duration-side speaker conditioning hurts WER / UTMOS / style transfer — https://aclanthology.org/2025.acl-long.790/
-- L2-ARCTIC: 24 non-native speakers with manually annotated pronunciation deviations make it suitable for run-level confidence weighting — https://psi.engr.tamu.edu/l2-arctic-corpus/
-- CMU ARCTIC / ARCTIC prompts: shared prompt inventory remains the simplest native-native / L2-native sanity surface — https://www.festvox.org/cmu_arctic/
+The maintained narrowing of this branch stays aligned with a few external anchors:
 
-## 2. Default unit-run writer formula
+- Conan paper: discrete content labels are the controllable interface, so the retimer should attach to the content-code stream instead of the chunk scheduler.
+- R-VC: token/run-level duration control is more stable than sentence-level duration control, and duration-side conditioning matters for quality.
+- L2-ARCTIC: non-native pronunciation deviations make confidence-aware paired supervision necessary instead of blindly trusting monotonic projection.
+- CMU ARCTIC prompt sharing remains the simplest native-native / L2-native sanity surface.
 
-For the maintained default path, the runtime reading is:
+## 3. Stable-Lattice Source-Anchored Coarse-to-Local Run Retiming
 
-> `z_hat_i = (g_ref - g_src_prefix,i) + c_hat_i + r_hat_i`
->
-> `log d_hat_i = log a_i + z_hat_i`
+### 3.1 Motivation
+
+In Conan, `chunk` is the streaming input and scheduling unit; it is not the right semantic object for duration control. The natural modeling object is the **run lattice** obtained after causal debounce and adjacent same-code merging.
+
+That observation is necessary but not sufficient. If the run lattice itself is noisy, then all downstream quantities are corrupted together:
+
+- source multiplicity `n_i`
+- speech/silence routing `s_i`
+- boundary and phrase sidecars
+- target projection back onto the source lattice
+- relative log-stretch labels `z_i*`
+
+So V1 can no longer treat "light debounce + same-code merge" as a disposable pre-processing detail. It has to elevate that step into a **stable input contract**. The duration head is not supposed to be a universal denoiser for dirty lattices; the correct order is:
+
+1. stabilize the lattice
+2. propagate uncertainty
+3. supervise duration on top of the stabilized interface
+
+This leads to a two-layer definition:
+
+- **Layer 0** builds a stable lattice interface from raw unit streams.
+- **Layer 1** performs minimal source-anchored retiming only on that interface.
+
+That keeps V1 identifiable, causal, and robust enough for deployment.
+
+### 3.2 Layer 0: Stable Lattice Interface
+
+Given the cumulative raw unit stream `a_{1:T}`, we define a shared stabilizer `S` and construct the source run lattice
+
+`R_src = S(a_{1:T}) = {(u_i, n_i, s_i, omega_i, kappa_i)}_{i=1}^N`.
+
+Each run contains:
+
+- `u_i`: unit id
+- `n_i`: source multiplicity / source run duration
+- `s_i in {0,1}`: speech/silence flag
+- `omega_i in [0,1]`: run reliability
+- `kappa_i in {0,1}`: whether the run is closed and may be committed
+
+This is a **spec-level contract**. In the current repo, the same contract is realized by a combination of:
+
+- run ids and durations from the unitizer/frontend
+- `source_silence_mask`
+- `sealed_mask` / open-tail handling
+- paired-target confidence fields such as `unit_confidence_local_tgt` and `unit_confidence_coarse_tgt`
+
+The key rule is that the stabilizer `S` must be shared by training cache generation and runtime streaming. Otherwise train/infer lattice drift breaks V1 at the interface level.
+
+The stabilizer may use fixed rules or lightweight parametric rules, but the maintained reading is conservative:
+
+- suppress short flicker bridges such as `A-x-A`
+- suppress short fake silence islands such as `speech-silence-speech` when boundary evidence is weak
+- preserve causal commit discipline: already committed prefix runs are never rewritten
+- keep explicit silence runs in the lattice instead of collapsing them into separator-only markers
+
+Current code surfaces that implement this contract include:
+
+- `modules/Conan/rhythm_v3/unitizer.py`
+- `modules/Conan/rhythm/unitizer.py`
+- `modules/Conan/rhythm_v3/unit_frontend.py`
+- `tasks/Conan/rhythm/duration_v3/dataset_mixin.py`
+- `inference/Conan.py`
+
+Training projects target durations back onto the source lattice and obtains target occupancy `n_i*`. The supervision target is the relative log-stretch
+
+`z_i* = log((n_i* + eps) / (n_i + eps))`.
+
+This preserves the source-anchor reading: the model learns how to stretch the fixed source skeleton, not how to generate a new absolute duration sequence from scratch.
+
+### 3.3 Layer 1: Minimal Retimer
+
+#### 3.3.1 Content-normalized global rate
+
+To avoid content composition dominating speaking-rate estimates, V1 uses content-normalized speech durations. Let `mu_u` be the unit-conditioned base prior. For speech runs only,
+
+`d_i = log(n_i + eps) - mu_{u_i}`, with `s_i = 0`.
+
+The source prefix speech rate is the strict-causal EMA
+
+`p_i = EMA_{k < i, s_k = 0}(d_k)`.
+
+The reference-side speech-only global rate is
+
+`g = rho * median_{j: s_j^ref = 0}(d_j^ref)`
+
+where `rho in [0,1]` is a short-prompt shrinkage factor that pulls very short prompts toward a conservative estimate.
+
+The reference condition is compressed into
+
+`c = [e, g, m]`
 
 where:
 
-- `a_i`: source-observed duration for sealed speech units, with frontend fallback only when needed
-- `g_ref`: speech-only global prompt log-rate
-- `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
-- `c_hat_i`: small prefix-coarse correction from pooled causal source state + static prompt summary + speaker vector
-- `r_hat_i`: learned speech-run residual from a causal source query against the same static prompt summary
+- `e`: speaker embedding
+- `g`: speech-only global rate
+- `m`: low-leakage rhythm summary
 
-In other words:
+V1 does **not** treat `m` as a reference timeline, slot planner, or lexical template memory.
 
-- the prompt is distilled once into static conditioning
-- the writer is source-anchored
-- the coarse branch stays close to the analytic `g_ref - g_src_prefix,i` term
-- only sealed speech units are committed
-- silence runs remain but follow the coarse/global bias (clipped, no local residual) so speech stats stay speech-only while pauses stretch with the overall pace
-- the projector only handles integerization and carry
+#### 3.3.2 Three explanatory terms: `a_i`, `b`, `r_i`
 
-## 3. Scope boundary
+V1 keeps exactly three explanatory terms.
 
-The current v3 mainline is a maintained duration-transfer path for streaming VC.
-It is not a claim of full prosody transfer or fully stateful end-to-end
-low-latency deployment.
+1. **Analytic global rate gap**
 
-## 4. What stays in code but is not the default reading
+   `a_i = g - p_i`
 
-`rhythm_v3` still contains comparative runtime modes, including:
+2. **Single coarse correction**
 
-- `global_only`
-- `operator`
-- `progress`
-- `detector`
-- source-residual operator variants
+   `b = delta * tanh(F_b(e, m))`
 
-These stay for controlled comparison, but the maintained default branch reading
-is the unit-run / prompt-summary path above.
+   `b` is an utterance-level scalar, not a time-varying vector. This is deliberate: V1 does not allow the coarse branch to compete with the local branch in explaining the same local structure.
 
-## 5. Prompt-side contract
+3. **Speech-only local residual**
 
-The maintained v3 path requires explicit prompt-unit conditioning:
+   Let the source encoder produce a causal source state `h_i`. Then
+
+   `r_i = alpha * tanh(F_r(h_i, e, m, a_i + b))`
+
+   `r_i` only applies to stable, closed, speech runs. Low-confidence or still-open runs are implicitly gated down.
+
+The final predicted log-stretch is
+
+- speech runs: `z_hat_i = a_i + b + r_i`
+- silence runs: `z_hat_i = clip(a_i + b, -tau, tau)`
+
+So speech gets **coarse + local**, while silence gets **coarse-only clipped follow**. Silence stays in the sequence but does not get its own writer.
+
+#### 3.3.3 Execution and causal commit
+
+The continuous multiplicity prediction is
+
+`n_tilde_i = n_i * exp(z_hat_i)`.
+
+Discrete execution uses carry rounding:
+
+`k_i = max(1, round_carry(n_tilde_i))`.
+
+The prefix budget is
+
+`o_i = sum_{t <= i}(k_t - n_t)`, constrained to `[-B_-, B_+]`.
+
+Only runs with `kappa_i = 1` are committed. Committed runs are never rewritten.
+
+So V1 is causal in the stronger sense:
+
+- the network does not look into the future
+- only closed prefix runs are committed
+- committed prefix predictions are not allowed to change later
+
+This is the maintained strict-causal commit discipline.
+
+### 3.4 Training
+
+#### 3.4.1 Labels and reliability
+
+Monotonic paired projection should not collapse every mismatch into duration truth. In addition to `n_i*`, training carries run-level reliability `omega_i`, driven by:
+
+- alignment path cost / margin
+- run-lattice stability
+- speech vs silence routing confidence
+- optional mispronunciation annotations or exclusion surfaces
+
+A key rule is:
+
+> unstable silence may remain on the lattice, but it must not be elevated into high-confidence hard truth.
+
+This is why V1 splits the existence of silence runs from the right to supervise them strongly.
+
+In the current code, this is expressed through split confidence routing:
+
+- `unit_confidence_local_tgt`
+- `unit_confidence_coarse_tgt`
+
+rather than one shared confidence scalar.
+
+#### 3.4.2 Minimal loss set: 2 + 1
+
+V1 keeps only a minimal objective family.
+
+First define the speech-only coarse target
+
+`b* = wmed_{i: s_i = 0}(z_i* - a_i ; omega_i)`.
+
+Then define the speech local target
+
+`r_i* = z_i* - a_i - b*`.
+
+The main losses are:
+
+1. **Speech residual loss**
+
+   `L_loc = sum_{i: s_i = 0} omega_i * Huber(r_i, r_i*) / sum_{i: s_i = 0} omega_i`
+
+2. **Coarse loss**
+
+   `L_crs = Huber(b, b*)`
+
+3. **Committed-prefix consistency loss** (opened only for strict-causal fine-tuning)
+
+   `L_con = (1 / |C|) * sum_{i in C} Huber(z_hat_i^short, sg(z_hat_i^long))`
+
+The total objective is
+
+`L = L_loc + lambda_c * L_crs + lambda_p * L_con`.
+
+V1 intentionally does **not** introduce a standalone silence primary loss. Silence is a deterministic clipped coarse follower, not an independent modeling object. If training needs a silence target for prefix or consistency bookkeeping, it must be a **coarse-derived pseudo-target**, never a raw full pause target.
+
+That rule keeps the implementation aligned with the theory:
+
+- speech local residuals learn the local rhythm change
+- coarse learns the utterance-level pace shift
+- silence cannot re-enter as a hidden pause planner through auxiliary losses
+
+### 3.5 Boundary / non-goal statement
+
+This V1 is **not**:
+
+- a pause planner
+- a reference timeline matcher
+- a prompt-specific lexical micro-rhythm copier
+- a joint duration-F0-energy full prosody transfer model
+
+It is a **stable-lattice, source-anchored, speech-dominant, causally committed relative retimer**.
+
+That contraction is intentional. It trades away some expressive power in exchange for:
+
+- clearer boundaries
+- better identifiability
+- simpler ablations
+- lower deployment risk
+
+### 3.6 Upgrade interfaces reserved for later versions
+
+V1 leaves room for later upgrades, but they should not be mixed into this version prematurely.
+
+- **Boundary-aware silence branch**
+  - upgrade constant `tau` into boundary-aware `tau_i`
+  - optionally add silence-specific residuals
+  - belongs to V2, not V1
+
+- **Phrasewise coarse**
+  - upgrade scalar `b` into phrasewise `b_i`
+  - only after scalar coarse is shown insufficient
+
+- **Richer reference memory**
+  - only after proving the current summary `m` remains stable under same-speaker different-text conditioning
+  - otherwise it easily collapses into lexical template matching
+
+- **Joint prosody transfer**
+  - only after the duration frontend is stable
+  - do not let duration and decoder-side style/pitch pathways compensate for each other during V1
+
+## 4. Current repo contract mapping
+
+### 4.1 Prompt-side contract
+
+The maintained prompt-summary path requires explicit prompt-unit evidence:
 
 - `prompt_content_units`
 - `prompt_duration_obs`
 - `prompt_unit_mask`
-- optional `prompt_valid_mask`
-- optional `prompt_speech_mask`
-- optional `prompt_spk_embed`
 
-The prompt encoder produces:
+For the maintained prompt-summary reading, speech-only rate semantics must be preserved. So runtime accepts, in order:
+
+1. `prompt_speech_mask`
+2. `prompt_silence_mask`
+3. derivation from explicit silence tokens when `rhythm_v3_emit_silence_runs=true`
+
+It no longer silently falls back to `prompt_valid_mask` for prompt-summary mode.
+
+The prompt encoder exports:
 
 - `global_rate`
 - `summary_state`
 - `spk_embed`
-- diagnostic slot statistics:
-  - `role_value`
-  - `role_var`
-  - `role_coverage`
+- diagnostic summary slots / role statistics
 
-Those statistics remain useful for losses and observability. Runtime only needs
-static prompt conditioning rather than a prompt-time evolution story, and the
-writer now consumes `summary_state` directly instead of treating it as a pure
-diagnostic sidecar.
+Pooling and prompt global-rate estimation remain speech-only.
 
-Paired-target supervision is kept separate: the canonical path pulls `unit_duration_tgt`
-from an explicit paired target item or `paired_target_*` inputs instead of recycling
-the prompt diagnostics, and it only accepts a source-self fallback when
-`rhythm_v3_allow_source_self_target_fallback` is intentionally enabled.
+### 4.2 Source/runtime contract
 
-## 6. Source-side/runtime contract
-
-The maintained unit-run / prompt-summary runtime uses:
+The maintained source-side contract uses:
 
 - `content_units`
-- `dur_anchor_src`
+- `source_duration_obs` / `dur_anchor_src`
 - `unit_anchor_base`
+- `unit_rate_log_base`
+- `source_silence_mask`
+- `source_boundary_cue`
+- `phrase_group_pos`
+- `phrase_final_mask`
 - sealed/open masks from the frontend
 
-For the default path:
+Important current rules:
 
-- source-observed durations anchor committed speech units
-- strict-causal local-rate state is the key streaming rate state
-- `sep_mask` is not the canonical speech mask
-- `source_silence_mask` gates speech-only supervision and rate tracking
-- the maintained v3 frontend now materializes explicit silence runs instead of collapsing silence into separator-only markers
+- precomputed source durations stay float-valued; they are not forcibly truncated to integers
+- prompt-summary + explicit silence runs requires `source_silence_mask` in precomputed source caches
+- runtime performs EOS tail closing instead of leaving the final open tail permanently outside committed retiming
+- the rhythm frontend can run incrementally rather than rebuilding the whole source lattice every chunk
 
-## 7. Projector contract
+### 4.3 Training-side contract
 
-The maintained projector story is narrow:
+Paired-target supervision is kept separate from prompt conditioning. The maintained paired projection path returns:
 
-- deterministic projection to integer frames
-- residual carry
-- explicit prefix unit-budget clamp so the cumulative `O_p = Σ(q_i - n_i)` stays within configured bounds
-- raw uncommitted open-tail units are retained and concatenated after the retimed prefix for downstream processing
+- `unit_duration_tgt`
+- `unit_confidence_local_tgt`
+- `unit_confidence_coarse_tgt`
+- alignment diagnostics such as coverage / match / cost
 
-## 8. Task/data split now in code
+That split is central to the maintained V1 reading:
 
-The task layer is now split into real packages:
+- high-confidence speech runs may supervise local residuals
+- lower-confidence speech runs may still supervise coarse structure
+- silence never becomes a high-confidence local target
 
-- `tasks/Conan/rhythm/common/`
-- `tasks/Conan/rhythm/duration_v3/`
-- `tasks/Conan/rhythm/rhythm_v2/`
-
-Meaning:
-
-- `common/`: shared orchestration, runtime helpers, collate / batching, validation helpers
-- `duration_v3/`: canonical v3 task and dataset logic
-- `rhythm_v2/`: legacy v2 teacher/export compatibility logic
-
-Top-level files remain only as compatibility facades:
-
-- `tasks/Conan/rhythm/task_mixin.py`
-- `tasks/Conan/rhythm/dataset_mixin.py`
-- `tasks/Conan/rhythm/losses.py`
-- `tasks/Conan/rhythm/targets.py`
-- `tasks/Conan/rhythm/metrics.py`
-- `tasks/Conan/rhythm/task_config.py`
-- `tasks/Conan/rhythm/runtime_modes.py`
-- `tasks/Conan/rhythm/task_runtime_support.py`
-
-## 9. Current file map
+## 5. Current file map
 
 ### Runtime
 
 - `modules/Conan/rhythm_v3/module.py`
 - `modules/Conan/rhythm_v3/summary_memory.py`
-- `modules/Conan/rhythm_v3/reference_memory.py`
 - `modules/Conan/rhythm_v3/projector.py`
+- `modules/Conan/rhythm_v3/runtime_adapter.py`
 - `modules/Conan/rhythm_v3/unit_frontend.py`
+- `modules/Conan/rhythm_v3/unitizer.py`
 
-### Training surfaces
+### Training/data
 
 - `tasks/Conan/rhythm/common/`
 - `tasks/Conan/rhythm/duration_v3/`
-- `tasks/Conan/rhythm/rhythm_v2/`
+- `modules/Conan/rhythm/supervision.py`
+- `modules/Conan/rhythm/unit_frontend.py`
+- `modules/Conan/rhythm/unitizer.py`
 
 ### Inference/runtime helpers
 
@@ -185,16 +392,17 @@ Top-level files remain only as compatibility facades:
 - `inference/run_voice_conversion.py`
 - `inference/run_streaming_latency_report.py`
 
-## 10. Documentation rule
+## 6. Documentation rule
 
 When documentation disagrees, prefer the smallest truthful current reading:
 
 - `rhythm_v3` is the maintained line
-- `unit_run + source_observed + carry-only projector` is the maintained default
+- final V1 is the two-layer reading above: stable lattice interface + minimal retimer
+- explicit silence runs, speech-only global rate, speech coarse+local, silence coarse-only, carry rounding, and prefix budget are the defining constraints
 - top-level task files are compatibility shells, not the main implementation location
-- legacy v2 docs are archive notes, not the mainline spec
+- legacy v2 notes are archival, not the mainline specification
 
-## 11. Legacy status of v2
+## 7. Legacy status of v2
 
 `rhythm_v2` remains only for:
 
@@ -203,34 +411,22 @@ When documentation disagrees, prefer the smallest truthful current reading:
 - legacy experiments
 - archival operational notes
 
-## 12. Current validation snapshot
+It is not the maintained architecture target.
 
-Validated locally after the real task-layer split and mixin cleanup:
+## 8. Validation snapshot (2026-04-12)
 
-- `python -m compileall -q tasks/Conan/rhythm tasks/Conan/Conan.py tasks/Conan/dataset.py inference/Conan.py`
-- import smoke for:
-  - `tasks.Conan.rhythm`
-  - `tasks.Conan.Conan`
-  - `tasks.Conan.dataset`
-  - `inference.Conan`
+Validated locally after the stable-lattice / prompt-summary contract tightening and paired-projection confidence split:
+
+- `py -3 -m py_compile` on the touched v3 runtime, frontend, dataset, task-config, and test files
 - pytest bundle:
-  - `tests/rhythm/test_rhythm_v3_losses.py`
-  - `tests/rhythm/test_rhythm_v3_metrics.py`
-  - `tests/rhythm/test_loss_components.py`
-  - `tests/rhythm/test_target_builder.py`
   - `tests/rhythm/test_task_config_v3.py`
   - `tests/rhythm/test_runtime_modes_v3.py`
   - `tests/rhythm/test_task_runtime_support.py`
-  - `tests/rhythm/test_inference_entrypoints.py`
-  - `tests/rhythm/test_reference_sidecar.py`
-  - `tests/rhythm/test_optimizer_param_collection.py`
-  - `tests/rhythm/test_pitch_supervision_runtime.py`
-  - `tests/rhythm/test_loss_confidence_routing.py`
-  - `tests/rhythm/test_metrics_masking.py`
-  - `tests/rhythm/test_streaming_chunk_metrics.py`
-  - `tests/rhythm/test_budget_surfaces.py`
   - `tests/rhythm/test_cache_contracts.py`
-  - `tests/rhythm/test_reference_bootstrap_runtime.py`
-  - `tests/rhythm/test_runtime_validation_alignment.py`
+  - `tests/rhythm/test_rhythm_v3_losses.py`
+  - `tests/rhythm/test_rhythm_v3_metrics.py`
+  - `tests/rhythm/test_rhythm_v3_runtime.py`
+  - `tests/rhythm/test_rhythm_v3_unit_frontend.py`
+  - with `-k "not test_protocol_duration_baseline_table_prior_file_offsets_nominal_anchor" -p no:cacheprovider -p no:tmpdir`
 
-Result: **216 passed**.
+Result: **184 passed, 1 deselected**.

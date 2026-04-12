@@ -212,6 +212,13 @@ class CommonRhythmTaskMixin:
                 "sealed_mask": legacy_sealed,
                 "sep_mask": legacy_sep,
                 "unit_anchor_base": sample.get(f"{prefix}unit_anchor_base"),
+                "unit_rate_log_base": sample.get(f"{prefix}unit_rate_log_base"),
+                "source_silence_mask": sample.get(f"{prefix}source_silence_mask"),
+                "source_run_stability": sample.get(f"{prefix}source_run_stability"),
+                "source_boundary_cue": sample.get(f"{prefix}source_boundary_cue"),
+                "phrase_group_index": sample.get(f"{prefix}phrase_group_index"),
+                "phrase_group_pos": sample.get(f"{prefix}phrase_group_pos"),
+                "phrase_final_mask": sample.get(f"{prefix}phrase_final_mask"),
             }
         keys = self._LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS + self._LEGACY_RHYTHM_SOURCE_CACHE_OPTIONAL_KEYS
         payload = {}

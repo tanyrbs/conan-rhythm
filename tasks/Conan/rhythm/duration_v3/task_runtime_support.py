@@ -38,6 +38,8 @@ class DurationV3TaskRuntimeSupportMixin:
             ).strip().lower(),
             silence_coarse_weight=max(0.0, float(hparams.get("rhythm_v3_silence_coarse_weight", 0.25) or 0.0)),
             silence_logstretch_max=max(0.01, float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35) or 0.35)),
+            local_rate_decay=float(hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95),
+            silence_short_gap_scale=float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35) or 0.35),
         )
 
 

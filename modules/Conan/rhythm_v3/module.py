@@ -335,8 +335,14 @@ class MixedEffectsDurationModule(nn.Module):
         summary_slots = int(unused_kwargs.pop("num_summary_slots", unused_kwargs.pop("num_role_slots", max(4, basis_rank))))
         summary_cov_floor = float(unused_kwargs.pop("summary_cov_floor", unused_kwargs.pop("role_cov_floor", 0.05)))
         summary_pool_speech_only = bool(unused_kwargs.pop("summary_pool_speech_only", True))
+        summary_use_unit_embedding = bool(unused_kwargs.pop("summary_use_unit_embedding", False))
         max_logstretch = float(unused_kwargs.pop("max_logstretch", 1.2))
         max_silence_logstretch = float(unused_kwargs.pop("max_silence_logstretch", 0.35))
+        local_cold_start_runs = int(unused_kwargs.pop("local_cold_start_runs", 2))
+        local_short_run_min_duration = float(unused_kwargs.pop("local_short_run_min_duration", 2.0))
+        local_rate_decay = float(unused_kwargs.pop("local_rate_decay", 0.95))
+        short_gap_silence_scale = float(unused_kwargs.pop("short_gap_silence_scale", 0.35))
+        leading_silence_scale = float(unused_kwargs.pop("leading_silence_scale", 0.0))
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
@@ -344,6 +350,11 @@ class MixedEffectsDurationModule(nn.Module):
         operator_holdout_ratio = float(unused_kwargs.pop("operator_holdout_ratio", 0.30))
         prefix_budget_pos = int(unused_kwargs.pop("prefix_budget_pos", unused_kwargs.pop("unit_budget_pos", 24)))
         prefix_budget_neg = int(unused_kwargs.pop("prefix_budget_neg", unused_kwargs.pop("unit_budget_neg", 24)))
+        dynamic_budget_ratio = float(unused_kwargs.pop("dynamic_budget_ratio", 0.0))
+        min_prefix_budget = int(unused_kwargs.pop("min_prefix_budget", 0))
+        max_prefix_budget = int(unused_kwargs.pop("max_prefix_budget", 0))
+        boundary_carry_decay = float(unused_kwargs.pop("boundary_carry_decay", 0.25))
+        boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
@@ -387,6 +398,11 @@ class MixedEffectsDurationModule(nn.Module):
         self.projector = StreamingDurationProjector(
             prefix_budget_pos=prefix_budget_pos,
             prefix_budget_neg=prefix_budget_neg,
+            dynamic_budget_ratio=dynamic_budget_ratio,
+            min_prefix_budget=min_prefix_budget,
+            max_prefix_budget=max_prefix_budget,
+            boundary_carry_decay=boundary_carry_decay,
+            boundary_reset_thresh=boundary_reset_thresh,
         )
         self.summary_codebook = None
         self.role_codebook = None
@@ -403,6 +419,7 @@ class MixedEffectsDurationModule(nn.Module):
                 operator_rank=basis_rank,
                 coverage_floor=summary_cov_floor,
                 summary_pool_speech_only=summary_pool_speech_only,
+                summary_use_unit_embedding=summary_use_unit_embedding,
                 codebook=self.summary_codebook,
             )
             self.duration_head = StreamingDurationHead(
@@ -412,6 +429,11 @@ class MixedEffectsDurationModule(nn.Module):
                 spk_dim=hidden_size,
                 max_logstretch=max_logstretch,
                 max_silence_logstretch=max_silence_logstretch,
+                local_cold_start_runs=local_cold_start_runs,
+                local_short_run_min_duration=local_short_run_min_duration,
+                local_rate_decay=local_rate_decay,
+                short_gap_silence_scale=short_gap_silence_scale,
+                leading_silence_scale=leading_silence_scale,
                 codebook=self.summary_codebook,
             )
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
@@ -459,14 +481,23 @@ class MixedEffectsDurationModule(nn.Module):
                 raise ValueError(
                     "rhythm_v3 prompt_summary/unit_run backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
                 )
+            prompt_speech_mask = ref_conditioning.get("prompt_speech_mask")
+            if not isinstance(prompt_speech_mask, torch.Tensor):
+                raise ValueError(
+                    "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask "
+                    "to preserve speech-only global rate semantics."
+                )
             return self.prompt_memory_encoder(
                 prompt_content_units=prompt_content_units,
                 prompt_duration_obs=prompt_duration_obs,
                 prompt_mask=prompt_mask,
                 prompt_valid_mask=ref_conditioning.get("prompt_valid_mask"),
-                prompt_speech_mask=ref_conditioning.get("prompt_speech_mask"),
+                prompt_speech_mask=prompt_speech_mask,
+                prompt_unit_anchor_base=ref_conditioning.get("prompt_unit_anchor_base"),
+                prompt_log_base=ref_conditioning.get("prompt_log_base"),
                 prompt_spk_embed=ref_conditioning.get("prompt_spk_embed"),
-                prompt_edge_cue=None,
+                prompt_edge_cue=ref_conditioning.get("prompt_source_boundary_cue"),
+                prompt_phrase_final_mask=ref_conditioning.get("prompt_phrase_final_mask"),
             )
         need_progress = self._use_progress_response()
         need_detector = self._use_detector_bank()
@@ -726,11 +757,14 @@ class MixedEffectsDurationModule(nn.Module):
         final_rate_ema: torch.Tensor,
         next_state: DurationRuntimeState,
     ) -> DurationRuntimeState:
-        zeros = final_rate_ema.new_zeros(final_rate_ema.shape)
         return replace(
             next_state,
             local_rate_ema=final_rate_ema.detach(),
-            since_last_boundary=zeros.detach(),
+            since_last_boundary=(
+                next_state.since_last_boundary.detach()
+                if isinstance(next_state.since_last_boundary, torch.Tensor)
+                else final_rate_ema.new_zeros(final_rate_ema.shape)
+            ),
         )
 
     @staticmethod
@@ -784,10 +818,20 @@ class MixedEffectsDurationModule(nn.Module):
             role_plan = self.duration_head(
                 content_units=source_batch.content_units,
                 log_anchor=torch.log(prediction_anchor.clamp_min(1.0e-4)),
+                log_base=(
+                    source_batch.unit_rate_log_base.float()
+                    if isinstance(getattr(source_batch, "unit_rate_log_base", None), torch.Tensor)
+                    else torch.log(source_batch.unit_anchor_base.float().clamp_min(1.0e-4))
+                ),
                 unit_mask=unit_mask,
                 sealed_mask=sealed_mask,
                 sep_hint=(source_batch.sep_mask.float() if isinstance(getattr(source_batch, "sep_mask", None), torch.Tensor) else unit_mask.new_zeros(unit_mask.shape)),
-                edge_cue=unit_mask.new_zeros(unit_mask.shape),
+                edge_cue=(
+                    source_batch.source_boundary_cue.float()
+                    if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+                    else unit_mask.new_zeros(unit_mask.shape)
+                ),
+                phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
                 global_rate=ref_memory.global_rate,
                 summary_state=ref_memory.summary_state,
                 spk_embed=ref_memory.spk_embed,
@@ -796,6 +840,7 @@ class MixedEffectsDurationModule(nn.Module):
                 role_coverage=ref_memory.role_coverage,
                 local_rate_ema=local_rate_ema,
                 silence_mask=getattr(source_batch, "source_silence_mask", None),
+                run_stability=getattr(source_batch, "source_run_stability", None),
             )
             unit_logstretch = role_plan["unit_logstretch"] * commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
@@ -807,7 +852,7 @@ class MixedEffectsDurationModule(nn.Module):
             unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
                 unit_duration_exec=unit_duration_exec,
                 unit_logstretch=unit_logstretch,
-                unit_anchor_base=source_batch.source_duration_obs.float().clamp_min(1.0e-4),
+                unit_anchor_base=prediction_anchor.float().clamp_min(1.0e-4),
                 state=state,
             )
             execution = self.projector.finalize_execution(
@@ -833,6 +878,8 @@ class MixedEffectsDurationModule(nn.Module):
                     if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor)
                     else None
                 ),
+                source_boundary_cue=getattr(source_batch, "source_boundary_cue", None),
+                phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
                 global_bias_scalar=role_plan.get("global_bias_scalar"),
                 global_shift_analytic=role_plan.get("unit_global_shift_analytic"),
                 coarse_logstretch=role_plan.get("unit_coarse_logstretch"),
@@ -879,7 +926,7 @@ class MixedEffectsDurationModule(nn.Module):
         unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
             unit_duration_exec=unit_duration_exec,
             unit_logstretch=unit_logstretch,
-            unit_anchor_base=source_batch.source_duration_obs.float().clamp_min(1.0e-4),
+            unit_anchor_base=prediction_anchor.float().clamp_min(1.0e-4),
             state=state,
         )
         return self.projector.finalize_execution(
@@ -898,6 +945,8 @@ class MixedEffectsDurationModule(nn.Module):
                 else detector_response * speech_commit_mask
             ),
             local_response=local_response * speech_commit_mask,
+            source_boundary_cue=getattr(source_batch, "source_boundary_cue", None),
+            phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
             unit_logstretch_raw=unit_logstretch_raw,
             unit_duration_raw=unit_duration_raw,
         )

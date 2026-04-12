@@ -116,6 +116,11 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError(
                 "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run')."
             )
+        if not bool(hparams.get("rhythm_v3_emit_silence_runs", True)):
+            raise ValueError(
+                "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') "
+                "requires rhythm_v3_emit_silence_runs=true."
+            )
     if backbone_mode == "operator" and warp_mode == "progress" and not allow_hybrid:
         raise ValueError(
             "rhythm_v3_backbone='operator' with rhythm_v3_warp_mode='progress' "
@@ -173,6 +178,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         "lambda_rhythm_ortho",
         "rhythm_v3_silence_coarse_weight",
         "rhythm_v3_silence_max_logstretch",
+        "rhythm_v3_local_short_run_min_duration",
         "rhythm_global_shrink_tau",
         "rhythm_operator_support_tau",
         "rhythm_operator_holdout_ratio",
@@ -180,6 +186,27 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     ):
         if float(hparams.get(key, 0.0) or 0.0) < 0.0:
             raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
+    for key in (
+        "rhythm_v3_short_gap_silence_scale",
+        "rhythm_v3_leading_silence_scale",
+        "rhythm_v3_local_rate_decay",
+        "rhythm_v3_boundary_carry_decay",
+        "rhythm_v3_boundary_reset_thresh",
+    ):
+        value = float(hparams.get(key, 0.0) or 0.0)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{key} must be within [0, 1] for rhythm_v3.")
+    dynamic_budget_ratio = float(hparams.get("rhythm_v3_dynamic_budget_ratio", 0.0) or 0.0)
+    if dynamic_budget_ratio < 0.0 or dynamic_budget_ratio > 1.0:
+        raise ValueError("rhythm_v3_dynamic_budget_ratio must be within [0, 1] for rhythm_v3.")
+    min_prefix_budget = int(hparams.get("rhythm_v3_min_prefix_budget", 0) or 0)
+    max_prefix_budget = int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0)
+    if min_prefix_budget < 0:
+        raise ValueError("rhythm_v3_min_prefix_budget must be >= 0 for rhythm_v3.")
+    if max_prefix_budget < 0:
+        raise ValueError("rhythm_v3_max_prefix_budget must be >= 0 for rhythm_v3.")
+    if max_prefix_budget > 0 and max_prefix_budget < min_prefix_budget:
+        raise ValueError("rhythm_v3_max_prefix_budget must be >= rhythm_v3_min_prefix_budget.")
     if float(hparams.get("rhythm_progress_support_tau", 8.0) or 0.0) < 0.0:
         raise ValueError("rhythm_progress_support_tau must be >= 0 for rhythm_v3.")
     if int(hparams.get("rhythm_progress_bins", 4) or 0) <= 0:

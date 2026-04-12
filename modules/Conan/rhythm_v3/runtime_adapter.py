@@ -17,6 +17,7 @@ from .frame_plan import RhythmFramePlan, build_frame_plan_from_execution
 from .module import MixedEffectsDurationModule
 from .renderer import RenderedRhythmSequence, render_rhythm_sequence
 from .unit_frontend import DurationUnitFrontend
+from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 
 _PROMPT_UNIT_REQUIRED_KEYS = (
     "prompt_content_units",
@@ -29,18 +30,28 @@ class ConanDurationAdapter(nn.Module):
         super().__init__()
         self.hparams = hparams
         self.baseline_train_mode = str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
+        self.silent_token = int(hparams.get("silent_token", 57))
+        self.emit_silence_runs = bool(hparams.get("rhythm_v3_emit_silence_runs", True))
+        self.prompt_summary_backbone = is_duration_v3_prompt_summary_backbone(
+            hparams.get("rhythm_v3_backbone", "global_only")
+        )
         for removed_key, replacement in (
             ("rhythm_coarse_bins", "rhythm_progress_bins"),
             ("rhythm_coarse_support_tau", "rhythm_progress_support_tau"),
         ):
             if removed_key in hparams:
                 raise ValueError(f"{removed_key} has been removed from rhythm_v3. Use {replacement} instead.")
+        if self.prompt_summary_backbone and not self.emit_silence_runs:
+            raise ValueError(
+                "rhythm_v3 prompt_summary/unit_run backbone requires rhythm_v3_emit_silence_runs=true."
+            )
         self.unit_frontend = DurationUnitFrontend(
             vocab_size=vocab_size,
-            silent_token=hparams.get("silent_token", 57),
+            silent_token=self.silent_token,
             separator_aware=bool(hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(hparams.get("rhythm_tail_open_units", 1)),
-            emit_silence_runs=bool(hparams.get("rhythm_v3_emit_silence_runs", True)),
+            emit_silence_runs=self.emit_silence_runs,
+            debounce_min_run_frames=int(hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             anchor_hidden_size=int(hparams.get("rhythm_anchor_hidden_size", 128)),
             anchor_min_frames=float(hparams.get("rhythm_anchor_min_frames", 1.0)),
             anchor_max_frames=float(hparams.get("rhythm_anchor_max_frames", 12.0)),
@@ -61,8 +72,14 @@ class ConanDurationAdapter(nn.Module):
             num_summary_slots=int(hparams.get("rhythm_num_summary_slots", hparams.get("rhythm_num_role_slots", 12))),
             role_cov_floor=float(hparams.get("rhythm_prompt_cov_floor", 0.05)),
             summary_pool_speech_only=bool(hparams.get("rhythm_v3_summary_pool_speech_only", True)),
+            summary_use_unit_embedding=bool(hparams.get("rhythm_v3_summary_use_unit_embedding", False)),
             max_logstretch=float(hparams.get("rhythm_max_logstretch", 1.2)),
             max_silence_logstretch=float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35)),
+            local_cold_start_runs=int(hparams.get("rhythm_v3_local_cold_start_runs", 2)),
+            local_short_run_min_duration=float(hparams.get("rhythm_v3_local_short_run_min_duration", 2.0)),
+            local_rate_decay=float(hparams.get("rhythm_v3_local_rate_decay", 0.95)),
+            short_gap_silence_scale=float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35)),
+            leading_silence_scale=float(hparams.get("rhythm_v3_leading_silence_scale", 0.0)),
             response_window_left=int(hparams.get("rhythm_response_window_left", 4)),
             response_window_right=int(hparams.get("rhythm_response_window_right", 0)),
             streaming_mode=streaming_mode,
@@ -78,6 +95,11 @@ class ConanDurationAdapter(nn.Module):
             warp_mode=hparams.get("rhythm_v3_warp_mode"),
             prefix_budget_pos=int(hparams.get("rhythm_v3_prefix_budget_pos", hparams.get("rhythm_v3_unit_budget_pos", 24))),
             prefix_budget_neg=int(hparams.get("rhythm_v3_prefix_budget_neg", hparams.get("rhythm_v3_unit_budget_neg", 24))),
+            dynamic_budget_ratio=float(hparams.get("rhythm_v3_dynamic_budget_ratio", 0.0) or 0.0),
+            min_prefix_budget=int(hparams.get("rhythm_v3_min_prefix_budget", 0) or 0),
+            max_prefix_budget=int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0),
+            boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
+            boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
             allow_hybrid=(
                 None
                 if "rhythm_v3_allow_hybrid" not in hparams
@@ -119,6 +141,15 @@ class ConanDurationAdapter(nn.Module):
     ):
         precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
         if precomputed_cache is not None:
+            if (
+                self.prompt_summary_backbone
+                and self.emit_silence_runs
+                and precomputed_cache.get("source_silence_mask") is None
+            ):
+                raise ValueError(
+                    "rhythm_v3 prompt_summary runtime with explicit silence runs requires "
+                    "source_silence_mask in rhythm_source_cache / offline source cache."
+                )
             return self.unit_frontend.from_precomputed(
                 **precomputed_cache,
             )
@@ -138,14 +169,26 @@ class ConanDurationAdapter(nn.Module):
             return prompt_unit_mask.float().clamp(0.0, 1.0)
         return prompt_duration_obs.float().gt(0.0).float()
 
-    @staticmethod
     def _resolve_prompt_speech_mask(
+        self,
         *,
+        prompt_content_units: torch.Tensor,
         prompt_valid_mask: torch.Tensor,
         prompt_speech_mask: torch.Tensor | None,
+        prompt_silence_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         if isinstance(prompt_speech_mask, torch.Tensor):
             return prompt_speech_mask.float().clamp(0.0, 1.0) * prompt_valid_mask.float()
+        if isinstance(prompt_silence_mask, torch.Tensor):
+            return prompt_valid_mask.float() * (1.0 - prompt_silence_mask.float().clamp(0.0, 1.0))
+        if self.emit_silence_runs:
+            derived_silence = prompt_content_units.long().eq(int(self.silent_token)).float()
+            return prompt_valid_mask.float() * (1.0 - derived_silence)
+        if self.prompt_summary_backbone:
+            raise ValueError(
+                "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask, "
+                "prompt_silence_mask, or explicit silence-run prompt units."
+            )
         return prompt_valid_mask.float()
 
     def _prepare_prompt_unit_conditioning(
@@ -164,10 +207,21 @@ class ConanDurationAdapter(nn.Module):
             prompt_duration_obs=prompt_duration_obs,
             prompt_unit_mask=ref_conditioning.get("prompt_unit_mask"),
         )
+        prompt_silence_mask = (
+            ref_conditioning["prompt_silence_mask"].to(device=device).float()
+            if isinstance(ref_conditioning.get("prompt_silence_mask"), torch.Tensor)
+            else None
+        )
         prompt_speech_mask = self._resolve_prompt_speech_mask(
+            prompt_content_units=prompt_content_units,
             prompt_valid_mask=prompt_valid_mask,
             prompt_speech_mask=ref_conditioning.get("prompt_speech_mask"),
+            prompt_silence_mask=prompt_silence_mask,
         )
+        if self.prompt_summary_backbone and not bool((prompt_speech_mask > 0.5).any().item()):
+            raise ValueError(
+                "rhythm_v3 prompt_summary/unit_run backbone requires at least one speech run in prompt conditioning."
+            )
         enriched = {
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
@@ -175,6 +229,8 @@ class ConanDurationAdapter(nn.Module):
             "prompt_valid_mask": prompt_valid_mask,
             "prompt_speech_mask": prompt_speech_mask,
         }
+        if isinstance(prompt_silence_mask, torch.Tensor):
+            enriched["prompt_silence_mask"] = prompt_silence_mask * prompt_valid_mask
         if isinstance(ref_conditioning.get("prompt_spk_embed"), torch.Tensor):
             enriched["prompt_spk_embed"] = ref_conditioning["prompt_spk_embed"].to(device=device).float().detach()
         if isinstance(ref_conditioning.get("prompt_unit_anchor_base"), torch.Tensor):
@@ -189,7 +245,7 @@ class ConanDurationAdapter(nn.Module):
             if isinstance(ref_conditioning.get(key), torch.Tensor):
                 enriched[key] = ref_conditioning[key].to(device=device).float()
         if enriched.get("prompt_log_base") is None and enriched.get("prompt_unit_anchor_base") is None:
-            enriched["prompt_unit_anchor_base"] = self.unit_frontend.compute_baseline(
+            enriched["prompt_log_base"] = self.unit_frontend.compute_rate_log_base(
                 prompt_content_units,
                 prompt_valid_mask,
                 stop_gradient=True,

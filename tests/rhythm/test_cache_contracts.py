@@ -30,7 +30,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             "rhythm_enable_v2": True,
             "rhythm_stage": "student_kd",
             "rhythm_strict_mainline": True,
-            "rhythm_cache_version": 5,
+            "rhythm_cache_version": 6,
             "rhythm_dataset_target_mode": "cached_only",
             "rhythm_primary_target_surface": "teacher",
             "rhythm_teacher_target_source": "learned_offline",
@@ -60,7 +60,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             "rhythm_enable_v2": True,
             "rhythm_stage": "legacy_dual_mode_kd",
             "rhythm_strict_mainline": False,
-            "rhythm_cache_version": 5,
+            "rhythm_cache_version": 6,
             "rhythm_dataset_target_mode": "cached_only",
             "rhythm_primary_target_surface": "teacher",
             "rhythm_teacher_target_source": "learned_offline",
@@ -150,7 +150,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             "rhythm_enable_v2": True,
             "rhythm_stage": "transitional",
             "rhythm_strict_mainline": False,
-            "rhythm_cache_version": 5,
+            "rhythm_cache_version": 6,
             "rhythm_dataset_target_mode": "runtime_only",
             "rhythm_primary_target_surface": "teacher",
             "rhythm_teacher_target_source": "algorithmic",
@@ -182,7 +182,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             "rhythm_enable_v2": True,
             "rhythm_stage": "transitional",
             "rhythm_strict_mainline": False,
-            "rhythm_cache_version": 5,
+            "rhythm_cache_version": 6,
             "rhythm_dataset_target_mode": "cached_only",
             "rhythm_primary_target_surface": "guidance",
             "rhythm_distill_surface": "none",
@@ -310,10 +310,53 @@ class RhythmCacheContractTests(unittest.TestCase):
             paired_target_conditioning=paired_target_conditioning,
             sample={},
         )
-        self.assertTrue(np.allclose(merged["unit_duration_tgt"], np.asarray([3.0, 1.0, 1.0], dtype=np.float32)))
+        self.assertTrue(np.allclose(merged["unit_duration_tgt"], np.asarray([3.0, 2.0, 1.0], dtype=np.float32)))
         self.assertEqual(merged["unit_confidence_tgt"].shape, (3,))
-        self.assertGreater(float(merged["unit_confidence_tgt"][0]), 0.5)
-        self.assertGreater(float(merged["unit_confidence_tgt"][2]), 0.5)
+        self.assertEqual(merged["unit_confidence_local_tgt"].shape, (3,))
+        self.assertEqual(merged["unit_confidence_coarse_tgt"].shape, (3,))
+        self.assertEqual(merged["unit_alignment_coverage_tgt"].shape, (3,))
+        self.assertEqual(merged["unit_alignment_match_tgt"].shape, (3,))
+        self.assertEqual(merged["unit_alignment_cost_tgt"].shape, (3,))
+        self.assertGreater(float(merged["unit_confidence_local_tgt"][0]), 0.5)
+        self.assertGreater(float(merged["unit_confidence_local_tgt"][2]), 0.5)
+        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][0]), 0.5)
+        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][2]), 0.5)
+        self.assertEqual(float(merged["unit_confidence_local_tgt"][1]), 0.0)
+        self.assertEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
+        self.assertTrue(np.all((merged["unit_alignment_coverage_tgt"] >= 0.0) & (merged["unit_alignment_coverage_tgt"] <= 1.0)))
+        self.assertTrue(np.all((merged["unit_alignment_match_tgt"] >= 0.0) & (merged["unit_alignment_match_tgt"] <= 1.0)))
+        self.assertTrue(np.all(np.isfinite(merged["unit_alignment_cost_tgt"])))
+        self.assertTrue(np.all(merged["unit_alignment_cost_tgt"] >= 0.0))
+
+    def test_duration_v3_target_merge_preserves_split_confidence_fields_from_sample(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+            }
+        )
+        sample = {
+            "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+            "unit_confidence_local_tgt": np.asarray([0.0, 0.8], dtype=np.float32),
+            "unit_confidence_coarse_tgt": np.asarray([0.6, 0.9], dtype=np.float32),
+            "unit_alignment_coverage_tgt": np.asarray([0.0, 1.0], dtype=np.float32),
+            "unit_alignment_match_tgt": np.asarray([0.0, 1.0], dtype=np.float32),
+            "unit_alignment_cost_tgt": np.asarray([1.0, 0.0], dtype=np.float32),
+        }
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_passthrough"},
+            source_cache={},
+            paired_target_conditioning={},
+            sample=sample,
+        )
+        self.assertTrue(np.allclose(merged["unit_duration_tgt"], sample["unit_duration_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_confidence_local_tgt"], sample["unit_confidence_local_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_confidence_coarse_tgt"], sample["unit_confidence_coarse_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_confidence_tgt"], sample["unit_confidence_coarse_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_alignment_coverage_tgt"], sample["unit_alignment_coverage_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_alignment_match_tgt"], sample["unit_alignment_match_tgt"]))
+        self.assertTrue(np.allclose(merged["unit_alignment_cost_tgt"], sample["unit_alignment_cost_tgt"]))
 
     def test_duration_v3_target_merge_rejects_self_paired_target_projection_without_explicit_fallback(self) -> None:
         dataset = _DummyDataset(

@@ -97,6 +97,52 @@ def test_validate_rhythm_training_hparams_accepts_positive_silence_settings():
     )
 
 
+def test_validate_rhythm_training_hparams_rejects_invalid_dynamic_budget_ratio():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_dynamic_budget_ratio"] = 1.5
+    with pytest.raises(ValueError, match="rhythm_v3_dynamic_budget_ratio"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_max_prefix_budget_below_min():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_min_prefix_budget"] = 12
+    hparams["rhythm_v3_max_prefix_budget"] = 8
+    with pytest.raises(ValueError, match="rhythm_v3_max_prefix_budget"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_dynamic_prefix_budget_surface():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_dynamic_budget_ratio": 0.15,
+            "rhythm_v3_min_prefix_budget": 12,
+            "rhythm_v3_max_prefix_budget": 48,
+        }
+    )
+
+
+def test_validate_rhythm_training_hparams_rejects_invalid_boundary_reset_thresh():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_boundary_reset_thresh"] = 1.2
+    with pytest.raises(ValueError, match="rhythm_v3_boundary_reset_thresh"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_prompt_summary_without_explicit_silence_runs():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_backbone"] = "prompt_summary"
+    hparams["rhythm_v3_warp_mode"] = "none"
+    hparams["rhythm_v3_allow_hybrid"] = False
+    hparams["rhythm_v3_anchor_mode"] = "source_observed"
+    hparams["lambda_rhythm_op"] = 0.0
+    hparams["lambda_rhythm_zero"] = 0.0
+    hparams["rhythm_v3_emit_silence_runs"] = False
+    with pytest.raises(ValueError, match="rhythm_v3_emit_silence_runs=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_train_mode():
     hparams = _minimal_v3_hparams()
     hparams["rhythm_v3_baseline_train_mode"] = "alternating"

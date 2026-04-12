@@ -18,8 +18,10 @@ class SourceUnitBatch:
     unit_mask: torch.Tensor
     sealed_mask: torch.Tensor
     sep_mask: torch.Tensor
+    unit_rate_log_base: Optional[torch.Tensor] = None
     source_silence_mask: Optional[torch.Tensor] = None
     source_boundary_cue: Optional[torch.Tensor] = None
+    source_run_stability: Optional[torch.Tensor] = None
     phrase_group_index: Optional[torch.Tensor] = None
     phrase_group_pos: Optional[torch.Tensor] = None
     phrase_final_mask: Optional[torch.Tensor] = None
@@ -35,8 +37,10 @@ DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS = (
     "sealed_mask",
     "sep_mask",
     "unit_anchor_base",
+    "unit_rate_log_base",
     "source_silence_mask",
     "source_boundary_cue",
+    "source_run_stability",
     "phrase_group_index",
     "phrase_group_pos",
     "phrase_final_mask",
@@ -392,11 +396,13 @@ def move_source_unit_batch(
             batch.content_units,
             batch.source_duration_obs,
             batch.unit_anchor_base,
+            batch.unit_rate_log_base,
             batch.unit_mask,
             batch.sealed_mask,
             batch.sep_mask,
             batch.source_silence_mask,
             batch.source_boundary_cue,
+            batch.source_run_stability,
             batch.phrase_group_index,
             batch.phrase_group_pos,
             batch.phrase_final_mask,
@@ -407,11 +413,13 @@ def move_source_unit_batch(
         content_units=_move_tensor(batch.content_units, device=device),
         source_duration_obs=_move_tensor(batch.source_duration_obs, device=device),
         unit_anchor_base=_move_tensor(batch.unit_anchor_base, device=device),
+        unit_rate_log_base=_move_tensor(batch.unit_rate_log_base, device=device),
         unit_mask=_move_tensor(batch.unit_mask, device=device),
         sealed_mask=_move_tensor(batch.sealed_mask, device=device),
         sep_mask=_move_tensor(batch.sep_mask, device=device),
         source_silence_mask=_move_tensor(batch.source_silence_mask, device=device),
         source_boundary_cue=_move_tensor(batch.source_boundary_cue, device=device),
+        source_run_stability=_move_tensor(batch.source_run_stability, device=device),
         phrase_group_index=_move_tensor(batch.phrase_group_index, device=device),
         phrase_group_pos=_move_tensor(batch.phrase_group_pos, device=device),
         phrase_final_mask=_move_tensor(batch.phrase_final_mask, device=device),

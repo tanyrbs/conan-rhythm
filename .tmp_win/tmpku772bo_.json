@@ -1,0 +1,1 @@
+{"train": [{"source": "A", "refs": ["B_fast", "B_mid", "B_slow"], "include_self": true, "group_id": "group_A"}, {"source": "C", "refs": ["C_ref"], "include_self": true, "group_id": "group_C"}]}

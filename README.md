@@ -19,8 +19,8 @@ In that default path, the writer is:
 
 where:
 
-- `g_ref`: speech-only prompt global log-rate
-- `g_src_prefix,i`: strict-causal source prefix rate EMA before unit `i`
+- `g_ref`: speech-only prompt global rate on content-normalized log-duration residuals
+- `g_src_prefix,i`: strict-causal source prefix rate EMA on content-normalized source log-duration residuals before unit `i`
 - `c_hat_i`: small prefix-coarse correction from pooled causal source state + static prompt summary + speaker vector
 - `r_hat_i`: bounded local speech-run residual
 
@@ -29,6 +29,7 @@ and committed speech duration is written as:
 > `log d_hat_i = log a_i + z_hat_i`
 
 Silence-like runs remain in the retimed prefix but only follow the coarse/global bias (clipped for stability) without a local residual, so they stretch or compress slightly with the overall pace while speech-only statistics stay focused on speaking runs.
+The canonical writer also keeps local residuals conservative at cold start: open runs are not committed, and the first few committed speech runs are biased toward analytic/coarse control before local residuals fully open up.
 
 The maintained explanation is:
 
@@ -65,6 +66,10 @@ It produces:
 The diagnostic slot statistics remain useful for losses and observability, while
 runtime now directly uses `summary_state + spk_embed` as static conditioning;
 slot statistics are diagnostics only.
+
+A `rhythm_v3_summary_pool_speech_only` flag keeps that summary pooling speech-only, masking out silence runs before computing the pooled mean/std so `global_rate` and `summary_state` stay focused on speaking rhythm rather than pause counts.
+
+A `rhythm_v3_summary_pool_speech_only` flag keeps that summary pooling speech-only, masking out silence runs before computing the pooled mean/std so `global_rate` and `summary_state` stay focused on speaking rhythm rather than pause counts.
 
 ### Source side
 

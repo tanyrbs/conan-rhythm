@@ -6,7 +6,11 @@ import torch
 
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
-from tasks.Conan.rhythm.common.targets_impl import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
+from tasks.Conan.rhythm.common.targets_impl import (
+    DurationV3TargetBuildConfig,
+    _build_duration_v3_silence_tau,
+    build_duration_v3_loss_targets,
+)
 
 
 def _build_hparams():
@@ -163,6 +167,48 @@ def test_rhythm_v3_metrics_ignore_silence_units_in_speech_supervision():
     assert torch.allclose(metrics["rhythm_metric_prefix_drift_l1"], torch.tensor(0.0))
 
 
+def test_rhythm_v3_metrics_report_silence_follow_statistics():
+    output = _run_adapter()
+    execution = output["rhythm_execution"]
+    commit_mask = execution.commit_mask.float()
+    committed = (commit_mask > 0.5).nonzero(as_tuple=False)
+    assert committed.numel() > 0
+    row = int(committed[0, 0].item())
+    col = int(committed[0, 1].item())
+    silence_mask = torch.zeros_like(commit_mask)
+    silence_mask[row, col] = 1.0
+    output["rhythm_unit_batch"].source_silence_mask = silence_mask
+    target = output["speech_duration_exec"].detach().clone()
+    target[row, col] = target[row, col] + 2.0
+    metrics = build_rhythm_metric_dict(output, sample={"unit_duration_tgt": target})
+    expected_logstretch = execution.unit_logstretch[row, col].abs()
+    expected_ratio = (
+        output["speech_duration_exec"][row, col]
+        / output["rhythm_unit_batch"].source_duration_obs[row, col].clamp_min(1.0e-6)
+    )
+    assert torch.allclose(metrics["rhythm_metric_silence_logstretch_abs_mean"], expected_logstretch)
+    assert torch.allclose(metrics["rhythm_metric_silence_exec_ratio_mean"], expected_ratio)
+    assert torch.allclose(metrics["rhythm_metric_silence_prefix_drift_l1"], torch.tensor(2.0))
+
+
+def test_rhythm_v3_metrics_source_rate_seq_mean_uses_speech_mask():
+    output = _run_adapter()
+    execution = output["rhythm_execution"]
+    commit_mask = execution.commit_mask.float()
+    silence_mask = torch.zeros_like(commit_mask)
+    silence_mask[0, 1] = 1.0
+    unit_batch = output["rhythm_unit_batch"]
+    unit_batch.source_silence_mask = silence_mask
+    seq_len = execution.unit_logstretch.size(1)
+    source_rate_seq = torch.linspace(0.1, 0.2, seq_len, dtype=torch.float32).unsqueeze(0)
+    execution.source_rate_seq = source_rate_seq
+    speech_mask = commit_mask * (1.0 - silence_mask)
+    sample = {"unit_duration_tgt": output["speech_duration_exec"].detach()}
+    metrics = build_rhythm_metric_dict(output, sample=sample)
+    expected = (source_rate_seq * speech_mask).sum(dim=1) / speech_mask.sum(dim=1).clamp_min(1.0e-6)
+    assert torch.allclose(metrics["rhythm_metric_source_rate_seq_mean"], expected)
+
+
 def test_duration_v3_loss_targets_clip_silence_only_coarse():
     unit_mask = torch.ones((1, 3))
     sample = {"unit_duration_tgt": torch.tensor([[5.0, 3.0, 25.0]])}
@@ -191,15 +237,23 @@ def test_duration_v3_loss_targets_clip_silence_only_coarse():
         torch.log(sample["unit_duration_tgt"])
         - torch.log(targets.prediction_anchor.float().clamp_min(1.0e-6))
     )
-    clipped_logstretch = full_logstretch.clamp(
-        min=-float(config.silence_logstretch_max),
-        max=float(config.silence_logstretch_max),
+    silence_tau = _build_duration_v3_silence_tau(
+        prediction_anchor=targets.prediction_anchor.float(),
+        committed_silence_mask=targets.committed_silence_mask.float(),
+        sep_hint=None,
+        boundary_cue=None,
+        max_silence_logstretch=float(config.silence_logstretch_max),
+        short_gap_scale=float(config.silence_short_gap_scale),
     )
     silence_idx = 2
+    expected_coarse_duration = targets.prediction_anchor[0, silence_idx] * torch.exp(targets.coarse_logstretch_tgt[0, silence_idx])
+    assert torch.allclose(targets.coarse_duration_tgt[0, silence_idx], expected_coarse_duration)
     assert torch.allclose(
-        targets.coarse_logstretch_tgt[0, silence_idx],
-        clipped_logstretch[0, silence_idx],
+        targets.prefix_duration_tgt[0, silence_idx],
+        expected_coarse_duration,
     )
+    assert abs(float(targets.coarse_logstretch_tgt[0, silence_idx].item())) <= float(silence_tau[0, silence_idx].item()) + 1.0e-6
+    assert not torch.allclose(targets.coarse_logstretch_tgt[0, silence_idx], full_logstretch[0, silence_idx])
     assert torch.allclose(targets.local_residual_tgt[0, silence_idx], torch.tensor(0.0))
 
 

@@ -31,16 +31,21 @@ The maintained v3 inference story is:
 - prompt distilled into static summary conditioning
 - speaker embedding passed explicitly into the duration writer
 - source-observed sealed-unit anchors
-- analytic source/ref rate gap corrected by a small prefix-coarse branch
+- analytic source/ref rate gap, computed on anchor-base-normalized speech log-duration residuals, corrected by a small prefix-coarse branch
 - bounded local speech-run residual on top of that coarse term
+- cold-start gating keeps the first committed speech runs close to analytic/coarse control before local residuals fully open up
 - strict-causal prefix-rate state
 - incremental unit-run source-cache updates via `rhythm_unit_frontend.step_content_tensor()` instead of recompressing the full prefix every chunk
 - deterministic carry-only projection
 - runtime enforces the prefix unit-budget clamp so retimed counts stay within configured drift bounds
 - raw uncommitted open-tail units are kept intact and appended after the retimed prefix before the main model consumes them
 - `rhythm_v3_emit_silence_runs` exposes `source_silence_mask` so the runtime can distinguish speech runs from intentional pauses
+- `rhythm_v3_summary_pool_speech_only` keeps summary pooling speech-only, keeping the global-rate summary conditioning focused on speaking units even when pauses exist in the prompt.
+- `rhythm_v3_summary_pool_speech_only` keeps the summary pooling speech-only so global-rate conditioning remains clean
 
 Silence-like runs remain in the emitted sequence, but they no longer rely on a separate pause planner or on a full local residual. Instead their log-stretch prediction is clipped around the coarse bias term, and the silence contribution to loss is down-weighted via `rhythm_v3_silence_coarse_weight` while the clip range is governed by `rhythm_v3_silence_max_logstretch`. Global rate statistics (`g_ref` / `g_src`) remain speech-only, so the coarse-only policy keeps speech and silence aligned without overfitting noisy pause labels.
+
+The rhythm frontend is incremental, but the final tail is still flushed from the last full-prefix pass rather than from a separate strict committed-only seal step. In other words, incremental run-lattice state is real, while the final end-of-utterance tail remains a pragmatic last-pass flush.
 
 ## What this directory currently serves
 
