@@ -166,7 +166,8 @@ keeps three gate-oriented tables for rapid falsification:
 Important convenience fields now emitted by the single export path:
 
 - row summary: `same_speaker_reference`, `same_speaker_target`, `tempo_delta`,
-  `alignment_kind`, `target_duration_surface`, `projector_boundary_hit_rate`,
+  `alignment_kind`, `alignment_source`, `alignment_version`,
+  `target_duration_surface`, `projector_boundary_hit_rate`,
   `projector_boundary_decay_rate`
 - monotonicity table: `sample_id`, `pair_id`, `tempo_delta`, `mono_triplet_ok`
 - ladder table: `tempo_transfer_slope`
@@ -246,7 +247,8 @@ carries:
 - `ref_len_sec`
 - `speech_ratio`
 - `unit_duration_proj_raw_tgt` or another explicit raw target-surface alias
-- `unit_alignment_mode_id_tgt` when paired-target provenance is available
+- `unit_alignment_mode_id_tgt` and `unit_alignment_kind_tgt` when paired-target
+  provenance is available
 
 If those fields are missing, the scripts still export tables and figures, but
 you should read the result as a partial audit rather than a full falsification

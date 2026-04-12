@@ -169,7 +169,10 @@ becomes available only with the explicit `rhythm_v3_allow_source_self_target_fal
 escape hatch.
 
 For review/export, `unit_duration_proj_raw_tgt` is the explicit raw-projection
-alias and should be preferred when present. Training still consumes decomposed
+alias and should be preferred when present. When `unit_duration_tgt` is cached
+for the maintained continuous path, keep `unit_duration_proj_raw_tgt`,
+`unit_alignment_mode_id_tgt`, and `unit_alignment_kind_tgt` alongside it so the
+target surface remains provenance-clean. Training still consumes decomposed
 surfaces such as `global_shift_tgt`, `coarse_logstretch_tgt`,
 `local_residual_tgt`, and the clipped coarse-derived silence target rather than
 treating the raw projection surface as the final supervision object.

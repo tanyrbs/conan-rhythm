@@ -207,6 +207,12 @@ projection surface. Training still decomposes supervision into
 clipped coarse-derived silence target instead of treating the raw projection
 surface as the final supervision object.
 
+If you cache `unit_duration_tgt` for the maintained continuous path, also cache
+`unit_duration_proj_raw_tgt`, `unit_alignment_mode_id_tgt`, and
+`unit_alignment_kind_tgt` so later review/export can distinguish
+`continuous_precomputed` from `continuous_viterbi_v1` instead of treating the
+sample as opaque legacy supervision.
+
 In practice, the normal way is to provide a **pair manifest** via:
 
 - `rhythm_pair_manifest_path`
@@ -528,6 +534,7 @@ In the current codebase, `--infer` is the explicit task test/eval mode. `--valid
 
 ```bash
 py -3 -m pytest -q ^
+  tests/rhythm/test_continuous_alignment_projection.py ^
   tests/rhythm/test_rhythm_v3_losses.py ^
   tests/rhythm/test_rhythm_v3_runtime.py ^
   tests/rhythm/test_cache_contracts.py ^

@@ -136,4 +136,7 @@ lambda_rhythm_ortho: 0.0
 
 # Keep v3 target building strict by default: do not silently fall back to
 # source run-length anchors as supervision.
+# When you switch the maintained recipe to continuous paired-target supervision,
+# explicitly set rhythm_v3_use_continuous_alignment: true and keep alignment
+# provenance/frame-state sidecars attached.
 rhythm_v3_strict_target_alignment: true

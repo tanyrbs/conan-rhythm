@@ -122,7 +122,11 @@ The maintained `continuous` path now has two provenance-clean variants,
 accepted by convention alone.
 
 - paired-target alignment arrays now only feed the maintained continuous path
-  when paired metadata explicitly marks them with a continuous `alignment_kind`
+  when paired metadata explicitly marks them with a continuous
+  `alignment_kind`
+- keep `unit_alignment_kind_tgt` readable in tables, while `alignment_source`
+  and `alignment_version` preserve the exact producer (`continuous_precomputed`
+  vs `run_state_viterbi`) for later review
 - otherwise the existing fail-fast path remains in charge
 - projection export also carries
   `unit_alignment_unmatched_speech_ratio_tgt`,
