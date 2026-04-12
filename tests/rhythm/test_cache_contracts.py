@@ -590,6 +590,14 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         self.assertEqual(built["alignment_source"], "run_state_viterbi")
         self.assertEqual(built["alignment_version"], "2026-04-13")
+        self.assertEqual(
+            str(np.asarray(built["unit_alignment_source_tgt"], dtype=object).reshape(-1)[0]),
+            "run_state_viterbi",
+        )
+        self.assertEqual(
+            str(np.asarray(built["unit_alignment_version_tgt"], dtype=object).reshape(-1)[0]),
+            "2026-04-13",
+        )
 
     def test_duration_v3_target_merge_rejects_alignment_metadata_without_continuous_provenance(self) -> None:
         dataset = _DummyDataset(
@@ -653,9 +661,13 @@ class RhythmCacheContractTests(unittest.TestCase):
         keys = set(dataset._resolve_optional_sample_keys())
         collate_spec = dataset._build_optional_collate_spec()
         self.assertIn("unit_alignment_kind_tgt", keys)
+        self.assertIn("unit_alignment_source_tgt", keys)
+        self.assertIn("unit_alignment_version_tgt", keys)
         self.assertIn("alignment_source", keys)
         self.assertIn("alignment_version", keys)
         self.assertEqual(collate_spec["unit_alignment_kind_tgt"][0], "object")
+        self.assertEqual(collate_spec["unit_alignment_source_tgt"][0], "object")
+        self.assertEqual(collate_spec["unit_alignment_version_tgt"][0], "object")
         self.assertEqual(collate_spec["alignment_source"][0], "object")
         self.assertEqual(collate_spec["alignment_version"][0], "object")
 
@@ -713,6 +725,41 @@ class RhythmCacheContractTests(unittest.TestCase):
             np.allclose(
                 merged["unit_alignment_mean_coarse_confidence_speech_tgt"],
                 sample["unit_alignment_mean_coarse_confidence_speech_tgt"],
+            )
+        )
+
+    def test_duration_v3_projection_conditioning_copies_item_level_alignment_provenance_aliases(self) -> None:
+        dataset = _DummyDataset({"rhythm_enable_v3": True})
+        conditioning = dataset._build_paired_target_projection_conditioning(
+            {
+                "item_name": "paired_item",
+                "content_units": np.asarray([1, 2], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
+                "unit_alignment_mode_id_tgt": np.asarray([1], dtype=np.int64),
+                "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                "unit_alignment_assigned_source_debug": np.asarray([0, 1], dtype=np.int64),
+                "unit_alignment_assigned_cost_debug": np.asarray([0.0, 0.1], dtype=np.float32),
+            },
+            target_mode="cached_only",
+            source_item=None,
+        )
+        self.assertEqual(conditioning["paired_target_alignment_kind"], "continuous_viterbi_v1")
+        self.assertEqual(int(np.asarray(conditioning["paired_target_alignment_mode_id"]).reshape(-1)[0]), 1)
+        self.assertEqual(conditioning["paired_target_alignment_source"], "run_state_viterbi")
+        self.assertEqual(conditioning["paired_target_alignment_version"], "2026-04-13")
+        self.assertTrue(
+            np.array_equal(
+                np.asarray(conditioning["paired_target_alignment_assigned_source"]),
+                np.asarray([0, 1], dtype=np.int64),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                np.asarray(conditioning["paired_target_alignment_assigned_cost"], dtype=np.float32),
+                np.asarray([0.0, 0.1], dtype=np.float32),
             )
         )
 
