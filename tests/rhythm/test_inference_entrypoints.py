@@ -23,17 +23,28 @@ def test_streaming_inference_extracts_prompt_units_for_v3_by_default():
     assert "def _extract_prompt_unit_conditioning" in source
     assert "rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(" in source
     assert "prepared_spk_embed=prepared_spk_embed" in source
+    assert "ref_source_id=inp.get(\"ref_wav\")" in source
     assert '"prompt_content_units"' in source
     assert '"prompt_duration_obs"' in source
     assert '"prompt_unit_mask"' in source
     assert '"prompt_source_boundary_cue"' in source
     assert '"prompt_global_weight"' in source
+    assert '"prompt_unit_log_prior_present"' in source
+
+
+def test_streaming_inference_prompt_cache_key_prefers_file_backed_fast_path():
+    source = (ROOT / "inference" / "Conan.py").read_text(encoding="utf-8")
+    assert "ref_source_id: str | None = None" in source
+    assert "os.path.isfile(ref_path)" in source
+    assert "os.stat(ref_path)" in source
 
 
 def test_streaming_inference_reports_content_history_windowing_metadata():
     source = (ROOT / "inference" / "Conan.py").read_text(encoding="utf-8")
     assert '"content_history_windowing_enabled"' in source
     assert '"content_history_left_context_tokens"' in source
+    assert '"rhythm_prefix_budget_abs_p95"' in source
+    assert '"rhythm_boundary_decay_applied_rate"' in source
 
 
 def test_streaming_inference_uses_incremental_rhythm_frontend_cache_updates():
@@ -58,12 +69,10 @@ def test_run_streaming_latency_report_defaults_to_v3_config():
     assert 'default="egs/conan_emformer_rhythm_v3.yaml"' in source
 
 
-def test_v3_preflight_and_smoke_scripts_exist():
+def test_v3_preflight_script_exists_and_v3_smoke_script_is_retired():
     preflight = (ROOT / "scripts" / "preflight_rhythm_v3.py").read_text(encoding="utf-8")
-    smoke = (ROOT / "scripts" / "smoke_test_rhythm_v3.py").read_text(encoding="utf-8")
     assert "tasks.Conan.rhythm.preflight_support" in preflight
-    assert "ConanDurationAdapter" in smoke
-    assert "rhythm_v3_rate_mode" in smoke
+    assert not (ROOT / "scripts" / "smoke_test_rhythm_v3.py").exists()
 
 
 def test_streaming_inference_monotone_frontier_guard_raises_on_rollback():
@@ -124,3 +133,12 @@ def test_streaming_inference_eos_tail_policy_rejects_tail_when_strict():
             prev_committed_len=1,
             allow_tail_flush=False,
         )
+
+
+def test_streaming_inference_runtime_summary_helpers_report_prefix_budget_and_boundary_decay():
+    prefix_offset = torch.tensor([[0.0, -0.2, 0.4, 0.1]], dtype=torch.float32)
+    boundary_decay = torch.tensor([[0.0, 1.0, 0.0, 1.0]], dtype=torch.float32)
+    p95 = StreamingVoiceConversion._summarize_prefix_budget_abs_p95(prefix_offset)
+    decay_rate = StreamingVoiceConversion._summarize_boundary_decay_applied_rate(boundary_decay)
+    assert p95 == pytest.approx(float(torch.quantile(prefix_offset.abs().reshape(-1), 0.95).item()))
+    assert decay_rate == pytest.approx(0.5)

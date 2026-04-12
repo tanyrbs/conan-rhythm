@@ -6,7 +6,8 @@ from typing import Callable, Optional
 
 import torch
 
-from modules.Conan.rhythm_v3.math_utils import build_causal_local_rate_seq
+from modules.Conan.rhythm_v3.math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
+from modules.Conan.rhythm_v3.silence_surface import build_silence_tau_surface
 from .losses_impl import DurationV3LossTargets, RhythmLossTargets
 
 
@@ -96,6 +97,7 @@ class DurationV3TargetBuildConfig:
     silence_coarse_weight: float = 0.25
     silence_logstretch_max: float = 0.35
     local_rate_decay: float = 0.95
+    analytic_gap_clip: float = 0.35
     silence_short_gap_scale: float = 0.35
     use_log_base_rate: bool = False
     simple_global_stats: bool = False
@@ -1061,7 +1063,11 @@ def build_duration_v3_loss_targets(
             default_init_rate=default_init_rate,
             decay=float(config.local_rate_decay),
         )
-        global_shift_tgt = (prompt_targets["global_rate"].float().detach() - local_rate_seq_tgt) * committed_mask.float()
+        analytic_gap_tgt = apply_analytic_gap_clip(
+            prompt_targets["global_rate"].float().detach() - local_rate_seq_tgt,
+            getattr(config, "analytic_gap_clip", 0.0),
+        )
+        global_shift_tgt = analytic_gap_tgt * committed_mask.float()
         full_logstretch_tgt = (
             torch.log(unit_duration_tgt.float().clamp_min(1.0e-6))
             - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
@@ -1092,6 +1098,7 @@ def build_duration_v3_loss_targets(
             ),
             max_silence_logstretch=float(config.silence_logstretch_max),
             short_gap_scale=float(config.silence_short_gap_scale),
+            minimal_v1_profile=bool(getattr(config, "minimal_v1_profile", False)),
         )
         if bool((committed_silence_mask > 0.5).any().item()):
             silence_coarse_tgt = torch.clamp(
@@ -1153,6 +1160,7 @@ def build_duration_v3_loss_targets(
                     ),
                     max_silence_logstretch=float(config.silence_logstretch_max),
                     short_gap_scale=float(config.silence_short_gap_scale),
+                    minimal_v1_profile=bool(getattr(config, "minimal_v1_profile", False)),
                 )
                 consistency_logstretch_tgt = consistency_logstretch_tgt + (
                     torch.clamp(
@@ -1302,23 +1310,17 @@ def _build_duration_v3_silence_tau(
     boundary_cue: torch.Tensor | None,
     max_silence_logstretch: float,
     short_gap_scale: float = 0.35,
+    minimal_v1_profile: bool = False,
 ) -> torch.Tensor:
-    silence_mask = committed_silence_mask.float().clamp(0.0, 1.0)
-    if silence_mask.numel() <= 0:
-        return silence_mask
-    log_anchor = torch.log(prediction_anchor.float().clamp_min(1.0e-4))
-    pause_shape = torch.sigmoid(log_anchor - math.log(3.0))
-    edge = (
-        boundary_cue.float().clamp(0.0, 1.0)
-        if isinstance(boundary_cue, torch.Tensor)
-        else torch.zeros_like(pause_shape)
+    return build_silence_tau_surface(
+        prediction_anchor=prediction_anchor,
+        committed_silence_mask=committed_silence_mask,
+        sep_hint=sep_hint,
+        boundary_cue=boundary_cue,
+        max_silence_logstretch=max_silence_logstretch,
+        short_gap_scale=short_gap_scale,
+        minimal_v1_profile=minimal_v1_profile,
     )
-    if isinstance(sep_hint, torch.Tensor):
-        edge = torch.maximum(edge, sep_hint.float().clamp(0.0, 1.0))
-    silence_shape = torch.maximum(pause_shape, edge)
-    scale = float(max(0.0, min(1.0, short_gap_scale)))
-    tau = float(max(1.0e-4, max_silence_logstretch)) * (scale + ((1.0 - scale) * silence_shape))
-    return tau * silence_mask
 
 
 def _build_duration_v3_baseline_targets(

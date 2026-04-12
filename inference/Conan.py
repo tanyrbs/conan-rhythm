@@ -16,6 +16,7 @@ from modules.Conan.rhythm_v3.g_stats import normalize_global_rate_variant
 from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
 from modules.Conan.rhythm_v3.source_cache import (
     DURATION_V3_CACHE_META_KEY,
+    UNIT_LOG_PRIOR_META_KEY,
     assert_duration_v3_cache_meta_compatible,
     build_duration_v3_cache_meta,
     build_source_rhythm_cache_v3 as build_source_rhythm_cache,
@@ -278,6 +279,50 @@ class StreamingVoiceConversion:
         return speech * (0.25 + (0.75 * stability))
 
     @staticmethod
+    def _extract_batch_vector(
+        value,
+        *,
+        batch_index: int = 0,
+    ):
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 0:
+                return value.detach().reshape(1)
+            if value.ndim == 1:
+                return value.detach()
+            if value.size(0) <= batch_index:
+                return None
+            return value[batch_index].detach()
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return value.reshape(1)
+            if value.ndim == 1:
+                return value
+            if value.shape[0] <= batch_index:
+                return None
+            return value[batch_index]
+        return None
+
+    @staticmethod
+    def _summarize_prefix_budget_abs_p95(prefix_offset) -> float | None:
+        vector = StreamingVoiceConversion._extract_batch_vector(prefix_offset)
+        if vector is None:
+            return None
+        tensor = torch.as_tensor(vector, dtype=torch.float32).reshape(-1).abs()
+        if tensor.numel() <= 0:
+            return None
+        return float(torch.quantile(tensor, 0.95).item())
+
+    @staticmethod
+    def _summarize_boundary_decay_applied_rate(boundary_decay) -> float | None:
+        vector = StreamingVoiceConversion._extract_batch_vector(boundary_decay)
+        if vector is None:
+            return None
+        tensor = torch.as_tensor(vector, dtype=torch.float32).reshape(-1)
+        if tensor.numel() <= 0:
+            return None
+        return float((tensor > 0.5).float().mean().item())
+
+    @staticmethod
     def _resolve_uncommitted_eos_tail(
         *,
         last_mel_out: torch.Tensor,
@@ -297,11 +342,24 @@ class StreamingVoiceConversion:
         return mel_tail, unresolved
 
     @staticmethod
-    def _make_prompt_conditioning_cache_key(ref_mel_batch: torch.Tensor, *, frontend_signature: str) -> str:
-        ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
-        array = ref_cpu.numpy()
+    def _make_prompt_conditioning_cache_key(
+        ref_mel_batch: torch.Tensor,
+        *,
+        frontend_signature: str,
+        ref_source_id: str | None = None,
+    ) -> str:
         digest = hashlib.sha1()
         digest.update(str(frontend_signature).encode("utf-8"))
+        if ref_source_id:
+            ref_path = os.path.abspath(str(ref_source_id))
+            if os.path.isfile(ref_path):
+                stat = os.stat(ref_path)
+                digest.update(ref_path.encode("utf-8"))
+                digest.update(str(int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1.0e9)))).encode("utf-8"))
+                digest.update(str(int(stat.st_size)).encode("utf-8"))
+                return digest.hexdigest()
+        ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        array = ref_cpu.numpy()
         digest.update(str(tuple(array.shape)).encode("utf-8"))
         digest.update(array.tobytes())
         return digest.hexdigest()
@@ -335,12 +393,14 @@ class StreamingVoiceConversion:
         self,
         ref_mel_batch: torch.Tensor,
         prepared_spk_embed: torch.Tensor | None = None,
+        ref_source_id: str | None = None,
     ) -> Dict[str, torch.Tensor]:
         cache_key = None
         if self._prompt_conditioning_cache_size > 0:
             cache_key = self._make_prompt_conditioning_cache_key(
                 ref_mel_batch,
                 frontend_signature=self.rhythm_v3_frontend_signature,
+                ref_source_id=ref_source_id,
             )
             cached = self._prompt_conditioning_cache.get(cache_key)
             if cached is not None:
@@ -366,13 +426,14 @@ class StreamingVoiceConversion:
                 codes = torch.argmax(codes, dim=-1)
 
         cache = build_source_rhythm_cache(
-            codes[0].detach().cpu().reshape(-1).numpy(),
+            codes[0].detach().reshape(-1),
             silent_token=self.hparams.get("silent_token", 57),
             separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
             tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
             emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
             debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+            unit_prior_path=self.hparams.get("rhythm_v3_unit_prior_path"),
         )
         assert_duration_v3_cache_meta_compatible(
             cache.get(DURATION_V3_CACHE_META_KEY),
@@ -431,9 +492,17 @@ class StreamingVoiceConversion:
             prompt_speech_mask=prompt_speech_mask,
             prompt_run_stability=prompt_run_stability,
         )
+        out["prompt_global_weight_present"] = torch.ones((1, 1), device=self.device, dtype=torch.float32)
+        out["g_trim_ratio"] = torch.full(
+            (1, 1),
+            float(self.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+            device=self.device,
+            dtype=torch.float32,
+        )
         prompt_unit_log_prior = cache.get("prompt_unit_log_prior")
         if prompt_unit_log_prior is None:
             prompt_unit_log_prior = cache.get("unit_log_prior")
+        unit_prior_meta = cache.get(UNIT_LOG_PRIOR_META_KEY, {})
         if prompt_unit_log_prior is not None:
             prompt_unit_log_prior_arr = np.asarray(prompt_unit_log_prior, dtype=np.float32).reshape(-1)
             if prompt_unit_log_prior_arr.shape[0] != int(prompt_duration_obs.shape[1]):
@@ -446,11 +515,20 @@ class StreamingVoiceConversion:
                 device=self.device,
                 dtype=torch.float32,
             ).unsqueeze(0)
+            out["prompt_unit_log_prior_present"] = torch.ones((1, 1), device=self.device, dtype=torch.float32)
+            out["prompt_unit_prior_vocab_size"] = torch.tensor(
+                [[int(unit_prior_meta.get("unit_prior_vocab_size", 0) or 0)]],
+                device=self.device,
+                dtype=torch.long,
+            )
         elif g_variant == "unit_norm":
             raise RuntimeError(
                 "rhythm_v3 g_variant=unit_norm requires prompt_unit_log_prior/unit_log_prior "
                 "matching prompt runs in prompt conditioning."
             )
+        else:
+            out["prompt_unit_log_prior_present"] = torch.zeros((1, 1), device=self.device, dtype=torch.float32)
+            out["prompt_unit_prior_vocab_size"] = torch.zeros((1, 1), device=self.device, dtype=torch.long)
         if prompt_silence is not None:
             out["prompt_silence_mask"] = prompt_silence_mask
         rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
@@ -549,6 +627,8 @@ class StreamingVoiceConversion:
         previous_resolved_frontier = None
         max_content_window_start = 0
         final_debug_bundle = None
+        last_projector_prefix_offset = None
+        last_projector_boundary_decay = None
         allow_eos_tail_flush_fallback = bool(
             self.hparams.get(
                 "rhythm_allow_eos_tail_flush_fallback",
@@ -571,6 +651,7 @@ class StreamingVoiceConversion:
                     rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(
                         ref_mel_batch,
                         prepared_spk_embed=prepared_spk_embed,
+                        ref_source_id=inp.get("ref_wav"),
                     )
                 else:
                     rhythm_ref_conditioning = self.model.prepare_rhythm_reference(
@@ -660,6 +741,16 @@ class StreamingVoiceConversion:
                     next_state=next_rhythm_state,
                 )
                 rhythm_state = next_rhythm_state
+                execution = out.get("rhythm_execution")
+                if execution is not None:
+                    last_projector_prefix_offset = self._extract_batch_vector(
+                        getattr(execution, "prefix_unit_offset", None),
+                        batch_index=0,
+                    )
+                    last_projector_boundary_decay = self._extract_batch_vector(
+                        getattr(execution, "projector_boundary_decay_applied", None),
+                        batch_index=0,
+                    )
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 decoder_cache = out.get("decoder_cache", decoder_cache)
                 last_mel_out = out["mel_out"][0]
@@ -682,6 +773,7 @@ class StreamingVoiceConversion:
                             "phase": "inference",
                             "src_wav": inp.get("src_wav"),
                             "ref_wav": inp.get("ref_wav"),
+                            "ref_condition": "real",
                             "streaming_chunk_index": int(num_chunks),
                         },
                     ).to_dict()
@@ -745,6 +837,16 @@ class StreamingVoiceConversion:
                 next_state=next_rhythm_state,
             )
             rhythm_state = next_rhythm_state
+            execution = final_out.get("rhythm_execution")
+            if execution is not None:
+                last_projector_prefix_offset = self._extract_batch_vector(
+                    getattr(execution, "prefix_unit_offset", None),
+                    batch_index=0,
+                )
+                last_projector_boundary_decay = self._extract_batch_vector(
+                    getattr(execution, "projector_boundary_decay_applied", None),
+                    batch_index=0,
+                )
             decoder_cache = final_out.get("decoder_cache", decoder_cache)
             last_mel_out = final_out["mel_out"][0]
             final_committed_frontier = self._resolve_committed_token_frontier_from_cache(
@@ -766,6 +868,7 @@ class StreamingVoiceConversion:
                         "phase": "inference",
                         "src_wav": inp.get("src_wav"),
                         "ref_wav": inp.get("ref_wav"),
+                        "ref_condition": "real",
                         "streaming_chunk_index": int(num_chunks),
                         "eos_tail_closed": True,
                     },
@@ -819,6 +922,10 @@ class StreamingVoiceConversion:
         self.last_inference_metadata = self.get_streaming_runtime_metadata(
             duration_seconds=duration_seconds
         )
+        if last_projector_prefix_offset is None and isinstance(final_debug_bundle, dict):
+            last_projector_prefix_offset = final_debug_bundle.get("prefix_unit_offset")
+        if last_projector_boundary_decay is None and isinstance(final_debug_bundle, dict):
+            last_projector_boundary_decay = final_debug_bundle.get("projector_boundary_decay_applied")
         self.last_inference_metadata.update(
             {
                 "source_total_frames": int(total_frames),
@@ -835,6 +942,8 @@ class StreamingVoiceConversion:
                 "rhythm_final_tail_is_not_strictly_committed_only": bool(unresolved_eos_tail_frames > 0),
                 "rhythm_uncommitted_eos_tail_frames": int(unresolved_eos_tail_frames),
                 "rhythm_allow_eos_tail_flush_fallback": bool(allow_eos_tail_flush_fallback),
+                "rhythm_prefix_budget_abs_p95": self._summarize_prefix_budget_abs_p95(last_projector_prefix_offset),
+                "rhythm_boundary_decay_applied_rate": self._summarize_boundary_decay_applied_rate(last_projector_boundary_decay),
                 "content_history_windowing_enabled": True,
                 "content_history_left_context_tokens": int(content_window_left_tokens),
                 "content_history_max_trimmed_tokens": int(max_content_window_start),

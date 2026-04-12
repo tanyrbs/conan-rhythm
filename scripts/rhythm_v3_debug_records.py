@@ -6,6 +6,8 @@ import csv
 from pathlib import Path
 import sys
 
+import numpy as np
+
 try:
     import pandas as pd
 except Exception:  # pragma: no cover
@@ -43,6 +45,9 @@ def _warn_sparse_review_metadata(frame) -> None:
         "g_support_ratio_vs_speech",
         "g_support_ratio_vs_valid",
         "g_valid",
+        "g_trim_ratio",
+        "prompt_global_weight_present",
+        "prompt_unit_log_prior_present",
         "alignment_unmatched_speech_ratio",
         "alignment_mean_local_confidence_speech",
         "alignment_mean_coarse_confidence_speech",
@@ -63,6 +68,99 @@ def _warn_sparse_review_metadata(frame) -> None:
             "[rhythm_v3_debug_records] warning: review metadata is incomplete "
             f"({joined}). Summary export will still succeed, but Gate-0/Panel-C "
             "style slices or boundary/provenance review may be partially degenerate.",
+            file=sys.stderr,
+        )
+    quality_issues = []
+    if "g_valid" in frame.columns:
+        g_valid = pd.to_numeric(frame["g_valid"], errors="coerce")
+        g_valid_rate = float(np.nanmean(g_valid.to_numpy(dtype=np.float32)))
+        if np.isfinite(g_valid_rate) and g_valid_rate < 0.95:
+            quality_issues.append(f"g_valid_mean={g_valid_rate:.3f}<0.950")
+    if "gate0_row_dropped" in frame.columns:
+        gate0_drop = pd.to_numeric(frame["gate0_row_dropped"], errors="coerce").to_numpy(dtype=np.float32)
+        gate0_nan_rate = float(np.nanmean(gate0_drop)) if gate0_drop.size > 0 else float("nan")
+        if np.isfinite(gate0_nan_rate) and gate0_nan_rate > 0.05:
+            quality_issues.append(f"gate0_nan_rate={gate0_nan_rate:.3f}>0.050")
+        if "gate0_drop_reason" in frame.columns:
+            drop_reason = frame.loc[pd.to_numeric(frame["gate0_row_dropped"], errors="coerce") > 0.5, "gate0_drop_reason"]
+            if not drop_reason.empty:
+                reason_counts = (
+                    drop_reason.astype(str)
+                    .str.strip()
+                    .replace({"": "missing"})
+                    .value_counts()
+                    .head(5)
+                )
+                quality_issues.append(
+                    "gate0_drop_top="
+                    + "|".join(f"{key}:{int(value)}" for key, value in reason_counts.items())
+                )
+    if "alignment_unmatched_speech_ratio" in frame.columns:
+        unmatched = pd.to_numeric(frame["alignment_unmatched_speech_ratio"], errors="coerce").to_numpy(dtype=np.float32)
+        unmatched_p95 = float(np.nanpercentile(unmatched, 95)) if np.isfinite(unmatched).any() else float("nan")
+        if np.isfinite(unmatched_p95) and unmatched_p95 > 0.15:
+            quality_issues.append(f"alignment_unmatched_speech_ratio_p95={unmatched_p95:.3f}>0.150")
+    if "alignment_kind" in frame.columns:
+        alignment_kind = frame["alignment_kind"].astype(str).str.strip().str.lower()
+        observed = alignment_kind[(alignment_kind != "") & (alignment_kind != "nan")]
+        alignment_valid_rate = float(observed.shape[0]) / float(total)
+        if np.isfinite(alignment_valid_rate) and alignment_valid_rate < 0.95:
+            quality_issues.append(f"alignment_valid_rate={alignment_valid_rate:.3f}<0.950")
+        if not observed.empty:
+            continuous_mask = observed.str.startswith("continuous")
+            if bool((~continuous_mask).any()):
+                fraction = float(continuous_mask.mean())
+                quality_issues.append(f"continuous_alignment_coverage={fraction:.3f}<1.000")
+    for column in ("g_compute_status", "g_src_compute_status"):
+        if column not in frame.columns:
+            continue
+        failures = frame[column].astype(str).str.strip().str.lower()
+        failures = failures[(failures != "") & (failures != "ok") & (failures != "nan")]
+        if not failures.empty:
+            top = failures.value_counts().head(3)
+            quality_issues.append(
+                f"{column}_top=" + "|".join(f"{key}:{int(value)}" for key, value in top.items())
+            )
+    if {"eval_mode"}.issubset(frame.columns):
+        observed_modes = {
+            str(mode).strip()
+            for mode in frame["eval_mode"].dropna().tolist()
+            if str(mode).strip() and str(mode).strip().lower() != "nan"
+        }
+        missing_modes = [mode for mode in ("analytic", "coarse_only", "learned") if mode not in observed_modes]
+        if missing_modes:
+            quality_issues.append("missing_eval_modes=" + "|".join(missing_modes))
+    if {"src_id", "eval_mode", "ref_bin"}.issubset(frame.columns):
+        triplet_frame = frame.copy()
+        if "ref_condition" in triplet_frame.columns:
+            ref_condition = triplet_frame["ref_condition"].astype(str).str.strip().str.lower()
+            real_mask = ref_condition.isin({"", "nan", "real", "real_reference"})
+            triplet_frame = triplet_frame[real_mask]
+        triplet_frame = triplet_frame[triplet_frame["ref_bin"].astype(str).str.strip().str.lower().isin({"slow", "mid", "fast"})]
+        if not triplet_frame.empty:
+            triplet_counts = (
+                triplet_frame.assign(ref_bin=triplet_frame["ref_bin"].astype(str).str.strip().str.lower())
+                .groupby(["src_id", "eval_mode"])["ref_bin"]
+                .nunique()
+            )
+            incomplete = int((triplet_counts < 3).sum())
+            if incomplete > 0:
+                quality_issues.append(f"incomplete_real_triplets={incomplete}")
+    if "ref_condition" not in frame.columns:
+        quality_issues.append("ref_condition=missing")
+    else:
+        ref_conditions = {
+            str(value).strip().lower()
+            for value in frame["ref_condition"].dropna().tolist()
+            if str(value).strip() and str(value).strip().lower() != "nan"
+        }
+        if not ref_conditions.intersection({"source_only", "random_ref", "shuffled_ref"}):
+            quality_issues.append("negative_control_reference=missing")
+    if quality_issues:
+        print(
+            "[rhythm_v3_debug_records] warning: gate quality checks found potential evidence gaps "
+            f"({', '.join(quality_issues)}). Partial exports still succeed, but this bundle should "
+            "not be read as a full gate pass.",
             file=sys.stderr,
         )
 

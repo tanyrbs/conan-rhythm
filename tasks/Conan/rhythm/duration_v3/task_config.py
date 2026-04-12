@@ -282,6 +282,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         "lambda_rhythm_ortho",
         "rhythm_v3_silence_coarse_weight",
         "rhythm_v3_silence_max_logstretch",
+        "rhythm_v3_analytic_gap_clip",
         "rhythm_v3_local_short_run_min_duration",
         "rhythm_global_shrink_tau",
         "rhythm_operator_support_tau",

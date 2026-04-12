@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,8 @@ from .core import RhythmV3DebugRecord, derive_record, load_debug_records, weight
 DEFAULT_REVIEW_SILENCE_TAU = 0.35
 DEFAULT_REVIEW_BOUNDARY_THRESHOLD = 0.55
 DEFAULT_REVIEW_UNIT_STEP_MS = 20.0
+_REAL_REF_CONDITIONS = {"", "nan", "real", "real_reference"}
+_NEGATIVE_CONTROL_REF_CONDITIONS = {"source_only", "random_ref", "shuffled_ref"}
 
 
 def weighted_median(values: Any, weight: Any | None = None) -> float:
@@ -101,6 +104,56 @@ def _as_str(value: Any, default: str = "") -> str:
     return str(value)
 
 
+def _normalize_ref_condition(value: Any) -> str:
+    return _as_str(value, default="").strip().lower()
+
+
+def _stable_slope_strength(
+    x: Any,
+    y: Any,
+    *,
+    metric_fn: Callable[[Any, Any], Mapping[str, float]],
+) -> float:
+    arr_x, arr_y = _align_pair(x, y, dtype=np.float32)
+    if arr_x is None or arr_y is None:
+        return float("nan")
+    valid = np.isfinite(arr_x) & np.isfinite(arr_y)
+    if not bool(np.any(valid)):
+        return float("nan")
+    arr_x = arr_x[valid]
+    arr_y = arr_y[valid]
+    if arr_x.size <= 0:
+        return float("nan")
+    if float(np.nanmax(arr_x) - np.nanmin(arr_x)) <= 1.0e-6:
+        return 0.0
+    metric = metric_fn(arr_x, arr_y)
+    slope = float(metric.get("robust_slope", float("nan")))
+    return 0.0 if not np.isfinite(slope) else slope
+
+
+def _compute_negative_control_gap(
+    frame: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    metric_fn: Callable[[Any, Any], Mapping[str, float]],
+) -> tuple[float, int, int]:
+    if frame.empty or "ref_condition" not in frame or x_col not in frame or y_col not in frame:
+        return float("nan"), 0, 0
+    ref_condition = frame["ref_condition"].map(_normalize_ref_condition)
+    real = frame[ref_condition.isin(_REAL_REF_CONDITIONS)]
+    negative = frame[ref_condition.isin(_NEGATIVE_CONTROL_REF_CONDITIONS)]
+    real_count = int(real.shape[0])
+    negative_count = int(negative.shape[0])
+    if real.empty or negative.empty:
+        return float("nan"), real_count, negative_count
+    real_strength = _stable_slope_strength(real[x_col], real[y_col], metric_fn=metric_fn)
+    negative_strength = _stable_slope_strength(negative[x_col], negative[y_col], metric_fn=metric_fn)
+    if not np.isfinite(real_strength) or not np.isfinite(negative_strength):
+        return float("nan"), real_count, negative_count
+    return float(real_strength - negative_strength), real_count, negative_count
+
+
 def _infer_speaker_id(value: Any, default: str = "") -> str:
     name = _as_str(value, default=default).strip()
     if not name:
@@ -147,6 +200,25 @@ def _speech_tempo(duration: Any, speech_mask: Any) -> float:
     )
 
 
+def _warn_status(name: str, status: str) -> None:
+    if status == "ok":
+        return
+    warnings.warn(f"{name} failed: {status}", RuntimeWarning, stacklevel=3)
+
+
+def _maybe_with_status(
+    value: float,
+    status: str,
+    *,
+    name: str,
+    return_status: bool,
+) -> float | tuple[float, str]:
+    if return_status:
+        return float(value), str(status)
+    _warn_status(name, str(status))
+    return float(value)
+
+
 def compute_g(
     duration_obs: Any,
     *,
@@ -158,12 +230,19 @@ def compute_g(
     weight: Any | None = None,
     unit_ids: Any | None = None,
     unit_log_prior: Any | None = None,
-) -> float:
+    return_status: bool = False,
+) -> float | tuple[float, str]:
     duration = _safe_array(duration_obs, dtype=np.float32)
     speech = _safe_array(speech_mask, dtype=np.float32)
     valid = None if valid_mask is None else _safe_array(valid_mask, dtype=np.float32)
     if duration is None or speech is None:
-        return float("nan")
+        missing = "duration_obs" if duration is None else "speech_mask"
+        return _maybe_with_status(
+            float("nan"),
+            f"missing:{missing}",
+            name="compute_g",
+            return_status=return_status,
+        )
     try:
         value = compute_global_rate(
             log_dur=torch.log(torch.as_tensor(duration.reshape(1, -1), dtype=torch.float32).clamp_min(1.0e-4)),
@@ -182,9 +261,19 @@ def compute_g(
             if unit_log_prior is None
             else torch.as_tensor(np.asarray(unit_log_prior, dtype=np.float32), dtype=torch.float32),
         )
-        return float(value.reshape(-1)[0].item())
-    except Exception:
-        return float("nan")
+        return _maybe_with_status(
+            float(value.reshape(-1)[0].item()),
+            "ok",
+            name="compute_g",
+            return_status=return_status,
+        )
+    except Exception as exc:
+        return _maybe_with_status(
+            float("nan"),
+            f"error:{type(exc).__name__}",
+            name="compute_g",
+            return_status=return_status,
+        )
 
 
 def compute_source_global_rate_for_analysis(
@@ -199,17 +288,28 @@ def compute_source_global_rate_for_analysis(
     source_unit_prior: Any | None = None,
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
-) -> float:
+    return_status: bool = False,
+) -> float | tuple[float, str]:
     log_dur = _safe_array(source_log_dur, dtype=np.float32)
     if log_dur is None:
         duration = _safe_array(source_duration_obs, dtype=np.float32)
         if duration is None:
-            return float("nan")
+            return _maybe_with_status(
+                float("nan"),
+                "missing:source_duration_obs",
+                name="compute_source_global_rate_for_analysis",
+                return_status=return_status,
+            )
         log_dur = np.log(np.clip(duration, 1.0e-4, None))
     speech = _safe_array(source_speech_mask, dtype=np.float32)
     valid = None if source_valid_mask is None else _safe_array(source_valid_mask, dtype=np.float32)
     if speech is None:
-        return float("nan")
+        return _maybe_with_status(
+            float("nan"),
+            "missing:source_speech_mask",
+            name="compute_source_global_rate_for_analysis",
+            return_status=return_status,
+        )
     try:
         value = compute_global_rate(
             log_dur=torch.as_tensor(log_dur.reshape(1, -1), dtype=torch.float32),
@@ -228,9 +328,19 @@ def compute_source_global_rate_for_analysis(
             if source_unit_prior is None
             else torch.as_tensor(np.asarray(source_unit_prior, dtype=np.float32), dtype=torch.float32),
         )
-        return float(value.reshape(-1)[0].item())
-    except Exception:
-        return float("nan")
+        return _maybe_with_status(
+            float(value.reshape(-1)[0].item()),
+            "ok",
+            name="compute_source_global_rate_for_analysis",
+            return_status=return_status,
+        )
+    except Exception as exc:
+        return _maybe_with_status(
+            float("nan"),
+            f"error:{type(exc).__name__}",
+            name="compute_source_global_rate_for_analysis",
+            return_status=return_status,
+        )
 
 
 def compute_speech_tempo_for_analysis(
@@ -298,6 +408,26 @@ def compute_b_star(
         return float("nan")
     weights = None if weight is None else _safe_array(weight, dtype=np.float32)[:width]
     return weighted_median(z[:width][valid] - a[:width][valid], None if weights is None else weights[valid])
+
+
+def _resolve_gate0_drop_reason(
+    *,
+    g_ref: float,
+    g_src: float,
+    c_star: float,
+    g_compute_status: str,
+    g_src_compute_status: str,
+) -> str:
+    if not np.isfinite(c_star):
+        return "missing:c_star"
+    if not np.isfinite(g_ref):
+        return f"g_ref:{g_compute_status}"
+    if not np.isfinite(g_src):
+        return f"g_src:{g_src_compute_status}"
+    delta_g = float(g_ref - g_src)
+    if not np.isfinite(delta_g):
+        return "delta_g:nonfinite"
+    return "ok"
 
 
 def _resolve_record_ids(record: RhythmV3DebugRecord, index: int) -> dict[str, Any]:
@@ -443,10 +573,11 @@ def build_ref_crop_table(
         prompt_units = _safe_array(record.prompt_content_units, dtype=np.int64)
         if prompt_speech is None and prompt_duration is not None and derived.prompt_speech_mask is not None:
             prompt_speech = derived.prompt_speech_mask.astype(np.float32, copy=False)
-        g_ref = (
-            float(record.global_rate)
-            if record.global_rate is not None
-            else compute_source_global_rate_for_analysis(
+        if record.global_rate is not None:
+            g_ref = float(record.global_rate)
+            g_compute_status = "ok" if np.isfinite(g_ref) else "invalid:record.global_rate"
+        else:
+            g_ref, g_compute_status = compute_source_global_rate_for_analysis(
                 source_duration_obs=prompt_duration,
                 source_speech_mask=np.ones_like(prompt_duration, dtype=np.float32)
                 if prompt_speech is None and prompt_duration is not None
@@ -456,14 +587,14 @@ def build_ref_crop_table(
                 g_trim_ratio=g_trim_ratio,
                 drop_edge_runs=drop_edge_runs,
                 source_unit_ids=prompt_units,
+                return_status=True,
             )
-        )
         source_speech = (
             np.ones_like(source_duration, dtype=np.float32)
             if source_duration is not None and source_silence is None
             else (1.0 - np.clip(source_silence, 0.0, 1.0) if source_silence is not None else None)
         )
-        g_src = compute_source_global_rate_for_analysis(
+        g_src, g_src_compute_status = compute_source_global_rate_for_analysis(
             source_duration_obs=source_duration,
             source_speech_mask=source_speech,
             source_valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None and source_valid is None else source_valid,
@@ -471,6 +602,7 @@ def build_ref_crop_table(
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
             source_unit_ids=source_units,
+            return_status=True,
         )
         g_src_prefix_mean = float("nan")
         if derived.source_rate_seq is not None and derived.speech_mask is not None:
@@ -537,6 +669,14 @@ def build_ref_crop_table(
         same_speaker_target = _meta(record, "same_speaker_target", default=None)
         if same_speaker_target is None and src_spk and tgt_spk:
             same_speaker_target = int(src_spk == tgt_spk)
+        c_star = np.nan if derived.oracle_bias is None else float(derived.oracle_bias)
+        gate0_drop_reason = _resolve_gate0_drop_reason(
+            g_ref=g_ref,
+            g_src=g_src,
+            c_star=c_star,
+            g_compute_status=g_compute_status,
+            g_src_compute_status=g_src_compute_status,
+        )
         rows.append(
             {
                 **ids,
@@ -556,14 +696,19 @@ def build_ref_crop_table(
                 "same_speaker": np.nan if same_speaker_reference is None else float(same_speaker_reference),
                 "same_speaker_reference": np.nan if same_speaker_reference is None else float(same_speaker_reference),
                 "same_speaker_target": np.nan if same_speaker_target is None else float(same_speaker_target),
+                "ref_condition": _as_str(_meta(record, "ref_condition", default="")),
                 "lexical_mismatch": _meta(record, "lexical_mismatch", default=np.nan),
                 "g_crop": g_ref,
+                "g_compute_status": g_compute_status,
                 "g_src": g_src,
+                "g_src_compute_status": g_src_compute_status,
                 "g_src_utt": g_src,
                 "g_src_prefix_mean": g_src_prefix_mean,
                 "delta_g": float(g_ref - g_src) if np.isfinite(g_ref) and np.isfinite(g_src) else float("nan"),
-                "c_star": np.nan if derived.oracle_bias is None else float(derived.oracle_bias),
+                "c_star": c_star,
                 "zbar_sp_star": speech_target_stat,
+                "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
+                "gate0_drop_reason": gate0_drop_reason,
             }
         )
     frame = pd.DataFrame(rows)
@@ -921,12 +1066,13 @@ def build_monotonicity_table(
     drop_edge_runs: int = 0,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
-    grouped: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
     for index, record in enumerate(records):
         meta = dict(record.metadata or {})
         src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
         sample_id = _as_str(meta.get("sample_id", record.item_name or src_id))
         pair_id = _as_str(meta.get("pair_id", meta.get("rhythm_pair_group_id", sample_id)))
+        ref_condition = _normalize_ref_condition(meta.get("ref_condition", ""))
         ref_bin = _as_str(meta.get("ref_bin", meta.get("tempo_bin", ""))).strip().lower()
         if ref_bin not in {"slow", "mid", "fast"}:
             continue
@@ -968,7 +1114,7 @@ def build_monotonicity_table(
             drop_edge_runs=drop_edge_runs,
             source_unit_ids=record.source_content_units,
         )
-        grouped.setdefault((src_id, eval_mode), {})[ref_bin] = {
+        grouped.setdefault((src_id, eval_mode, ref_condition, pair_id), {})[ref_bin] = {
             "sample_id": sample_id,
             "pair_id": pair_id,
             "tempo_out": tempo_out,
@@ -977,6 +1123,7 @@ def build_monotonicity_table(
             "g_ref": float(derived.global_rate) if derived.global_rate is not None else float("nan"),
             "g_src_utt": g_src_utt,
             "item_name": record.item_name or src_id,
+            "ref_condition": ref_condition,
             "same_text_reference": _as_float(meta.get("same_text_reference", meta.get("same_text", float("nan")))),
             "same_speaker_reference": _as_float(
                 meta.get(
@@ -986,7 +1133,7 @@ def build_monotonicity_table(
             ),
         }
     rows: list[dict[str, Any]] = []
-    for (src_id, eval_mode), bins in grouped.items():
+    for (src_id, eval_mode, ref_condition, pair_id), bins in grouped.items():
         mono = float("nan")
         if all(name in bins for name in ("slow", "mid", "fast")):
             mono = float(
@@ -1019,6 +1166,8 @@ def build_monotonicity_table(
                         else float("nan")
                     ),
                     "eval_mode": eval_mode,
+                    "triplet_id": f"{src_id}|{eval_mode}|{ref_condition}|{pair_id}",
+                    "ref_condition": ref_condition,
                     "same_text_reference": payload["same_text_reference"],
                     "same_speaker_reference": payload["same_speaker_reference"],
                     "mono_triplet_ok": mono,
@@ -1065,10 +1214,27 @@ def summarize_falsification_ladder(
             "robust_slope": float("nan"),
             "r2_like": float("nan"),
         }
+        negative_control_gap = float("nan")
+        real_reference_count = 0
+        negative_control_count = 0
         if not mono_mode.empty:
-            unique_triplets = mono_mode.drop_duplicates(subset=["src_id", "eval_mode"])
+            triplet_keys = ["triplet_id"] if "triplet_id" in mono_mode.columns else ["src_id", "eval_mode", "pair_id", "ref_condition"]
+            unique_triplets = mono_mode.drop_duplicates(subset=[key for key in triplet_keys if key in mono_mode.columns])
             mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
             tempo_transfer = transfer_slope(mono_mode.get("delta_g", []), mono_mode.get("tempo_delta", []))
+            negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
+                mono_mode,
+                x_col="delta_g",
+                y_col="tempo_delta",
+                metric_fn=transfer_slope,
+            )
+        elif not crop_mode.empty:
+            negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
+                crop_mode,
+                x_col="delta_g",
+                y_col="c_star",
+                metric_fn=tempo_explainability,
+            )
 
         rows.append(
             {
@@ -1079,14 +1245,27 @@ def summarize_falsification_ladder(
                 "monotonicity_rate": mono_rate,
                 "tempo_transfer_slope": float(tempo_transfer["robust_slope"]),
                 "tempo_transfer_spearman": float(tempo_transfer["spearman"]),
+                "negative_control_gap": negative_control_gap,
                 "same_text_gap": gap,
                 "silence_leakage": float(np.nanmean(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
                 "prefix_discrepancy": float(np.nanmean(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
                 "budget_hit_rate": float(np.nanmean(prefix_mode["budget_hit_rate"].to_numpy(dtype=np.float32))) if not prefix_mode.empty and "budget_hit_rate" in prefix_mode else float("nan"),
                 "cumulative_drift": float(np.nanmean(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
                 "n_ref_crops": int(crop_mode.shape[0]),
-                "n_triplets": 0 if mono_mode.empty else int(mono_mode["src_id"].nunique()),
+                "n_triplets": (
+                    0
+                    if mono_mode.empty
+                    else int(
+                        mono_mode["triplet_id"].nunique()
+                        if "triplet_id" in mono_mode.columns
+                        else mono_mode.drop_duplicates(
+                            subset=[key for key in ("src_id", "eval_mode", "pair_id", "ref_condition") if key in mono_mode.columns]
+                        ).shape[0]
+                    )
+                ),
                 "n_prefix_samples": int(prefix_mode.shape[0]),
+                "n_real_references": int(real_reference_count),
+                "n_negative_controls": int(negative_control_count),
             }
         )
     return pd.DataFrame(rows)
@@ -1115,11 +1294,17 @@ def plot_monotonicity_intervention(monotonicity_df: pd.DataFrame):
         series = [work.loc[work["ref_bin"] == ref_bin, "tempo_out"].dropna().to_numpy(dtype=np.float32) for ref_bin in order]
         if any(arr.size > 0 for arr in series):
             ax.boxplot(series, labels=order, showmeans=True)
-        paired = work.pivot_table(index="src_id", columns="ref_bin", values="tempo_out", aggfunc="first")
+        paired = work.pivot_table(
+            index="triplet_id" if "triplet_id" in work.columns else "src_id",
+            columns="ref_bin",
+            values="tempo_out",
+            aggfunc="first",
+        )
         for _, row in paired.iterrows():
             if all(name in row.index and np.isfinite(row[name]) for name in order):
                 ax.plot(np.arange(1, 4), [row["slow"], row["mid"], row["fast"]], color="#4C78A8", alpha=0.18, linewidth=1.0)
-        unique_triplets = work.drop_duplicates(subset=["src_id", "eval_mode"])
+        triplet_keys = ["triplet_id"] if "triplet_id" in work.columns else ["src_id", "eval_mode", "pair_id", "ref_condition"]
+        unique_triplets = work.drop_duplicates(subset=[key for key in triplet_keys if key in work.columns])
         mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
         ax.set_title(f"{eval_mode}\nmono={mono_rate:.3f}" if np.isfinite(mono_rate) else eval_mode)
         ax.set_ylabel("tempo_out")
@@ -1169,11 +1354,12 @@ def plot_falsification_ladder(ladder_df: pd.DataFrame):
     metrics = [
         ("explainability_slope", "slope"),
         ("monotonicity_rate", "mono"),
+        ("negative_control_gap", "neg-ctrl gap"),
         ("same_text_gap", "same-text gap"),
         ("silence_leakage", "silence leak"),
         ("prefix_discrepancy", "prefix disc"),
     ]
-    fig, axes = plt.subplots(1, len(metrics), figsize=(18, 4.8), constrained_layout=True)
+    fig, axes = plt.subplots(1, len(metrics), figsize=(21, 4.8), constrained_layout=True)
     if ladder_df.empty:
         for ax, (_, title) in zip(np.asarray(axes).reshape(-1), metrics):
             ax.text(0.5, 0.5, "No ladder summary", ha="center", va="center")

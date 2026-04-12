@@ -5,7 +5,11 @@ import torch
 
 from modules.Conan.rhythm.policy import is_duration_operator_mode
 from modules.Conan.rhythm_v3.g_stats import normalize_global_rate_variant
-from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3 as build_source_rhythm_cache
+from modules.Conan.rhythm_v3.source_cache import (
+    UNIT_LOG_PRIOR_META_KEY,
+    build_source_rhythm_cache_v3 as build_source_rhythm_cache,
+    maybe_attach_unit_log_prior_from_path,
+)
 from tasks.Conan.rhythm.duration_v3.alignment_projection import (
     align_target_runs_to_source_discrete as _align_target_runs_to_source_discrete,
     as_float32_1d as _as_float32_1d,
@@ -45,6 +49,37 @@ def _extract_object_scalar(value):
 
 class DurationV3DatasetMixin:
     @staticmethod
+    def _normalize_alignment_kind_export(value, *, mode_id=None) -> str:
+        normalized = str(_extract_object_scalar(value) or "").strip().lower()
+        if normalized:
+            return normalized
+        try:
+            resolved_mode_id = int(_extract_object_scalar(mode_id)) if mode_id is not None else None
+        except Exception:
+            resolved_mode_id = None
+        if resolved_mode_id == 1:
+            return "continuous_precomputed"
+        return "discrete"
+
+    def _resolve_duration_v3_unit_prior_path(self) -> str | None:
+        path = self.hparams.get("rhythm_v3_unit_prior_path")
+        if path is None:
+            return None
+        text = str(path).strip()
+        return text or None
+
+    def _maybe_attach_duration_v3_unit_prior(self, source_cache: dict) -> dict:
+        unit_prior_path = self._resolve_duration_v3_unit_prior_path()
+        if unit_prior_path is None:
+            return source_cache
+        if source_cache.get("unit_log_prior") is not None or source_cache.get("prompt_unit_log_prior") is not None:
+            return source_cache
+        return maybe_attach_unit_log_prior_from_path(
+            source_cache,
+            unit_prior_path=unit_prior_path,
+        )
+
+    @staticmethod
     def _build_prompt_global_weight(
         *,
         prompt_speech_mask: np.ndarray,
@@ -71,10 +106,16 @@ class DurationV3DatasetMixin:
             prompt_speech_mask=prompt_speech_mask,
             run_stability=source_cache.get("source_run_stability"),
         )
+        conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
+        conditioning["g_trim_ratio"] = np.asarray(
+            [float(self.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2)],
+            dtype=np.float32,
+        )
         g_variant = normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median"))
         prompt_unit_log_prior = source_cache.get("prompt_unit_log_prior")
         if prompt_unit_log_prior is None:
             prompt_unit_log_prior = source_cache.get("unit_log_prior")
+        unit_prior_meta = source_cache.get(UNIT_LOG_PRIOR_META_KEY, {})
         if prompt_unit_log_prior is not None:
             prompt_unit_log_prior = np.asarray(prompt_unit_log_prior, dtype=np.float32).reshape(-1)
             if prompt_unit_log_prior.shape != prompt_duration_obs.shape:
@@ -83,11 +124,19 @@ class DurationV3DatasetMixin:
                     f"{prompt_unit_log_prior.shape} vs {prompt_duration_obs.shape}"
                 )
             conditioning["prompt_unit_log_prior"] = prompt_unit_log_prior
+            conditioning["prompt_unit_log_prior_present"] = np.asarray([1.0], dtype=np.float32)
+            conditioning["prompt_unit_prior_vocab_size"] = np.asarray(
+                [int(unit_prior_meta.get("unit_prior_vocab_size", 0) or 0)],
+                dtype=np.int64,
+            )
         elif g_variant == "unit_norm":
             raise RuntimeError(
                 "rhythm_v3 g_variant=unit_norm requires prompt_unit_log_prior/unit_log_prior "
                 "matching prompt runs in prompt/reference conditioning."
             )
+        else:
+            conditioning["prompt_unit_log_prior_present"] = np.asarray([0.0], dtype=np.float32)
+            conditioning["prompt_unit_prior_vocab_size"] = np.asarray([0], dtype=np.int64)
         if conditioning["prompt_global_weight"].shape != prompt_duration_obs.shape:
             raise RuntimeError(
                 "prompt_global_weight shape mismatch with prompt_duration_obs: "
@@ -258,6 +307,7 @@ class DurationV3DatasetMixin:
                 emit_silence_runs=explicit_silence,
                 debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
             )
         elif has_cached_prompt_source and target_mode != "cached_only":
             if explicit_silence:
@@ -270,6 +320,7 @@ class DurationV3DatasetMixin:
                         emit_silence_runs=True,
                         debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                        unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
                     )
                 else:
                     raise RuntimeError(
@@ -296,6 +347,7 @@ class DurationV3DatasetMixin:
             )
         if source_cache is None:
             return {}
+        source_cache = self._maybe_attach_duration_v3_unit_prior(source_cache)
         prompt_content_units = np.asarray(source_cache["content_units"], dtype=np.int64)
         prompt_duration_obs = np.asarray(source_cache["dur_anchor_src"], dtype=np.float32)
         prompt_valid_mask = (prompt_duration_obs > 0).astype(np.float32)
@@ -373,24 +425,56 @@ class DurationV3DatasetMixin:
         alignment_kind = paired_target_conditioning.get("paired_target_alignment_kind")
         if alignment_kind is None:
             alignment_kind = paired_target_conditioning.get("paired_target_alignment_mode")
+        if alignment_kind is None:
+            alignment_kind = paired_target_conditioning.get("unit_alignment_kind_tgt")
         normalized_kind = (
-            str(alignment_kind).strip().lower()
+            str(_extract_object_scalar(alignment_kind) or "").strip().lower()
             if alignment_kind is not None
             else ""
         )
         alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_mode_id")
         if alignment_mode_id is None:
             alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_kind_id")
+        if alignment_mode_id is None:
+            alignment_mode_id = paired_target_conditioning.get("unit_alignment_mode_id_tgt")
+        alignment_source = paired_target_conditioning.get("paired_target_alignment_source")
+        if alignment_source is None:
+            alignment_source = paired_target_conditioning.get("alignment_source")
+        if alignment_source is None:
+            alignment_source = paired_target_conditioning.get("unit_alignment_source_tgt")
+        alignment_version = paired_target_conditioning.get("paired_target_alignment_version")
+        if alignment_version is None:
+            alignment_version = paired_target_conditioning.get("alignment_version")
+        if alignment_version is None:
+            alignment_version = paired_target_conditioning.get("unit_alignment_version_tgt")
         try:
             normalized_mode_id = int(_extract_object_scalar(alignment_mode_id)) if alignment_mode_id is not None else None
         except Exception:
             normalized_mode_id = None
-        if normalized_kind != "continuous_precomputed" and normalized_mode_id != 1:
+        is_continuous_kind = bool(normalized_kind) and normalized_kind.startswith("continuous")
+        if not is_continuous_kind and normalized_mode_id != 1:
             return None
+        normalized_source = str(_extract_object_scalar(alignment_source) or "").strip()
+        normalized_version = str(_extract_object_scalar(alignment_version) or "").strip()
+        if not normalized_source or not normalized_version:
+            return None
+        resolved_kind = normalized_kind if is_continuous_kind else "continuous_precomputed"
         return {
             "assigned_source": _as_int64_1d(assigned_source) if assigned_source is not None else None,
             "assigned_cost": _as_float32_1d(assigned_cost) if assigned_cost is not None else None,
+            "alignment_kind": resolved_kind,
+            "alignment_source": normalized_source,
+            "alignment_version": normalized_version,
         }
+
+    @staticmethod
+    def _maybe_extract_frame_sidecar(item, *keys: str, dtype=None):
+        if not isinstance(item, dict):
+            return None
+        for key in keys:
+            if key in item and item[key] is not None:
+                return np.asarray(item[key], dtype=dtype) if dtype is not None else np.asarray(item[key])
+        return None
 
     def _build_paired_target_projection_conditioning(self, paired_target_item, *, target_mode: str, source_item=None):
         if paired_target_item is None:
@@ -423,6 +507,7 @@ class DurationV3DatasetMixin:
                 emit_silence_runs=explicit_silence,
                 debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
             )
         elif has_cached_target_source and target_mode != "cached_only":
             if explicit_silence:
@@ -435,6 +520,7 @@ class DurationV3DatasetMixin:
                         emit_silence_runs=True,
                         debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+                        unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
                     )
                 else:
                     raise RuntimeError(
@@ -461,7 +547,7 @@ class DurationV3DatasetMixin:
             silence_mask=source_cache.get("source_silence_mask"),
         )
         paired_target_speech_mask = paired_target_valid_mask * (1.0 - paired_target_silence_mask.clip(0.0, 1.0))
-        return {
+        conditioning = {
             "paired_target_content_units": paired_target_content_units,
             "paired_target_duration_obs": paired_target_duration_obs,
             "paired_target_valid_mask": paired_target_valid_mask,
@@ -476,6 +562,93 @@ class DurationV3DatasetMixin:
                 dtype=object,
             ),
         }
+        for src_key, dst_key in (
+            ("paired_target_alignment_kind", "paired_target_alignment_kind"),
+            ("unit_alignment_kind_tgt", "paired_target_alignment_kind"),
+            ("paired_target_alignment_mode", "paired_target_alignment_mode"),
+            ("paired_target_alignment_mode_id", "paired_target_alignment_mode_id"),
+            ("paired_target_alignment_kind_id", "paired_target_alignment_kind_id"),
+            ("unit_alignment_mode_id_tgt", "paired_target_alignment_mode_id"),
+            ("paired_target_alignment_source", "paired_target_alignment_source"),
+            ("alignment_source", "paired_target_alignment_source"),
+            ("unit_alignment_source_tgt", "paired_target_alignment_source"),
+            ("paired_target_alignment_version", "paired_target_alignment_version"),
+            ("alignment_version", "paired_target_alignment_version"),
+            ("unit_alignment_version_tgt", "paired_target_alignment_version"),
+            ("paired_target_alignment_assigned_source", "paired_target_alignment_assigned_source"),
+            ("paired_target_assigned_source", "paired_target_alignment_assigned_source"),
+            ("unit_alignment_assigned_source_debug", "paired_target_alignment_assigned_source"),
+            ("paired_target_alignment_assigned_cost", "paired_target_alignment_assigned_cost"),
+            ("paired_target_assigned_cost", "paired_target_alignment_assigned_cost"),
+            ("unit_alignment_assigned_cost_debug", "paired_target_alignment_assigned_cost"),
+        ):
+            if not isinstance(paired_target_item, dict):
+                continue
+            if src_key in paired_target_item and paired_target_item[src_key] is not None and dst_key not in conditioning:
+                conditioning[dst_key] = paired_target_item[src_key]
+        source_frame_states = self._maybe_extract_frame_sidecar(
+            source_item,
+            "source_frame_states",
+            "frame_states",
+            dtype=np.float32,
+        )
+        source_frame_to_run = self._maybe_extract_frame_sidecar(
+            source_item,
+            "source_frame_to_run",
+            "frame_to_run",
+            dtype=np.int64,
+        )
+        target_frame_states = self._maybe_extract_frame_sidecar(
+            paired_target_item,
+            "paired_target_frame_states",
+            "target_frame_states",
+            "frame_states",
+            dtype=np.float32,
+        )
+        target_frame_speech_prob = self._maybe_extract_frame_sidecar(
+            paired_target_item,
+            "paired_target_frame_speech_prob",
+            "target_frame_speech_prob",
+            "frame_speech_prob",
+            "frame_speech_mask",
+            dtype=np.float32,
+        )
+        target_frame_weight = self._maybe_extract_frame_sidecar(
+            paired_target_item,
+            "paired_target_frame_weight",
+            "target_frame_weight",
+            "frame_weight",
+            dtype=np.float32,
+        )
+        target_frame_valid = self._maybe_extract_frame_sidecar(
+            paired_target_item,
+            "paired_target_frame_valid",
+            "target_frame_valid",
+            "frame_valid",
+            dtype=np.float32,
+        )
+        target_frame_unit_hint = self._maybe_extract_frame_sidecar(
+            paired_target_item,
+            "paired_target_frame_unit_hint",
+            "target_frame_unit_hint",
+            "frame_unit_hint",
+            dtype=np.int64,
+        )
+        if source_frame_states is not None:
+            conditioning["source_frame_states"] = np.asarray(source_frame_states, dtype=np.float32)
+        if source_frame_to_run is not None:
+            conditioning["source_frame_to_run"] = np.asarray(source_frame_to_run, dtype=np.int64)
+        if target_frame_states is not None:
+            conditioning["paired_target_frame_states"] = np.asarray(target_frame_states, dtype=np.float32)
+        if target_frame_speech_prob is not None:
+            conditioning["paired_target_frame_speech_prob"] = np.asarray(target_frame_speech_prob, dtype=np.float32)
+        if target_frame_weight is not None:
+            conditioning["paired_target_frame_weight"] = np.asarray(target_frame_weight, dtype=np.float32)
+        if target_frame_valid is not None:
+            conditioning["paired_target_frame_valid"] = np.asarray(target_frame_valid, dtype=np.float32)
+        if target_frame_unit_hint is not None:
+            conditioning["paired_target_frame_unit_hint"] = np.asarray(target_frame_unit_hint, dtype=np.int64)
+        return conditioning
 
     def _build_paired_duration_v3_targets(self, *, item, source_cache, paired_target_conditioning):
         projection_inputs = self._resolve_paired_target_projection_inputs(paired_target_conditioning)
@@ -492,6 +665,13 @@ class DurationV3DatasetMixin:
         precomputed_alignment = self._resolve_paired_target_alignment_metadata(
             paired_target_conditioning
         )
+        source_frame_states = paired_target_conditioning.get("source_frame_states")
+        source_frame_to_run = paired_target_conditioning.get("source_frame_to_run")
+        target_frame_states = paired_target_conditioning.get("paired_target_frame_states")
+        target_frame_speech_prob = paired_target_conditioning.get("paired_target_frame_speech_prob")
+        target_frame_weight = paired_target_conditioning.get("paired_target_frame_weight")
+        target_frame_valid = paired_target_conditioning.get("paired_target_frame_valid")
+        target_frame_unit_hint = paired_target_conditioning.get("paired_target_frame_unit_hint")
         try:
             projection = _project_target_runs_onto_source(
                 source_units=source_units,
@@ -504,6 +684,13 @@ class DurationV3DatasetMixin:
                 use_continuous_alignment=bool(
                     self.hparams.get("rhythm_v3_use_continuous_alignment", False)
                 ),
+                source_frame_states=source_frame_states,
+                target_frame_states=target_frame_states,
+                source_frame_to_run=source_frame_to_run,
+                target_frame_speech_prob=target_frame_speech_prob,
+                target_frame_weight=target_frame_weight,
+                target_frame_valid=target_frame_valid,
+                target_frame_unit_hint=target_frame_unit_hint,
                 precomputed_alignment=precomputed_alignment,
             )
         except Exception as exc:
@@ -548,15 +735,63 @@ class DurationV3DatasetMixin:
             "unit_alignment_mode_id_tgt": np.asarray(
                 [
                     1
-                    if str(projection.get("alignment_kind", "discrete")).strip().lower() == "continuous_precomputed"
+                    if str(projection.get("alignment_kind", "discrete")).strip().lower() != "discrete"
                     else 0
                 ],
                 dtype=np.int64,
             ),
+            "unit_alignment_kind_tgt": np.asarray(
+                [self._normalize_alignment_kind_export(projection.get("alignment_kind", "discrete"))],
+                dtype=object,
+            ),
+            "alignment_source": str(
+                projection.get("alignment_source", (precomputed_alignment or {}).get("alignment_source", "")) or ""
+            ),
+            "alignment_version": str(
+                projection.get("alignment_version", (precomputed_alignment or {}).get("alignment_version", "")) or ""
+            ),
+            "unit_alignment_source_tgt": np.asarray(
+                [
+                    str(
+                        projection.get("alignment_source", (precomputed_alignment or {}).get("alignment_source", ""))
+                        or ""
+                    )
+                ],
+                dtype=object,
+            ),
+            "unit_alignment_version_tgt": np.asarray(
+                [
+                    str(
+                        projection.get(
+                            "alignment_version",
+                            (precomputed_alignment or {}).get("alignment_version", ""),
+                        )
+                        or ""
+                    )
+                ],
+                dtype=object,
+            ),
         }
 
     def _merge_duration_v3_rhythm_targets(self, item, source_cache, paired_target_conditioning, sample):
+        minimal_v1_profile = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_minimal_v1_profile", False)
+        )
+        use_continuous_alignment = bool(
+            self.hparams.get("rhythm_v3_use_continuous_alignment", False)
+        )
         if isinstance(sample, dict) and "unit_duration_tgt" in sample:
+            if minimal_v1_profile and use_continuous_alignment:
+                if "unit_duration_proj_raw_tgt" not in sample:
+                    raise RuntimeError(
+                        "minimal_v1_profile + continuous alignment requires explicit unit_duration_proj_raw_tgt "
+                        "when loading cached unit_duration_tgt."
+                    )
+                if "unit_alignment_mode_id_tgt" not in sample:
+                    raise RuntimeError(
+                        "minimal_v1_profile + continuous alignment requires unit_alignment_mode_id_tgt "
+                        "for cached paired-target supervision."
+                    )
             out = {
                 "unit_duration_tgt": np.asarray(sample["unit_duration_tgt"], dtype=np.float32),
             }
@@ -586,11 +821,34 @@ class DurationV3DatasetMixin:
                 if key in sample:
                     dtype = np.int64 if key.endswith("_mode_id_tgt") else np.float32
                     out[key] = np.asarray(sample[key], dtype=dtype)
+            alignment_mode_id = out.get("unit_alignment_mode_id_tgt", sample.get("unit_alignment_mode_id_tgt"))
+            out["unit_alignment_kind_tgt"] = np.asarray(
+                [
+                    self._normalize_alignment_kind_export(
+                        sample.get("unit_alignment_kind_tgt"),
+                        mode_id=alignment_mode_id,
+                    )
+                ],
+                dtype=object,
+            )
+            alignment_source_value = (
+                sample.get("unit_alignment_source_tgt")
+                if "unit_alignment_source_tgt" in sample
+                else sample.get("alignment_source")
+            )
+            alignment_version_value = (
+                sample.get("unit_alignment_version_tgt")
+                if "unit_alignment_version_tgt" in sample
+                else sample.get("alignment_version")
+            )
+            out["alignment_source"] = str(_extract_object_scalar(alignment_source_value) or "")
+            out["alignment_version"] = str(_extract_object_scalar(alignment_version_value) or "")
+            out["unit_alignment_source_tgt"] = np.asarray([out["alignment_source"]], dtype=object)
+            out["unit_alignment_version_tgt"] = np.asarray([out["alignment_version"]], dtype=object)
+            out.setdefault("alignment_source", "")
+            out.setdefault("alignment_version", "")
             return out
 
-        minimal_v1_profile = self._is_enabled_flag(
-            self.hparams.get("rhythm_v3_minimal_v1_profile", False)
-        )
         allow_source_self_target_fallback = self._is_enabled_flag(
             self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False)
         )
@@ -657,6 +915,11 @@ class DurationV3DatasetMixin:
                 "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
                 "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
                 "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
+                "unit_alignment_kind_tgt": np.asarray(["discrete"], dtype=object),
+                "unit_alignment_source_tgt": np.asarray([""], dtype=object),
+                "unit_alignment_version_tgt": np.asarray([""], dtype=object),
+                "alignment_source": "",
+                "alignment_version": "",
             }
 
         raise RuntimeError(

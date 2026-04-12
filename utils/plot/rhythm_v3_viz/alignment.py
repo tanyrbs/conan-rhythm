@@ -47,7 +47,33 @@ def build_projection_debug_payload(
         target_speech_mask=target_speech_mask,
         use_continuous_alignment=use_continuous_alignment,
     )
-    return {
+    alignment_kind = str(projection.get("alignment_kind", "discrete")).strip() or "discrete"
+    alignment_source = str(projection.get("alignment_source", "")).strip()
+    alignment_version = str(projection.get("alignment_version", "")).strip()
+    payload = {
+        "unit_alignment_kind_tgt": np.asarray([alignment_kind], dtype=object),
+        "unit_alignment_source_tgt": np.asarray([alignment_source], dtype=object),
+        "unit_alignment_version_tgt": np.asarray([alignment_version], dtype=object),
+    }
+    optional_vector_sidecars = {
+        "run_margin": "unit_alignment_run_margin_tgt",
+        "run_mean_cost": "unit_alignment_run_mean_cost_tgt",
+        "run_type_agree": "unit_alignment_run_type_agree_tgt",
+        "run_occ_weighted": "unit_alignment_run_occ_weighted_tgt",
+        "run_occ_expected": "unit_alignment_run_occ_expected_tgt",
+        "run_entropy": "unit_alignment_run_entropy_tgt",
+        "run_posterior_mass_on_path": "unit_alignment_run_posterior_mass_on_path_tgt",
+        "posterior_band_left": "unit_alignment_posterior_band_left_debug",
+        "posterior_band_right": "unit_alignment_posterior_band_right_debug",
+        "posterior_values": "unit_alignment_posterior_values_debug",
+    }
+    for projection_key, payload_key in optional_vector_sidecars.items():
+        value = projection.get(projection_key)
+        if value is None:
+            continue
+        dtype = np.int64 if "band_" in projection_key else np.float32
+        payload[payload_key] = np.asarray(value, dtype=dtype)
+    payload.update({
         "unit_duration_tgt": np.asarray(projection["projected"], dtype=np.float32),
         "unit_duration_proj_raw_tgt": np.asarray(projection["projected"], dtype=np.float32),
         "unit_confidence_local_tgt": np.asarray(projection["confidence_local"], dtype=np.float32),
@@ -69,7 +95,7 @@ def build_projection_debug_payload(
             dtype=np.float32,
         ),
         "unit_alignment_mode_id_tgt": np.asarray(
-            [1 if str(projection.get("alignment_kind", "discrete")).strip().lower() == "continuous_precomputed" else 0],
+            [1 if alignment_kind.lower().startswith("continuous") else 0],
             dtype=np.int64,
         ),
         "paired_target_content_units_debug": np.asarray(target_units, dtype=np.int64),
@@ -82,7 +108,8 @@ def build_projection_debug_payload(
             projection["source_valid_run_index"],
             dtype=np.int64,
         ),
-    }
+    })
+    return payload
 
 
 def attach_projection_debug(
@@ -106,7 +133,17 @@ def attach_projection_debug(
         target_speech_mask=target_speech_mask,
         use_continuous_alignment=use_continuous_alignment,
     )
-    return replace(record, **payload)
+    metadata = dict(record.metadata or {})
+    alignment_kind = payload.get("unit_alignment_kind_tgt")
+    alignment_source = payload.get("unit_alignment_source_tgt")
+    alignment_version = payload.get("unit_alignment_version_tgt")
+    if alignment_kind is not None:
+        metadata.setdefault("alignment_kind", str(np.asarray(alignment_kind, dtype=object).reshape(-1)[0]))
+    if alignment_source is not None:
+        metadata.setdefault("alignment_source", str(np.asarray(alignment_source, dtype=object).reshape(-1)[0]))
+    if alignment_version is not None:
+        metadata.setdefault("alignment_version", str(np.asarray(alignment_version, dtype=object).reshape(-1)[0]))
+    return replace(record, metadata=metadata, **payload)
 
 
 __all__ = [

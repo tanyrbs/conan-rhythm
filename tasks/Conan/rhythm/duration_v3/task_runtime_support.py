@@ -57,6 +57,7 @@ class DurationV3TaskRuntimeSupportMixin:
             ),
             silence_logstretch_max=max(0.01, float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35) or 0.35)),
             local_rate_decay=float(hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95),
+            analytic_gap_clip=max(0.0, float(hparams.get("rhythm_v3_analytic_gap_clip", 0.35) or 0.0)),
             silence_short_gap_scale=float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35) or 0.35),
             use_log_base_rate=use_log_base_rate,
             simple_global_stats=simple_global_stats,

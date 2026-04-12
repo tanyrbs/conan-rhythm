@@ -269,6 +269,9 @@ class RhythmV3DebugRecord:
     unit_duration_tgt: Optional[np.ndarray] = None
     unit_duration_proj_raw_tgt: Optional[np.ndarray] = None
     unit_alignment_mode_id_tgt: Optional[np.ndarray] = None
+    unit_alignment_kind_tgt: Optional[np.ndarray] = None
+    unit_alignment_source_tgt: Optional[np.ndarray] = None
+    unit_alignment_version_tgt: Optional[np.ndarray] = None
     unit_confidence_tgt: Optional[np.ndarray] = None
     unit_confidence_local_tgt: Optional[np.ndarray] = None
     unit_confidence_coarse_tgt: Optional[np.ndarray] = None
@@ -285,6 +288,16 @@ class RhythmV3DebugRecord:
     unit_alignment_assigned_source_debug: Optional[np.ndarray] = None
     unit_alignment_assigned_cost_debug: Optional[np.ndarray] = None
     unit_alignment_source_valid_run_index_debug: Optional[np.ndarray] = None
+    unit_alignment_run_margin_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_mean_cost_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_type_agree_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_occ_weighted_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_occ_expected_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_entropy_tgt: Optional[np.ndarray] = None
+    unit_alignment_run_posterior_mass_on_path_tgt: Optional[np.ndarray] = None
+    unit_alignment_posterior_band_left_debug: Optional[np.ndarray] = None
+    unit_alignment_posterior_band_right_debug: Optional[np.ndarray] = None
+    unit_alignment_posterior_values_debug: Optional[np.ndarray] = None
     global_rate: Optional[float] = None
     source_rate_seq: Optional[np.ndarray] = None
     global_shift_analytic: Optional[np.ndarray] = None
@@ -353,7 +366,10 @@ def build_debug_record(
             "ref_len_sec",
             "speech_ratio",
             "alignment_kind",
+            "alignment_source",
+            "alignment_version",
             "target_duration_surface",
+            "ref_condition",
             "ref_bin",
             "tempo_bin",
             "g_support_count",
@@ -364,6 +380,13 @@ def build_debug_record(
             "g_valid",
             "g_drop_edge_runs",
             "g_strict_speech_only",
+            "g_trim_ratio",
+            "prompt_global_weight_present",
+            "prompt_unit_log_prior_present",
+            "prompt_unit_prior_vocab_size",
+            "unit_alignment_kind_tgt",
+            "unit_alignment_source_tgt",
+            "unit_alignment_version_tgt",
         ):
             value = _extract_mapping_value(sample, key, batch_index)
             scalar = _as_object_scalar(value)
@@ -422,17 +445,27 @@ def build_debug_record(
         if item_name is not None:
             _maybe_set_meta(meta, "src_spk", _infer_speaker_id(item_name))
             _maybe_set_meta(meta, "src_prompt_id", item_name)
+        alignment_kind_value = _as_object_scalar(_extract_mapping_value(sample, "unit_alignment_kind_tgt", batch_index))
+        if alignment_kind_value is not None:
+            _maybe_set_meta(meta, "alignment_kind", str(alignment_kind_value))
+        alignment_source_value = _as_object_scalar(_extract_mapping_value(sample, "unit_alignment_source_tgt", batch_index))
+        if alignment_source_value is not None:
+            _maybe_set_meta(meta, "alignment_source", str(alignment_source_value))
+        alignment_version_value = _as_object_scalar(_extract_mapping_value(sample, "unit_alignment_version_tgt", batch_index))
+        if alignment_version_value is not None:
+            _maybe_set_meta(meta, "alignment_version", str(alignment_version_value))
         alignment_mode_id = _as_object_scalar(_extract_mapping_value(sample, "unit_alignment_mode_id_tgt", batch_index))
         if alignment_mode_id is not None:
             try:
                 alignment_mode_id = int(alignment_mode_id)
             except Exception:
                 alignment_mode_id = 0
-            _maybe_set_meta(
-                meta,
-                "alignment_kind",
-                "continuous_precomputed" if alignment_mode_id == 1 else "discrete",
-            )
+            if "alignment_kind" not in meta:
+                _maybe_set_meta(
+                    meta,
+                    "alignment_kind",
+                    "continuous" if alignment_mode_id == 1 else "discrete",
+                )
         if _extract_mapping_value(sample, "unit_duration_proj_raw_tgt", batch_index) is not None:
             _maybe_set_meta(meta, "target_duration_surface", "projection_raw")
         ref_name = meta.get("ref_item_name") or meta.get("ref_prompt_id")
@@ -468,11 +501,16 @@ def build_debug_record(
             ("rhythm_debug_g_valid", "g_valid"),
             ("rhythm_debug_g_drop_edge_runs", "g_drop_edge_runs"),
             ("rhythm_debug_g_strict_speech_only", "g_strict_speech_only"),
+            ("rhythm_debug_prompt_global_weight_present", "prompt_global_weight_present"),
+            ("rhythm_debug_prompt_unit_log_prior_present", "prompt_unit_log_prior_present"),
+            ("rhythm_debug_prompt_unit_prior_vocab_size", "prompt_unit_prior_vocab_size"),
         ):
             value = model_output.get(key)
             scalar = _as_object_scalar(_to_numpy(value) if value is not None else None)
             if scalar is not None:
                 _maybe_set_meta(meta, meta_key, scalar)
+        if model_output.get("rhythm_v3_g_trim_ratio") is not None:
+            _maybe_set_meta(meta, "g_trim_ratio", _as_object_scalar(model_output.get("rhythm_v3_g_trim_ratio")))
 
     return RhythmV3DebugRecord(
         item_name=None if item_name is None else str(item_name),
@@ -536,6 +574,18 @@ def build_debug_record(
             _extract_mapping_value(sample, "unit_alignment_mode_id_tgt", batch_index),
             dtype=np.int64,
         ),
+        unit_alignment_kind_tgt=_as_optional_array(
+            _extract_mapping_value(sample, "unit_alignment_kind_tgt", batch_index),
+            dtype=None,
+        ),
+        unit_alignment_source_tgt=_as_optional_array(
+            _extract_mapping_value(sample, "unit_alignment_source_tgt", batch_index),
+            dtype=None,
+        ),
+        unit_alignment_version_tgt=_as_optional_array(
+            _extract_mapping_value(sample, "unit_alignment_version_tgt", batch_index),
+            dtype=None,
+        ),
         unit_confidence_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_tgt", batch_index)),
         unit_confidence_local_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_local_tgt", batch_index)),
         unit_confidence_coarse_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_confidence_coarse_tgt", batch_index)),
@@ -566,6 +616,26 @@ def build_debug_record(
         unit_alignment_source_valid_run_index_debug=_as_optional_vector(
             _extract_mapping_value(sample, "unit_alignment_source_valid_run_index_debug", batch_index),
             dtype=np.int64,
+        ),
+        unit_alignment_run_margin_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_margin_tgt", batch_index)),
+        unit_alignment_run_mean_cost_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_mean_cost_tgt", batch_index)),
+        unit_alignment_run_type_agree_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_type_agree_tgt", batch_index)),
+        unit_alignment_run_occ_weighted_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_occ_weighted_tgt", batch_index)),
+        unit_alignment_run_occ_expected_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_occ_expected_tgt", batch_index)),
+        unit_alignment_run_entropy_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_alignment_run_entropy_tgt", batch_index)),
+        unit_alignment_run_posterior_mass_on_path_tgt=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_run_posterior_mass_on_path_tgt", batch_index)
+        ),
+        unit_alignment_posterior_band_left_debug=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_posterior_band_left_debug", batch_index),
+            dtype=np.int64,
+        ),
+        unit_alignment_posterior_band_right_debug=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_posterior_band_right_debug", batch_index),
+            dtype=np.int64,
+        ),
+        unit_alignment_posterior_values_debug=_as_optional_vector(
+            _extract_mapping_value(sample, "unit_alignment_posterior_values_debug", batch_index)
         ),
         global_rate=(
             None
@@ -755,6 +825,7 @@ def record_summary(
     from .review import (
         compute_source_global_rate_for_analysis,
         compute_speech_tempo_for_analysis,
+        _resolve_gate0_drop_reason,
         weighted_median,
     )
     from tasks.Conan.rhythm.duration_v3.metrics import cumulative_drift, silence_leakage
@@ -791,8 +862,26 @@ def record_summary(
         if derived.analytic_shift is None
         else derived.analytic_shift[speech_valid]
     )
-    g_ref = np.nan if derived.global_rate is None else float(derived.global_rate)
-    g_src_utt = compute_source_global_rate_for_analysis(
+    if derived.global_rate is None:
+        prompt_speech_for_g = (
+            record.prompt_speech_mask
+            if record.prompt_speech_mask is not None
+            else derived.prompt_speech_mask
+        )
+        g_ref, g_compute_status = compute_source_global_rate_for_analysis(
+            source_duration_obs=record.prompt_duration_obs,
+            source_speech_mask=prompt_speech_for_g,
+            source_valid_mask=record.prompt_valid_mask,
+            g_variant=g_variant,
+            g_trim_ratio=g_trim_ratio,
+            drop_edge_runs=drop_edge_runs,
+            source_unit_ids=record.prompt_content_units,
+            return_status=True,
+        )
+    else:
+        g_ref = float(derived.global_rate)
+        g_compute_status = "ok" if np.isfinite(g_ref) else "invalid:record.global_rate"
+    g_src_utt, g_src_compute_status = compute_source_global_rate_for_analysis(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
@@ -800,6 +889,7 @@ def record_summary(
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
         source_unit_ids=record.source_content_units,
+        return_status=True,
     )
     g_src_prefix_mean = float("nan")
     if derived.source_rate_seq is not None and bool(np.any(speech_valid)):
@@ -904,6 +994,13 @@ def record_summary(
         if record.prefix_unit_offset is None or record.prefix_unit_offset.size <= 0
         else float(record.prefix_unit_offset.reshape(-1)[-1])
     )
+    gate0_drop_reason = _resolve_gate0_drop_reason(
+        g_ref=g_ref,
+        g_src=g_src_utt,
+        c_star=c_star,
+        g_compute_status=g_compute_status,
+        g_src_compute_status=g_src_compute_status,
+    )
     summary = {
         "sample_id": sample_id,
         "src_id": str(meta.get("src_id", sample_id)),
@@ -919,9 +1016,13 @@ def record_summary(
         "ref_bin": str(meta.get("ref_bin", meta.get("tempo_bin", ""))),
         "g_variant": str(meta.get("g_variant", g_variant)),
         "g_ref": g_ref,
+        "g_compute_status": g_compute_status,
         "g_src_utt": g_src_utt,
+        "g_src_compute_status": g_src_compute_status,
         "g_src_prefix_mean": g_src_prefix_mean,
         "delta_g": delta_g,
+        "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
+        "gate0_drop_reason": gate0_drop_reason,
         "g_support_count": _as_float(meta.get("g_support_count"), default=np.nan),
         "g_speech_count": _as_float(meta.get("g_speech_count"), default=np.nan),
         "g_valid_count": _as_float(meta.get("g_valid_count"), default=np.nan),
@@ -930,6 +1031,10 @@ def record_summary(
         "g_valid": _as_float(meta.get("g_valid"), default=np.nan),
         "g_drop_edge_runs": _as_float(meta.get("g_drop_edge_runs"), default=np.nan),
         "g_strict_speech_only": _as_float(meta.get("g_strict_speech_only"), default=np.nan),
+        "g_trim_ratio": _as_float(meta.get("g_trim_ratio"), default=np.nan),
+        "prompt_global_weight_present": _as_float(meta.get("prompt_global_weight_present"), default=np.nan),
+        "prompt_unit_log_prior_present": _as_float(meta.get("prompt_unit_log_prior_present"), default=np.nan),
+        "prompt_unit_prior_vocab_size": _as_float(meta.get("prompt_unit_prior_vocab_size"), default=np.nan),
         "c_star": c_star,
         "zbar_sp_star": zbar_sp_star,
         "tempo_src": tempo_src,
@@ -948,7 +1053,10 @@ def record_summary(
         "same_speaker_reference": np.nan if same_speaker_reference is None else float(same_speaker_reference),
         "same_speaker_target": np.nan if same_speaker_target is None else float(same_speaker_target),
         "alignment_kind": str(meta.get("alignment_kind", "")),
+        "alignment_source": str(meta.get("alignment_source", "")),
+        "alignment_version": str(meta.get("alignment_version", "")),
         "target_duration_surface": str(meta.get("target_duration_surface", "")),
+        "ref_condition": str(meta.get("ref_condition", "")),
         "lexical_mismatch": lexical_mismatch,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,

@@ -406,6 +406,13 @@ class MixedEffectsDurationModule(nn.Module):
         local_cold_start_runs = int(unused_kwargs.pop("local_cold_start_runs", 2))
         local_short_run_min_duration = float(unused_kwargs.pop("local_short_run_min_duration", 2.0))
         local_rate_decay = float(unused_kwargs.pop("local_rate_decay", 0.95))
+        analytic_gap_clip = float(
+            unused_kwargs.pop(
+                "analytic_gap_clip",
+                unused_kwargs.pop("rhythm_v3_analytic_gap_clip", 0.35),
+            )
+            or 0.0
+        )
         short_gap_silence_scale = float(unused_kwargs.pop("short_gap_silence_scale", 0.35))
         leading_silence_scale = float(unused_kwargs.pop("leading_silence_scale", 0.0))
         rate_mode = str(
@@ -513,6 +520,7 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop("debug_export", unused_kwargs.pop("rhythm_v3_debug_export", False))
         )
         del unused_kwargs
+        self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
             raise ValueError(f"Unsupported streaming_mode={streaming_mode!r}")
@@ -610,6 +618,7 @@ class MixedEffectsDurationModule(nn.Module):
                     local_cold_start_runs=local_cold_start_runs,
                     local_short_run_min_duration=local_short_run_min_duration,
                     local_rate_decay=local_rate_decay,
+                    analytic_gap_clip=self.analytic_gap_clip,
                     eval_mode=self.eval_mode,
                     disable_local_residual=self.disable_local_residual,
                     disable_coarse_bias=self.disable_coarse_bias,
@@ -655,6 +664,7 @@ class MixedEffectsDurationModule(nn.Module):
                     local_cold_start_runs=local_cold_start_runs,
                     local_short_run_min_duration=local_short_run_min_duration,
                     local_rate_decay=local_rate_decay,
+                    analytic_gap_clip=self.analytic_gap_clip,
                     short_gap_silence_scale=short_gap_silence_scale,
                     leading_silence_scale=leading_silence_scale,
                     eval_mode=self.eval_mode,
@@ -673,6 +683,7 @@ class MixedEffectsDurationModule(nn.Module):
             self.duration_head.simple_global_stats = self.simple_global_stats
             self.duration_head.use_log_base_rate = self.use_log_base_rate
             self.duration_head.use_learned_residual_gate = self.use_learned_residual_gate
+            self.duration_head.analytic_gap_clip = self.analytic_gap_clip
             self.duration_head.eval_mode = self.eval_mode
             self.duration_head.disable_local_residual = self.disable_local_residual
             self.duration_head.disable_coarse_bias = self.disable_coarse_bias

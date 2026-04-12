@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 
 from .g_stats import normalize_falsification_eval_mode
-from .math_utils import build_causal_local_rate_seq
+from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
+from .silence_surface import build_silence_tau_surface
 from .summary_memory import CausalUnitRunEncoder
 
 
@@ -26,6 +27,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         local_cold_start_runs: int = 2,
         local_short_run_min_duration: float = 2.0,
         local_rate_decay: float = 0.95,
+        analytic_gap_clip: float = 0.35,
         short_gap_silence_scale: float = 0.35,
         leading_silence_scale: float = 0.0,
         eval_mode: str = "learned",
@@ -60,6 +62,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.local_cold_start_runs = int(max(0, local_cold_start_runs))
         self.local_short_run_min_duration = float(max(1.0, local_short_run_min_duration))
         self.local_rate_decay = float(max(0.0, min(0.999, local_rate_decay)))
+        self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.eval_mode = normalize_falsification_eval_mode(eval_mode)
         self.disable_local_residual = bool(disable_local_residual)
         self.disable_coarse_bias = bool(disable_coarse_bias)
@@ -187,7 +190,11 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         else:
             spk_ctx = query.new_zeros((batch_size, self.query_dim))
 
-        global_shift_analytic = (global_rate_col - local_rate_seq.float()) * commit_valid_mask
+        analytic_gap = apply_analytic_gap_clip(
+            global_rate_col - local_rate_seq.float(),
+            self.analytic_gap_clip,
+        )
+        global_shift_analytic = analytic_gap * commit_valid_mask
         coarse_context = torch.cat([spk_ctx, global_rate_col], dim=-1)
         coarse_scalar = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_context).squeeze(-1))
         predicted_coarse = coarse_scalar.unsqueeze(1).expand_as(global_shift_analytic) * commit_valid_mask
@@ -225,8 +232,16 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
-        silence_tau = torch.full_like(global_term, self.max_silence_logstretch)
-        pred_silence = torch.clamp(global_term, min=-self.max_silence_logstretch, max=self.max_silence_logstretch)
+        silence_tau = build_silence_tau_surface(
+            prediction_anchor=torch.exp(log_anchor.float()),
+            committed_silence_mask=silence_commit_mask,
+            sep_hint=sep_hint,
+            boundary_cue=edge_cue,
+            max_silence_logstretch=self.max_silence_logstretch,
+            short_gap_scale=0.35,
+            minimal_v1_profile=True,
+        )
+        pred_silence = torch.clamp(global_term, min=-silence_tau, max=silence_tau)
         pred_silence = pred_silence * silence_commit_mask
         pred = pred_speech + pred_silence
         global_bias_scalar = coarse_scalar.reshape(-1, 1)

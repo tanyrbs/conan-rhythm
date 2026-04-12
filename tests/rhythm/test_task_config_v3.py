@@ -113,6 +113,22 @@ def test_validate_rhythm_training_hparams_accepts_positive_silence_settings():
     )
 
 
+def test_validate_rhythm_training_hparams_rejects_negative_analytic_gap_clip():
+    hparams = _minimal_v3_hparams()
+    hparams["rhythm_v3_analytic_gap_clip"] = -0.1
+    with pytest.raises(ValueError, match="rhythm_v3_analytic_gap_clip"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_positive_analytic_gap_clip():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_analytic_gap_clip": 0.35,
+        }
+    )
+
+
 def test_validate_rhythm_training_hparams_rejects_invalid_dynamic_budget_ratio():
     hparams = _minimal_v3_hparams()
     hparams["rhythm_v3_dynamic_budget_ratio"] = 1.5

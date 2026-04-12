@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from functools import lru_cache
 import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from .unitizer import estimate_boundary_confidence, estimate_run_stability
 
 DURATION_V3_SOURCE_CACHE_VERSION = 3
 DURATION_V3_CACHE_META_KEY = "rhythm_v3_cache_meta"
+UNIT_LOG_PRIOR_META_KEY = "rhythm_v3_unit_prior_meta"
 
 
 def build_duration_v3_cache_meta(
@@ -137,6 +139,145 @@ def _as_token_list(content_tokens) -> list[int]:
     return [int(x) for x in content_tokens]
 
 
+def _coerce_unit_prior_array(value) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        arr = value
+    elif torch.is_tensor(value):
+        arr = value.detach().cpu().numpy()
+    else:
+        arr = np.asarray(value)
+    arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+    if arr.size <= 0:
+        raise ValueError("unit_log_prior must contain at least one value.")
+    return arr
+
+
+def _extract_scalar_meta(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return str(value.item())
+        flat = value.reshape(-1)
+        if flat.size <= 0:
+            return None
+        return str(flat[0].item() if hasattr(flat[0], "item") else flat[0])
+    if torch.is_tensor(value):
+        flat = value.detach().cpu().reshape(-1)
+        if flat.numel() <= 0:
+            return None
+        return str(flat[0].item())
+    return str(value)
+
+
+def _normalize_unit_prior_bundle(
+    payload,
+    *,
+    default_source: str | None = None,
+) -> dict[str, object]:
+    if isinstance(payload, Mapping):
+        prior_value = payload.get("unit_log_prior", payload.get("unit_prior"))
+        if prior_value is None:
+            raise ValueError("unit prior bundle is missing unit_log_prior.")
+        prior = _coerce_unit_prior_array(prior_value)
+        source = _extract_scalar_meta(payload.get("unit_prior_source", default_source))
+        version = _extract_scalar_meta(payload.get("unit_prior_version"))
+    else:
+        prior = _coerce_unit_prior_array(payload)
+        source = _extract_scalar_meta(default_source)
+        version = None
+    return {
+        "unit_log_prior": prior.astype(np.float32, copy=False),
+        "unit_prior_source": source,
+        "unit_prior_version": version,
+        "unit_prior_vocab_size": int(prior.shape[0]),
+    }
+
+
+@lru_cache(maxsize=4)
+def load_unit_log_prior_bundle(path: str) -> dict[str, object]:
+    prior_path = Path(path)
+    if not prior_path.exists():
+        raise FileNotFoundError(f"unit prior path does not exist: {prior_path}")
+    suffix = prior_path.suffix.lower()
+    payload = None
+    if suffix == ".npy":
+        payload = np.load(prior_path, allow_pickle=True)
+    elif suffix == ".npz":
+        with np.load(prior_path, allow_pickle=True) as data:
+            payload = {key: data[key] for key in data.files}
+    elif suffix in {".pt", ".pth"}:
+        payload = torch.load(prior_path, map_location="cpu", weights_only=False)
+    else:
+        raise ValueError(
+            f"Unsupported unit prior file format: {prior_path}. Expected one of: .npy, .npz, .pt, .pth"
+        )
+    bundle = _normalize_unit_prior_bundle(payload, default_source=str(prior_path))
+    bundle["unit_prior_path"] = str(prior_path)
+    return bundle
+
+
+def attach_unit_log_prior_to_source_cache(
+    cache: dict,
+    *,
+    unit_prior_bundle: Mapping[str, object] | None = None,
+    unit_log_prior=None,
+    unit_prior_source: str | None = None,
+    unit_prior_version: str | None = None,
+    overwrite: bool = False,
+) -> dict:
+    if "content_units" not in cache:
+        raise ValueError("source cache must contain content_units before attaching unit_log_prior.")
+    if not overwrite and cache.get("unit_log_prior") is not None:
+        return cache
+    bundle = (
+        dict(unit_prior_bundle)
+        if isinstance(unit_prior_bundle, Mapping)
+        else _normalize_unit_prior_bundle(
+            {
+                "unit_log_prior": unit_log_prior,
+                "unit_prior_source": unit_prior_source,
+                "unit_prior_version": unit_prior_version,
+            }
+        )
+    )
+    prior = _coerce_unit_prior_array(bundle["unit_log_prior"])
+    content_units = np.asarray(cache["content_units"], dtype=np.int64).reshape(-1)
+    if content_units.size <= 0:
+        cache["unit_log_prior"] = np.zeros((0,), dtype=np.float32)
+    else:
+        max_unit = int(content_units.max())
+        if max_unit >= int(prior.shape[0]):
+            raise ValueError(
+                "unit_log_prior vocabulary is smaller than the cached content unit ids: "
+                f"max_unit={max_unit}, vocab_size={int(prior.shape[0])}"
+            )
+        cache["unit_log_prior"] = prior[content_units].astype(np.float32, copy=False)
+    cache[UNIT_LOG_PRIOR_META_KEY] = {
+        "unit_prior_source": _extract_scalar_meta(bundle.get("unit_prior_source")),
+        "unit_prior_version": _extract_scalar_meta(bundle.get("unit_prior_version")),
+        "unit_prior_vocab_size": int(prior.shape[0]),
+        "unit_prior_path": _extract_scalar_meta(bundle.get("unit_prior_path")),
+    }
+    return cache
+
+
+def maybe_attach_unit_log_prior_from_path(
+    cache: dict,
+    *,
+    unit_prior_path: str | None,
+    overwrite: bool = False,
+) -> dict:
+    if not unit_prior_path:
+        return cache
+    bundle = load_unit_log_prior_bundle(str(unit_prior_path))
+    return attach_unit_log_prior_to_source_cache(
+        cache,
+        unit_prior_bundle=bundle,
+        overwrite=overwrite,
+    )
+
+
 @lru_cache(maxsize=8)
 def _cached_frontend(
     silent_token: int | None,
@@ -154,6 +295,27 @@ def _cached_frontend(
     )
 
 
+def _build_source_boundary_cue_v3(
+    *,
+    dur_anchor_src: torch.Tensor,
+    unit_mask: torch.Tensor,
+    sep_hint: torch.Tensor,
+    open_run_mask: torch.Tensor,
+    sealed_mask: torch.Tensor,
+    boundary_confidence: torch.Tensor,
+) -> torch.Tensor:
+    from modules.Conan.rhythm.source_boundary import build_source_boundary_cue as _legacy_build_source_boundary_cue
+
+    return _legacy_build_source_boundary_cue(
+        dur_anchor_src=dur_anchor_src,
+        unit_mask=unit_mask,
+        sep_hint=sep_hint,
+        open_run_mask=open_run_mask,
+        sealed_mask=sealed_mask,
+        boundary_confidence=boundary_confidence,
+    )
+
+
 def build_source_phrase_cache(
     *,
     dur_anchor_src,
@@ -163,15 +325,13 @@ def build_source_phrase_cache(
     boundary_confidence,
     phrase_boundary_threshold: float = 0.55,
 ) -> dict[str, np.ndarray]:
-    from modules.Conan.rhythm.source_boundary import build_source_boundary_cue
-
-    dur_anchor_src = torch.tensor(np.asarray(dur_anchor_src), dtype=torch.float32).unsqueeze(0)
-    sep_hint = torch.tensor(np.asarray(sep_hint), dtype=torch.long).unsqueeze(0)
-    open_run_mask = torch.tensor(np.asarray(open_run_mask), dtype=torch.long).unsqueeze(0)
-    sealed_mask = torch.tensor(np.asarray(sealed_mask), dtype=torch.float32).unsqueeze(0)
-    boundary_confidence = torch.tensor(np.asarray(boundary_confidence), dtype=torch.float32).unsqueeze(0)
+    dur_anchor_src = torch.as_tensor(dur_anchor_src, dtype=torch.float32).reshape(1, -1)
+    sep_hint = torch.as_tensor(sep_hint, dtype=torch.long).reshape(1, -1)
+    open_run_mask = torch.as_tensor(open_run_mask, dtype=torch.long).reshape(1, -1)
+    sealed_mask = torch.as_tensor(sealed_mask, dtype=torch.float32).reshape(1, -1)
+    boundary_confidence = torch.as_tensor(boundary_confidence, dtype=torch.float32).reshape(1, -1)
     unit_mask = dur_anchor_src.gt(0).float()
-    source_boundary_cue = build_source_boundary_cue(
+    source_boundary_cue = _build_source_boundary_cue_v3(
         dur_anchor_src=dur_anchor_src,
         unit_mask=unit_mask,
         sep_hint=sep_hint,
@@ -219,6 +379,7 @@ def build_source_rhythm_cache_v3(
     emit_silence_runs: bool = True,
     debounce_min_run_frames: int = 2,
     phrase_boundary_threshold: float = 0.55,
+    unit_prior_path: str | None = None,
 ) -> dict[str, np.ndarray]:
     frontend = _cached_frontend(
         silent_token=silent_token,
@@ -255,7 +416,7 @@ def build_source_rhythm_cache_v3(
             phrase_boundary_threshold=phrase_boundary_threshold,
         )
     )
-    return attach_duration_v3_cache_meta(
+    source_cache = attach_duration_v3_cache_meta(
         source_cache,
         silent_token=silent_token,
         separator_aware=separator_aware,
@@ -263,6 +424,10 @@ def build_source_rhythm_cache_v3(
         emit_silence_runs=emit_silence_runs,
         debounce_min_run_frames=debounce_min_run_frames,
         phrase_boundary_threshold=phrase_boundary_threshold,
+    )
+    return maybe_attach_unit_log_prior_from_path(
+        source_cache,
+        unit_prior_path=unit_prior_path,
     )
 
 
@@ -272,7 +437,9 @@ build_source_rhythm_cache = build_source_rhythm_cache_v3
 __all__ = [
     "DURATION_V3_CACHE_META_KEY",
     "DURATION_V3_SOURCE_CACHE_VERSION",
+    "UNIT_LOG_PRIOR_META_KEY",
     "assert_duration_v3_cache_meta_compatible",
+    "attach_unit_log_prior_to_source_cache",
     "attach_duration_v3_cache_meta",
     "build_duration_v3_cache_meta",
     "build_source_phrase_cache",
@@ -281,5 +448,7 @@ __all__ = [
     "duration_v3_cache_meta_signature",
     "estimate_boundary_confidence",
     "estimate_run_stability",
+    "load_unit_log_prior_bundle",
+    "maybe_attach_unit_log_prior_from_path",
     "resolve_duration_v3_cache_meta",
 ]

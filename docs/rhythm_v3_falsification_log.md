@@ -48,7 +48,6 @@ This is now the single home for:
 To keep the project lean, the maintained script surface is intentionally small:
 
 - `scripts/preflight_rhythm_v3.py`
-- `scripts/smoke_test_rhythm_v3.py`
 - `scripts/rhythm_v3_debug_records.py`
 
 The intent is deliberate:
@@ -56,6 +55,10 @@ The intent is deliberate:
 - keep the **core implementation** and **review util** authoritative
 - keep the CLI surface to one maintained review/export command
 - avoid growing a second plotting or experiment framework
+
+The old zero-data standalone smoke script has been retired. Structural smoke
+coverage now belongs to focused entrypoint tests plus the short task-level
+smoke run in the training guide, not to a second maintained v3 wrapper CLI.
 
 The maintained export command is most informative when the debug bundle still carries pair
 metadata (`pair_id`, prompt ids, same-text flags, `lexical_mismatch`,
@@ -70,6 +73,10 @@ The export surface also now keeps small but useful analysis aliases together:
 - ladder-level `tempo_transfer_slope`
 - `alignment_kind`
 - `target_duration_surface`
+- `ref_condition`
+- `g_trim_ratio`
+- `prompt_global_weight_present`
+- `prompt_unit_log_prior_present`
 
 ### 2.3 Runtime/debug export keeps the same core signals plus clearer boundary provenance
 
@@ -110,11 +117,12 @@ on the same `g` semantics:
 
 ### 2.5 Continuous alignment provenance is now by contract
 
-The maintained `continuous` path is still `continuous_precomputed` only, but it
-is no longer accepted by convention alone.
+The maintained `continuous` path now has two provenance-clean variants,
+`continuous_precomputed` and `continuous_viterbi_v1`, and it is no longer
+accepted by convention alone.
 
 - paired-target alignment arrays now only feed the maintained continuous path
-  when paired metadata explicitly marks them as `continuous_precomputed`
+  when paired metadata explicitly marks them with a continuous `alignment_kind`
 - otherwise the existing fail-fast path remains in charge
 - projection export also carries
   `unit_alignment_unmatched_speech_ratio_tgt`,
@@ -122,7 +130,14 @@ is no longer accepted by convention alone.
   `unit_alignment_mean_coarse_confidence_speech_tgt`
   so weak supervision does not hide inside a single opaque confidence surface
 
-### 2.6 Static `g_src_utt` is kept separate from runtime `g_src_prefix`
+### 2.6 `unit_norm` now has a repo-native producer
+
+The maintained repo now ships `scripts/build_unit_log_prior.py` plus a matching
+`rhythm_v3_unit_prior_path` loading path in dataset and inference code. So
+`unit_norm` is no longer just "supported if you hand-wire an array"; it can now
+be treated as a reproducible experiment path.
+
+### 2.7 Static `g_src_utt` is kept separate from runtime `g_src_prefix`
 
 The local workspace now makes this split explicit:
 
@@ -225,6 +240,8 @@ Stop early if:
 Run `analytic` mode and stop early if:
 
 - slow / mid / fast references do not induce monotone speech tempo movement
+- no negative-control reference (`source_only`, `random_ref`, `shuffled_ref`)
+  is exported alongside the real-reference triplets
 
 ### Gate 2: coarse-only before local
 
@@ -252,6 +269,17 @@ be re-proposed as new refactors:
 3. render the five retained figures from the review util
 4. update this log with actual measurements
 5. only then decide whether to keep, weaken, or replace the current default `g`
+
+The log should also state explicitly whether the current bundle is a full gate
+bundle or only a partial audit. In this workspace, the maintained
+`scripts/rhythm_v3_debug_records.py` path now warns when:
+
+- `g_valid` coverage is weak
+- unmatched speech alignment is high
+- continuous coverage is incomplete for the current `alignment_kind` split
+- `analytic / coarse_only / learned` modes are missing
+- real-reference triplets are incomplete
+- negative controls are absent
 
 Typical entry points:
 

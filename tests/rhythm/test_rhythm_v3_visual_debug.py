@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import warnings
 
 import numpy as np
+import pandas as pd
 import torch
 
 from modules.Conan.rhythm_v3.contracts import (
@@ -24,6 +26,8 @@ from utils.plot.rhythm_v3_viz import (
     record_summary,
     summarize_falsification_ladder,
 )
+from scripts.rhythm_v3_debug_records import _warn_sparse_review_metadata
+from utils.plot.rhythm_v3_viz.review import compute_g, compute_source_global_rate_for_analysis
 
 
 def test_projection_debug_payload_exposes_alignment_trace():
@@ -69,6 +73,24 @@ def test_attach_projection_debug_keeps_record_outside_dataset_mixin():
     assert enriched.unit_alignment_mode_id_tgt is not None
     assert enriched.unit_alignment_assigned_source_debug is not None
     assert enriched.paired_target_duration_obs_debug is not None
+
+
+def test_build_debug_records_from_mode_id_only_uses_generic_continuous_alignment_kind():
+    records = build_debug_records_from_batch(
+        sample={
+            "item_name": np.asarray(["demo_mode_only"], dtype=object),
+            "content_units": torch.tensor([[3, 7]], dtype=torch.long),
+            "dur_anchor_src": torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+            "source_silence_mask": torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+            "unit_mask": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "unit_duration_tgt": torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+            "unit_duration_proj_raw_tgt": torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+            "unit_alignment_mode_id_tgt": torch.tensor([[1]], dtype=torch.long),
+        }
+    )
+    assert len(records) == 1
+    assert records[0].metadata["alignment_kind"] == "continuous"
+    assert int(np.asarray(records[0].unit_alignment_mode_id_tgt).reshape(-1)[0]) == 1
 
 
 def test_build_debug_records_and_summary_from_runtime_objects():
@@ -159,6 +181,10 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["g_ref"])
     assert np.isfinite(summary["g_src_utt"])
     assert np.isfinite(summary["delta_g"])
+    assert summary["g_compute_status"] == "ok"
+    assert summary["g_src_compute_status"] == "ok"
+    assert summary["gate0_row_dropped"] == 0.0
+    assert summary["gate0_drop_reason"] == "ok"
     assert summary["g_support_count"] == 2.0
     assert np.isfinite(summary["g_support_ratio_vs_valid"])
     assert np.isfinite(summary["c_star"])
@@ -264,6 +290,9 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     ladder_df = summarize_falsification_ladder(ref_crop_df, monotonicity_df, prefix_silence_df)
 
     assert "g_src_utt" in ref_crop_df.columns
+    assert "g_compute_status" in ref_crop_df.columns
+    assert "g_src_compute_status" in ref_crop_df.columns
+    assert "gate0_row_dropped" in ref_crop_df.columns
     assert "g_src_prefix_mean" in ref_crop_df.columns
     assert "same_text_reference" in ref_crop_df.columns
     assert "same_speaker_reference" in ref_crop_df.columns
@@ -271,6 +300,7 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     summary = record_summary(mid)
     assert np.isfinite(summary["alignment_unmatched_speech_ratio"])
     assert np.isfinite(summary["alignment_mean_coarse_confidence_speech"])
+    assert summary["gate0_drop_reason"] == "ok"
     assert set(monotonicity_df["ref_bin"].tolist()) >= {"slow", "mid", "fast"}
     assert "tempo_delta" in monotonicity_df.columns
     assert np.isfinite(monotonicity_df["mono_triplet_ok"]).any()
@@ -280,3 +310,160 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert ladder_df.iloc[0]["eval_mode"] == "analytic"
     assert np.isfinite(ladder_df.iloc[0]["monotonicity_rate"])
     assert "tempo_transfer_slope" in ladder_df.columns
+    assert "negative_control_gap" in ladder_df.columns
+
+
+def test_falsification_ladder_reports_negative_control_gap():
+    monotonicity_df = pd.DataFrame(
+        [
+            {
+                "src_id": "src_a",
+                "pair_id": "real_triplet",
+                "triplet_id": "src_a|analytic|real|real_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "real",
+                "ref_bin": "slow",
+                "delta_g": -0.4,
+                "tempo_delta": -0.3,
+                "mono_triplet_ok": 1.0,
+            },
+            {
+                "src_id": "src_a",
+                "pair_id": "real_triplet",
+                "triplet_id": "src_a|analytic|real|real_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "real",
+                "ref_bin": "mid",
+                "delta_g": 0.0,
+                "tempo_delta": 0.0,
+                "mono_triplet_ok": 1.0,
+            },
+            {
+                "src_id": "src_a",
+                "pair_id": "real_triplet",
+                "triplet_id": "src_a|analytic|real|real_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "real",
+                "ref_bin": "fast",
+                "delta_g": 0.4,
+                "tempo_delta": 0.35,
+                "mono_triplet_ok": 1.0,
+            },
+            {
+                "src_id": "src_a",
+                "pair_id": "neg_triplet",
+                "triplet_id": "src_a|analytic|random_ref|neg_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "random_ref",
+                "ref_bin": "slow",
+                "delta_g": -0.4,
+                "tempo_delta": -0.05,
+                "mono_triplet_ok": 0.0,
+            },
+            {
+                "src_id": "src_a",
+                "pair_id": "neg_triplet",
+                "triplet_id": "src_a|analytic|random_ref|neg_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "random_ref",
+                "ref_bin": "mid",
+                "delta_g": 0.0,
+                "tempo_delta": 0.0,
+                "mono_triplet_ok": 0.0,
+            },
+            {
+                "src_id": "src_a",
+                "pair_id": "neg_triplet",
+                "triplet_id": "src_a|analytic|random_ref|neg_triplet",
+                "eval_mode": "analytic",
+                "ref_condition": "random_ref",
+                "ref_bin": "fast",
+                "delta_g": 0.4,
+                "tempo_delta": 0.05,
+                "mono_triplet_ok": 0.0,
+            },
+        ]
+    )
+    ladder_df = summarize_falsification_ladder(
+        pd.DataFrame(columns=["eval_mode"]),
+        monotonicity_df,
+        pd.DataFrame(columns=["eval_mode"]),
+    )
+    assert "negative_control_gap" in ladder_df.columns
+    assert float(ladder_df.iloc[0]["negative_control_gap"]) > 0.0
+    assert int(ladder_df.iloc[0]["n_negative_controls"]) == 3
+
+
+def test_compute_g_and_source_global_rate_report_failure_status_without_silent_drop():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        value = compute_g(None, speech_mask=np.asarray([1.0, 1.0], dtype=np.float32))
+    assert np.isnan(value)
+    assert any("compute_g failed" in str(item.message) for item in caught)
+
+    value_with_status, status = compute_g(
+        None,
+        speech_mask=np.asarray([1.0, 1.0], dtype=np.float32),
+        return_status=True,
+    )
+    assert np.isnan(value_with_status)
+    assert status == "missing:duration_obs"
+
+    g_src, g_src_status = compute_source_global_rate_for_analysis(
+        source_duration_obs=np.asarray([2.0, 3.0], dtype=np.float32),
+        source_speech_mask=None,
+        return_status=True,
+    )
+    assert np.isnan(g_src)
+    assert g_src_status == "missing:source_speech_mask"
+
+
+def test_warn_sparse_review_metadata_accepts_continuous_viterbi_alignment_kind(capsys):
+    rows = []
+    for eval_mode in ("analytic", "coarse_only", "learned"):
+        for ref_bin in ("slow", "mid", "fast"):
+            rows.append(
+                {
+                    "pair_id": f"{eval_mode}_{ref_bin}",
+                    "same_text_reference": 0.0,
+                    "same_text_target": 1.0,
+                    "lexical_mismatch": 1.0,
+                    "ref_len_sec": 4.0,
+                    "speech_ratio": 0.8,
+                    "alignment_kind": "continuous_viterbi_v1",
+                    "target_duration_surface": "projection_raw",
+                    "g_support_count": 4.0,
+                    "g_support_ratio_vs_speech": 1.0,
+                    "g_support_ratio_vs_valid": 1.0,
+                    "g_valid": 1.0,
+                    "g_trim_ratio": 0.2,
+                    "prompt_global_weight_present": 1.0,
+                    "prompt_unit_log_prior_present": 0.0,
+                    "alignment_unmatched_speech_ratio": 0.0,
+                    "alignment_mean_local_confidence_speech": 0.9,
+                    "alignment_mean_coarse_confidence_speech": 0.9,
+                    "projector_boundary_hit_rate": 0.0,
+                    "projector_boundary_decay_rate": 0.0,
+                    "g_compute_status": "ok",
+                    "g_src_compute_status": "ok",
+                    "gate0_row_dropped": 0.0,
+                    "gate0_drop_reason": "ok",
+                    "eval_mode": eval_mode,
+                    "src_id": "src_demo",
+                    "ref_bin": ref_bin,
+                    "ref_condition": "real",
+                }
+            )
+    rows.append(
+        {
+            **rows[0],
+            "pair_id": "analytic_random_ref",
+            "ref_condition": "random_ref",
+            "ref_bin": "mid",
+        }
+    )
+    frame = pd.DataFrame(rows)
+    _warn_sparse_review_metadata(frame)
+    captured = capsys.readouterr()
+    assert "continuous_precomputed_coverage" not in captured.err
+    assert "continuous_alignment_coverage" not in captured.err

@@ -220,12 +220,18 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "projector_budget_pos_used" in debug
     assert "projector_budget_neg_used" in debug
     assert "coarse_path_logstretch" in debug
+    assert "analytic_logstretch" in debug
+    assert "coarse_delta" in debug
+    assert "residual_logstretch" in debug
     assert "speech_pred" in debug
     assert "silence_pred" in debug
     assert "projector_since_last_boundary" in debug
     assert "rhythm_debug_projector_boundary_hit" in ret
     assert "rhythm_debug_projector_boundary_decay" in ret
+    assert "rhythm_debug_analytic_logstretch" in ret
+    assert "rhythm_debug_coarse_delta" in ret
     assert "rhythm_debug_coarse_path" in ret
+    assert "rhythm_debug_residual_logstretch" in ret
     assert "rhythm_debug_speech_pred" in ret
     assert "rhythm_debug_silence_pred" in ret
     assert "rhythm_debug_projector_since_last_boundary" in ret
@@ -244,6 +250,41 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert debug["eval_mode"] == "learned"
     assert execution.coarse_path_logstretch is not None
     assert torch.allclose(execution.coarse_path_logstretch, execution.coarse_logstretch)
+    assert torch.allclose(debug["analytic_logstretch"], execution.global_shift_analytic)
+    assert torch.allclose(debug["coarse_correction_pred"], execution.coarse_correction)
+    assert torch.allclose(debug["coarse_delta"], execution.coarse_correction)
+    assert torch.allclose(debug["coarse_path_logstretch"], execution.coarse_path_logstretch)
+    assert torch.allclose(debug["residual_logstretch"], execution.local_residual)
+
+
+def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
+    head = MinimalStreamingDurationHeadV1G(
+        vocab_size=32,
+        dim=16,
+        num_slots=1,
+        simple_global_stats=True,
+        use_log_base_rate=False,
+        use_learned_residual_gate=False,
+        analytic_gap_clip=0.25,
+        eval_mode="analytic",
+        disable_coarse_bias=True,
+        disable_local_residual=True,
+    )
+    output = head(
+        content_units=torch.tensor([[1, 2]], dtype=torch.long),
+        log_anchor=torch.zeros((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        sealed_mask=torch.ones((1, 2), dtype=torch.float32),
+        sep_hint=torch.zeros((1, 2), dtype=torch.float32),
+        edge_cue=torch.zeros((1, 2), dtype=torch.float32),
+        global_rate=torch.full((1, 1), 2.0, dtype=torch.float32),
+        local_rate_ema=torch.zeros((1, 1), dtype=torch.float32),
+        silence_mask=torch.zeros((1, 2), dtype=torch.float32),
+    )
+    expected = torch.full((1, 2), 0.25, dtype=torch.float32)
+    assert torch.allclose(output["unit_analytic_logstretch"], expected)
+    assert torch.allclose(output["unit_coarse_path_logstretch"], expected)
+    assert torch.allclose(output["unit_logstretch"], expected)
 
 
 def test_rhythm_v3_minimal_prompt_summary_uses_global_only_prompt_memory():
@@ -1460,6 +1501,51 @@ def test_rhythm_v3_projector_tracks_since_last_boundary_state():
     assert float(execution.projector_boundary_hit.sum().item()) >= 1.0
     assert execution.projector_boundary_decay_applied is not None
     assert float(execution.projector_boundary_decay_applied.sum().item()) >= 1.0
+
+
+def test_rhythm_v3_projector_tensor_budget_matches_scalar_budget_resolution():
+    projector = StreamingDurationProjector(
+        prefix_budget_pos=3,
+        prefix_budget_neg=3,
+        dynamic_budget_ratio=0.5,
+        min_prefix_budget=1,
+        max_prefix_budget=4,
+    )
+    source_duration_obs = torch.tensor(
+        [[2.0, 2.0, 2.0], [3.0, 1.0, 5.0]],
+        dtype=torch.float32,
+    )
+    committed_len = torch.tensor([2, 3], dtype=torch.long)
+    budget_tensor = projector._resolve_prefix_budget_tensor(
+        source_duration_obs=source_duration_obs,
+        committed_len=committed_len,
+        static_budget=projector.prefix_budget_pos,
+        dynamic_budget_ratio=projector.dynamic_budget_ratio,
+        min_prefix_budget=projector.min_prefix_budget,
+        max_prefix_budget=projector.max_prefix_budget,
+    )
+    expected = torch.tensor(
+        [
+            projector._resolve_prefix_budget(
+                source_duration_obs=source_duration_obs[0],
+                committed_len=2,
+                static_budget=projector.prefix_budget_pos,
+                dynamic_budget_ratio=projector.dynamic_budget_ratio,
+                min_prefix_budget=projector.min_prefix_budget,
+                max_prefix_budget=projector.max_prefix_budget,
+            ),
+            projector._resolve_prefix_budget(
+                source_duration_obs=source_duration_obs[1],
+                committed_len=3,
+                static_budget=projector.prefix_budget_pos,
+                dynamic_budget_ratio=projector.dynamic_budget_ratio,
+                min_prefix_budget=projector.min_prefix_budget,
+                max_prefix_budget=projector.max_prefix_budget,
+            ),
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(budget_tensor, expected)
 
 
 def test_rhythm_v3_frame_plan_uses_real_source_timeline_for_explicit_silence_runs():

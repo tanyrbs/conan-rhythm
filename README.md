@@ -23,6 +23,7 @@ Use:
 - `rhythm_v3_rate_mode: simple_global`
 - `rhythm_v3_simple_global_stats: true`
 - `rhythm_v3_g_variant: raw_median`
+- `rhythm_v3_unit_prior_path: null`  (`unit_norm` only; build with `scripts/build_unit_log_prior.py`)
 - `rhythm_v3_eval_mode: learned`
 
 In that default path, the writer is:
@@ -54,6 +55,7 @@ The maintained explanation is:
 - **stable-lattice suppression of short flicker runs and micro-silence islands before retiming**
 - **silence runs follow the coarse/global bias (clipped) without a local residual, keeping them tied to the overall rate**
 - **minimal V1 keeps silence on a constant clip surface; short-gap / leading-silence scaling remains a non-minimal head feature**
+- **runtime and target construction now share the same silence-`tau` helper; minimal stays constant-clip, non-minimal stays boundary-aware**
 - **reference summary diagnostics remain available but are disabled in the default V1-G writer**
 - **paired-target supervision drawn from dedicated target data instead of prompt sidecars**
 - **same-text rule split by role: reference stays different-text, paired-target supervision stays same-text unless `unit_duration_tgt` is already cached**
@@ -177,14 +179,21 @@ For the maintained `rhythm_v3_minimal_v1_profile`, the pairing rule is:
 - **reference prompt**: same-speaker / different-text
 - **paired target supervision**: same-text target-to-source projection (`rhythm_v3_require_same_text_paired_target: true`), or an explicitly cached `unit_duration_tgt`
 
-`rhythm_v3_use_continuous_alignment: true` currently means
-`continuous_precomputed` only. If no precomputed frame/content-space alignment
-metadata is available, the maintained path now fails fast instead of silently
-falling back to discrete projection.
+`rhythm_v3_use_continuous_alignment: true` now supports
+`continuous_precomputed` and the built-in offline `continuous_viterbi_v1`
+source-run / target-frame aligner. If neither explicit continuous provenance nor
+the required frame-state sidecars are available, the maintained path fails fast
+instead of silently falling back to discrete projection.
 
 The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
 compatibility alias that inherits the maintained `rhythm_v3` contract; it is no
 longer a separate V2 experiment surface.
+
+If you move from `raw_median` / `weighted_median` / `trimmed_mean` to
+`rhythm_v3_g_variant: unit_norm`, treat that as a data-contract change rather
+than a pure knob flip: the maintained repo now expects a reproducible unit prior
+bundle under `rhythm_v3_unit_prior_path`, and the recommended way to build it
+is `scripts/build_unit_log_prior.py`.
 
 Required public inputs:
 
@@ -232,20 +241,22 @@ Recommended default weights in `egs/conan_emformer_rhythm_v3.yaml` currently kee
 ## Falsification-first scripts
 
 The maintained evaluation surface is now intentionally reduced to one export
-script plus two health checks:
+script plus one explicit health check:
 
 - `scripts/preflight_rhythm_v3.py`
-- `scripts/smoke_test_rhythm_v3.py`
 - `scripts/rhythm_v3_debug_records.py`
 
 `scripts/rhythm_v3_debug_records.py` is the single maintained review/export
 entrypoint. It writes the row summary CSV, the retained five-figure bundle, and
 the gate-oriented tables/figures from the same `utils/plot/rhythm_v3_viz/`
 util layer instead of keeping separate per-gate wrapper CLIs.
-The other two scripts stay on purpose:
+The remaining maintained helper stays on purpose:
 
 - `preflight_rhythm_v3.py`: config/data/cache contract checks
-- `smoke_test_rhythm_v3.py`: zero-data structural smoke run
+
+The old zero-data standalone smoke script has been retired from the maintained
+surface. Structural smoke coverage now lives in focused entrypoint tests and
+the short training smoke recipe documented below.
 
 Some earlier cleanup ideas are already obsolete in the local codebase:
 
@@ -317,8 +328,10 @@ Current split:
 Maintained automation should exercise the V3 path:
 
 - `scripts/preflight_rhythm_v3.py`
-- `scripts/smoke_test_rhythm_v3.py`
 - `scripts/rhythm_v3_debug_records.py`
+
+Structural smoke is expected to come from targeted `tests/rhythm/` coverage
+and short task-level smoke runs rather than a separate standalone v3 smoke CLI.
 
 ## Legacy status
 

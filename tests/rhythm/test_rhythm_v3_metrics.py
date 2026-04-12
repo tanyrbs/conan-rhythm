@@ -5,6 +5,11 @@ from types import SimpleNamespace
 import torch
 
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
+from tasks.Conan.rhythm.duration_v3.metrics import (
+    tempo_explainability,
+    tempo_monotonicity,
+    tempo_tie_rate,
+)
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
 from tasks.Conan.rhythm.common.targets_impl import (
     DurationV3TargetBuildConfig,
@@ -363,3 +368,32 @@ def test_rhythm_v3_detector_only_metrics_report_detector_response():
     assert torch.allclose(metrics["rhythm_metric_local_response_abs_mean"], torch.tensor(0.0))
     assert float(metrics["rhythm_metric_detector_response_abs_mean"].item()) > 0.0
     assert float(metrics["rhythm_metric_detector_coeff_abs_mean"].item()) > 0.0
+
+
+def test_tempo_explainability_uses_tie_aware_spearman():
+    metrics = tempo_explainability(
+        torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32),
+        torch.tensor([0.0, 0.0, 2.0, 2.0], dtype=torch.float32),
+    )
+    assert metrics["count"] == 4.0
+    assert abs(metrics["spearman"] - 1.0) < 1.0e-6
+    assert abs(metrics["robust_slope"] - 2.0) < 1.0e-6
+    assert abs(metrics["r2_like"] - 1.0) < 1.0e-6
+
+
+def test_tempo_monotonicity_supports_margin_threshold():
+    slow = torch.tensor([1.0, 1.0], dtype=torch.float32)
+    mid = torch.tensor([1.05, 1.3], dtype=torch.float32)
+    fast = torch.tensor([1.2, 1.7], dtype=torch.float32)
+    strict = tempo_monotonicity(slow, mid, fast)
+    margin = tempo_monotonicity(slow, mid, fast, margin=0.1)
+    assert torch.allclose(strict, torch.tensor(1.0))
+    assert torch.allclose(margin, torch.tensor(0.5))
+
+
+def test_tempo_tie_rate_counts_near_ties_without_marking_all_invalid():
+    slow = torch.tensor([1.0, 1.0, float("nan")], dtype=torch.float32)
+    mid = torch.tensor([1.0, 1.2, 1.5], dtype=torch.float32)
+    fast = torch.tensor([1.4, 1.2 + 5.0e-5, 1.8], dtype=torch.float32)
+    tie_rate = tempo_tie_rate(slow, mid, fast, atol=1.0e-4)
+    assert torch.allclose(tie_rate, torch.tensor(1.0))

@@ -43,13 +43,15 @@ This remains the shared projection module for:
 - dataset target construction
 - offline audit/debug reconstruction
 
-`use_continuous_alignment=True` currently means `continuous_precomputed` only.
-If no precomputed frame/content-space alignment metadata is available, the
-maintained path now fails fast instead of silently falling back to discrete
-projection.
+`use_continuous_alignment=True` now accepts either
+`continuous_precomputed` provenance or built-in `continuous_viterbi_v1`
+outputs. If neither explicit continuous provenance nor the required frame-state
+sidecars are available, the maintained path fails fast instead of silently
+falling back to discrete projection.
 Paired target alignment arrays are only accepted for this path when the cache
-also explicitly marks them as `continuous_precomputed`; arrays without
-provenance no longer count as continuous metadata.
+also explicitly marks them with a continuous `alignment_kind`, currently
+`continuous_precomputed` or `continuous_viterbi_v1`; arrays without provenance still do not count as
+continuous metadata.
 
 ### 2.2 Debug-record schema
 
@@ -67,6 +69,9 @@ The maintained debug/summary surface now includes both:
   `alignment_unmatched_speech_ratio`,
   `alignment_mean_local_confidence_speech`, and
   `alignment_mean_coarse_confidence_speech`
+- prompt-side audit sidecars such as `g_trim_ratio`,
+  `prompt_global_weight_present`, `prompt_unit_log_prior_present`, and
+  `prompt_unit_prior_vocab_size`
 
 ### 2.3 Five-figure review util
 
@@ -92,6 +97,9 @@ The project was intentionally simplified here:
 - the maintained CLI should stay singular: `scripts/rhythm_v3_debug_records.py`
   exports the shared review/gate bundle, while narrower gate inspection should
   come from the emitted CSVs or direct util calls instead of extra wrapper CLIs
+- the old standalone `scripts/smoke_test_rhythm_v3.py` wrapper is retired;
+  structural smoke coverage now comes from targeted tests plus short task-level
+  smoke runs
 
 Some earlier implementation suggestions are therefore already outdated in this
 workspace:
@@ -216,7 +224,15 @@ The local code now keeps these two meanings separate:
 
 They should not be mixed when making falsification plots.
 
-### 4.2 Debug-bundle metadata expectations
+### 4.2 `unit_norm` is now reproducible inside the repo
+
+The maintained repo now ships `scripts/build_unit_log_prior.py` and a matching
+`rhythm_v3_unit_prior_path` loading path. That makes `unit_norm` a real
+reproducible experiment path instead of a consumer-only interface, but the
+bundle should still be treated as provenance-bearing data rather than an
+implicit constant.
+
+### 4.3 Debug-bundle metadata expectations
 
 The maintained export script can summarize any valid debug bundle, but the
 strongest Gate-0 / contamination-slice conclusions assume the bundle still
@@ -235,6 +251,11 @@ carries:
 If those fields are missing, the scripts still export tables and figures, but
 you should read the result as a partial audit rather than a full falsification
 verdict.
+The same caution applies when the gate contract itself is incomplete:
+
+- missing `analytic`, `coarse_only`, or `learned` means the mode ladder is incomplete
+- missing full `slow / mid / fast` triplets means Gate 1 is incomplete even if a figure exists
+- missing `ref_condition` / negative-control exports means you only have correlation evidence, not a full control audit
 
 ## 5. Important local implementation boundaries
 

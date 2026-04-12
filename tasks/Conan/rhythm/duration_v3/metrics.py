@@ -28,8 +28,19 @@ def _rank_1d(values: torch.Tensor) -> torch.Tensor:
     if values.numel() <= 0:
         return values
     order = torch.argsort(values, stable=True)
-    ranks = torch.empty_like(order, dtype=torch.float32)
-    ranks[order] = torch.arange(values.numel(), device=values.device, dtype=torch.float32)
+    sorted_vals = values[order]
+    sorted_ranks = torch.empty_like(sorted_vals, dtype=torch.float32)
+    start = 0
+    total = int(sorted_vals.numel())
+    while start < total:
+        end = start + 1
+        while end < total and torch.isclose(sorted_vals[end], sorted_vals[start], atol=1.0e-8, rtol=0.0):
+            end += 1
+        avg_rank = 0.5 * float(start + end - 1)
+        sorted_ranks[start:end] = avg_rank
+        start = end
+    ranks = torch.empty_like(sorted_ranks)
+    ranks[order] = sorted_ranks
     return ranks
 
 
@@ -71,7 +82,8 @@ def tempo_explainability(delta_g: Any, coarse_target: Any) -> dict[str, float]:
     rank_y = _rank_1d(y)
     spearman = _pearson_corr(rank_x, rank_y)
     slope = _theil_sen_slope(x, y)
-    pred = slope * (x - x.median()) + y.median()
+    intercept = torch.median(y - (slope * x))
+    pred = (slope * x) + intercept
     denom = (y - y.mean()).square().sum().clamp_min(1.0e-12)
     r2_like = 1.0 - ((y - pred).square().sum() / denom)
     return {
@@ -82,14 +94,42 @@ def tempo_explainability(delta_g: Any, coarse_target: Any) -> dict[str, float]:
     }
 
 
-def tempo_monotonicity(tempo_slow: Any, tempo_mid: Any, tempo_fast: Any) -> torch.Tensor:
+def tempo_monotonicity(
+    tempo_slow: Any,
+    tempo_mid: Any,
+    tempo_fast: Any,
+    *,
+    margin: float = 0.0,
+) -> torch.Tensor:
     slow = _to_tensor(tempo_slow).reshape(-1)
     mid = _to_tensor(tempo_mid).reshape(-1)
     fast = _to_tensor(tempo_fast).reshape(-1)
     valid = torch.isfinite(slow) & torch.isfinite(mid) & torch.isfinite(fast)
     if not bool(valid.any().item()):
         return slow.new_tensor(float("nan"))
-    return ((slow[valid] < mid[valid]) & (mid[valid] < fast[valid])).float().mean()
+    return (((mid[valid] - slow[valid]) > float(margin)) & ((fast[valid] - mid[valid]) > float(margin))).float().mean()
+
+
+def tempo_tie_rate(
+    tempo_slow: Any,
+    tempo_mid: Any,
+    tempo_fast: Any,
+    *,
+    atol: float = 1.0e-4,
+) -> torch.Tensor:
+    slow = _to_tensor(tempo_slow).reshape(-1)
+    mid = _to_tensor(tempo_mid).reshape(-1)
+    fast = _to_tensor(tempo_fast).reshape(-1)
+    valid = torch.isfinite(slow) & torch.isfinite(mid) & torch.isfinite(fast)
+    if not bool(valid.any().item()):
+        return slow.new_tensor(float("nan"))
+    tie = torch.isclose(slow, mid, atol=float(atol), rtol=0.0) | torch.isclose(
+        mid,
+        fast,
+        atol=float(atol),
+        rtol=0.0,
+    )
+    return tie[valid].float().mean()
 
 
 def transfer_slope(delta_g: Any, tempo_delta: Any) -> dict[str, float]:
@@ -193,6 +233,7 @@ __all__ = [
     "silence_leakage",
     "monotonic_triplet_table",
     "tempo_explainability",
+    "tempo_tie_rate",
     "tempo_monotonicity",
     "transfer_slope",
 ]

@@ -153,6 +153,9 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
         "unit_alignment_match_tgt",
         "unit_alignment_cost_tgt",
         "unit_alignment_mode_id_tgt",
+        "unit_alignment_kind_tgt",
+        "unit_alignment_source_tgt",
+        "unit_alignment_version_tgt",
     )
     _RHYTHM_STREAMING_PREFIX_META_KEYS = (
         "rhythm_stream_prefix_ratio",
@@ -164,6 +167,8 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
         "rhythm_pair_group_id",
         "rhythm_pair_rank",
         "rhythm_pair_is_identity",
+        "alignment_source",
+        "alignment_version",
     )
     _RHYTHM_STREAMING_OFFLINE_SOURCE_KEYS = (
         "rhythm_offline_content_units",

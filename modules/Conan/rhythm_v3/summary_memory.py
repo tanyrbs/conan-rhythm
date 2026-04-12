@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .math_utils import build_causal_local_rate_seq
+from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
+from .silence_surface import build_silence_tau_surface
 from .g_stats import (
     build_global_rate_support_mask,
     compute_global_rate,
@@ -602,6 +603,7 @@ class StreamingDurationHead(nn.Module):
         local_cold_start_runs: int = 2,
         local_short_run_min_duration: float = 2.0,
         local_rate_decay: float = 0.95,
+        analytic_gap_clip: float = 0.35,
         short_gap_silence_scale: float = 0.35,
         leading_silence_scale: float = 0.0,
         eval_mode: str = "learned",
@@ -619,6 +621,7 @@ class StreamingDurationHead(nn.Module):
         self.local_cold_start_runs = int(max(0, local_cold_start_runs))
         self.local_short_run_min_duration = float(max(1.0, local_short_run_min_duration))
         self.local_rate_decay = float(max(0.0, min(0.999, local_rate_decay)))
+        self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.short_gap_silence_scale = float(max(0.0, min(1.0, short_gap_silence_scale)))
         self.leading_silence_scale = float(max(0.0, min(1.0, leading_silence_scale)))
         self.eval_mode = normalize_falsification_eval_mode(eval_mode)
@@ -761,7 +764,11 @@ class StreamingDurationHead(nn.Module):
         else:
             spk_ctx = summary.new_zeros(summary.shape)
 
-        global_shift_analytic = (global_rate.float() - local_rate_seq.float()) * commit_valid_mask
+        analytic_gap = apply_analytic_gap_clip(
+            global_rate.float() - local_rate_seq.float(),
+            self.analytic_gap_clip,
+        )
+        global_shift_analytic = analytic_gap * commit_valid_mask
         summary_expand = summary.unsqueeze(1).expand(-1, query.size(1), -1)
         spk_expand = spk_ctx.unsqueeze(1).expand(-1, query.size(1), -1)
         coarse_context = torch.cat(
@@ -814,12 +821,14 @@ class StreamingDurationHead(nn.Module):
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
-        pause_shape = torch.sigmoid(log_anchor.float() - math.log(3.0))
-        boundary_shape = torch.maximum(sep_hint.float().clamp(0.0, 1.0), edge_cue.float().clamp(0.0, 1.0))
-        silence_shape = torch.maximum(pause_shape, boundary_shape)
-        silence_tau = self.max_silence_logstretch * (
-            self.short_gap_silence_scale
-            + ((1.0 - self.short_gap_silence_scale) * silence_shape)
+        silence_tau = build_silence_tau_surface(
+            prediction_anchor=torch.exp(log_anchor.float()),
+            committed_silence_mask=silence_commit_mask,
+            sep_hint=sep_hint,
+            boundary_cue=edge_cue,
+            max_silence_logstretch=self.max_silence_logstretch,
+            short_gap_scale=self.short_gap_silence_scale,
+            minimal_v1_profile=False,
         )
         leading_gate = torch.where(
             prefix_speech_prev > 0.0,
@@ -829,24 +838,35 @@ class StreamingDurationHead(nn.Module):
         pred_silence = torch.clamp(global_term, min=-silence_tau, max=silence_tau) * silence_commit_mask * leading_gate
         pred = pred_speech + pred_silence
         global_bias_scalar = coarse_scalar.reshape(-1, 1)
+        analytic_term = global_shift_analytic * mask
+        coarse_delta = coarse_correction * mask
+        coarse_delta_pred = predicted_coarse * mask
+        coarse_path = global_term * mask
+        residual_used = residual * mask
+        residual_pred = predicted_residual * mask
 
         return {
             "unit_logstretch": pred,
-            "unit_global_shift": global_term * mask,
-            "unit_analytic_gap": global_shift_analytic * mask,
-            "unit_global_shift_analytic": global_shift_analytic * mask,
+            "unit_global_shift": coarse_path,
+            "unit_analytic_gap": analytic_term,
+            "unit_global_shift_analytic": analytic_term,
+            "unit_analytic_logstretch": analytic_term,
             "global_bias_scalar": global_bias_scalar,
-            "unit_coarse_logstretch": global_term * mask,
-            "unit_coarse_correction_used": coarse_correction * mask,
-            "unit_coarse_correction": coarse_correction * mask,
-            "unit_coarse_correction_predicted": predicted_coarse * mask,
-            "unit_coarse_correction_pred": predicted_coarse * mask,
-            "unit_local_residual_used": residual * mask,
-            "unit_residual_logstretch": residual * mask,
-            "unit_residual_logstretch_pred": predicted_residual * mask,
+            "unit_coarse_logstretch": coarse_path,
+            "unit_coarse_path_logstretch": coarse_path,
+            "unit_coarse_correction_used": coarse_delta,
+            "unit_coarse_correction": coarse_delta,
+            "unit_coarse_delta": coarse_delta,
+            "unit_coarse_correction_predicted": coarse_delta_pred,
+            "unit_coarse_correction_pred": coarse_delta_pred,
+            "unit_local_residual_used": residual_used,
+            "unit_residual_logstretch": residual_used,
+            "unit_residual_logstretch_pred": residual_pred,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
             "unit_silence_tau": silence_tau * silence_commit_mask,
+            "unit_speech_pred": pred_speech,
+            "unit_silence_pred": pred_silence,
             "role_attn_unit": (attn if attn is not None else mask.unsqueeze(-1)),
             "role_value_unit": (
                 role_value_unit * mask
@@ -864,8 +884,8 @@ class StreamingDurationHead(nn.Module):
                 else mask.new_zeros(mask.shape)
             ),
             "role_query_unit": query,
-            "local_response": residual * mask,
-            "local_response_pred": predicted_residual * mask,
+            "local_response": residual_used,
+            "local_response_pred": residual_pred,
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,

@@ -3,6 +3,18 @@ from __future__ import annotations
 import torch
 
 
+def apply_analytic_gap_clip(
+    analytic_gap: torch.Tensor,
+    clip_value: float | None,
+) -> torch.Tensor:
+    if clip_value is None:
+        return analytic_gap
+    clip = float(clip_value)
+    if clip <= 0.0:
+        return analytic_gap
+    return analytic_gap.clamp(min=-clip, max=clip)
+
+
 def build_causal_local_rate_seq(
     *,
     observed_log: torch.Tensor,
@@ -53,4 +65,4 @@ def build_causal_local_rate_seq(
     return local_rate_seq, prev
 
 
-__all__ = ["build_causal_local_rate_seq"]
+__all__ = ["apply_analytic_gap_clip", "build_causal_local_rate_seq"]

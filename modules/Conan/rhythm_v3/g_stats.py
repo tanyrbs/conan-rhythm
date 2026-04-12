@@ -115,6 +115,10 @@ def build_global_rate_support_mask(
             "build_global_rate_support_mask expects rank-1 or rank-2 speech_mask, "
             f"got {tuple(speech_mask.shape)}"
         )
+    if drop_edge_runs <= 0:
+        speech = speech_mask.bool()
+        valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
+        return speech & valid
     batch_size = int(speech_mask.size(0))
     support = torch.zeros_like(speech_mask, dtype=torch.bool)
     for batch_idx in range(batch_size):
@@ -243,6 +247,38 @@ def compute_global_rate_batch(
         )
     if log_dur.ndim != 2:
         raise ValueError(f"compute_global_rate expects rank-1 or rank-2 log_dur, got {tuple(log_dur.shape)}")
+    if variant == "raw_median" and weight is None and unit_prior is None:
+        support = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=drop_edge_runs,
+        )
+        support_count = support.sum(dim=1, keepdim=True)
+        if bool((support_count <= 0).any().item()):
+            raise ValueError("No valid speech duration for global rate.")
+        masked = log_dur.masked_fill(~support, float("nan"))
+        return torch.nanmedian(masked, dim=1).values.unsqueeze(1)
+    if variant == "trimmed_mean" and _normalize_drop_edge_runs(drop_edge_runs) <= 0:
+        support = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=0,
+        )
+        support_count = support.sum(dim=1, keepdim=True)
+        if bool((support_count <= 0).any().item()):
+            raise ValueError("No valid speech duration for global rate.")
+        invalid_fill = torch.finfo(log_dur.dtype).max
+        sorted_values = torch.sort(log_dur.masked_fill(~support, invalid_fill), dim=1).values
+        trim_ratio = float(max(0.0, min(0.49, trim_ratio)))
+        trim = torch.floor(support_count.float() * trim_ratio).long()
+        keep_start = torch.where((2 * trim) < support_count, trim, torch.zeros_like(trim))
+        keep_end = torch.where((2 * trim) < support_count, support_count - trim, support_count)
+        positions = torch.arange(log_dur.size(1), device=log_dur.device).unsqueeze(0)
+        valid_sorted = positions < support_count
+        keep_mask = (positions >= keep_start) & (positions < keep_end) & valid_sorted
+        keep_weight = keep_mask.float()
+        mean = (sorted_values * keep_weight).sum(dim=1, keepdim=True) / keep_weight.sum(dim=1, keepdim=True).clamp_min(1.0)
+        return mean
     batch_size = int(log_dur.size(0))
     out = log_dur.new_zeros((batch_size, 1))
     for batch_idx in range(batch_size):

@@ -72,6 +72,10 @@ small overrides:
 Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
 `weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
 shows a real reason.
+For `unit_norm`, also wire a reproducible prior bundle through
+`rhythm_v3_unit_prior_path`; the maintained repo now ships
+`scripts/build_unit_log_prior.py` so `unit_norm` is no longer just a consumer
+interface with no official producer.
 
 One practical note: the maintained config file still ships with
 `rhythm_v3_eval_mode=learned` because that is the runtime default surface. For
@@ -268,10 +272,20 @@ contract:
 - **reference prompt**: same-speaker / different-text
 - **paired target supervision**: same-text projection target (`rhythm_v3_require_same_text_paired_target: true`), unless `unit_duration_tgt` is already explicitly cached in the sample
 
-`rhythm_v3_use_continuous_alignment: true` currently means
-`continuous_precomputed` only. If no precomputed frame/content alignment
-metadata is attached to the paired target, the maintained dataset path now
-fails fast instead of silently falling back to discrete projection.
+`rhythm_v3_use_continuous_alignment: true` now supports
+`continuous_precomputed` and the built-in offline `continuous_viterbi_v1`
+source-run / target-frame aligner. If neither explicit continuous provenance
+nor the required frame-state sidecars are attached to the paired target, the
+maintained dataset path fails fast instead of silently falling back to discrete
+projection.
+
+Likewise, treat gate completeness as a contract rather than a plotting detail:
+
+- missing `analytic`, `coarse_only`, or `learned` means the falsification
+  ladder is incomplete
+- missing complete `slow / mid / fast` triplets means Gate 1 is incomplete
+- missing `source_only` / `random_ref` / `shuffled_ref` style controls means
+  you only have correlation evidence, not a strong control claim
 
 ---
 
@@ -521,6 +535,10 @@ py -3 -m pytest -q ^
 ```
 
 ### 9.2 Do a short training smoke run
+
+The old standalone `scripts/smoke_test_rhythm_v3.py` wrapper has been retired.
+For the maintained path, this short task-level run plus the targeted entrypoint
+tests above are now the supported structural smoke checks.
 
 ```bash
 py -3 tasks\run.py ^

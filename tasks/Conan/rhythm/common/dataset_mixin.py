@@ -218,7 +218,7 @@ class CommonRhythmDatasetMixin:
         return tuple(dict.fromkeys(keys))
 
     @staticmethod
-    def _build_optional_collate_spec() -> dict[str, tuple[str, float | int]]:
+    def _build_optional_collate_spec() -> dict[str, tuple[str, float | int | None]]:
         return {
             "content_units": ("long", 0),
             "dur_anchor_src": ("float", 0.0),
@@ -254,7 +254,11 @@ class CommonRhythmDatasetMixin:
             "prompt_valid_mask": ("float", 0.0),
             "prompt_speech_mask": ("float", 0.0),
             "prompt_global_weight": ("float", 0.0),
+            "prompt_global_weight_present": ("float", 0.0),
             "prompt_unit_log_prior": ("float", 0.0),
+            "prompt_unit_log_prior_present": ("float", 0.0),
+            "prompt_unit_prior_vocab_size": ("long", 0),
+            "g_trim_ratio": ("float", 0.0),
             "prompt_unit_anchor_base": ("float", 0.0),
             "prompt_log_base": ("float", 0.0),
             "prompt_source_boundary_cue": ("float", 0.0),
@@ -272,6 +276,11 @@ class CommonRhythmDatasetMixin:
             "unit_alignment_mean_local_confidence_speech_tgt": ("float", 0.0),
             "unit_alignment_mean_coarse_confidence_speech_tgt": ("float", 0.0),
             "unit_alignment_mode_id_tgt": ("long", 0),
+            "unit_alignment_kind_tgt": ("object", None),
+            "unit_alignment_source_tgt": ("object", None),
+            "unit_alignment_version_tgt": ("object", None),
+            "alignment_source": ("object", None),
+            "alignment_version": ("object", None),
             "ref_phrase_trace": ("float", 0.0),
             "planner_ref_phrase_trace": ("float", 0.0),
             "ref_phrase_valid": ("float", 0.0),
@@ -759,6 +768,9 @@ class CommonRhythmDatasetMixin:
                     f"({present_count}/{len(samples)} samples). Re-binarize or fix the cache contract."
                 )
             if present_count != len(samples):
+                continue
+            if dtype_name == "object":
+                batch[key] = [sample[key] for sample in samples]
                 continue
             value = collate_1d_or_2d([sample[key] for sample in samples], pad_value)
             batch[key] = value.long() if dtype_name == "long" else value.float()

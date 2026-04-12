@@ -67,3 +67,64 @@ def test_compute_global_rate_raises_when_no_speech_support_exists():
             valid_mask=valid_mask,
             variant="raw_median",
         )
+
+
+def test_compute_global_rate_raw_median_batch_fast_path_matches_expected_support():
+    log_dur = torch.log(torch.tensor([[4.0, 1.0, 8.0], [2.0, 3.0, 9.0]], dtype=torch.float32))
+    speech_mask = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]], dtype=torch.float32)
+    valid_mask = torch.ones_like(speech_mask)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        variant="raw_median",
+    )
+
+    expected = torch.log(torch.tensor([[4.0], [3.0]], dtype=torch.float32))
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_trimmed_mean_batch_fast_path_ignores_trimmed_extrema():
+    log_dur = torch.log(torch.tensor([[1.0, 2.0, 100.0, 200.0]], dtype=torch.float32))
+    speech_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    valid_mask = torch.ones_like(speech_mask)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        variant="trimmed_mean",
+        trim_ratio=0.25,
+    )
+
+    expected = (
+        torch.log(torch.tensor([[2.0]], dtype=torch.float32))
+        + torch.log(torch.tensor([[100.0]], dtype=torch.float32))
+    ) / 2.0
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_raw_median_batch_fast_path_supports_edge_drop():
+    log_dur = torch.log(
+        torch.tensor(
+            [
+                [2.0, 4.0, 8.0, 16.0],
+                [3.0, 5.0, 7.0, 11.0],
+            ],
+            dtype=torch.float32,
+        )
+    )
+    speech_mask = torch.ones_like(log_dur)
+    valid_mask = torch.ones_like(log_dur)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        variant="raw_median",
+        drop_edge_runs=1,
+    )
+
+    expected = torch.log(torch.tensor([[4.0], [5.0]], dtype=torch.float32))
+    assert torch.allclose(g, expected)

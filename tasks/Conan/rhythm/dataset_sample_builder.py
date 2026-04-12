@@ -4,6 +4,22 @@ import numpy as np
 import torch
 
 
+def _extract_object_scalar(value):
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        flat = value.reshape(-1)
+        if flat.size <= 0:
+            return None
+        item = flat[0]
+        return item.item() if hasattr(item, "item") else item
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
 class RhythmDatasetSampleAssembler:
     def __init__(self, owner):
         self.owner = owner
@@ -30,6 +46,17 @@ class RhythmDatasetSampleAssembler:
             )
 
     def _tensorize_optional_value(self, key, value):
+        if key in {
+            "unit_alignment_kind_tgt",
+            "alignment_source",
+            "alignment_version",
+            "unit_alignment_source_tgt",
+            "unit_alignment_version_tgt",
+        }:
+            scalar = _extract_object_scalar(value)
+            if isinstance(scalar, (bytes, bytearray)):
+                scalar = scalar.decode("utf-8")
+            return "" if scalar is None else str(scalar)
         if key in {
             "ref_rhythm_trace",
             "ref_phrase_trace",
@@ -83,7 +110,9 @@ class RhythmDatasetSampleAssembler:
             "prompt_duration_obs",
             "prompt_unit_mask",
             "prompt_global_weight",
+            "prompt_global_weight_present",
             "prompt_unit_log_prior",
+            "prompt_unit_log_prior_present",
             "unit_duration_tgt",
             "unit_confidence_tgt",
             "unit_confidence_local_tgt",
@@ -94,12 +123,14 @@ class RhythmDatasetSampleAssembler:
             "unit_alignment_unmatched_speech_ratio_tgt",
             "unit_alignment_mean_local_confidence_speech_tgt",
             "unit_alignment_mean_coarse_confidence_speech_tgt",
+            "g_trim_ratio",
         }:
             return torch.tensor(value, dtype=torch.float32)
         if key in {"rhythm_retimed_target_confidence", "rhythm_trace_horizon", "rhythm_source_phrase_threshold"}:
             return torch.tensor(value, dtype=torch.float32)
         if key in {
             "prompt_content_units",
+            "prompt_unit_prior_vocab_size",
             "phrase_group_index",
             "ref_phrase_lengths",
             "ref_phrase_starts",

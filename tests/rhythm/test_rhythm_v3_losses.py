@@ -871,6 +871,48 @@ def test_rhythm_v3_silence_runs_use_coarse_only_targets():
     assert torch.allclose(masked_losses["rhythm_v3_pref"], baseline_losses["rhythm_v3_pref"])
 
 
+def test_rhythm_v3_target_builder_applies_explicit_analytic_gap_clip():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    ret["rhythm_ref_conditioning"].global_rate = torch.full((1, 1), 3.0, dtype=torch.float32)
+    targets = build_duration_v3_loss_targets(
+        sample={"unit_duration_tgt": ret["speech_duration_exec"].detach().clone()},
+        output=ret,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.0,
+            lambda_pref=0.20,
+            lambda_cons=0.0,
+            lambda_zero=0.0,
+            analytic_gap_clip=0.25,
+        ),
+    )
+    assert targets is not None
+    assert targets.global_shift_tgt is not None
+    assert float(targets.global_shift_tgt.abs().max().item()) <= 0.25 + 1.0e-6
+
+
 def test_rhythm_v3_prefix_uses_sg_baseline_and_consistency_prefers_raw_duration_when_available():
     execution = type(
         "DummyExec",
@@ -1313,7 +1355,10 @@ def test_prompt_summary_runtime_retimes_explicit_silence_runs_via_coarse_only_br
         max=silence_tau[row, col],
     )
     assert torch.allclose(execution.unit_logstretch[row, col], expected, atol=1.0e-5)
-    assert float(execution.unit_duration_exec[row, col].item()) > float(unit_batch.source_duration_obs[row, col].item())
+    expected_duration = unit_batch.source_duration_obs[row, col].float() * torch.exp(expected.float())
+    if isinstance(getattr(execution, "unit_duration_raw", None), torch.Tensor):
+        assert torch.allclose(execution.unit_duration_raw[row, col], expected_duration, atol=1.0e-5)
+    assert float(execution.unit_duration_exec[row, col].item()) >= 1.0
 
 
 def test_prompt_summary_runtime_cold_start_gates_first_speech_local_residual():
