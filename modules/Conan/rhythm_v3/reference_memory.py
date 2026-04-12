@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from .g_stats import compute_global_rate, normalize_global_rate_variant
 from .contracts import (
     PromptConditioningEvidence,
     ReferenceDurationMemory,
@@ -57,6 +58,8 @@ _V3_PROMPT_UNIT_OPTIONAL_FIELDS = (
     "prompt_unit_mask",
     "prompt_valid_mask",
     "prompt_speech_mask",
+    "prompt_global_weight",
+    "prompt_unit_log_prior",
     "prompt_spk_embed",
     "prompt_source_boundary_cue",
     "prompt_phrase_group_pos",
@@ -241,6 +244,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         min_operator_support_factor: float = 1.0,
         simple_global_stats: bool = False,
         use_log_base_rate: bool = False,
+        g_variant: str = "raw_median",
+        g_trim_ratio: float = 0.2,
     ) -> None:
         super().__init__()
         self.progress_bins = int(max(1, progress_bins))
@@ -253,6 +258,8 @@ class PromptConditionedOperatorEstimator(nn.Module):
         self.simple_global_stats = bool(simple_global_stats)
         self.rate_mode = "simple_global" if self.simple_global_stats else "log_base"
         self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
+        self.g_variant = normalize_global_rate_variant(g_variant)
+        self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
 
     @staticmethod
     def _masked_median(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -431,10 +438,14 @@ class PromptConditionedOperatorEstimator(nn.Module):
     def _build_prompt_summary_from_units(
         self,
         *,
+        prompt_content_units: torch.Tensor,
         prompt_duration_obs: torch.Tensor,
         prompt_unit_anchor_base: torch.Tensor | None,
         prompt_log_base: torch.Tensor | None,
         prompt_unit_mask: torch.Tensor | None,
+        prompt_speech_mask: torch.Tensor | None = None,
+        prompt_global_weight: torch.Tensor | None = None,
+        prompt_unit_log_prior: torch.Tensor | None = None,
     ) -> PromptOperatorSummary:
         prompt_mask = self._resolve_prompt_mask(
             prompt_duration_obs=prompt_duration_obs,
@@ -453,9 +464,31 @@ class PromptConditionedOperatorEstimator(nn.Module):
             prompt_log_residual = (prompt_log_duration - prompt_log_base).detach() * prompt_mask
         else:
             prompt_log_residual = prompt_log_duration
+        speech_mask = (
+            prompt_speech_mask.float().clamp(0.0, 1.0) * prompt_mask
+            if isinstance(prompt_speech_mask, torch.Tensor)
+            else prompt_mask
+        )
+        support_mask = torch.where(
+            (speech_mask.sum(dim=1, keepdim=True) > 0.0),
+            speech_mask,
+            prompt_mask,
+        )
+        global_rate = prompt_log_residual.new_zeros((prompt_log_residual.size(0), 1))
+        for batch_idx in range(int(prompt_log_residual.size(0))):
+            global_rate[batch_idx, 0] = compute_global_rate(
+                log_dur=prompt_log_residual[batch_idx],
+                speech_mask=support_mask[batch_idx],
+                valid_mask=prompt_mask[batch_idx],
+                variant=self.g_variant,
+                weight=(None if prompt_global_weight is None else prompt_global_weight[batch_idx]),
+                trim_ratio=self.g_trim_ratio,
+                unit_ids=prompt_content_units[batch_idx],
+                unit_prior=prompt_unit_log_prior,
+            )
         global_rate = self._support_shrink(
-            self._masked_median(prompt_log_residual, prompt_mask),
-            self._masked_count(prompt_mask),
+            global_rate,
+            self._masked_count(support_mask),
             self.global_shrink_tau,
         ).detach()
         prompt_random_target = (prompt_log_residual - global_rate) * prompt_mask
@@ -718,6 +751,9 @@ class PromptConditionedOperatorEstimator(nn.Module):
         prompt_unit_anchor_base: torch.Tensor | None,
         prompt_log_base: torch.Tensor | None,
         prompt_unit_mask: torch.Tensor | None,
+        prompt_speech_mask: torch.Tensor | None,
+        prompt_global_weight: torch.Tensor | None,
+        prompt_unit_log_prior: torch.Tensor | None,
         prompt_source_boundary_cue: torch.Tensor | None,
         prompt_phrase_group_pos: torch.Tensor | None,
         prompt_phrase_final_mask: torch.Tensor | None,
@@ -727,10 +763,14 @@ class PromptConditionedOperatorEstimator(nn.Module):
         need_operator: bool = True,
     ) -> ReferenceDurationMemory:
         summary = self._build_prompt_summary_from_units(
+            prompt_content_units=prompt_content_units,
             prompt_duration_obs=prompt_duration_obs,
             prompt_unit_anchor_base=prompt_unit_anchor_base,
             prompt_log_base=prompt_log_base,
             prompt_unit_mask=prompt_unit_mask,
+            prompt_speech_mask=prompt_speech_mask,
+            prompt_global_weight=prompt_global_weight,
+            prompt_unit_log_prior=prompt_unit_log_prior,
         )
         progress_profile, prompt_progress_fit = self._build_prompt_progress_components(
             prompt_random_target=summary.prompt_random_target,
@@ -959,6 +999,9 @@ class PromptConditionedOperatorEstimator(nn.Module):
                 prompt_unit_anchor_base=normalized.get("prompt_unit_anchor_base"),
                 prompt_log_base=normalized.get("prompt_log_base"),
                 prompt_unit_mask=normalized.get("prompt_unit_mask"),
+                prompt_speech_mask=normalized.get("prompt_speech_mask"),
+                prompt_global_weight=normalized.get("prompt_global_weight"),
+                prompt_unit_log_prior=normalized.get("prompt_unit_log_prior"),
                 prompt_source_boundary_cue=normalized.get("prompt_source_boundary_cue"),
                 prompt_phrase_group_pos=normalized.get("prompt_phrase_group_pos"),
                 prompt_phrase_final_mask=normalized.get("prompt_phrase_final_mask"),

@@ -1,13 +1,137 @@
 from __future__ import annotations
 
-from ..common.metrics_impl import (
-    _build_duration_v3_metric_sections as build_duration_v3_metric_sections,
+import math
+from typing import Any
+
+import torch
+
+from tasks.Conan.rhythm.common.metrics_impl import (
     build_rhythm_metric_dict,
     build_rhythm_metric_sections,
 )
 
+
+def _to_tensor(value: Any, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(dtype=dtype)
+    return torch.as_tensor(value, dtype=dtype)
+
+
+def _flatten_valid_pair(x: Any, y: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    tx = _to_tensor(x).reshape(-1)
+    ty = _to_tensor(y).reshape(-1)
+    valid = torch.isfinite(tx) & torch.isfinite(ty)
+    return tx[valid], ty[valid]
+
+
+def _rank_1d(values: torch.Tensor) -> torch.Tensor:
+    if values.numel() <= 0:
+        return values
+    order = torch.argsort(values, stable=True)
+    ranks = torch.empty_like(order, dtype=torch.float32)
+    ranks[order] = torch.arange(values.numel(), device=values.device, dtype=torch.float32)
+    return ranks
+
+
+def _pearson_corr(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    if x.numel() <= 1 or y.numel() <= 1:
+        return x.new_tensor(float("nan"))
+    x_center = x - x.mean()
+    y_center = y - y.mean()
+    denom = torch.sqrt((x_center.square().sum() * y_center.square().sum()).clamp_min(1.0e-12))
+    return (x_center * y_center).sum() / denom
+
+
+def _theil_sen_slope(x: torch.Tensor, y: torch.Tensor, *, max_points: int = 256) -> torch.Tensor:
+    if x.numel() <= 1 or y.numel() <= 1:
+        return x.new_tensor(float("nan"))
+    if x.numel() > max_points:
+        step = max(1, int(math.ceil(float(x.numel()) / float(max_points))))
+        x = x[::step]
+        y = y[::step]
+    dx = x[:, None] - x[None, :]
+    dy = y[:, None] - y[None, :]
+    valid = torch.triu(dx.abs() > 1.0e-8, diagonal=1)
+    if not bool(valid.any().item()):
+        return x.new_tensor(float("nan"))
+    slopes = (dy[valid] / dx[valid]).float()
+    return slopes.median()
+
+
+def tempo_explainability(delta_g: Any, coarse_target: Any) -> dict[str, float]:
+    x, y = _flatten_valid_pair(delta_g, coarse_target)
+    if x.numel() <= 1:
+        return {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+            "count": float(x.numel()),
+        }
+    rank_x = _rank_1d(x)
+    rank_y = _rank_1d(y)
+    spearman = _pearson_corr(rank_x, rank_y)
+    slope = _theil_sen_slope(x, y)
+    pred = slope * (x - x.median()) + y.median()
+    denom = (y - y.mean()).square().sum().clamp_min(1.0e-12)
+    r2_like = 1.0 - ((y - pred).square().sum() / denom)
+    return {
+        "spearman": float(spearman.item()),
+        "robust_slope": float(slope.item()),
+        "r2_like": float(r2_like.item()),
+        "count": float(x.numel()),
+    }
+
+
+def tempo_monotonicity(tempo_slow: Any, tempo_mid: Any, tempo_fast: Any) -> torch.Tensor:
+    slow = _to_tensor(tempo_slow).reshape(-1)
+    mid = _to_tensor(tempo_mid).reshape(-1)
+    fast = _to_tensor(tempo_fast).reshape(-1)
+    valid = torch.isfinite(slow) & torch.isfinite(mid) & torch.isfinite(fast)
+    if not bool(valid.any().item()):
+        return slow.new_tensor(float("nan"))
+    return ((slow[valid] < mid[valid]) & (mid[valid] < fast[valid])).float().mean()
+
+
+def silence_leakage(delta_z: Any, speech_mask: Any, silence_mask: Any) -> torch.Tensor:
+    dz = _to_tensor(delta_z).float()
+    speech = _to_tensor(speech_mask).float()
+    silence = _to_tensor(silence_mask).float()
+    numerator = (dz.abs() * silence).sum()
+    denominator = (dz.abs() * speech).sum().clamp_min(1.0e-6)
+    return numerator / denominator
+
+
+def prefix_discrepancy(z_short: Any, z_long: Any, committed_mask: Any) -> torch.Tensor:
+    short = _to_tensor(z_short).float()
+    long = _to_tensor(z_long).float()
+    committed = _to_tensor(committed_mask).float()
+    diff = (short - long).abs() * committed
+    return diff.sum() / committed.sum().clamp_min(1.0)
+
+
+def budget_hit_rate(
+    budget_hit_pos: Any | None,
+    budget_hit_neg: Any | None = None,
+) -> torch.Tensor:
+    if budget_hit_pos is None and budget_hit_neg is None:
+        return torch.tensor(float("nan"))
+    hit_pos = torch.zeros((), dtype=torch.float32) if budget_hit_pos is None else _to_tensor(budget_hit_pos).float()
+    hit_neg = torch.zeros_like(hit_pos) if budget_hit_neg is None else _to_tensor(budget_hit_neg).float()
+    hits = torch.maximum(hit_pos.reshape(-1), hit_neg.reshape(-1))
+    return hits.mean() if hits.numel() > 0 else torch.tensor(float("nan"))
+
+
 __all__ = [
+    "budget_hit_rate",
     "build_duration_v3_metric_sections",
     "build_rhythm_metric_dict",
     "build_rhythm_metric_sections",
+    "prefix_discrepancy",
+    "silence_leakage",
+    "tempo_explainability",
+    "tempo_monotonicity",
 ]
+
+
+def build_duration_v3_metric_sections(output: dict[str, Any], sample: dict[str, Any] | None = None):
+    return build_rhythm_metric_sections(output, sample=sample)

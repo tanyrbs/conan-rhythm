@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .math_utils import build_causal_local_rate_seq
+from .g_stats import compute_global_rate, normalize_falsification_eval_mode, normalize_global_rate_variant
 from .contracts import (
     PromptConditioningEvidence,
     ReferenceDurationMemory,
@@ -229,18 +230,28 @@ class PromptDurationMemoryEncoder(nn.Module):
         summary_use_unit_embedding: bool = False,
         simple_global_stats: bool = False,
         use_log_base_rate: bool = False,
+        emit_prompt_diagnostics: bool = True,
+        g_variant: str = "raw_median",
+        g_trim_ratio: float = 0.2,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
-        del operator_rank
+        self.operator_rank = int(max(1, operator_rank))
         self.simple_global_stats = bool(simple_global_stats)
         self.rate_mode = "simple_global" if self.simple_global_stats else "log_base"
         self.coverage_floor = float(max(1.0e-4, coverage_floor))
         self.summary_pool_speech_only = bool(summary_pool_speech_only)
         self.summary_use_unit_embedding = bool(summary_use_unit_embedding)
         self.use_log_base_rate = bool(use_log_base_rate) and not self.simple_global_stats
+        self.emit_prompt_diagnostics = bool(emit_prompt_diagnostics)
+        self.g_variant = normalize_global_rate_variant(g_variant)
+        self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
         self.summary_dim = int(max(8, dim))
-        self.prompt_unit_emb = nn.Embedding(vocab_size, self.summary_dim)
+        self.prompt_unit_emb = (
+            nn.Embedding(vocab_size, self.summary_dim)
+            if self.summary_use_unit_embedding
+            else None
+        )
         self.prompt_in_proj = nn.Linear(self.summary_dim + 4, self.summary_dim)
         self.prompt_conv1 = nn.Conv1d(self.summary_dim, self.summary_dim, kernel_size=3, padding=1)
         self.prompt_conv2 = nn.Conv1d(self.summary_dim, self.summary_dim, kernel_size=3, padding=1)
@@ -275,7 +286,7 @@ class PromptDurationMemoryEncoder(nn.Module):
         )
         content_embed = (
             self.prompt_unit_emb(prompt_content_units.long())
-            if self.summary_use_unit_embedding
+            if self.prompt_unit_emb is not None
             else centered_logdur.new_zeros(
                 prompt_content_units.size(0),
                 prompt_content_units.size(1),
@@ -311,6 +322,8 @@ class PromptDurationMemoryEncoder(nn.Module):
         prompt_spk_embed: torch.Tensor | None = None,
         prompt_edge_cue: torch.Tensor | None = None,
         prompt_phrase_final_mask: torch.Tensor | None = None,
+        prompt_global_weight: torch.Tensor | None = None,
+        prompt_unit_log_prior: torch.Tensor | None = None,
     ) -> ReferenceDurationMemory:
         valid_mask = prompt_valid_mask
         if not isinstance(valid_mask, torch.Tensor):
@@ -335,10 +348,44 @@ class PromptDurationMemoryEncoder(nn.Module):
             if self.use_log_base_rate
             else logdur
         )
-        global_rate = _masked_median(rate_logdur, speech_mask)
         speech_support = (speech_mask.sum(dim=1, keepdim=True) > 0.0).float()
         support_mask = torch.where(speech_support > 0.0, speech_mask, valid_mask)
+        global_rate = rate_logdur.new_zeros((rate_logdur.size(0), 1))
+        for batch_idx in range(int(rate_logdur.size(0))):
+            if bool(speech_support[batch_idx, 0].item()):
+                global_rate[batch_idx, 0] = compute_global_rate(
+                    log_dur=rate_logdur[batch_idx],
+                    speech_mask=speech_mask[batch_idx],
+                    valid_mask=support_mask[batch_idx],
+                    variant=self.g_variant,
+                    weight=(None if prompt_global_weight is None else prompt_global_weight[batch_idx]),
+                    trim_ratio=self.g_trim_ratio,
+                    unit_ids=prompt_content_units[batch_idx],
+                    unit_prior=prompt_unit_log_prior,
+                )
         ref_residual = (rate_logdur - global_rate) * support_mask
+        if self.simple_global_stats and not self.emit_prompt_diagnostics:
+            operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
+            return validate_reference_duration_memory(
+                ReferenceDurationMemory(
+                    global_rate=global_rate,
+                    operator=StructuredDurationOperatorMemory(operator_coeff=operator_coeff),
+                    summary_state=None,
+                    spk_embed=(
+                        prompt_spk_embed.float()
+                        if isinstance(prompt_spk_embed, torch.Tensor)
+                        else None
+                    ),
+                    prompt_valid_mask=valid_mask,
+                    prompt_speech_mask=speech_mask,
+                    prompt=PromptConditioningEvidence(
+                        prompt_mask=valid_mask,
+                        prompt_log_base=log_base,
+                        prompt_log_duration=logdur,
+                        prompt_log_residual=ref_residual,
+                    ),
+                )
+            )
 
         summary_mask = support_mask if self.summary_pool_speech_only else valid_mask
         hidden = self._encode_prompt_summary(
@@ -410,6 +457,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         operator_rank: int,
         min_speech_ratio: float = 0.6,
         use_log_base_rate: bool = False,
+        g_variant: str = "raw_median",
+        g_trim_ratio: float = 0.2,
     ) -> None:
         super().__init__()
         self.operator_rank = int(max(1, operator_rank))
@@ -417,6 +466,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         self.use_log_base_rate = bool(use_log_base_rate)
         self.rate_mode = "log_base" if self.use_log_base_rate else "simple_global"
         self.simple_global_stats = not self.use_log_base_rate
+        self.g_variant = normalize_global_rate_variant(g_variant)
+        self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
 
     def forward(
         self,
@@ -431,8 +482,10 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         prompt_spk_embed: torch.Tensor | None = None,
         prompt_edge_cue: torch.Tensor | None = None,
         prompt_phrase_final_mask: torch.Tensor | None = None,
+        prompt_global_weight: torch.Tensor | None = None,
+        prompt_unit_log_prior: torch.Tensor | None = None,
     ) -> ReferenceDurationMemory:
-        del prompt_content_units, prompt_edge_cue, prompt_phrase_final_mask
+        del prompt_edge_cue, prompt_phrase_final_mask
         valid_mask = prompt_valid_mask
         if not isinstance(valid_mask, torch.Tensor):
             valid_mask = prompt_mask
@@ -467,7 +520,16 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         else:
             log_base = torch.zeros_like(logdur)
         rate_logdur = ((logdur - log_base) * valid_mask) if self.use_log_base_rate else logdur
-        global_rate = _masked_median(rate_logdur, speech_mask)
+        global_rate = compute_global_rate(
+            log_dur=rate_logdur,
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            variant=self.g_variant,
+            weight=prompt_global_weight,
+            trim_ratio=self.g_trim_ratio,
+            unit_ids=prompt_content_units,
+            unit_prior=prompt_unit_log_prior,
+        )
         prompt_residual = (rate_logdur - global_rate) * speech_mask
         operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
 
@@ -513,6 +575,9 @@ class StreamingDurationHead(nn.Module):
         local_rate_decay: float = 0.95,
         short_gap_silence_scale: float = 0.35,
         leading_silence_scale: float = 0.0,
+        eval_mode: str = "learned",
+        disable_local_residual: bool = False,
+        disable_coarse_bias: bool = False,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
@@ -527,6 +592,9 @@ class StreamingDurationHead(nn.Module):
         self.local_rate_decay = float(max(0.0, min(0.999, local_rate_decay)))
         self.short_gap_silence_scale = float(max(0.0, min(1.0, short_gap_silence_scale)))
         self.leading_silence_scale = float(max(0.0, min(1.0, leading_silence_scale)))
+        self.eval_mode = normalize_falsification_eval_mode(eval_mode)
+        self.disable_local_residual = bool(disable_local_residual)
+        self.disable_coarse_bias = bool(disable_coarse_bias)
         self.query_dim = int(max(8, dim))
         self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.codebook = codebook if codebook is not None else SharedSummaryCodebook(num_slots=num_slots, dim=self.query_dim)
@@ -542,10 +610,14 @@ class StreamingDurationHead(nn.Module):
             nn.GELU(),
             nn.Linear(self.query_dim, 1),
         )
-        self.residual_gate_head = nn.Sequential(
-            nn.Linear((self.query_dim * 3) + 1, self.query_dim),
-            nn.GELU(),
-            nn.Linear(self.query_dim, 1),
+        self.residual_gate_head = (
+            nn.Sequential(
+                nn.Linear((self.query_dim * 3) + 1, self.query_dim),
+                nn.GELU(),
+                nn.Linear(self.query_dim, 1),
+            )
+            if self.use_learned_residual_gate
+            else None
         )
         self.coarse_delta_scale = 0.20
         self.local_residual_scale = 0.35
@@ -672,7 +744,10 @@ class StreamingDurationHead(nn.Module):
             dim=-1,
         )
         coarse_scalar = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_context).squeeze(-1))
-        coarse_correction = coarse_scalar.unsqueeze(1).expand(-1, query.size(1)) * commit_valid_mask
+        predicted_coarse = coarse_scalar.unsqueeze(1).expand(-1, query.size(1)) * commit_valid_mask
+        coarse_correction = predicted_coarse
+        if self.eval_mode == "analytic" or self.disable_coarse_bias:
+            coarse_correction = torch.zeros_like(predicted_coarse)
         global_term = global_shift_analytic + coarse_correction
         residual_input = torch.cat(
             [
@@ -696,11 +771,16 @@ class StreamingDurationHead(nn.Module):
         ).clamp(0.0, 1.0)
         deterministic_gate = cold_gate * short_gate * runtime_stability * speech_mask
         if self.use_learned_residual_gate:
+            if self.residual_gate_head is None:
+                raise RuntimeError("residual_gate_head is missing while learned residual gate is enabled.")
             gate_raw = torch.sigmoid(self.residual_gate_head(residual_input).squeeze(-1))
             residual_gate = gate_raw * deterministic_gate
         else:
             residual_gate = deterministic_gate
         residual = residual * residual_gate
+        predicted_residual = residual
+        if self.eval_mode in {"analytic", "coarse_only"} or self.disable_local_residual:
+            residual = torch.zeros_like(predicted_residual)
         pred_speech = (global_term + residual).clamp(
             min=-self.max_logstretch,
             max=self.max_logstretch,
@@ -728,7 +808,9 @@ class StreamingDurationHead(nn.Module):
             "global_bias_scalar": global_bias_scalar,
             "unit_coarse_logstretch": global_term * mask,
             "unit_coarse_correction": coarse_correction * mask,
+            "unit_coarse_correction_pred": predicted_coarse * mask,
             "unit_residual_logstretch": residual * mask,
+            "unit_residual_logstretch_pred": predicted_residual * mask,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
             "unit_silence_tau": silence_tau * silence_commit_mask,
@@ -750,9 +832,11 @@ class StreamingDurationHead(nn.Module):
             ),
             "role_query_unit": query,
             "local_response": residual * mask,
+            "local_response_pred": predicted_residual * mask,
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
+            "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
         }
 
 

@@ -999,6 +999,9 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_use_reference_summary: false" in source
     assert "rhythm_v3_use_learned_residual_gate: false" in source
     assert "rhythm_v3_disable_learned_gate: true" in source
+    assert "rhythm_v3_eval_mode: learned" in source
+    assert "rhythm_v3_g_variant: raw_median" in source
+    assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_num_summary_slots: 1" in source
     assert "rhythm_v3_summary_use_unit_embedding: false" in source

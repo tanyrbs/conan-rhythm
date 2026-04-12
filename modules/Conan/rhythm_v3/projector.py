@@ -40,6 +40,8 @@ class StreamingDurationProjector(nn.Module):
             cached_duration_exec=None,
             local_rate_ema=None,
             since_last_boundary=zeros.clone(),
+            frontend_state=None,
+            consumed_content_steps=torch.zeros((batch_size, 1), dtype=torch.long, device=device),
         )
 
     @staticmethod
@@ -179,31 +181,25 @@ class StreamingDurationProjector(nn.Module):
                 residual_next[batch_idx] = carry
                 prefix_offset_next[batch_idx] = float(prefix_offset)
                 continue
-            row_exec = unit_duration_exec[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-            row_source = source_duration_obs[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-            row_source_rounded = np.rint(np.clip(row_source, a_min=0.0, a_max=None)).astype(np.int64, copy=False)
-            row_speech = speech_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-            row_coarse = (
-                coarse_only_commit_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-                if isinstance(coarse_only_commit_mask, torch.Tensor)
-                else None
-            )
-            row_boundary = (
-                source_boundary_cue[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-                if isinstance(source_boundary_cue, torch.Tensor)
-                else None
-            )
-            row_phrase_final = (
-                phrase_final_mask[batch_idx, start_unit:committed_len].detach().float().cpu().numpy()
-                if isinstance(phrase_final_mask, torch.Tensor)
-                else None
+            row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final = (
+                StreamingDurationProjector._extract_projection_row_numpy(
+                    batch_idx=batch_idx,
+                    start_unit=start_unit,
+                    committed_len=committed_len,
+                    unit_duration_exec=unit_duration_exec,
+                    source_duration_obs=source_duration_obs,
+                    speech_commit_mask=speech_commit_mask,
+                    coarse_only_commit_mask=coarse_only_commit_mask,
+                    source_boundary_cue=source_boundary_cue,
+                    phrase_final_mask=phrase_final_mask,
+                )
             )
             row_projected = np.empty_like(row_exec, dtype=np.float32)
             for offset in range(int(row_exec.shape[0])):
                 exec_value = float(row_exec[offset])
                 source_count = int(max(0, int(row_source_rounded[offset])))
-                is_speech = bool(row_speech[offset] > 0.5)
-                is_coarse_only = bool(row_coarse is not None and row_coarse[offset] > 0.5)
+                is_speech = bool(row_speech[offset])
+                is_coarse_only = bool(row_coarse is not None and row_coarse[offset])
                 if (not is_speech) and (not is_coarse_only):
                     row_projected[offset] = np.float32(source_count)
                     continue
@@ -218,9 +214,9 @@ class StreamingDurationProjector(nn.Module):
                 prefix_offset += int(frames) - anchor
                 carry = total - frames
                 boundary_hit = False
-                if row_boundary is not None and float(row_boundary[offset]) >= float(boundary_reset_thresh):
+                if row_boundary is not None and bool(row_boundary[offset]):
                     boundary_hit = True
-                if row_phrase_final is not None and float(row_phrase_final[offset]) > 0.5:
+                if row_phrase_final is not None and bool(row_phrase_final[offset]):
                     boundary_hit = True
                 if boundary_hit:
                     carry = float(carry) * float(boundary_carry_decay)
@@ -233,6 +229,41 @@ class StreamingDurationProjector(nn.Module):
             residual_next[batch_idx] = carry
             prefix_offset_next[batch_idx] = float(prefix_offset)
         return projected, residual_next.reshape(batch_size, 1), prefix_offset_next.reshape(batch_size, 1)
+
+    @staticmethod
+    def _extract_projection_row_numpy(
+        *,
+        batch_idx: int,
+        start_unit: int,
+        committed_len: int,
+        unit_duration_exec: torch.Tensor,
+        source_duration_obs: torch.Tensor,
+        speech_commit_mask: torch.Tensor,
+        coarse_only_commit_mask: torch.Tensor | None,
+        source_boundary_cue: torch.Tensor | None,
+        phrase_final_mask: torch.Tensor | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        row_slice = slice(int(start_unit), int(committed_len))
+        row_exec = unit_duration_exec[batch_idx, row_slice].detach().float().cpu().numpy()
+        row_source = source_duration_obs[batch_idx, row_slice].detach().float().cpu().numpy()
+        row_source_rounded = np.rint(np.clip(row_source, a_min=0.0, a_max=None)).astype(np.int64, copy=False)
+        row_speech = speech_commit_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+        row_coarse = (
+            coarse_only_commit_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+            if isinstance(coarse_only_commit_mask, torch.Tensor)
+            else None
+        )
+        row_boundary = (
+            source_boundary_cue[batch_idx, row_slice].detach().cpu().numpy() >= 0.5
+            if isinstance(source_boundary_cue, torch.Tensor)
+            else None
+        )
+        row_phrase_final = (
+            phrase_final_mask[batch_idx, row_slice].detach().cpu().numpy() > 0.5
+            if isinstance(phrase_final_mask, torch.Tensor)
+            else None
+        )
+        return row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final
 
     @staticmethod
     def _materialize_projected_duration(
@@ -285,6 +316,12 @@ class StreamingDurationProjector(nn.Module):
             cached_duration_exec=cached_duration_exec.detach(),
             local_rate_ema=None if state_prev.local_rate_ema is None else state_prev.local_rate_ema.detach(),
             since_last_boundary=since_last_boundary.detach(),
+            frontend_state=state_prev.frontend_state,
+            consumed_content_steps=(
+                None
+                if state_prev.consumed_content_steps is None
+                else state_prev.consumed_content_steps.detach().clone()
+            ),
         )
 
     def finalize_execution(
@@ -374,6 +411,8 @@ class StreamingDurationProjector(nn.Module):
             projected_duration_exec=projected_duration_exec,
             commit_mask=commit_mask,
         )
+        budget_hit_pos = prefix_unit_offset_next >= float(self.prefix_budget_pos - 1.0e-6)
+        budget_hit_neg = prefix_unit_offset_next <= -float(self.prefix_budget_neg - 1.0e-6)
         return DurationExecution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=materialized_duration_exec,
@@ -398,4 +437,6 @@ class StreamingDurationProjector(nn.Module):
             source_rate_seq=source_rate_seq,
             source_prefix_summary=source_prefix_summary,
             prefix_unit_offset=prefix_unit_offset_next,
+            projector_budget_hit_pos=budget_hit_pos.detach(),
+            projector_budget_hit_neg=budget_hit_neg.detach(),
         )

@@ -403,6 +403,23 @@ class RhythmUnitFrontend:
         batch = self._batch_from_row_states(next_rows, mark_last_open=mark_last_open, device=content.device)
         return batch, next_state
 
+    def materialize_stream_state(
+        self,
+        state: StreamingUnitizerState,
+        *,
+        mark_last_open: bool = True,
+        device: torch.device | None = None,
+    ) -> RhythmUnitBatch:
+        row_states = [
+            self._move_row_state(row, device) if device is not None else row
+            for row in state.rows
+        ]
+        return self._batch_from_row_states(
+            row_states,
+            mark_last_open=mark_last_open,
+            device=device,
+        )
+
 
 class TableDurationPrior(nn.Module):
     """Frozen speaker-free unigram prior for nominal duration anchoring."""
@@ -968,6 +985,20 @@ class DurationUnitFrontend(nn.Module):
             mark_last_open=mark_last_open,
         )
         return self._convert_batch(base_batch), next_state
+
+    def materialize_stream_state(
+        self,
+        state,
+        *,
+        mark_last_open: bool = True,
+        device: torch.device | None = None,
+    ):
+        base_batch = self.base_frontend.materialize_stream_state(
+            state,
+            mark_last_open=mark_last_open,
+            device=device,
+        )
+        return self._convert_batch(base_batch)
 
 
 NominalDurationBaseline = ProtocolDurationBaseline

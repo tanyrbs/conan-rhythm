@@ -245,6 +245,8 @@ class RhythmV3DebugRecord:
     unit_duration_exec: Optional[np.ndarray] = None
     unit_duration_raw: Optional[np.ndarray] = None
     prefix_unit_offset: Optional[np.ndarray] = None
+    projector_budget_hit_pos: Optional[np.ndarray] = None
+    projector_budget_hit_neg: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -383,6 +385,8 @@ def build_debug_record(
         unit_duration_exec=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_exec", batch_index)),
         unit_duration_raw=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_raw", batch_index)),
         prefix_unit_offset=_as_optional_vector(_extract_attr_or_key(execution, "prefix_unit_offset", batch_index)),
+        projector_budget_hit_pos=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index)),
+        projector_budget_hit_neg=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index)),
     )
 
 

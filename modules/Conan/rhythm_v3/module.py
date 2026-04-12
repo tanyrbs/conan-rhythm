@@ -18,6 +18,7 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
+from .g_stats import normalize_falsification_eval_mode, normalize_global_rate_variant
 from .minimal_head import MinimalStreamingDurationHeadV1G
 from .summary_memory import (
     PromptDurationMemoryEncoder,
@@ -418,6 +419,39 @@ class MixedEffectsDurationModule(nn.Module):
         max_prefix_budget = int(unused_kwargs.pop("max_prefix_budget", 0))
         boundary_carry_decay = float(unused_kwargs.pop("boundary_carry_decay", 0.25))
         boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
+        emit_prompt_diagnostics = bool(
+            unused_kwargs.pop("emit_prompt_diagnostics", unused_kwargs.pop("rhythm_v3_emit_prompt_diagnostics", True))
+        )
+        self.g_variant = normalize_global_rate_variant(
+            unused_kwargs.pop("g_variant", unused_kwargs.pop("rhythm_v3_g_variant", "raw_median"))
+        )
+        self.g_trim_ratio = float(
+            max(
+                0.0,
+                min(
+                    0.49,
+                    float(unused_kwargs.pop("g_trim_ratio", unused_kwargs.pop("rhythm_v3_g_trim_ratio", 0.2))),
+                ),
+            )
+        )
+        self.eval_mode = normalize_falsification_eval_mode(
+            unused_kwargs.pop("eval_mode", unused_kwargs.pop("rhythm_v3_eval_mode", "learned"))
+        )
+        self.disable_local_residual = bool(
+            unused_kwargs.pop(
+                "disable_local_residual",
+                unused_kwargs.pop("rhythm_v3_disable_local_residual", False),
+            )
+        )
+        self.disable_coarse_bias = bool(
+            unused_kwargs.pop(
+                "disable_coarse_bias",
+                unused_kwargs.pop("rhythm_v3_disable_coarse_bias", False),
+            )
+        )
+        self.debug_export = bool(
+            unused_kwargs.pop("debug_export", unused_kwargs.pop("rhythm_v3_debug_export", False))
+        )
         del unused_kwargs
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
         if self.streaming_mode not in {"strict", "micro_lookahead"}:
@@ -459,6 +493,8 @@ class MixedEffectsDurationModule(nn.Module):
                 holdout_ratio=operator_holdout_ratio,
                 simple_global_stats=self.simple_global_stats,
                 use_log_base_rate=self.use_log_base_rate,
+                g_variant=self.g_variant,
+                g_trim_ratio=self.g_trim_ratio,
             )
             self.reference_memory_builder.rate_mode = self.rate_mode
         self.projector = StreamingDurationProjector(
@@ -470,6 +506,8 @@ class MixedEffectsDurationModule(nn.Module):
             boundary_carry_decay=boundary_carry_decay,
             boundary_reset_thresh=boundary_reset_thresh,
         )
+        if self.use_reference_summary:
+            emit_prompt_diagnostics = True
         self.summary_codebook = None
         self.role_codebook = None
         self.prompt_memory_encoder = None
@@ -479,6 +517,8 @@ class MixedEffectsDurationModule(nn.Module):
                 self.prompt_memory_encoder = PromptGlobalConditionEncoderV1G(
                     operator_rank=basis_rank,
                     use_log_base_rate=self.use_log_base_rate,
+                    g_variant=self.g_variant,
+                    g_trim_ratio=self.g_trim_ratio,
                 )
                 self.duration_head = MinimalStreamingDurationHeadV1G(
                     vocab_size=vocab_size,
@@ -495,6 +535,9 @@ class MixedEffectsDurationModule(nn.Module):
                     local_rate_decay=local_rate_decay,
                     short_gap_silence_scale=short_gap_silence_scale,
                     leading_silence_scale=leading_silence_scale,
+                    eval_mode=self.eval_mode,
+                    disable_local_residual=self.disable_local_residual,
+                    disable_coarse_bias=self.disable_coarse_bias,
                 )
             else:
                 summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
@@ -508,6 +551,9 @@ class MixedEffectsDurationModule(nn.Module):
                     coverage_floor=summary_cov_floor,
                     summary_pool_speech_only=summary_pool_speech_only,
                     summary_use_unit_embedding=summary_use_unit_embedding,
+                    emit_prompt_diagnostics=emit_prompt_diagnostics,
+                    g_variant=self.g_variant,
+                    g_trim_ratio=self.g_trim_ratio,
                     codebook=self.summary_codebook,
                 )
                 if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
@@ -518,6 +564,8 @@ class MixedEffectsDurationModule(nn.Module):
             self.prompt_memory_encoder.rate_mode = self.rate_mode
             self.prompt_memory_encoder.simple_global_stats = self.simple_global_stats
             self.prompt_memory_encoder.use_log_base_rate = self.use_log_base_rate
+            self.prompt_memory_encoder.g_variant = self.g_variant
+            self.prompt_memory_encoder.g_trim_ratio = self.g_trim_ratio
 
             if not self.minimal_v1_profile:
                 duration_head_kwargs = dict(
@@ -532,6 +580,9 @@ class MixedEffectsDurationModule(nn.Module):
                     local_rate_decay=local_rate_decay,
                     short_gap_silence_scale=short_gap_silence_scale,
                     leading_silence_scale=leading_silence_scale,
+                    eval_mode=self.eval_mode,
+                    disable_local_residual=self.disable_local_residual,
+                    disable_coarse_bias=self.disable_coarse_bias,
                     codebook=self.summary_codebook,
                 )
                 if _init_accepts_kwarg(StreamingDurationHead, "simple_global_stats"):
@@ -545,6 +596,9 @@ class MixedEffectsDurationModule(nn.Module):
             self.duration_head.simple_global_stats = self.simple_global_stats
             self.duration_head.use_log_base_rate = self.use_log_base_rate
             self.duration_head.use_learned_residual_gate = self.use_learned_residual_gate
+            self.duration_head.eval_mode = self.eval_mode
+            self.duration_head.disable_local_residual = self.disable_local_residual
+            self.duration_head.disable_coarse_bias = self.disable_coarse_bias
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
         elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
@@ -617,6 +671,8 @@ class MixedEffectsDurationModule(nn.Module):
                 prompt_spk_embed=ref_conditioning.get("prompt_spk_embed"),
                 prompt_edge_cue=ref_conditioning.get("prompt_source_boundary_cue"),
                 prompt_phrase_final_mask=ref_conditioning.get("prompt_phrase_final_mask"),
+                prompt_global_weight=ref_conditioning.get("prompt_global_weight"),
+                prompt_unit_log_prior=ref_conditioning.get("prompt_unit_log_prior"),
             )
         need_progress = self._use_progress_response()
         need_detector = self._use_detector_bank()

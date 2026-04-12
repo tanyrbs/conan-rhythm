@@ -1,41 +1,36 @@
 # rhythm_v3 / V1-G validation stack
 
-This document defines the **validation-first** workflow for the maintained
+This document defines the **util-first** validation workflow for the maintained
 `rhythm_v3` / minimal-V1 path.
 
-The goal is not to add more loss terms first. The goal is to make the theory
-**falsifiable** before large-scale training:
+The current goal is not to grow a larger dashboard. The goal is to make the
+core theory easy to **audit and falsify** with the smallest stable surface.
 
-- source-anchor run retiming must be visible in the labels
-- the speech-only global cue must carry usable signal
-- coarse/local factorization must be auditable
-- inference must expose the same contract as training
+## 1. What we validate first
 
-## 1. What to validate first
+The maintained V1-G line makes five hard claims:
 
-Think in three layers:
+1. the source run lattice is a stable interface
+2. `g` is a usable speech-only global cue
+3. scalar coarse bias is a meaningful variable, not a placeholder
+4. silence should stay coarse-only rather than become a pause planner
+5. closed-prefix + carry rounding + budget form a real online commit contract
 
-1. **Before training — label and alignment audit**
-   - Is the source run lattice stable enough to be treated as the anchor?
-   - Does target-to-source projection preserve mass and monotonicity?
-   - Is `g` stable enough to act as a speech-only global tempo proxy?
-   - Is scalar coarse still sufficient, or is low-frequency drift leaking into local residual?
-   - Does silence look like bounded coarse follow rather than a pause script?
+That is why the main review surface is now restricted to **five figures**:
 
-2. **During training — semantic audit**
-   - Is the model actually learning `a_i + b + r_i` rather than hiding everything in one branch?
-   - Is `b` learning sentence-level correction?
-   - Is `r_i` remaining speech-local?
-   - Are low-confidence alignment regions really weaker supervision?
+- Figure A: run-lattice stability
+- Figure B: global cue survival
+- Figure C: oracle decomposition
+- Figure D: silence theory audit
+- Figure E: online commit semantics
 
-3. **During inference — contract audit**
-   - Does the model expose the same stable-lattice / source-anchor surface as training?
-   - Are commit frontier, prefix offset, and carried rounding visible?
-   - Can a single inference run be exported as a debug bundle for case review?
+Everything else is secondary:
 
-## 2. Current code support
+- alignment heatmaps belong in appendix or local diagnosis
+- label conservation pages belong in dataset QA
+- single-case multi-track pages belong in internal debugging
 
-This repo now provides a **non-plotting debug layer first**.
+## 2. Current local code support
 
 ### 2.1 Shared alignment/projection module
 
@@ -43,12 +38,10 @@ File:
 
 - `tasks/Conan/rhythm/duration_v3/alignment_projection.py`
 
-This is the extracted target-to-source projection logic shared by:
+This remains the shared projection module for:
 
-- training dataset construction
-- offline validation/debug tooling
-
-It avoids putting debug-only logic into dataset mixins.
+- dataset target construction
+- offline audit/debug reconstruction
 
 ### 2.2 Debug-record schema
 
@@ -57,186 +50,142 @@ Files:
 - `utils/plot/rhythm_v3_viz/core.py`
 - `utils/plot/rhythm_v3_viz/alignment.py`
 
-Main exported helpers:
+These are still the stable bridge between runtime/data code and later review.
 
-- `build_debug_record(...)`
-- `build_debug_records_from_batch(...)`
-- `derive_record(...)`
-- `record_summary(...)`
-- `save_debug_records(...)`
-- `load_debug_records(...)`
-- `build_projection_debug_payload(...)`
-- `attach_projection_debug(...)`
-
-The debug record is the stable intermediate artifact for later visualization.
-
-### 2.3 Inference-side debug export
+### 2.3 Five-figure review util
 
 File:
 
-- `inference/Conan.py`
+- `utils/plot/rhythm_v3_viz/review.py`
 
-`StreamingVoiceConversion.infer_once(...)` now supports:
+This is now the single place for:
 
-- `return_debug_bundle=True`
+- shared scalar reconstruction such as `g`, `p_i`, `a_i`, `b*`
+- unified table builders
+- per-figure summaries
+- lightweight plotting helpers
 
-and stores the last bundle in:
+The project was intentionally simplified here:
 
-- `self.last_rhythm_debug_bundle`
+- no extra falsification CLI layer is required
+- no extra dedicated falsification test file is kept
+- review logic should live in the util layer, not be copied across scripts
 
-This means inference no longer needs a separate ad-hoc tracing path.
+## 3. Unified analysis tables
 
-### 2.4 CSV summary script
+The review util is built around three shared tables instead of five unrelated
+figure-specific code paths.
 
-File:
+### 3.1 `run_table`
 
-- `scripts/rhythm_v3_debug_records.py`
+One source run per row. Used by Figure C and Figure D.
 
-This script converts exported debug bundles into a flat summary CSV for
-inspection, filtering, and later plotting.
+Key columns:
 
-Example:
+- `utt_id`, `pair_id`, `run_idx`, `unit_id`
+- `run_type`, `boundary_type`
+- `n_src`, `n_star`, `omega`
+- `p_i`, `g`, `a_i`
+- `z_star`, `b_star`, `b_pred`
+- `r_star`, `r_pred`
+- `n_pred_cont`, `k_pred_disc`
 
-```bash
-python scripts/rhythm_v3_debug_records.py ^
-  --input artifacts/rhythm_v3_debug ^
-  --output artifacts/rhythm_v3_debug/summary.csv
-```
+### 3.2 `ref_crop_table`
 
-## 3. Recommended validation variables
+One prompt/reference crop per row. Used by Figure B.
 
-Before any charting layer, every sample should be reducible to the following
-quantities:
+Key columns:
 
-- source run multiplicity `n_i`
-- projected target multiplicity `n_i*`
-- source-anchor target `z_i* = log((n_i* + eps)/(n_i + eps))`
-- run confidence `ω_i`
-- prompt global cue `g`
-- source prefix tempo `p_i`
-- analytic shift `a_i`
-- oracle coarse `b*`
-- oracle local residual `r_i*`
+- `pair_id`, `crop_id`
+- `ref_len_sec`, `speech_ratio`
+- `same_text`, `lexical_mismatch`
+- `g_crop`, `g_full`, `delta_g`
+- `c_star`, `zbar_sp_star`
 
-The current debug-record code reconstructs these from:
+### 3.3 `prefix_replay_table`
 
-- dataset sample targets
-- runtime source batch
-- reference memory
-- execution surface
+One prefix-step run row. Used by Figure A and Figure E.
 
-## 4. How to use it in practice
+Key columns:
 
-### 4.1 Before training: label / alignment audit
+- `utt_id`, `chunk_scheme`, `prefix_ratio`, `commit_lag`
+- `run_idx`, `is_closed`, `is_committed`
+- `n_prefix`, `n_full`
+- `n_pred_cont`, `k_pred_disc`, `k_full_disc`
+- `budget_drift`, `budget_hit`
 
-Build a source-side debug record from a sample:
+## 4. Review util entry points
 
-```python
-from utils.plot.rhythm_v3_viz import build_debug_records_from_batch
-
-records = build_debug_records_from_batch(sample=batch)
-```
-
-If you also have paired-target run info outside the dataset path, attach
-projection debug **without touching the mixin**:
+Typical usage:
 
 ```python
-from utils.plot.rhythm_v3_viz import attach_projection_debug
-
-record = records[0]
-record = attach_projection_debug(
-    record,
-    target_units=paired_target_units,
-    target_durations=paired_target_durations,
-    target_valid_mask=paired_target_valid_mask,
-    target_speech_mask=paired_target_speech_mask,
+from utils.plot.rhythm_v3_viz import (
+    build_prefix_replay_table,
+    build_ref_crop_table,
+    build_run_table,
+    save_review_figure_bundle,
 )
+
+run_df = build_run_table(records)
+crop_df = build_ref_crop_table(records)
+prefix_df = build_prefix_replay_table(records)
+
+paths = save_review_figure_bundle(records, output_dir="artifacts/rhythm_v3_review")
 ```
 
-Then persist:
+Useful public helpers:
 
-```python
-from utils.plot.rhythm_v3_viz import save_debug_records
+- `build_run_table(...)`
+- `build_ref_crop_table(...)`
+- `build_prefix_replay_table(...)`
+- `compute_run_stability(...)`
+- `summarize_global_cue_review(...)`
+- `summarize_oracle_decomposition(...)`
+- `build_silence_audit_table(...)`
+- `compute_commit_metrics(...)`
+- `save_review_figure_bundle(...)`
 
-save_debug_records([record], "artifacts/rhythm_v3_debug/pretrain_sample.pt")
-```
+## 5. Important local implementation boundaries
 
-### 4.2 During training: semantic audit
+These figure utilities are aligned to the current local codebase, not to an
+idealized future dataset.
 
-Inside a validation hook or notebook, export records from batch + model output:
+### 5.1 Boundary typing is a proxy
 
-```python
-records = build_debug_records_from_batch(
-    sample=batch,
-    model_output=outputs,
-    metadata={"phase": "valid"},
-)
-save_debug_records(records, "artifacts/rhythm_v3_debug/valid_step_1000.pt")
-```
+`boundary_type` is currently reconstructed from local signals:
 
-This captures:
+- `sep_mask`
+- `source_boundary_cue`
+- utterance-final position
 
-- source lattice
-- prompt conditioning summary
-- target supervision
-- predicted global/coarse/local surfaces
-- commit mask / prefix offset
+So Figure D should be read as a **boundary-aware audit proxy**, not as a
+linguistic gold boundary annotation.
 
-### 4.3 During inference: contract audit
+### 5.2 Crop stability requires actual crop groups
 
-```python
-wav, mel, meta, debug_bundle = engine.infer_once(
-    inp,
-    return_metadata=True,
-    return_debug_bundle=True,
-)
-```
+Figure B Panel A only becomes meaningful when the debug records contain
+multiple crops for the same `pair_id`. If there is only one crop, the review
+util keeps the field but does not pretend the stability question was answered.
 
-Then save:
+### 5.3 Closed and committed are different
 
-```python
-import torch
-torch.save([debug_bundle], "artifacts/rhythm_v3_debug/infer_case.pt")
-```
+Figure A uses `is_closed`.
+Figure E uses `is_committed`.
 
-## 5. Training alignment vs inference usage
+That separation is deliberate. Open tails should not be counted as interface
+instability, and closed-but-not-yet-committed runs should not be counted as a
+commit violation.
 
-This distinction should stay explicit.
+## 6. What the five figures should prove
 
-### Training-time alignment
+- Figure A should tell us whether the source lattice behaves like an interface.
+- Figure B should tell us whether `g` is stable and informative enough to keep.
+- Figure C should tell us whether scalar coarse is sufficient before escalating
+  to phrasewise coarse.
+- Figure D should tell us whether silence really belongs on the coarse-only
+  side of the theory boundary.
+- Figure E should tell us whether the runtime is actually commit-safe online.
 
-Alignment is a **label builder**:
-
-- it projects paired target occupancy back to source runs
-- it creates `n_i*`, `z_i*`, and confidence weights
-- it enables oracle decomposition into `a_i`, `b*`, and `r_i*`
-
-### Inference-time execution
-
-Inference does **not** run target alignment online.
-
-It only uses:
-
-- prompt-side `g`
-- source-side prefix tempo `p_i`
-- model-predicted coarse/local terms
-- carry rounding
-- prefix offset / commit discipline
-
-### Offline evaluation
-
-Alignment reappears again only as an **evaluation tool**, not as an online module.
-
-## 6. What to prove before re-adding plotting
-
-The plotting layer was intentionally postponed. Before adding figures back,
-ensure the exported debug records are sufficient to answer:
-
-1. Is `g` stable on 3–8s speech-dominant prompts?
-2. Does `g - p_i` correlate with oracle utterance-level stretch?
-3. Is scalar `b*` enough, or is phrasewise coarse already necessary?
-4. Does silence look bounded and low-freedom?
-5. Are commit frontier and prefix offset stable enough for strict-causal deployment?
-
-If the answer to those questions cannot be reconstructed from debug bundles and
-summary CSV alone, the record schema is still missing information.
+If one of these five figures fails badly, the right next step is usually to
+repair the corresponding interface or statistic first, not to add more model
+capacity.

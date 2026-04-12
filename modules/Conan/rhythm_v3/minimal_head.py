@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .g_stats import normalize_falsification_eval_mode
 from .math_utils import build_causal_local_rate_seq
 from .summary_memory import CausalUnitRunEncoder
 
@@ -27,6 +28,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         local_rate_decay: float = 0.95,
         short_gap_silence_scale: float = 0.35,
         leading_silence_scale: float = 0.0,
+        eval_mode: str = "learned",
+        disable_local_residual: bool = False,
+        disable_coarse_bias: bool = False,
         codebook=None,
     ) -> None:
         super().__init__()
@@ -46,6 +50,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.local_cold_start_runs = int(max(0, local_cold_start_runs))
         self.local_short_run_min_duration = float(max(1.0, local_short_run_min_duration))
         self.local_rate_decay = float(max(0.0, min(0.999, local_rate_decay)))
+        self.eval_mode = normalize_falsification_eval_mode(eval_mode)
+        self.disable_local_residual = bool(disable_local_residual)
+        self.disable_coarse_bias = bool(disable_coarse_bias)
         self.query_dim = int(max(8, dim))
         self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
@@ -173,7 +180,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         global_shift_analytic = (global_rate_col - local_rate_seq.float()) * commit_valid_mask
         coarse_context = torch.cat([spk_ctx, global_rate_col], dim=-1)
         coarse_scalar = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_context).squeeze(-1))
-        coarse_correction = coarse_scalar.unsqueeze(1).expand_as(global_shift_analytic) * commit_valid_mask
+        predicted_coarse = coarse_scalar.unsqueeze(1).expand_as(global_shift_analytic) * commit_valid_mask
+        coarse_correction = predicted_coarse
+        if self.eval_mode == "analytic" or self.disable_coarse_bias:
+            coarse_correction = torch.zeros_like(predicted_coarse)
         global_term = (global_shift_analytic + coarse_correction) * commit_valid_mask
 
         residual_input = torch.cat(
@@ -197,6 +207,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         ).clamp(0.0, 1.0)
         residual_gate = cold_gate * short_gate * runtime_stability * speech_mask
         residual = residual * residual_gate
+        predicted_residual = residual
+        if self.eval_mode in {"analytic", "coarse_only"} or self.disable_local_residual:
+            residual = torch.zeros_like(predicted_residual)
 
         pred_speech = (global_term + residual).clamp(
             min=-self.max_logstretch,
@@ -215,7 +228,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "global_bias_scalar": global_bias_scalar,
             "unit_coarse_logstretch": global_term * mask,
             "unit_coarse_correction": coarse_correction * mask,
+            "unit_coarse_correction_pred": predicted_coarse * mask,
             "unit_residual_logstretch": residual * mask,
+            "unit_residual_logstretch_pred": predicted_residual * mask,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
             "unit_silence_tau": silence_tau * silence_commit_mask,
@@ -225,9 +240,11 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "role_conf_unit": mask.new_zeros(mask.shape),
             "role_query_unit": query,
             "local_response": residual * mask,
+            "local_response_pred": predicted_residual * mask,
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
+            "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
         }
 
 

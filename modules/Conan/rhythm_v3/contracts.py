@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
 import torch
+from .unitizer import StreamingUnitizerRowState, StreamingUnitizerState
 
 if TYPE_CHECKING:
     from .frame_plan import RhythmFramePlan
@@ -288,6 +289,8 @@ class DurationRuntimeState:
     cached_duration_exec: Optional[torch.Tensor] = None
     local_rate_ema: Optional[torch.Tensor] = None
     since_last_boundary: Optional[torch.Tensor] = None
+    frontend_state: Optional[StreamingUnitizerState] = None
+    consumed_content_steps: Optional[torch.Tensor] = None
 
     @property
     def commit_frontier(self) -> torch.Tensor:
@@ -327,6 +330,8 @@ class DurationExecution:
     source_rate_seq: Optional[torch.Tensor] = None
     source_prefix_summary: Optional[torch.Tensor] = None
     prefix_unit_offset: Optional[torch.Tensor] = None
+    projector_budget_hit_pos: Optional[torch.Tensor] = None
+    projector_budget_hit_neg: Optional[torch.Tensor] = None
 
     @property
     def speech_duration_exec(self) -> torch.Tensor:
@@ -930,6 +935,22 @@ def move_duration_runtime_state(
 ) -> DurationRuntimeState | None:
     if state is None:
         return None
+
+    def _move_row(row: StreamingUnitizerRowState) -> StreamingUnitizerRowState:
+        return StreamingUnitizerRowState(
+            units=_move_tensor(row.units, device=device),
+            durations=_move_tensor(row.durations, device=device),
+            silence_mask=_move_tensor(row.silence_mask, device=device),
+            sep_hint=_move_tensor(row.sep_hint, device=device),
+            last_token=int(row.last_token),
+            pending_separator=bool(row.pending_separator),
+        )
+
+    frontend_state = None
+    if isinstance(getattr(state, "frontend_state", None), StreamingUnitizerState):
+        frontend_state = StreamingUnitizerState(
+            rows=[_move_row(row) for row in state.frontend_state.rows],
+        )
     return replace(
         state,
         committed_units=_move_tensor(state.committed_units, device=device),
@@ -938,6 +959,8 @@ def move_duration_runtime_state(
         cached_duration_exec=_move_tensor(state.cached_duration_exec, device=device),
         local_rate_ema=_move_tensor(state.local_rate_ema, device=device),
         since_last_boundary=_move_tensor(state.since_last_boundary, device=device),
+        frontend_state=frontend_state,
+        consumed_content_steps=_move_tensor(state.consumed_content_steps, device=device),
     )
 
 
@@ -953,7 +976,15 @@ def ensure_duration_runtime_state_batch(
         raise ValueError(
             f"DurationRuntimeState batch mismatch: source_batch={batch_size}, state_batch={current_batch}."
         )
-    for name in ("committed_units", "rounding_residual", "prefix_unit_offset", "cached_duration_exec", "local_rate_ema", "since_last_boundary"):
+    for name in (
+        "committed_units",
+        "rounding_residual",
+        "prefix_unit_offset",
+        "cached_duration_exec",
+        "local_rate_ema",
+        "since_last_boundary",
+        "consumed_content_steps",
+    ):
         value = getattr(state, name)
         if value is None or not isinstance(value, torch.Tensor):
             continue
@@ -969,12 +1000,22 @@ def ensure_duration_runtime_state_batch(
         raise ValueError(
             f"DurationRuntimeState.prefix_unit_offset must be rank-2 [B, 1], got shape={tuple(state.prefix_unit_offset.shape)}."
         )
-    for name in ("local_rate_ema", "since_last_boundary"):
+    for name in ("local_rate_ema", "since_last_boundary", "consumed_content_steps"):
         value = getattr(state, name)
         if value is None:
             continue
         if value.dim() != 2 or value.size(1) != 1:
             raise ValueError(
                 f"DurationRuntimeState.{name} must be rank-2 [B, 1], got shape={tuple(value.shape)}."
+            )
+    if state.frontend_state is not None:
+        if not isinstance(state.frontend_state, StreamingUnitizerState):
+            raise TypeError(
+                f"DurationRuntimeState.frontend_state must be a StreamingUnitizerState, got {type(state.frontend_state)!r}."
+            )
+        if len(state.frontend_state.rows) != batch_size:
+            raise ValueError(
+                "DurationRuntimeState.frontend_state row count mismatch: "
+                f"expected {batch_size}, got {len(state.frontend_state.rows)}."
             )
     return state

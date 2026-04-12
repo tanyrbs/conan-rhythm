@@ -192,3 +192,27 @@ def test_duration_unit_frontend_matches_offline_source_cache_after_debounce():
     assert batch.content_units[0, :2].tolist() == cache["content_units"].tolist()
     assert batch.source_duration_obs[0, :2].tolist() == cache["dur_anchor_src"].tolist()
     assert batch.source_silence_mask[0, :2].tolist() == cache["source_silence_mask"].tolist()
+
+
+def test_duration_unit_frontend_can_materialize_existing_stream_state_without_new_tokens():
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=2,
+        debounce_min_run_frames=2,
+    )
+    state = frontend.init_stream_state(batch_size=1)
+    _, state = frontend.step_content_tensor(
+        torch.tensor([[1, 57, 1, 2]], dtype=torch.long),
+        state,
+        content_lengths=torch.tensor([4], dtype=torch.long),
+        mark_last_open=True,
+    )
+    batch = frontend.materialize_stream_state(
+        state,
+        mark_last_open=True,
+    )
+    assert torch.equal(batch.content_units, torch.tensor([[1, 2]], dtype=torch.long))
+    assert torch.allclose(batch.source_duration_obs, torch.tensor([[3.0, 1.0]], dtype=torch.float32))
+    assert torch.allclose(batch.source_silence_mask, torch.tensor([[0.0, 0.0]], dtype=torch.float32))

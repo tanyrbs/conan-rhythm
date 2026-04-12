@@ -1,0 +1,1079 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+import torch
+
+from modules.Conan.rhythm_v3.g_stats import compute_global_rate
+from tasks.Conan.rhythm.duration_v3.metrics import (
+    budget_hit_rate,
+    prefix_discrepancy,
+    silence_leakage,
+    tempo_explainability,
+    tempo_monotonicity,
+)
+
+from .core import RhythmV3DebugRecord, derive_record, load_debug_records, weighted_median_np
+
+
+DEFAULT_REVIEW_SILENCE_TAU = 0.35
+DEFAULT_REVIEW_BOUNDARY_THRESHOLD = 0.55
+DEFAULT_REVIEW_UNIT_STEP_MS = 20.0
+
+
+def weighted_median(values: Any, weight: Any | None = None) -> float:
+    return weighted_median_np(
+        np.asarray(values, dtype=np.float32),
+        None if weight is None else np.asarray(weight, dtype=np.float32),
+    )
+
+
+def bootstrap_ci(
+    values: Any,
+    *,
+    reducer: Callable[[np.ndarray], float] | None = None,
+    n_boot: int = 512,
+    ci: float = 95.0,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size <= 0:
+        return float("nan"), float("nan"), float("nan")
+    reducer = reducer or (lambda x: float(np.nanmean(x)))
+    point = float(reducer(vals))
+    if vals.size == 1:
+        return point, point, point
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(max(1, int(n_boot))):
+        sample = vals[rng.integers(0, vals.size, size=vals.size)]
+        boots.append(float(reducer(sample)))
+    boots_arr = np.asarray(boots, dtype=np.float32)
+    alpha = max(0.0, min(49.0, (100.0 - float(ci)) * 0.5))
+    low = float(np.nanpercentile(boots_arr, alpha))
+    high = float(np.nanpercentile(boots_arr, 100.0 - alpha))
+    return low, point, high
+
+
+def ensure_debug_records(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+) -> list[RhythmV3DebugRecord]:
+    if isinstance(items, RhythmV3DebugRecord):
+        return [items]
+    if isinstance(items, Mapping):
+        return [RhythmV3DebugRecord.from_mapping(dict(items))]
+    if isinstance(items, (str, Path)):
+        return load_debug_records(items)
+    records: list[RhythmV3DebugRecord] = []
+    for item in items:
+        records.extend(ensure_debug_records(item))
+    return records
+
+
+def _meta(record: RhythmV3DebugRecord, *keys: str, default: Any = None) -> Any:
+    meta = dict(record.metadata or {})
+    for key in keys:
+        value = meta.get(key)
+        if value is not None:
+            return value
+    return default
+
+
+def _as_float(value: Any, default: float = float("nan")) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _as_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _safe_array(value: Any, *, dtype: np.dtype | type = np.float32) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        return np.asarray(value, dtype=dtype).reshape(-1)
+    except Exception:
+        return None
+
+
+def _safe_bool_array(value: Any) -> np.ndarray | None:
+    arr = _safe_array(value, dtype=np.float32)
+    if arr is None:
+        return None
+    return arr > 0.5
+
+
+def _align_pair(
+    a: Any,
+    b: Any,
+    *,
+    dtype: np.dtype | type = np.float32,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    arr_a = _safe_array(a, dtype=dtype)
+    arr_b = _safe_array(b, dtype=dtype)
+    if arr_a is None or arr_b is None:
+        return None, None
+    width = min(int(arr_a.shape[0]), int(arr_b.shape[0]))
+    if width <= 0:
+        return None, None
+    return arr_a[:width], arr_b[:width]
+
+
+def _speech_tempo(duration: Any, speech_mask: Any) -> float:
+    dur = _safe_array(duration, dtype=np.float32)
+    if dur is None:
+        return float("nan")
+    speech = _safe_bool_array(speech_mask)
+    valid = np.ones_like(dur, dtype=bool) if speech is None else speech[: dur.shape[0]]
+    if not bool(np.any(valid)):
+        return float("nan")
+    mean_duration = float(dur[valid].mean())
+    return 1.0 / max(mean_duration, 1.0e-6)
+
+
+def compute_g(
+    duration_obs: Any,
+    *,
+    speech_mask: Any,
+    valid_mask: Any | None = None,
+    variant: str = "raw_median",
+    trim_ratio: float = 0.2,
+    weight: Any | None = None,
+    unit_ids: Any | None = None,
+    unit_log_prior: Any | None = None,
+) -> float:
+    duration = _safe_array(duration_obs, dtype=np.float32)
+    speech = _safe_array(speech_mask, dtype=np.float32)
+    valid = None if valid_mask is None else _safe_array(valid_mask, dtype=np.float32)
+    if duration is None or speech is None:
+        return float("nan")
+    try:
+        value = compute_global_rate(
+            log_dur=torch.log(torch.as_tensor(duration.reshape(1, -1), dtype=torch.float32).clamp_min(1.0e-4)),
+            speech_mask=torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32),
+            valid_mask=None if valid is None else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32),
+            variant=variant,
+            trim_ratio=float(trim_ratio),
+            weight=None
+            if weight is None
+            else torch.as_tensor(np.asarray(weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32),
+            unit_ids=None
+            if unit_ids is None
+            else torch.as_tensor(np.asarray(unit_ids, dtype=np.int64).reshape(1, -1), dtype=torch.long),
+            unit_prior=None
+            if unit_log_prior is None
+            else torch.as_tensor(np.asarray(unit_log_prior, dtype=np.float32), dtype=torch.float32),
+        )
+        return float(value.reshape(-1)[0].item())
+    except Exception:
+        return float("nan")
+
+
+def compute_prefix_tempo(record: RhythmV3DebugRecord) -> np.ndarray | None:
+    derived = derive_record(record)
+    return None if derived.source_rate_seq is None else derived.source_rate_seq.copy()
+
+
+def compute_a_i(global_rate: float, prefix_tempo: Any, *, tau_g: float | None = None) -> np.ndarray | None:
+    prefix = _safe_array(prefix_tempo, dtype=np.float32)
+    if prefix is None or not np.isfinite(global_rate):
+        return None
+    analytic = float(global_rate) - prefix
+    if tau_g is not None:
+        analytic = np.clip(analytic, -float(tau_g), float(tau_g))
+    return analytic.astype(np.float32, copy=False)
+
+
+def compute_b_star(
+    z_star: Any,
+    a_i: Any,
+    *,
+    speech_mask: Any,
+    weight: Any | None = None,
+) -> float:
+    z = _safe_array(z_star, dtype=np.float32)
+    a = _safe_array(a_i, dtype=np.float32)
+    speech = _safe_bool_array(speech_mask)
+    if z is None or a is None or speech is None:
+        return float("nan")
+    width = min(int(z.shape[0]), int(a.shape[0]), int(speech.shape[0]))
+    if width <= 0:
+        return float("nan")
+    valid = speech[:width]
+    if not bool(np.any(valid)):
+        return float("nan")
+    weights = None if weight is None else _safe_array(weight, dtype=np.float32)[:width]
+    return weighted_median(z[:width][valid] - a[:width][valid], None if weights is None else weights[valid])
+
+
+def _resolve_record_ids(record: RhythmV3DebugRecord, index: int) -> dict[str, Any]:
+    item_name = record.item_name or f"item_{index:06d}"
+    return {
+        "item_name": item_name,
+        "utt_id": _as_str(_meta(record, "utt_id", "src_id", "sample_id", default=item_name)),
+        "pair_id": _as_str(_meta(record, "pair_id", default=item_name)),
+        "split": _as_str(record.split),
+        "chunk_scheme": _as_str(_meta(record, "chunk_scheme", "replay_scheme", default="default")),
+        "commit_lag": int(_as_float(_meta(record, "commit_lag", default=0.0), default=0.0)),
+    }
+
+
+def _resolve_prefix_ratio(record: RhythmV3DebugRecord, *, full_record: RhythmV3DebugRecord | None = None) -> float:
+    explicit = _meta(record, "prefix_ratio")
+    if explicit is not None:
+        return float(np.clip(_as_float(explicit, default=0.0), 0.0, 1.0))
+    commit = _safe_array(record.commit_mask, dtype=np.float32)
+    if commit is not None and commit.size > 0:
+        return float(np.clip(commit.mean(), 0.0, 1.0))
+    if full_record is not None:
+        full_len = 0 if full_record.source_duration_obs is None else int(np.asarray(full_record.source_duration_obs).reshape(-1).shape[0])
+        curr_len = 0 if record.source_duration_obs is None else int(np.asarray(record.source_duration_obs).reshape(-1).shape[0])
+        if full_len > 0:
+            return float(np.clip(float(curr_len) / float(full_len), 0.0, 1.0))
+    return 0.0
+
+
+def _resolve_boundary_type(
+    record: RhythmV3DebugRecord,
+    run_idx: int,
+    *,
+    boundary_threshold: float = DEFAULT_REVIEW_BOUNDARY_THRESHOLD,
+) -> str:
+    total = 0 if record.source_duration_obs is None else int(np.asarray(record.source_duration_obs).reshape(-1).shape[0])
+    if total > 0 and run_idx >= (total - 1):
+        return "sentence_final"
+    sep = _safe_array(record.sep_mask, dtype=np.float32)
+    cue = _safe_array(record.source_boundary_cue, dtype=np.float32)
+    sep_flag = False if sep is None or run_idx >= sep.shape[0] else bool(sep[run_idx] > 0.5)
+    cue_flag = False if cue is None or run_idx >= cue.shape[0] else bool(cue[run_idx] >= float(boundary_threshold))
+    if sep_flag or cue_flag:
+        return "phrase_boundary"
+    return "phrase_internal"
+
+
+def build_run_table(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+    *,
+    silence_tau: float = DEFAULT_REVIEW_SILENCE_TAU,
+    boundary_threshold: float = DEFAULT_REVIEW_BOUNDARY_THRESHOLD,
+) -> pd.DataFrame:
+    records = ensure_debug_records(items)
+    rows: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        ids = _resolve_record_ids(record, index)
+        if record.source_duration_obs is None:
+            continue
+        derived = derive_record(record, silence_tau=float(silence_tau))
+        n_src = _safe_array(record.source_duration_obs, dtype=np.float32)
+        n_star = _safe_array(record.unit_duration_tgt, dtype=np.float32)
+        omega = _safe_array(record.unit_confidence_tgt, dtype=np.float32)
+        if omega is None:
+            omega = _safe_array(record.unit_confidence_local_tgt, dtype=np.float32)
+        if omega is None:
+            omega = _safe_array(record.unit_confidence_coarse_tgt, dtype=np.float32)
+        if omega is None:
+            omega = np.ones_like(n_src, dtype=np.float32)
+        p_i = None if derived.source_rate_seq is None else derived.source_rate_seq
+        a_i = None if derived.analytic_shift is None else derived.analytic_shift
+        r_star = None if derived.oracle_local is None else derived.oracle_local
+        r_pred = None if derived.prediction_local is None else derived.prediction_local
+        z_star = None if derived.target_logstretch is None else derived.target_logstretch
+        n_pred_cont = _safe_array(record.unit_duration_raw, dtype=np.float32)
+        k_pred_disc = _safe_array(record.unit_duration_exec, dtype=np.float32)
+        source_units = _safe_array(record.source_content_units, dtype=np.int64)
+        speech_mask = derived.speech_mask
+        silence_mask = derived.silence_mask
+        sealed_mask = _safe_bool_array(record.sealed_mask)
+        commit_mask = _safe_bool_array(record.commit_mask)
+        run_stability = _safe_array(record.source_run_stability, dtype=np.float32)
+        for run_idx in range(int(n_src.shape[0])):
+            rows.append(
+                {
+                    **ids,
+                    "run_idx": int(run_idx),
+                    "unit_id": -1 if source_units is None or run_idx >= source_units.shape[0] else int(source_units[run_idx]),
+                    "run_type": "sil" if bool(silence_mask[run_idx] > 0.5) else "sp",
+                    "boundary_type": _resolve_boundary_type(record, run_idx, boundary_threshold=boundary_threshold),
+                    "n_src": float(n_src[run_idx]),
+                    "n_star": np.nan if n_star is None or run_idx >= n_star.shape[0] else float(n_star[run_idx]),
+                    "omega": np.nan if omega is None or run_idx >= omega.shape[0] else float(omega[run_idx]),
+                    "p_i": np.nan if p_i is None or run_idx >= p_i.shape[0] else float(p_i[run_idx]),
+                    "g": np.nan if derived.global_rate is None else float(derived.global_rate),
+                    "a_i": np.nan if a_i is None or run_idx >= a_i.shape[0] else float(a_i[run_idx]),
+                    "z_star": np.nan if z_star is None or run_idx >= z_star.shape[0] else float(z_star[run_idx]),
+                    "z_star_raw": np.nan if z_star is None or run_idx >= z_star.shape[0] else float(z_star[run_idx]),
+                    "b_star": np.nan if derived.oracle_bias is None else float(derived.oracle_bias),
+                    "b_pred": np.nan if derived.prediction_bias is None else float(derived.prediction_bias),
+                    "r_star": np.nan if r_star is None or run_idx >= r_star.shape[0] else float(r_star[run_idx]),
+                    "r_pred": np.nan if r_pred is None or run_idx >= r_pred.shape[0] else float(r_pred[run_idx]),
+                    "n_pred_cont": np.nan if n_pred_cont is None or run_idx >= n_pred_cont.shape[0] else float(n_pred_cont[run_idx]),
+                    "k_pred_disc": np.nan if k_pred_disc is None or run_idx >= k_pred_disc.shape[0] else float(k_pred_disc[run_idx]),
+                    "is_speech": float(speech_mask[run_idx] > 0.5),
+                    "is_silence": float(silence_mask[run_idx] > 0.5),
+                    "is_closed": 0.0 if sealed_mask is None or run_idx >= sealed_mask.shape[0] else float(sealed_mask[run_idx]),
+                    "is_committed": 0.0 if commit_mask is None or run_idx >= commit_mask.shape[0] else float(commit_mask[run_idx]),
+                    "run_stability": np.nan if run_stability is None or run_idx >= run_stability.shape[0] else float(run_stability[run_idx]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def build_ref_crop_table(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+    *,
+    g_variant: str = "raw_median",
+    g_trim_ratio: float = 0.2,
+    unit_step_ms: float = DEFAULT_REVIEW_UNIT_STEP_MS,
+) -> pd.DataFrame:
+    records = ensure_debug_records(items)
+    rows: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        ids = _resolve_record_ids(record, index)
+        derived = derive_record(record)
+        prompt_duration = _safe_array(record.prompt_duration_obs, dtype=np.float32)
+        prompt_valid = _safe_array(record.prompt_valid_mask, dtype=np.float32)
+        prompt_speech = _safe_array(record.prompt_speech_mask, dtype=np.float32)
+        source_duration = _safe_array(record.source_duration_obs, dtype=np.float32)
+        source_silence = _safe_array(record.source_silence_mask, dtype=np.float32)
+        source_units = _safe_array(record.source_content_units, dtype=np.int64)
+        prompt_units = _safe_array(record.prompt_content_units, dtype=np.int64)
+        if prompt_speech is None and prompt_duration is not None and derived.prompt_speech_mask is not None:
+            prompt_speech = derived.prompt_speech_mask.astype(np.float32, copy=False)
+        g_ref = (
+            float(record.global_rate)
+            if record.global_rate is not None
+            else compute_g(
+                prompt_duration,
+                speech_mask=np.ones_like(prompt_duration, dtype=np.float32) if prompt_speech is None and prompt_duration is not None else prompt_speech,
+                valid_mask=prompt_valid,
+                variant=g_variant,
+                trim_ratio=g_trim_ratio,
+                unit_ids=prompt_units,
+            )
+        )
+        g_src = compute_g(
+            source_duration,
+            speech_mask=np.ones_like(source_duration, dtype=np.float32)
+            if source_duration is not None and source_silence is None
+            else (1.0 - np.clip(source_silence, 0.0, 1.0) if source_silence is not None else None),
+            valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None else None,
+            variant=g_variant,
+            trim_ratio=g_trim_ratio,
+            unit_ids=source_units,
+        )
+        ref_len_sec = _as_float(
+            _meta(record, "ref_len_sec", default=None),
+            default=(
+                float("nan")
+                if prompt_duration is None
+                else float(prompt_duration.sum()) * float(unit_step_ms) / 1000.0
+            ),
+        )
+        speech_ratio = _as_float(
+            _meta(record, "speech_ratio", default=None),
+            default=(
+                float("nan")
+                if prompt_duration is None or prompt_speech is None
+                else float((prompt_duration * prompt_speech).sum() / max(float(prompt_duration.sum()), 1.0e-6))
+            ),
+        )
+        src_prompt_id = _as_str(_meta(record, "src_prompt_id", "prompt_id", default=ids["item_name"]))
+        ref_prompt_id = _as_str(_meta(record, "ref_prompt_id", "reference_prompt_id", default=""))
+        same_text = _meta(record, "same_text", default=None)
+        if same_text is None and src_prompt_id and ref_prompt_id:
+            same_text = int(src_prompt_id == ref_prompt_id)
+        speech_target_mean = float("nan")
+        if derived.target_logstretch is not None and derived.speech_mask is not None:
+            valid = derived.speech_mask > 0.5
+            if bool(np.any(valid)):
+                speech_target_mean = float(np.mean(derived.target_logstretch[valid]))
+        rows.append(
+            {
+                **ids,
+                "crop_id": _as_str(_meta(record, "crop_id", default=f"crop_{index:06d}")),
+                "src_spk": _as_str(_meta(record, "src_spk", "source_speaker", default="")),
+                "ref_spk": _as_str(_meta(record, "ref_spk", "reference_speaker", default="")),
+                "src_prompt_id": src_prompt_id,
+                "ref_prompt_id": ref_prompt_id,
+                "ref_len_sec": ref_len_sec,
+                "speech_ratio": speech_ratio,
+                "same_text": np.nan if same_text is None else float(same_text),
+                "lexical_mismatch": _meta(record, "lexical_mismatch", default=np.nan),
+                "g_crop": g_ref,
+                "g_src": g_src,
+                "delta_g": float(g_ref - g_src) if np.isfinite(g_ref) and np.isfinite(g_src) else float("nan"),
+                "c_star": np.nan if derived.oracle_bias is None else float(derived.oracle_bias),
+                "zbar_sp_star": speech_target_mean,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    group_size = frame.groupby("pair_id")["crop_id"].transform("count")
+    longest = frame.groupby("pair_id")["ref_len_sec"].transform(lambda col: np.nanmax(np.asarray(col, dtype=np.float32)))
+    frame["g_full"] = np.where(frame["ref_len_sec"].to_numpy() >= longest.to_numpy() - 1.0e-8, frame["g_crop"], np.nan)
+    frame["g_full"] = frame.groupby("pair_id")["g_full"].transform(lambda col: col.ffill().bfill())
+    frame["has_crop_comparison"] = group_size > 1
+    frame["g_crop_abs_err"] = np.where(
+        frame["has_crop_comparison"].to_numpy(),
+        np.abs(frame["g_crop"].to_numpy(dtype=np.float32) - frame["g_full"].to_numpy(dtype=np.float32)),
+        np.nan,
+    )
+    return frame
+
+
+def build_prefix_replay_table(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+) -> pd.DataFrame:
+    records = ensure_debug_records(items)
+    grouped: dict[tuple[str, str, int], list[tuple[int, RhythmV3DebugRecord]]] = {}
+    for index, record in enumerate(records):
+        ids = _resolve_record_ids(record, index)
+        grouped.setdefault((ids["utt_id"], ids["chunk_scheme"], ids["commit_lag"]), []).append((index, record))
+    rows: list[dict[str, Any]] = []
+    for (_, _, _), group in grouped.items():
+        _, full_record = max(group, key=lambda item: _resolve_prefix_ratio(item[1]))
+        full_source = _safe_array(full_record.source_duration_obs, dtype=np.float32)
+        full_exec = _safe_array(full_record.unit_duration_exec, dtype=np.float32)
+        full_cont = _safe_array(full_record.unit_duration_raw, dtype=np.float32)
+        full_len = 0 if full_source is None else int(full_source.shape[0])
+        for index, record in group:
+            ids = _resolve_record_ids(record, index)
+            prefix_ratio = _resolve_prefix_ratio(record, full_record=full_record)
+            source = _safe_array(record.source_duration_obs, dtype=np.float32)
+            if source is None:
+                continue
+            exec_disc = _safe_array(record.unit_duration_exec, dtype=np.float32)
+            exec_cont = _safe_array(record.unit_duration_raw, dtype=np.float32)
+            sealed = _safe_bool_array(record.sealed_mask)
+            commit = _safe_bool_array(record.commit_mask)
+            drift = _safe_array(record.prefix_unit_offset, dtype=np.float32)
+            hit_pos = _safe_array(record.projector_budget_hit_pos, dtype=np.float32)
+            hit_neg = _safe_array(record.projector_budget_hit_neg, dtype=np.float32)
+            for run_idx in range(int(source.shape[0])):
+                row_hit = 0.0
+                if hit_pos is not None and run_idx < hit_pos.shape[0] and hit_pos[run_idx] > 0.5:
+                    row_hit = 1.0
+                if hit_neg is not None and run_idx < hit_neg.shape[0] and hit_neg[run_idx] > 0.5:
+                    row_hit = 1.0
+                rows.append(
+                    {
+                        **ids,
+                        "prefix_ratio": float(prefix_ratio),
+                        "run_idx": int(run_idx),
+                        "is_observed": 1.0,
+                        "is_closed": 0.0 if sealed is None or run_idx >= sealed.shape[0] else float(sealed[run_idx]),
+                        "is_committed": 0.0 if commit is None or run_idx >= commit.shape[0] else float(commit[run_idx]),
+                        "n_prefix": float(source[run_idx]),
+                        "n_full": np.nan if full_source is None or run_idx >= full_source.shape[0] else float(full_source[run_idx]),
+                        "n_prefix_runs": int(source.shape[0]),
+                        "n_full_runs": int(full_len),
+                        "n_pred_cont": np.nan if exec_cont is None or run_idx >= exec_cont.shape[0] else float(exec_cont[run_idx]),
+                        "n_full_cont": np.nan if full_cont is None or run_idx >= full_cont.shape[0] else float(full_cont[run_idx]),
+                        "k_pred_disc": np.nan if exec_disc is None or run_idx >= exec_disc.shape[0] else float(exec_disc[run_idx]),
+                        "k_full_disc": np.nan if full_exec is None or run_idx >= full_exec.shape[0] else float(full_exec[run_idx]),
+                        "budget_drift": np.nan if drift is None or run_idx >= drift.shape[0] else float(drift[run_idx]),
+                        "budget_hit": row_hit,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def compute_run_stability(prefix_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if prefix_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    closed = prefix_df[(prefix_df["is_closed"] > 0.5) & prefix_df["n_full"].notna()].copy()
+    if closed.empty:
+        panel_a = pd.DataFrame(columns=["chunk_scheme", "prefix_ratio", "rewrite_rate", "exact_match_ratio", "mult_mae", "n_closed"])
+    else:
+        closed["rewrite"] = (closed["n_prefix"] != closed["n_full"]).astype(float)
+        closed["exact_match"] = 1.0 - closed["rewrite"]
+        closed["abs_err"] = (closed["n_prefix"] - closed["n_full"]).abs()
+        panel_a = (
+            closed.groupby(["chunk_scheme", "prefix_ratio"], as_index=False)
+            .agg(
+                rewrite_rate=("rewrite", "mean"),
+                exact_match_ratio=("exact_match", "mean"),
+                mult_mae=("abs_err", "mean"),
+                n_closed=("run_idx", "count"),
+            )
+            .sort_values(["chunk_scheme", "prefix_ratio"])
+        )
+    panel_b = (
+        prefix_df.groupby(["utt_id", "chunk_scheme", "prefix_ratio"], as_index=False)
+        .agg(n_prefix_runs=("n_prefix_runs", "max"), n_full_runs=("n_full_runs", "max"))
+    )
+    if not panel_b.empty:
+        panel_b["count_drift"] = (
+            (panel_b["n_prefix_runs"] - panel_b["n_full_runs"]).abs()
+            / panel_b["n_full_runs"].clip(lower=1.0)
+        )
+        panel_b = (
+            panel_b.groupby(["chunk_scheme", "prefix_ratio"], as_index=False)
+            .agg(
+                count_drift=("count_drift", "median"),
+                count_drift_p25=("count_drift", lambda s: float(np.nanpercentile(np.asarray(s, dtype=np.float32), 25.0))),
+                count_drift_p75=("count_drift", lambda s: float(np.nanpercentile(np.asarray(s, dtype=np.float32), 75.0))),
+            )
+            .sort_values(["chunk_scheme", "prefix_ratio"])
+        )
+    return panel_a, panel_b
+
+
+def summarize_global_cue_review(ref_crop_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if ref_crop_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    sliced_rows: list[dict[str, Any]] = []
+    definitions = [
+        ("same_text", ref_crop_df["same_text"].map(lambda x: "same_text" if float(x) > 0.5 else "cross_text") if "same_text" in ref_crop_df else None),
+        ("lexical_mismatch", pd.cut(pd.to_numeric(ref_crop_df["lexical_mismatch"], errors="coerce"), bins=[-np.inf, 0.1, 0.3, 0.6, np.inf], labels=["<=0.1", "0.1-0.3", "0.3-0.6", ">0.6"]) if "lexical_mismatch" in ref_crop_df else None),
+        ("ref_len_sec", pd.cut(ref_crop_df["ref_len_sec"], bins=[0.0, 3.0, 5.0, 8.0, np.inf], labels=["<3s", "3-5s", "5-8s", ">=8s"])),
+        ("speech_ratio", pd.cut(ref_crop_df["speech_ratio"], bins=[0.0, 0.4, 0.6, 0.8, 1.01], labels=["<0.4", "0.4-0.6", "0.6-0.8", ">=0.8"])),
+    ]
+    for slice_name, slice_values in definitions:
+        if slice_values is None:
+            continue
+        work = ref_crop_df.copy()
+        work["slice_value"] = slice_values.astype("object")
+        for slice_value, group in work.groupby("slice_value", dropna=True):
+            metric = tempo_explainability(group["delta_g"], group["c_star"])
+            sliced_rows.append(
+                {
+                    "slice_name": slice_name,
+                    "slice_value": slice_value,
+                    "count": int(group[["delta_g", "c_star"]].dropna().shape[0]),
+                    "spearman": float(metric["spearman"]),
+                    "robust_slope": float(metric["robust_slope"]),
+                    "r2_like": float(metric["r2_like"]),
+                }
+            )
+    crop_only = ref_crop_df[ref_crop_df["has_crop_comparison"] > 0].copy() if "has_crop_comparison" in ref_crop_df else ref_crop_df.iloc[0:0].copy()
+    return crop_only, pd.DataFrame(sliced_rows)
+
+
+def _piecewise_oracle_bias(sp_df: pd.DataFrame, segments: int) -> pd.Series:
+    if sp_df.empty:
+        return pd.Series(dtype=np.float32)
+    seg = pd.qcut(sp_df["run_idx"].rank(method="first"), q=min(max(1, int(segments)), int(sp_df.shape[0])), labels=False, duplicates="drop")
+    out = pd.Series(index=sp_df.index, dtype=np.float32)
+    for _, group in sp_df.groupby(seg):
+        bias = weighted_median(group["z_star"] - group["a_i"], group["omega"])
+        out.loc[group.index] = float(bias)
+    return out.astype(np.float32)
+
+
+def _lf_ratio(values: Any, cutoff_ratio: float = 0.2) -> float:
+    x = np.asarray(values, dtype=np.float32).reshape(-1)
+    x = x[np.isfinite(x)]
+    if x.size <= 1:
+        return float("nan")
+    x = x - x.mean()
+    spec = np.abs(np.fft.rfft(x)) ** 2
+    if spec.size <= 0:
+        return float("nan")
+    k = max(1, int(np.ceil(spec.size * float(cutoff_ratio))))
+    return float(spec[:k].sum() / max(float(spec.sum()), 1.0e-8))
+
+
+def summarize_oracle_decomposition(
+    run_df: pd.DataFrame,
+    *,
+    piecewise_segments: Sequence[int] = (2, 4),
+    low_freq_cutoff_ratio: float = 0.2,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if run_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    speech = run_df[(run_df["run_type"] == "sp") & run_df["z_star"].notna() & run_df["a_i"].notna()].copy()
+    suff_rows: list[dict[str, Any]] = []
+    lf_rows: list[dict[str, Any]] = []
+    calib_rows: list[dict[str, Any]] = []
+    for utt_id, group in speech.groupby("utt_id"):
+        z = group["z_star"].to_numpy(dtype=np.float32)
+        a = group["a_i"].to_numpy(dtype=np.float32)
+        omega = np.clip(group["omega"].to_numpy(dtype=np.float32), 1.0e-6, None)
+        b_star = weighted_median(z - a, omega)
+        approximations: list[tuple[str, np.ndarray]] = [("analytic", a), ("scalar_coarse", a + float(b_star))]
+        for segments in piecewise_segments:
+            piecewise = _piecewise_oracle_bias(group, int(segments))
+            approximations.append((f"piecewise_k{int(segments)}", a + piecewise.to_numpy(dtype=np.float32)))
+        for name, pred in approximations:
+            abs_err = np.abs(pred - z)
+            suff_rows.append(
+                {
+                    "utt_id": utt_id,
+                    "approximation": name,
+                    "mae": float(abs_err.mean()),
+                    "weighted_mae": float(np.sum(abs_err * omega) / max(float(omega.sum()), 1.0e-6)),
+                }
+            )
+        residual = z - (a + float(b_star))
+        lf_rows.append({"utt_id": utt_id, "lf_ratio": _lf_ratio(residual, cutoff_ratio=low_freq_cutoff_ratio)})
+        b_pred = group["b_pred"].dropna()
+        calib_rows.append(
+            {
+                "utt_id": utt_id,
+                "b_star": float(b_star),
+                "b_pred": float(b_pred.iloc[0]) if not b_pred.empty else float("nan"),
+            }
+        )
+    return pd.DataFrame(suff_rows), pd.DataFrame(lf_rows), pd.DataFrame(calib_rows)
+
+
+def build_silence_audit_table(
+    run_df: pd.DataFrame,
+    *,
+    silence_tau: float = DEFAULT_REVIEW_SILENCE_TAU,
+) -> pd.DataFrame:
+    if run_df.empty:
+        return pd.DataFrame()
+    silence = run_df[(run_df["run_type"] == "sil") & run_df["z_star"].notna() & run_df["a_i"].notna()].copy()
+    if silence.empty:
+        return silence
+    silence["z_pseudo"] = np.clip(
+        silence["a_i"].to_numpy(dtype=np.float32) + silence["b_star"].fillna(0.0).to_numpy(dtype=np.float32),
+        -float(silence_tau),
+        float(silence_tau),
+    )
+    silence["err_to_pseudo"] = silence["z_star"].to_numpy(dtype=np.float32) - silence["z_pseudo"].to_numpy(dtype=np.float32)
+    silence["abs_err_to_pseudo"] = np.abs(silence["err_to_pseudo"].to_numpy(dtype=np.float32))
+    return silence
+
+
+def summarize_silence_audit(silence_df: pd.DataFrame) -> pd.DataFrame:
+    if silence_df.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for boundary_type, group in silence_df.groupby("boundary_type"):
+        corr = group["z_star"].corr(group["z_pseudo"], method="spearman")
+        rows.append(
+            {
+                "boundary_type": boundary_type,
+                "count": int(group.shape[0]),
+                "spearman": float(corr) if corr is not None else float("nan"),
+                "mae": float(group["abs_err_to_pseudo"].mean()),
+                "cond_var": float(np.var(group["z_star"].to_numpy(dtype=np.float32) - group["z_pseudo"].to_numpy(dtype=np.float32))),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def compute_commit_metrics(prefix_df: pd.DataFrame) -> pd.DataFrame:
+    if prefix_df.empty:
+        return pd.DataFrame()
+    committed = prefix_df[(prefix_df["is_committed"] > 0.5) & prefix_df["k_full_disc"].notna()].copy()
+    if committed.empty:
+        return pd.DataFrame()
+    committed["rewrite"] = (committed["k_pred_disc"] != committed["k_full_disc"]).astype(float)
+    committed["abs_gap"] = (committed["k_pred_disc"] - committed["k_full_disc"]).abs()
+    committed["rounding_err"] = (committed["k_pred_disc"] - committed["n_pred_cont"]).abs()
+    return (
+        committed.groupby(["commit_lag", "prefix_ratio"], as_index=False)
+        .agg(
+            rewrite_rate=("rewrite", "mean"),
+            committed_gap=("abs_gap", "mean"),
+            rounding_err=("rounding_err", "mean"),
+            budget_drift=("budget_drift", lambda s: float(np.nanmedian(np.abs(np.asarray(s, dtype=np.float32))))),
+            hit_rate=("budget_hit", "mean"),
+        )
+        .sort_values(["commit_lag", "prefix_ratio"])
+    )
+
+
+def build_prefix_silence_review_table(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+) -> pd.DataFrame:
+    records = ensure_debug_records(items)
+    grouped: dict[str, list[tuple[int, RhythmV3DebugRecord]]] = {}
+    for index, record in enumerate(records):
+        sample_id = _as_str(_meta(record, "sample_id", default=record.item_name or f"sample_{index:06d}"))
+        grouped.setdefault(sample_id, []).append((index, record))
+    rows: list[dict[str, Any]] = []
+    for sample_id, group in grouped.items():
+        sorted_group = sorted(group, key=lambda item: _resolve_prefix_ratio(item[1]))
+        _, short_record = sorted_group[0]
+        _, long_record = sorted_group[-1]
+        short_ratio = _resolve_prefix_ratio(short_record, full_record=long_record)
+        long_ratio = _resolve_prefix_ratio(long_record, full_record=long_record)
+        short_logstretch, long_logstretch = _align_pair(short_record.unit_logstretch, long_record.unit_logstretch, dtype=np.float32)
+        short_commit, long_commit = _align_pair(short_record.commit_mask, long_record.commit_mask, dtype=np.float32)
+        commit_mask = None if short_commit is None or long_commit is None else np.minimum(short_commit, long_commit)
+        discrepancy = float("nan")
+        leakage = float("nan")
+        if short_logstretch is not None and long_logstretch is not None and commit_mask is not None:
+            discrepancy = float(prefix_discrepancy(short_logstretch, long_logstretch, commit_mask).item())
+            short_derived = derive_record(short_record)
+            long_derived = derive_record(long_record)
+            short_speech, long_speech = _align_pair(short_derived.speech_mask, long_derived.speech_mask, dtype=np.float32)
+            short_silence, long_silence = _align_pair(short_derived.silence_mask, long_derived.silence_mask, dtype=np.float32)
+            if short_speech is not None and long_speech is not None and short_silence is not None and long_silence is not None:
+                delta = long_logstretch - short_logstretch
+                leakage = float(
+                    silence_leakage(
+                        delta,
+                        np.minimum(short_speech, long_speech),
+                        np.minimum(short_silence, long_silence),
+                    ).item()
+                )
+        budget_hit = float(
+            budget_hit_rate(
+                long_record.projector_budget_hit_pos,
+                long_record.projector_budget_hit_neg,
+            ).item()
+        )
+        drift = (
+            float("nan")
+            if long_record.prefix_unit_offset is None or np.asarray(long_record.prefix_unit_offset).reshape(-1).size <= 0
+            else float(np.abs(np.asarray(long_record.prefix_unit_offset).reshape(-1)[-1]))
+        )
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "prefix_ratio": long_ratio,
+                "short_prefix_ratio": short_ratio,
+                "prefix_discrepancy": discrepancy,
+                "budget_hit": budget_hit,
+                "cumulative_drift": drift,
+                "silence_leakage": leakage,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_monotonicity_table(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+) -> pd.DataFrame:
+    records = ensure_debug_records(items)
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    for index, record in enumerate(records):
+        meta = dict(record.metadata or {})
+        src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
+        ref_bin = _as_str(meta.get("ref_bin", meta.get("tempo_bin", ""))).strip().lower()
+        if ref_bin not in {"slow", "mid", "fast"}:
+            continue
+        derived = derive_record(record)
+        grouped.setdefault(src_id, {})[ref_bin] = {
+            "tempo_out": _speech_tempo(record.unit_duration_exec, derived.speech_mask),
+            "tempo_src": _speech_tempo(record.source_duration_obs, derived.speech_mask),
+            "eval_mode": _as_str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", ""))),
+            "item_name": record.item_name or src_id,
+        }
+    rows: list[dict[str, Any]] = []
+    for src_id, bins in grouped.items():
+        mono = float("nan")
+        if all(name in bins for name in ("slow", "mid", "fast")):
+            mono = float(
+                tempo_monotonicity(
+                    [bins["slow"]["tempo_out"]],
+                    [bins["mid"]["tempo_out"]],
+                    [bins["fast"]["tempo_out"]],
+                ).item()
+            )
+        for ref_bin, payload in sorted(bins.items()):
+            rows.append(
+                {
+                    "src_id": src_id,
+                    "ref_bin": ref_bin,
+                    "tempo_out": payload["tempo_out"],
+                    "tempo_src": payload["tempo_src"],
+                    "eval_mode": payload["eval_mode"],
+                    "mono_triplet_ok": mono,
+                    "item_name": payload["item_name"],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def plot_run_lattice_stability(prefix_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    panel_a, panel_b = compute_run_stability(prefix_df)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), constrained_layout=True)
+    ax_a, ax_b, ax_c = axes
+    if panel_a.empty:
+        ax_a.text(0.5, 0.5, "No closed-prefix stability data", ha="center", va="center")
+        ax_c.text(0.5, 0.5, "No closed-prefix multiplicity data", ha="center", va="center")
+    else:
+        for chunk_scheme, group in panel_a.groupby("chunk_scheme"):
+            group = group.sort_values("prefix_ratio")
+            ax_a.plot(group["prefix_ratio"], group["rewrite_rate"], marker="o", label=chunk_scheme)
+            ax_c.plot(group["prefix_ratio"], group["exact_match_ratio"], marker="o", label=f"{chunk_scheme}: exact")
+        ax_a.set_title("Panel A: Closed-Run Rewrite Rate")
+        ax_a.set_xlabel("Prefix coverage")
+        ax_a.set_ylabel("rewrite_rate")
+        ax_a.set_ylim(0.0, 1.0)
+        ax_a.grid(alpha=0.25)
+        ax_a.legend(loc="best")
+        ax_c2 = ax_c.twinx()
+        for chunk_scheme, group in panel_a.groupby("chunk_scheme"):
+            group = group.sort_values("prefix_ratio")
+            ax_c2.plot(group["prefix_ratio"], group["mult_mae"], linestyle="--", marker="s", label=f"{chunk_scheme}: MAE")
+        ax_c.set_title("Panel C: Exact Match / Multiplicity MAE")
+        ax_c.set_xlabel("Prefix coverage")
+        ax_c.set_ylabel("exact_match_ratio")
+        ax_c.set_ylim(0.0, 1.0)
+        ax_c2.set_ylabel("mult_mae")
+        ax_c.grid(alpha=0.25)
+    if panel_b.empty:
+        ax_b.text(0.5, 0.5, "No run-count drift data", ha="center", va="center")
+    else:
+        for chunk_scheme, group in panel_b.groupby("chunk_scheme"):
+            group = group.sort_values("prefix_ratio")
+            ax_b.plot(group["prefix_ratio"], group["count_drift"], marker="o", label=chunk_scheme)
+            ax_b.fill_between(group["prefix_ratio"], group["count_drift_p25"], group["count_drift_p75"], alpha=0.15)
+        ax_b.set_title("Panel B: Run-Count Drift")
+        ax_b.set_xlabel("Prefix coverage")
+        ax_b.set_ylabel("count_drift")
+        ax_b.grid(alpha=0.25)
+        ax_b.legend(loc="best")
+    fig.suptitle("Figure A: Run-Lattice Stability", fontsize=14)
+    return fig
+
+
+def plot_global_cue_survival(ref_crop_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    crop_only, sliced = summarize_global_cue_review(ref_crop_df)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), constrained_layout=True)
+    ax_a, ax_b, ax_c = axes
+    if crop_only.empty:
+        ax_a.text(0.5, 0.5, "Need multi-crop groups to audit g stability", ha="center", va="center")
+    else:
+        work = crop_only.copy()
+        work["len_bin"] = pd.cut(work["ref_len_sec"], bins=[0.0, 3.0, 5.0, 8.0, np.inf], labels=["<3s", "3-5s", "5-8s", ">=8s"])
+        work["speech_bin"] = pd.cut(work["speech_ratio"], bins=[0.0, 0.4, 0.6, 0.8, 1.01], labels=["<0.4", "0.4-0.6", "0.6-0.8", ">=0.8"])
+        pivot = work.pivot_table(index="speech_bin", columns="len_bin", values="g_crop_abs_err", aggfunc="median")
+        img = ax_a.imshow(pivot.to_numpy(dtype=np.float32), aspect="auto", origin="lower", cmap="magma")
+        ax_a.set_xticks(range(len(pivot.columns)))
+        ax_a.set_xticklabels([str(x) for x in pivot.columns], rotation=25)
+        ax_a.set_yticks(range(len(pivot.index)))
+        ax_a.set_yticklabels([str(x) for x in pivot.index])
+        ax_a.set_title("Panel A: |g_crop - g_full|")
+        ax_a.set_xlabel("ref_len_sec")
+        ax_a.set_ylabel("speech_ratio")
+        fig.colorbar(img, ax=ax_a, fraction=0.046, pad=0.04)
+    info = ref_crop_df[["delta_g", "c_star"]].dropna()
+    if info.empty:
+        ax_b.text(0.5, 0.5, "No delta_g / c* pairs", ha="center", va="center")
+    else:
+        hb = ax_b.hexbin(info["delta_g"], info["c_star"], gridsize=24, cmap="viridis", mincnt=1)
+        metric = tempo_explainability(info["delta_g"], info["c_star"])
+        slope = float(metric["robust_slope"])
+        x = np.linspace(float(info["delta_g"].min()), float(info["delta_g"].max()), 128, dtype=np.float32)
+        y = slope * (x - float(np.median(info["delta_g"]))) + float(np.median(info["c_star"]))
+        ax_b.plot(x, y, color="white", linewidth=2.0, label=f"slope={slope:.3f}")
+        ax_b.set_title("Panel B: delta_g vs c*")
+        ax_b.set_xlabel("delta_g")
+        ax_b.set_ylabel("c_star")
+        ax_b.legend(loc="best")
+        fig.colorbar(hb, ax=ax_b, fraction=0.046, pad=0.04)
+    if sliced.empty:
+        ax_c.text(0.5, 0.5, "No slice summary", ha="center", va="center")
+    else:
+        labels = [f"{row.slice_name}:{row.slice_value}" for row in sliced.itertuples(index=False)]
+        ax_c.bar(np.arange(len(labels)), sliced["spearman"].to_numpy(dtype=np.float32), color="#4C78A8")
+        ax_c.set_xticks(np.arange(len(labels)))
+        ax_c.set_xticklabels(labels, rotation=45, ha="right")
+        ax_c.set_title("Panel C: Contamination Slices")
+        ax_c.set_ylabel("Spearman(delta_g, c*)")
+        ax_c.grid(axis="y", alpha=0.25)
+    fig.suptitle("Figure B: Global Cue Survival", fontsize=14)
+    return fig
+
+
+def plot_oracle_decomposition(run_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    suff, lf, calib = summarize_oracle_decomposition(run_df)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), constrained_layout=True)
+    ax_a, ax_b, ax_c = axes
+    if suff.empty:
+        ax_a.text(0.5, 0.5, "No speech oracle decomposition data", ha="center", va="center")
+    else:
+        summary = suff.groupby("approximation", as_index=False)["weighted_mae"].mean()
+        ax_a.bar(summary["approximation"], summary["weighted_mae"], color=["#72B7B2", "#F58518", "#E45756", "#54A24B"][: summary.shape[0]])
+        ax_a.set_title("Panel A: Coarse Sufficiency")
+        ax_a.set_ylabel("weighted_mae")
+        ax_a.tick_params(axis="x", rotation=20)
+    if lf.empty:
+        ax_b.text(0.5, 0.5, "No residual spectrum data", ha="center", va="center")
+    else:
+        ax_b.violinplot(lf["lf_ratio"].dropna().to_numpy(dtype=np.float32), showmeans=True, showextrema=True)
+        ax_b.set_title("Panel B: Residual Low-Frequency Ratio")
+        ax_b.set_xticks([1])
+        ax_b.set_xticklabels(["scalar coarse residual"])
+        ax_b.set_ylabel("LF ratio")
+    if calib.empty:
+        ax_c.text(0.5, 0.5, "No coarse calibration data", ha="center", va="center")
+    else:
+        valid = calib[["b_star", "b_pred"]].dropna()
+        if valid.empty:
+            ax_c.text(0.5, 0.5, "No valid b* / b pairs", ha="center", va="center")
+        else:
+            hb = ax_c.hexbin(valid["b_star"], valid["b_pred"], gridsize=20, cmap="plasma", mincnt=1)
+            low = float(min(valid["b_star"].min(), valid["b_pred"].min()))
+            high = float(max(valid["b_star"].max(), valid["b_pred"].max()))
+            ax_c.plot([low, high], [low, high], color="white", linestyle="--", linewidth=1.5)
+            ax_c.set_title("Panel C: b_pred vs b*")
+            ax_c.set_xlabel("b_star")
+            ax_c.set_ylabel("b_pred")
+            fig.colorbar(hb, ax=ax_c, fraction=0.046, pad=0.04)
+    fig.suptitle("Figure C: Oracle Decomposition", fontsize=14)
+    return fig
+
+
+def plot_silence_theory_audit(run_df: pd.DataFrame, *, silence_tau: float = DEFAULT_REVIEW_SILENCE_TAU):
+    import matplotlib.pyplot as plt
+
+    silence_df = build_silence_audit_table(run_df, silence_tau=silence_tau)
+    summary = summarize_silence_audit(silence_df)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8), constrained_layout=True)
+    ax_a, ax_b, ax_c = axes
+    if silence_df.empty:
+        for ax in axes:
+            ax.text(0.5, 0.5, "No silence audit data", ha="center", va="center")
+    else:
+        grouped = [group["err_to_pseudo"].dropna().to_numpy(dtype=np.float32) for _, group in silence_df.groupby("boundary_type")]
+        labels = [str(name) for name, _ in silence_df.groupby("boundary_type")]
+        if grouped:
+            ax_a.violinplot(grouped, showmeans=True, showextrema=True)
+            ax_a.set_xticks(np.arange(1, len(labels) + 1))
+            ax_a.set_xticklabels(labels, rotation=20)
+        ax_a.set_title("Panel A: raw - pseudo by boundary")
+        ax_a.set_ylabel("err_to_pseudo")
+        hb = ax_b.hexbin(silence_df["z_pseudo"], silence_df["z_star"], gridsize=22, cmap="cividis", mincnt=1)
+        ax_b.set_title("Panel B: raw vs pseudo")
+        ax_b.set_xlabel("z_pseudo")
+        ax_b.set_ylabel("z_star_raw")
+        fig.colorbar(hb, ax=ax_b, fraction=0.046, pad=0.04)
+        if summary.empty:
+            ax_c.text(0.5, 0.5, "No silence summary", ha="center", va="center")
+        else:
+            x = np.arange(summary.shape[0])
+            ax_c.bar(x, summary["spearman"], color="#4C78A8", label="spearman")
+            ax_c2 = ax_c.twinx()
+            ax_c2.plot(x, summary["mae"], color="#E45756", marker="o", label="mae")
+            ax_c.set_xticks(x)
+            ax_c.set_xticklabels(summary["boundary_type"], rotation=20)
+            ax_c.set_title("Panel C: Boundary-conditioned summary")
+            ax_c.set_ylabel("spearman")
+            ax_c2.set_ylabel("mae")
+            ax_c.grid(axis="y", alpha=0.25)
+    fig.suptitle("Figure D: Silence Theory Audit", fontsize=14)
+    return fig
+
+
+def plot_online_commit_semantics(prefix_df: pd.DataFrame):
+    import matplotlib.pyplot as plt
+
+    summary = compute_commit_metrics(prefix_df)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9), constrained_layout=True)
+    ax_a, ax_b, ax_c, ax_d = axes.reshape(-1)
+    if summary.empty:
+        for ax in (ax_a, ax_b, ax_c, ax_d):
+            ax.text(0.5, 0.5, "No committed-prefix replay data", ha="center", va="center")
+        fig.suptitle("Figure E: Online Commit Semantics", fontsize=14)
+        return fig
+    ax_d2 = ax_d.twinx()
+    for commit_lag, group in summary.groupby("commit_lag"):
+        group = group.sort_values("prefix_ratio")
+        label = f"lag={int(commit_lag)}"
+        ax_a.plot(group["prefix_ratio"], group["rewrite_rate"], marker="o", label=label)
+        ax_b.plot(group["prefix_ratio"], group["committed_gap"], marker="o", label=label)
+        ax_c.plot(group["prefix_ratio"], group["budget_drift"], marker="o", label=label)
+        ax_d.plot(group["prefix_ratio"], group["hit_rate"], marker="o", label=label)
+        ax_d2.plot(group["prefix_ratio"], group["rounding_err"], linestyle="--", marker="s", alpha=0.7)
+    ax_a.set_title("Panel A: committed rewrite rate")
+    ax_b.set_title("Panel B: short vs long committed gap")
+    ax_c.set_title("Panel C: budget drift")
+    ax_d.set_title("Panel D: budget hit / rounding err")
+    for ax in (ax_a, ax_b, ax_c, ax_d):
+        ax.set_xlabel("prefix_ratio")
+        ax.grid(alpha=0.25)
+        ax.legend(loc="best")
+    ax_a.set_ylabel("rewrite_rate")
+    ax_b.set_ylabel("committed_gap")
+    ax_c.set_ylabel("|budget_drift| median")
+    ax_d.set_ylabel("budget_hit_rate")
+    ax_d2.set_ylabel("rounding_err")
+    fig.suptitle("Figure E: Online Commit Semantics", fontsize=14)
+    return fig
+
+
+def save_review_figure_bundle(
+    items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
+    *,
+    output_dir: str | Path,
+    g_variant: str = "raw_median",
+    g_trim_ratio: float = 0.2,
+    silence_tau: float = DEFAULT_REVIEW_SILENCE_TAU,
+    boundary_threshold: float = DEFAULT_REVIEW_BOUNDARY_THRESHOLD,
+) -> dict[str, Path]:
+    records = ensure_debug_records(items)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_df = build_run_table(records, silence_tau=silence_tau, boundary_threshold=boundary_threshold)
+    ref_crop_df = build_ref_crop_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio)
+    prefix_df = build_prefix_replay_table(records)
+    paths = {
+        "run_table": out_dir / "run_table.csv",
+        "ref_crop_table": out_dir / "ref_crop_table.csv",
+        "prefix_replay_table": out_dir / "prefix_replay_table.csv",
+    }
+    run_df.to_csv(paths["run_table"], index=False)
+    ref_crop_df.to_csv(paths["ref_crop_table"], index=False)
+    prefix_df.to_csv(paths["prefix_replay_table"], index=False)
+    figures = {
+        "fig_a_run_lattice_stability.png": plot_run_lattice_stability(prefix_df),
+        "fig_b_global_cue_survival.png": plot_global_cue_survival(ref_crop_df),
+        "fig_c_oracle_decomposition.png": plot_oracle_decomposition(run_df),
+        "fig_d_silence_theory_audit.png": plot_silence_theory_audit(run_df, silence_tau=silence_tau),
+        "fig_e_online_commit_semantics.png": plot_online_commit_semantics(prefix_df),
+    }
+    for name, fig in figures.items():
+        path = out_dir / name
+        fig.savefig(path, dpi=180)
+        fig.clf()
+        paths[name] = path
+    return paths
+
+
+__all__ = [
+    "DEFAULT_REVIEW_BOUNDARY_THRESHOLD",
+    "DEFAULT_REVIEW_SILENCE_TAU",
+    "DEFAULT_REVIEW_UNIT_STEP_MS",
+    "bootstrap_ci",
+    "build_monotonicity_table",
+    "build_prefix_replay_table",
+    "build_prefix_silence_review_table",
+    "build_ref_crop_table",
+    "build_run_table",
+    "build_silence_audit_table",
+    "compute_a_i",
+    "compute_b_star",
+    "compute_commit_metrics",
+    "compute_g",
+    "compute_prefix_tempo",
+    "compute_run_stability",
+    "ensure_debug_records",
+    "plot_global_cue_survival",
+    "plot_online_commit_semantics",
+    "plot_oracle_decomposition",
+    "plot_run_lattice_stability",
+    "plot_silence_theory_audit",
+    "save_review_figure_bundle",
+    "summarize_global_cue_review",
+    "summarize_oracle_decomposition",
+    "summarize_silence_audit",
+    "weighted_median",
+]

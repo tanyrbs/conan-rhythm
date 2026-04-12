@@ -290,6 +290,92 @@ def test_rhythm_v3_prompt_summary_prediction_anchor_keeps_open_visible_units():
     assert torch.allclose(anchor, source_batch.source_duration_obs.float())
 
 
+def test_rhythm_v3_prompt_summary_runtime_tracks_incremental_frontend_state_without_precomputed_cache():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    first = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 1, 57, 57]], dtype=torch.long),
+        ref=None,
+        ref_conditioning=_build_prompt_conditioning(),
+    )
+    first_state = first["rhythm_state_next"]
+    assert first_state.frontend_state is not None
+    assert torch.equal(first_state.consumed_content_steps, torch.tensor([[4]], dtype=torch.long))
+
+    second_content = torch.tensor([[1, 1, 57, 57, 2, 2]], dtype=torch.long)
+    second = _run_adapter(
+        adapter,
+        content=second_content,
+        ref=None,
+        state=first_state,
+        ref_conditioning=first["rhythm_ref_conditioning"],
+    )
+    second_state = second["rhythm_state_next"]
+    assert second_state.frontend_state is not None
+    assert torch.equal(second_state.consumed_content_steps, torch.tensor([[6]], dtype=torch.long))
+    offline = adapter.unit_frontend.from_content_tensor(
+        second_content,
+        content_lengths=torch.tensor([6], dtype=torch.long),
+        mark_last_open=True,
+    )
+    assert torch.equal(second["rhythm_unit_batch"].content_units, offline.content_units)
+    assert torch.allclose(second["rhythm_unit_batch"].source_duration_obs, offline.source_duration_obs)
+
+    third = _run_adapter(
+        adapter,
+        content=second_content,
+        ref=None,
+        state=second_state,
+        ref_conditioning=second["rhythm_ref_conditioning"],
+    )
+    assert torch.equal(third["rhythm_state_next"].consumed_content_steps, torch.tensor([[6]], dtype=torch.long))
+    assert torch.equal(third["rhythm_unit_batch"].content_units, second["rhythm_unit_batch"].content_units)
+    assert torch.allclose(third["rhythm_unit_batch"].source_duration_obs, second["rhythm_unit_batch"].source_duration_obs)
+
+
+def test_rhythm_v3_prompt_summary_runtime_rejects_trimmed_incremental_content_without_source_cache():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    first = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 1, 2, 2]], dtype=torch.long),
+        ref=None,
+        ref_conditioning=_build_prompt_conditioning(),
+    )
+    with pytest.raises(ValueError, match="non-decreasing content lengths"):
+        _run_adapter(
+            adapter,
+            content=torch.tensor([[2, 2]], dtype=torch.long),
+            ref=None,
+            state=first["rhythm_state_next"],
+            ref_conditioning=first["rhythm_ref_conditioning"],
+        )
+
+
+def test_rhythm_v3_prompt_summary_can_disable_prompt_diagnostics_when_reference_summary_is_unused():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_emit_prompt_diagnostics"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 1, 2, 2]], dtype=torch.long),
+        ref=None,
+        ref_conditioning=_build_prompt_conditioning(),
+    )
+    ref_memory = ret["rhythm_ref_conditioning"]
+    assert ref_memory.summary_state is None
+    assert ref_memory.role_value is None
+    assert ref_memory.role_var is None
+    assert ref_memory.role_coverage is None
+    assert ref_memory.prompt_role_attn is None
+    assert ref_memory.prompt_role_fit is None
+    assert ref_memory.prompt_log_residual is not None
+    assert torch.isfinite(ref_memory.global_rate).all()
+
+
 def test_rhythm_v3_prompt_summary_coarse_correction_is_scalar_broadcast():
     adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 3]], dtype=torch.long)

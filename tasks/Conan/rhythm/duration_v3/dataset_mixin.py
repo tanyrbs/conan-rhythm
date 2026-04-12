@@ -299,6 +299,25 @@ class DurationV3DatasetMixin:
             _as_float32_1d(target_speech),
         )
 
+    @staticmethod
+    def _resolve_paired_target_alignment_metadata(
+        paired_target_conditioning: dict,
+    ) -> dict[str, np.ndarray] | None:
+        if not isinstance(paired_target_conditioning, dict):
+            return None
+        assigned_source = paired_target_conditioning.get("paired_target_alignment_assigned_source")
+        if assigned_source is None:
+            assigned_source = paired_target_conditioning.get("paired_target_assigned_source")
+        assigned_cost = paired_target_conditioning.get("paired_target_alignment_assigned_cost")
+        if assigned_cost is None:
+            assigned_cost = paired_target_conditioning.get("paired_target_assigned_cost")
+        if assigned_source is None and assigned_cost is None:
+            return None
+        return {
+            "assigned_source": _as_int64_1d(assigned_source) if assigned_source is not None else None,
+            "assigned_cost": _as_float32_1d(assigned_cost) if assigned_cost is not None else None,
+        }
+
     def _build_paired_target_projection_conditioning(self, paired_target_item, *, target_mode: str, source_item=None):
         if paired_target_item is None:
             return {}
@@ -396,6 +415,9 @@ class DurationV3DatasetMixin:
             silence_mask=source_cache.get("source_silence_mask"),
         )
         target_units, target_duration, target_valid, target_speech = projection_inputs
+        precomputed_alignment = self._resolve_paired_target_alignment_metadata(
+            paired_target_conditioning
+        )
         try:
             projection = _project_target_runs_onto_source(
                 source_units=source_units,
@@ -408,6 +430,7 @@ class DurationV3DatasetMixin:
                 use_continuous_alignment=bool(
                     self.hparams.get("rhythm_v3_use_continuous_alignment", False)
                 ),
+                precomputed_alignment=precomputed_alignment,
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to build paired duration_v3 targets for {item_name}: {exc}") from exc

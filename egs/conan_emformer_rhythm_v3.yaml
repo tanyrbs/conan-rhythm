@@ -13,8 +13,8 @@ binarization_args:
 rhythm_enable_v2: false
 rhythm_enable_v3: true
 rhythm_minimal_style_only: true
-rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, prompt_content_units, prompt_duration_obs, prompt_unit_mask]
-rhythm_public_outputs: [speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
+rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, source_silence_mask, source_boundary_cue, source_run_stability, prompt_content_units, prompt_duration_obs, prompt_unit_mask]
+rhythm_public_outputs: [unit_duration_exec, speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
 rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_bias, rhythm_v3_pref, rhythm_v3_cons]
 
 content_vocab_size: 102
@@ -36,6 +36,12 @@ rhythm_v3_use_log_base_rate: false
 rhythm_v3_use_reference_summary: false
 rhythm_v3_use_learned_residual_gate: false
 rhythm_v3_disable_learned_gate: true
+rhythm_v3_eval_mode: learned
+rhythm_v3_g_variant: raw_median
+rhythm_v3_g_trim_ratio: 0.2
+rhythm_v3_disable_local_residual: false
+rhythm_v3_disable_coarse_bias: false
+rhythm_v3_debug_export: true
 
 rhythm_response_rank: 12
 rhythm_response_window_left: 4
@@ -87,7 +93,7 @@ rhythm_v3_local_cold_start_runs: 2
 rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
-rhythm_v3_short_gap_silence_scale: 1.0
+rhythm_v3_short_gap_silence_scale: 0.35
 rhythm_v3_leading_silence_scale: 0.0
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
@@ -113,9 +119,9 @@ lambda_rhythm_dur: 1.0
 lambda_rhythm_bias: 0.20  # coarse scalar supervision
 lambda_rhythm_summary: 0.0
 # canonical prompt SUMMARY auxiliary loss stays disabled unless experiments explicitly re-enable it
-lambda_rhythm_pref: 0.10  # prefix target must remain coarse-derived for silence
+lambda_rhythm_pref: 0.0  # phase-0 falsification runs should not mix in prefix discipline
 lambda_rhythm_base: 0.0
-lambda_rhythm_cons: 0.10  # committed-prefix consistency for strict-causal fine-tuning
+lambda_rhythm_cons: 0.0  # phase-0 falsification runs should first validate g before consistency regularization
 lambda_rhythm_zero: 0.0
 lambda_rhythm_ortho: 0.0
 

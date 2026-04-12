@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from collections.abc import Mapping
+import warnings
 
 import torch
 import torch.nn as nn
@@ -8,6 +10,7 @@ import torch.nn as nn
 from .contracts import (
     ReferenceDurationMemory,
     collect_duration_v3_source_cache,
+    ensure_duration_runtime_state_batch,
     move_duration_runtime_state,
     move_reference_duration_memory,
     move_source_unit_batch,
@@ -146,6 +149,13 @@ class ConanDurationAdapter(nn.Module):
             use_log_base_rate=use_log_base_rate,
             use_learned_residual_gate=use_learned_residual_gate,
             use_reference_summary=use_reference_summary,
+            emit_prompt_diagnostics=bool(hparams.get("rhythm_v3_emit_prompt_diagnostics", True)),
+            eval_mode=str(hparams.get("rhythm_v3_eval_mode", "learned")),
+            g_variant=str(hparams.get("rhythm_v3_g_variant", "raw_median")),
+            g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2)),
+            disable_local_residual=bool(hparams.get("rhythm_v3_disable_local_residual", False)),
+            disable_coarse_bias=bool(hparams.get("rhythm_v3_disable_coarse_bias", False)),
+            debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
             allow_hybrid=(
                 None
                 if "rhythm_v3_allow_hybrid" not in hparams
@@ -184,6 +194,8 @@ class ConanDurationAdapter(nn.Module):
         content_lengths: torch.Tensor | None,
         rhythm_source_cache: dict | None,
         infer: bool,
+        state=None,
+        return_state: bool = False,
     ):
         precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
         if precomputed_cache is not None:
@@ -221,14 +233,89 @@ class ConanDurationAdapter(nn.Module):
                     "rhythm_v3 prompt_summary runtime with explicit silence runs requires "
                     "source_silence_mask in rhythm_source_cache / offline source cache."
                 )
-            return self.unit_frontend.from_precomputed(
+            batch = self.unit_frontend.from_precomputed(
                 **precomputed_cache,
             )
-        return self.unit_frontend.from_content_tensor(
-            content,
-            content_lengths=content_lengths,
-            mark_last_open=bool(infer) or bool(self.hparams.get("rhythm_streaming_prefix_train", False)),
+            return (batch, state) if return_state else batch
+        mark_last_open = bool(infer) or bool(self.hparams.get("rhythm_streaming_prefix_train", False))
+        batch_size, total_steps = content.shape
+        if content_lengths is None:
+            resolved_lengths = torch.full(
+                (batch_size,),
+                int(total_steps),
+                dtype=torch.long,
+                device=content.device,
+            )
+        else:
+            resolved_lengths = content_lengths.to(device=content.device).long().clamp(min=0, max=int(total_steps))
+        if not infer:
+            batch = self.unit_frontend.from_content_tensor(
+                content,
+                content_lengths=resolved_lengths,
+                mark_last_open=mark_last_open,
+            )
+            return (batch, state) if return_state else batch
+        if state is None:
+            state = self.module.init_state(batch_size=batch_size, device=content.device)
+        frontend_state = getattr(state, "frontend_state", None)
+        consumed = getattr(state, "consumed_content_steps", None)
+        if frontend_state is None or not isinstance(consumed, torch.Tensor):
+            frontend_state = self.unit_frontend.init_stream_state(
+                batch_size=batch_size,
+                device=content.device,
+            )
+            batch, next_frontend_state = self.unit_frontend.step_content_tensor(
+                content,
+                frontend_state,
+                content_lengths=resolved_lengths,
+                mark_last_open=mark_last_open,
+            )
+            next_state = replace(
+                state,
+                frontend_state=next_frontend_state,
+                consumed_content_steps=resolved_lengths.reshape(batch_size, 1).clone(),
+            )
+            return (batch, next_state) if return_state else batch
+        consumed = consumed.to(device=content.device, dtype=torch.long).reshape(batch_size, 1)
+        total_lengths = resolved_lengths.reshape(batch_size, 1)
+        if bool((consumed > total_lengths).any().item()):
+            raise ValueError(
+                "Incremental rhythm frontend requires non-decreasing content lengths. "
+                "Provide a precomputed rhythm_source_cache when content history is trimmed."
+            )
+        delta_lengths = (total_lengths - consumed).reshape(batch_size)
+        max_delta = int(delta_lengths.max().item()) if batch_size > 0 else 0
+        if max_delta <= 0:
+            batch = self.unit_frontend.materialize_stream_state(
+                frontend_state,
+                mark_last_open=mark_last_open,
+                device=content.device,
+            )
+            next_state = replace(
+                state,
+                consumed_content_steps=total_lengths.clone(),
+            )
+            return (batch, next_state) if return_state else batch
+        delta = torch.zeros((batch_size, max_delta), dtype=content.dtype, device=content.device)
+        for batch_idx in range(batch_size):
+            new_steps = int(delta_lengths[batch_idx].item())
+            if new_steps <= 0:
+                continue
+            end = int(total_lengths[batch_idx, 0].item())
+            start = end - new_steps
+            delta[batch_idx, :new_steps] = content[batch_idx, start:end]
+        batch, next_frontend_state = self.unit_frontend.step_content_tensor(
+            delta,
+            frontend_state,
+            content_lengths=delta_lengths,
+            mark_last_open=mark_last_open,
         )
+        next_state = replace(
+            state,
+            frontend_state=next_frontend_state,
+            consumed_content_steps=total_lengths.clone(),
+        )
+        return (batch, next_state) if return_state else batch
 
     @staticmethod
     def _resolve_prompt_unit_mask(
@@ -367,6 +454,8 @@ class ConanDurationAdapter(nn.Module):
         if use_log_base_rate and isinstance(ref_conditioning.get("prompt_log_base"), torch.Tensor):
             enriched["prompt_log_base"] = ref_conditioning["prompt_log_base"].to(device=device).detach()
         for key in (
+            "prompt_global_weight",
+            "prompt_unit_log_prior",
             "prompt_source_boundary_cue",
             "prompt_phrase_group_pos",
             "prompt_phrase_final_mask",
@@ -442,6 +531,7 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_state_prev"] = rhythm_state_prev
         ret["rhythm_state_next"] = execution.next_state
         ret["rhythm_ref_conditioning"] = ref_memory
+        ret["unit_duration_exec"] = execution.unit_duration_exec
         ret["speech_duration_exec"] = execution.speech_duration_exec
         ret["commit_frontier"] = execution.commit_frontier
         ret["rhythm_v3_runtime_mode"] = self.module.runtime_mode
@@ -450,6 +540,8 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
+        ret["rhythm_v3_eval_mode"] = self.module.eval_mode
+        ret["rhythm_v3_g_variant"] = self.module.g_variant
         if ref_memory is not None and isinstance(getattr(ref_memory, "summary_state", None), torch.Tensor):
             ret["rhythm_v3_summary_state_dim"] = float(ref_memory.summary_state.size(1))
         elif ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
@@ -461,6 +553,36 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_v3_source_rate_init"] = self.module.duration_head.src_rate_init.detach().reshape(1)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
+        if self.module.debug_export:
+            ret["rhythm_debug_g_ref"] = ref_memory.global_rate.detach()
+            ret["rhythm_debug_g_src_prefix"] = (
+                execution.source_rate_seq.detach()
+                if isinstance(getattr(execution, "source_rate_seq", None), torch.Tensor)
+                else None
+            )
+            ret["rhythm_debug_analytic_gap"] = (
+                execution.global_shift_analytic.detach()
+                if isinstance(getattr(execution, "global_shift_analytic", None), torch.Tensor)
+                else None
+            )
+            ret["rhythm_debug_coarse_bias"] = (
+                execution.coarse_correction.detach()
+                if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
+                else None
+            )
+            ret["rhythm_debug_local_residual"] = (
+                execution.local_residual.detach()
+                if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
+                else None
+            )
+            if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
+                ret["rhythm_debug_is_speech"] = (
+                    source_batch.unit_mask.float() * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))
+                ).detach()
+            if isinstance(getattr(execution, "projector_budget_hit_pos", None), torch.Tensor):
+                ret["rhythm_debug_budget_hit_pos"] = execution.projector_budget_hit_pos.detach()
+            if isinstance(getattr(execution, "projector_budget_hit_neg", None), torch.Tensor):
+                ret["rhythm_debug_budget_hit_neg"] = execution.projector_budget_hit_neg.detach()
 
     @staticmethod
     def _pad_tail_sequences(
@@ -622,9 +744,20 @@ class ConanDurationAdapter(nn.Module):
         rhythm_offline_source_cache: dict | None = None,
         speech_state_fn=None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        del target, global_steps, rhythm_runtime_overrides, rhythm_offline_source_cache
+        del target, global_steps, rhythm_offline_source_cache
         if ref is None and rhythm_ref_conditioning is None and not (not infer and self.baseline_train_mode == "pretrain"):
             return content_embed, tgt_nonpadding, f0, uv
+        if self.minimal_v1_profile and isinstance(rhythm_runtime_overrides, dict):
+            legacy_override_keys = [
+                key for key in rhythm_runtime_overrides.keys()
+                if any(token in str(key).lower() for token in ("phase", "pause", "debt"))
+            ]
+            if legacy_override_keys:
+                warnings.warn(
+                    "Ignoring legacy phase/pause/debt override under rhythm_v3 minimal profile: "
+                    + ", ".join(sorted(str(key) for key in legacy_override_keys)),
+                    stacklevel=2,
+                )
         if content_embed.device != content.device:
             raise ValueError(
                 f"content/content_embed device mismatch: content={content.device}, content_embed={content_embed.device}"
@@ -633,14 +766,21 @@ class ConanDurationAdapter(nn.Module):
             raise ValueError(
                 f"content/tgt_nonpadding device mismatch: content={content.device}, tgt_nonpadding={tgt_nonpadding.device}"
             )
-        source_batch = self._build_source_batch(
+        rhythm_state_prev = move_duration_runtime_state(rhythm_state, device=content.device)
+        if rhythm_state_prev is not None:
+            rhythm_state_prev = ensure_duration_runtime_state_batch(
+                rhythm_state_prev,
+                batch_size=int(content.size(0)),
+            )
+        source_batch, rhythm_state_prev = self._build_source_batch(
             content=content,
             content_lengths=content_lengths,
             rhythm_source_cache=rhythm_source_cache,
             infer=infer,
+            state=rhythm_state_prev,
+            return_state=True,
         )
         source_batch = move_source_unit_batch(source_batch, device=content.device)
-        rhythm_state_prev = move_duration_runtime_state(rhythm_state, device=content.device)
         self._validate_training_reference_semantics(
             infer=bool(infer),
             ref_conditioning=rhythm_ref_conditioning,
@@ -680,6 +820,16 @@ class ConanDurationAdapter(nn.Module):
             ref_memory=ref_memory,
             state=rhythm_state_prev,
         )
+        if rhythm_state_prev is not None:
+            execution.next_state = replace(
+                execution.next_state,
+                frontend_state=getattr(rhythm_state_prev, "frontend_state", None),
+                consumed_content_steps=(
+                    None
+                    if getattr(rhythm_state_prev, "consumed_content_steps", None) is None
+                    else rhythm_state_prev.consumed_content_steps.detach().clone()
+                ),
+            )
         self._attach_runtime_outputs(
             ret=ret,
             source_batch=source_batch,

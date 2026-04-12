@@ -375,6 +375,38 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertEqual(assigned_source.tolist(), [0, -1, 1])
         self.assertGreaterEqual(float(assigned_cost[1]), 0.0)
 
+    def test_duration_v3_target_merge_accepts_precomputed_alignment_metadata(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_align"},
+            source_cache={
+                "content_units": np.asarray([1, 2], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2.0, 2.0], dtype=np.float32),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+            },
+            paired_target_conditioning={
+                "paired_target_content_units": np.asarray([1, 99, 2], dtype=np.int64),
+                "paired_target_duration_obs": np.asarray([2.0, 1.0, 3.0], dtype=np.float32),
+                "paired_target_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "paired_target_speech_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+                "paired_target_alignment_assigned_source": np.asarray([0, -1, 1], dtype=np.int64),
+                "paired_target_alignment_assigned_cost": np.asarray([0.0, 0.4, 0.1], dtype=np.float32),
+            },
+            sample={},
+        )
+        self.assertTrue(np.allclose(merged["unit_duration_tgt"], np.asarray([2.0, 3.0], dtype=np.float32)))
+        self.assertTrue(np.all(merged["unit_alignment_cost_tgt"] >= 0.0))
+        self.assertEqual(float(merged["unit_alignment_coverage_tgt"][0]), 1.0)
+        self.assertEqual(float(merged["unit_alignment_coverage_tgt"][1]), 1.0)
+
     def test_duration_v3_target_merge_preserves_split_confidence_fields_from_sample(self) -> None:
         dataset = _DummyDataset(
             {

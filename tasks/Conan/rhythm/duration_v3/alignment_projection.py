@@ -11,6 +11,43 @@ def as_float32_1d(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32).reshape(-1)
 
 
+def resolve_precomputed_alignment(
+    *,
+    precomputed_alignment=None,
+    num_target: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if precomputed_alignment is None:
+        return None
+    if isinstance(precomputed_alignment, tuple) and len(precomputed_alignment) == 2:
+        assigned_source, assigned_cost = precomputed_alignment
+    elif isinstance(precomputed_alignment, dict):
+        assigned_source = precomputed_alignment.get("assigned_source")
+        assigned_cost = precomputed_alignment.get("assigned_cost")
+    else:
+        raise TypeError(
+            "precomputed_alignment must be a dict with assigned_source/assigned_cost "
+            "or a 2-tuple of arrays."
+        )
+    if assigned_source is None:
+        return None
+    assigned_source = as_int64_1d(assigned_source)
+    if assigned_source.shape[0] != int(num_target):
+        raise ValueError(
+            "precomputed alignment assigned_source length mismatch: "
+            f"expected {int(num_target)}, got {int(assigned_source.shape[0])}"
+        )
+    if assigned_cost is None:
+        assigned_cost = np.zeros((int(num_target),), dtype=np.float32)
+    else:
+        assigned_cost = as_float32_1d(assigned_cost)
+        if assigned_cost.shape[0] != int(num_target):
+            raise ValueError(
+                "precomputed alignment assigned_cost length mismatch: "
+                f"expected {int(num_target)}, got {int(assigned_cost.shape[0])}"
+            )
+    return assigned_source, assigned_cost
+
+
 def resolve_run_silence_mask(*, size: int, silence_mask=None) -> np.ndarray:
     if silence_mask is None:
         return np.zeros((size,), dtype=np.float32)
@@ -135,7 +172,17 @@ def align_target_frames_to_source_runs(
     target_units: np.ndarray,
     target_durations: np.ndarray,
     target_silence: np.ndarray,
+    source_frame_states: np.ndarray | None = None,
+    target_frame_states: np.ndarray | None = None,
+    source_frame_to_run: np.ndarray | None = None,
+    precomputed_alignment=None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
+    resolved = resolve_precomputed_alignment(
+        precomputed_alignment=precomputed_alignment,
+        num_target=int(target_units.shape[0]),
+    )
+    if resolved is not None:
+        return resolved
     del (
         source_units,
         source_durations,
@@ -143,6 +190,9 @@ def align_target_frames_to_source_runs(
         target_units,
         target_durations,
         target_silence,
+        source_frame_states,
+        target_frame_states,
+        source_frame_to_run,
     )
     return None
 
@@ -156,6 +206,10 @@ def align_target_to_source(
     target_durations: np.ndarray,
     target_silence: np.ndarray,
     use_continuous_alignment: bool = False,
+    source_frame_states: np.ndarray | None = None,
+    target_frame_states: np.ndarray | None = None,
+    source_frame_to_run: np.ndarray | None = None,
+    precomputed_alignment=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if use_continuous_alignment:
         continuous = align_target_frames_to_source_runs(
@@ -165,6 +219,10 @@ def align_target_to_source(
             target_units=target_units,
             target_durations=target_durations,
             target_silence=target_silence,
+            source_frame_states=source_frame_states,
+            target_frame_states=target_frame_states,
+            source_frame_to_run=source_frame_to_run,
+            precomputed_alignment=precomputed_alignment,
         )
         if continuous is not None:
             return continuous
@@ -188,6 +246,10 @@ def project_target_runs_onto_source(
     target_valid_mask: np.ndarray,
     target_speech_mask: np.ndarray,
     use_continuous_alignment: bool = False,
+    source_frame_states: np.ndarray | None = None,
+    target_frame_states: np.ndarray | None = None,
+    source_frame_to_run: np.ndarray | None = None,
+    precomputed_alignment=None,
 ) -> dict[str, np.ndarray]:
     source_silence_mask = resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
     target_silence_mask = ((target_valid_mask > 0.5) & ~(target_speech_mask > 0.5)).astype(np.float32)
@@ -225,6 +287,10 @@ def project_target_runs_onto_source(
         target_durations=tgt_durations_valid,
         target_silence=tgt_silence_valid,
         use_continuous_alignment=use_continuous_alignment,
+        source_frame_states=source_frame_states,
+        target_frame_states=target_frame_states,
+        source_frame_to_run=source_frame_to_run,
+        precomputed_alignment=precomputed_alignment,
     )
 
     num_source_runs = int(source_units.shape[0])
@@ -235,19 +301,33 @@ def project_target_runs_onto_source(
     source_support = np.zeros((num_source_runs,), dtype=np.float32)
     source_support[src_run_index] = 1.0
 
-    for tgt_idx, src_token_idx in enumerate(assigned_source.tolist()):
-        if src_token_idx < 0 or src_token_idx >= int(src_run_index.shape[0]):
-            continue
-        safe_src_token_idx = int(src_token_idx)
-        run_idx = int(src_run_index[safe_src_token_idx])
-        projected[run_idx] += float(tgt_durations_valid[tgt_idx])
-        aligned_target[run_idx] += 1.0
-        if (
-            int(src_units_valid[safe_src_token_idx]) == int(tgt_units_valid[tgt_idx])
-            and int(src_silence_valid[safe_src_token_idx] > 0.5) == int(tgt_silence_valid[tgt_idx] > 0.5)
-        ):
-            exact_match[run_idx] += 1.0
-        cost_mass[run_idx] += float(assigned_cost[tgt_idx])
+    valid = (assigned_source >= 0) & (assigned_source < int(src_run_index.shape[0]))
+    if bool(valid.any()):
+        src_token_idx = assigned_source[valid].astype(np.int64, copy=False)
+        run_idx = src_run_index[src_token_idx]
+        projected = np.bincount(
+            run_idx,
+            weights=tgt_durations_valid[valid].astype(np.float32, copy=False),
+            minlength=num_source_runs,
+        ).astype(np.float32, copy=False)
+        aligned_target = np.bincount(
+            run_idx,
+            minlength=num_source_runs,
+        ).astype(np.float32, copy=False)
+        exact_mask = (
+            (src_units_valid[src_token_idx].astype(np.int64, copy=False) == tgt_units_valid[valid].astype(np.int64, copy=False))
+            & ((src_silence_valid[src_token_idx] > 0.5) == (tgt_silence_valid[valid] > 0.5))
+        ).astype(np.float32, copy=False)
+        exact_match = np.bincount(
+            run_idx,
+            weights=exact_mask,
+            minlength=num_source_runs,
+        ).astype(np.float32, copy=False)
+        cost_mass = np.bincount(
+            run_idx,
+            weights=assigned_cost[valid].astype(np.float32, copy=False),
+            minlength=num_source_runs,
+        ).astype(np.float32, copy=False)
 
     coverage = np.divide(
         aligned_target,
@@ -325,5 +405,6 @@ __all__ = [
     "as_int64_1d",
     "filter_valid_runs",
     "project_target_runs_onto_source",
+    "resolve_precomputed_alignment",
     "resolve_run_silence_mask",
 ]
