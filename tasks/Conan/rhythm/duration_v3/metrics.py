@@ -100,14 +100,24 @@ def tempo_monotonicity(
     tempo_fast: Any,
     *,
     margin: float = 0.0,
+    increasing: bool = True,
 ) -> torch.Tensor:
+    """Monotonicity over slow/mid/fast triplets.
+
+    `increasing=True` is for tempo-like metrics where larger means faster.
+    `increasing=False` is for duration-like metrics where larger means slower.
+    """
     slow = _to_tensor(tempo_slow).reshape(-1)
     mid = _to_tensor(tempo_mid).reshape(-1)
     fast = _to_tensor(tempo_fast).reshape(-1)
     valid = torch.isfinite(slow) & torch.isfinite(mid) & torch.isfinite(fast)
     if not bool(valid.any().item()):
         return slow.new_tensor(float("nan"))
-    return (((mid[valid] - slow[valid]) > float(margin)) & ((fast[valid] - mid[valid]) > float(margin))).float().mean()
+    if bool(increasing):
+        monotonic = ((mid[valid] - slow[valid]) > float(margin)) & ((fast[valid] - mid[valid]) > float(margin))
+    else:
+        monotonic = ((slow[valid] - mid[valid]) > float(margin)) & ((mid[valid] - fast[valid]) > float(margin))
+    return monotonic.float().mean()
 
 
 def tempo_tie_rate(
@@ -133,6 +143,7 @@ def tempo_tie_rate(
 
 
 def transfer_slope(delta_g: Any, tempo_delta: Any) -> dict[str, float]:
+    """Association summary for tempo transfer; not a causal coefficient."""
     return tempo_explainability(delta_g, tempo_delta)
 
 
@@ -141,21 +152,48 @@ def monotonic_triplet_table(
     tempo_slow: Any,
     tempo_mid: Any,
     tempo_fast: Any,
+    *,
+    increasing: bool = True,
+    margin: float = 0.0,
+    tie_atol: float = 1.0e-4,
 ) -> dict[str, list[float | str]]:
+    """Per-sample monotonicity table.
+
+    `increasing=True` is for tempo-like metrics where larger means faster.
+    `increasing=False` is for duration-like metrics where larger means slower.
+    """
     slow = _to_tensor(tempo_slow).reshape(-1)
     mid = _to_tensor(tempo_mid).reshape(-1)
     fast = _to_tensor(tempo_fast).reshape(-1)
     count = min(int(slow.numel()), int(mid.numel()), int(fast.numel()))
-    mono = ((slow[:count] < mid[:count]) & (mid[:count] < fast[:count])).float()
+    slow = slow[:count]
+    mid = mid[:count]
+    fast = fast[:count]
+    valid = torch.isfinite(slow) & torch.isfinite(mid) & torch.isfinite(fast)
+    tie_sm = torch.isclose(slow, mid, atol=float(tie_atol), rtol=0.0) & valid
+    tie_mf = torch.isclose(mid, fast, atol=float(tie_atol), rtol=0.0) & valid
+    tie_any = tie_sm | tie_mf
+    if bool(increasing):
+        strict = ((slow < mid) & (mid < fast)) & valid
+        margin_ok = (((mid - slow) > float(margin)) & ((fast - mid) > float(margin))) & valid
+    else:
+        strict = ((slow > mid) & (mid > fast)) & valid
+        margin_ok = (((slow - mid) > float(margin)) & ((mid - fast) > float(margin))) & valid
     values = sample_ids[:count] if isinstance(sample_ids, (list, tuple)) else None
     if values is None:
         values = [str(index) for index in range(count)]
     return {
         "sample_id": [str(value) for value in values],
-        "tempo_slow": [float(value) for value in slow[:count].tolist()],
-        "tempo_mid": [float(value) for value in mid[:count].tolist()],
-        "tempo_fast": [float(value) for value in fast[:count].tolist()],
-        "mono_ok": [float(value) for value in mono[:count].tolist()],
+        "tempo_slow": [float(value) for value in slow.tolist()],
+        "tempo_mid": [float(value) for value in mid.tolist()],
+        "tempo_fast": [float(value) for value in fast.tolist()],
+        "valid": [float(value) for value in valid.float().tolist()],
+        "mono_ok": [float(value) for value in strict.float().tolist()],
+        "mono_ok_strict": [float(value) for value in strict.float().tolist()],
+        "mono_ok_margin": [float(value) for value in margin_ok.float().tolist()],
+        "tie_sm": [float(value) for value in tie_sm.float().tolist()],
+        "tie_mf": [float(value) for value in tie_mf.float().tolist()],
+        "tie_any": [float(value) for value in tie_any.float().tolist()],
     }
 
 

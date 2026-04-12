@@ -36,10 +36,11 @@ rhythm_v3_use_log_base_rate: false
 rhythm_v3_use_reference_summary: false
 rhythm_v3_use_learned_residual_gate: false
 rhythm_v3_disable_learned_gate: true
-# Maintained runtime default stays `learned`, but falsification should override:
-# Gate 0 / Gate 1: analytic + disable_local_residual + disable_coarse_bias
-# Gate 2: coarse_only + disable_local_residual
-# Only after those pass should full learned / prefix fine-tune be enabled.
+# Maintained runtime default stays `learned`.
+# For falsification, use checked-in overlays instead of hand-editing this file:
+# - egs/overrides/rhythm_v3_gate0_g_audit.yaml
+# - egs/overrides/rhythm_v3_gate1_analytic.yaml
+# - egs/overrides/rhythm_v3_gate2_coarse_only.yaml
 rhythm_v3_eval_mode: learned
 rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
@@ -137,6 +138,19 @@ lambda_rhythm_ortho: 0.0
 # Keep v3 target building strict by default: do not silently fall back to
 # source run-length anchors as supervision.
 # When you switch the maintained recipe to continuous paired-target supervision,
-# explicitly set rhythm_v3_use_continuous_alignment: true and keep alignment
-# provenance/frame-state sidecars attached.
+# set `rhythm_v3_use_continuous_alignment: true` and keep the alignment
+# provenance explicit in config. The maintained branch currently ships
+# `continuous_precomputed` and `continuous_viterbi_v1`; `continuous_fwdbwd_v1`
+# remains a planned upgrade surface and is not the maintained default.
 rhythm_v3_strict_target_alignment: true
+rhythm_v3_use_continuous_alignment: false
+# Ignored unless rhythm_v3_use_continuous_alignment=true.
+# continuous_viterbi_v1 is hard Viterbi occupancy only; posterior expected
+# occupancy remains reserved for future continuous_fwdbwd_v1.
+rhythm_v3_alignment_mode: continuous_viterbi_v1  # discrete | continuous_precomputed | continuous_viterbi_v1
+rhythm_v3_alignment_lambda_emb: 1.0
+rhythm_v3_alignment_lambda_type: 0.5
+rhythm_v3_alignment_lambda_band: 0.2
+rhythm_v3_alignment_lambda_unit: 0.0
+rhythm_v3_alignment_band_ratio: 0.08
+rhythm_v3_alignment_bad_cost_threshold: 1.2

@@ -17,6 +17,7 @@ if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"Failed to load alignment_projection from {_ALIGNMENT_PROJECTION_PATH}")
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+ContinuousRunAligner = _MODULE.ContinuousRunAligner
 project_target_runs_onto_source = _MODULE.project_target_runs_onto_source
 
 
@@ -70,7 +71,7 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
     def test_continuous_alignment_request_without_metadata_fails_fast(self) -> None:
         with self.assertRaisesRegex(
             RuntimeError,
-            "requires either continuous_precomputed metadata or explicit source_frame_states/source_frame_to_run/target_frame_states sidecars",
+            "requires explicit source_frame_states/source_frame_to_run/target_frame_states sidecars",
         ):
             project_target_runs_onto_source(
                 **self._base_source(),
@@ -138,11 +139,24 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             ),
             target_frame_speech_prob=np.ones((6,), dtype=np.float32),
             target_frame_valid=np.ones((6,), dtype=np.float32),
+            target_frame_weight=np.asarray([1.0, 2.0, 1.0, 3.0, 1.0, 4.0], dtype=np.float32),
         )
 
         self.assertEqual(result["alignment_kind"], "continuous_viterbi_v1")
+        self.assertEqual(result["alignment_mode"], "continuous_viterbi_v1")
         self.assertEqual(result["alignment_source"], "run_state_viterbi")
         self.assertEqual(result["alignment_version"], "2026-04-13")
+        self.assertEqual(result["posterior_kind"], "none")
+        self.assertEqual(result["confidence_kind"], "heuristic_v1")
+        self.assertEqual(result["confidence_formula_version"], "heuristic_margin_cost_type_v1")
+        self.assertEqual(result["source_progress_kind"], "anchor_duration_cdf")
+        self.assertEqual(result["target_progress_kind"], "weighted_cdf")
+        self.assertEqual(result["source_run_proto_kind"], "stability_boundary_weighted_mean_v1")
+        np.testing.assert_array_equal(
+            result["run_occ_expected_is_hard_proxy"],
+            np.asarray([1], dtype=np.int64),
+        )
+        self.assertEqual(result["run_occ_expected_semantics"], "hard_viterbi_proxy")
         np.testing.assert_array_equal(
             result["assigned_source"],
             np.asarray([0, 0, 1, 2, 2, 2], dtype=np.int64),
@@ -164,9 +178,101 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             np.asarray([2.0, 1.0, 3.0], dtype=np.float32),
         )
         np.testing.assert_allclose(
+            result["run_occ_hard"],
+            np.asarray([2.0, 1.0, 3.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            result["run_occ_weighted"],
+            np.asarray([3.0, 1.0, 8.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
             result["coverage"],
             np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
         )
+        self.assertEqual(tuple(result["source_run_proto"].shape), (3, 3))
+        self.assertEqual(tuple(result["source_run_proto_var"].shape), (3, 3))
+        np.testing.assert_allclose(
+            result["source_frame_count"],
+            np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
+        )
+        self.assertTrue(np.all(result["source_frame_weight_sum"] > 0.0))
+
+    def test_anchor_aware_band_prior_prefers_long_anchor_run_later_than_uniform_index_prior(self) -> None:
+        aligner = ContinuousRunAligner(
+            lambda_emb=0.0,
+            lambda_type=0.0,
+            lambda_band=1.0,
+            band_width=1,
+            band_ratio=0.01,
+        )
+        source_run_proto = np.ones((5, 1), dtype=np.float32)
+        source_run_types = np.zeros((5,), dtype=np.float32)
+        target_frame_state = np.ones((12, 1), dtype=np.float32)
+        target_frame_speech_prob = np.ones((12,), dtype=np.float32)
+
+        cost_uniform = aligner.build_local_cost(
+            source_run_proto=source_run_proto,
+            source_run_types=source_run_types,
+            target_frame_state=target_frame_state,
+            target_frame_speech_prob=target_frame_speech_prob,
+            source_durations=None,
+        )
+        cost_anchor = aligner.build_local_cost(
+            source_run_proto=source_run_proto,
+            source_run_types=source_run_types,
+            target_frame_state=target_frame_state,
+            target_frame_speech_prob=target_frame_speech_prob,
+            source_durations=np.asarray([1.0, 1.0, 8.0, 1.0, 1.0], dtype=np.float32),
+        )
+
+        late_mid_frame = 9
+        self.assertEqual(int(np.argmin(cost_uniform[late_mid_frame])), 3)
+        self.assertEqual(int(np.argmin(cost_anchor[late_mid_frame])), 2)
+        self.assertLess(
+            float(cost_anchor[late_mid_frame, 2]),
+            float(cost_uniform[late_mid_frame, 2]),
+        )
+
+    def test_bad_cost_frames_raise_unmatched_speech_ratio(self) -> None:
+        result = project_target_runs_onto_source(
+            source_units=np.asarray([11, 12, 13], dtype=np.int64),
+            source_durations=np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
+            source_silence_mask=np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            target_units=np.asarray([11, 12, 13], dtype=np.int64),
+            target_durations=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            target_valid_mask=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            target_speech_mask=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            use_continuous_alignment=True,
+            source_frame_states=np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            source_frame_to_run=np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64),
+            target_frame_states=np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            target_frame_speech_prob=np.ones((3,), dtype=np.float32),
+            target_frame_valid=np.ones((3,), dtype=np.float32),
+        )
+
+        np.testing.assert_array_equal(
+            result["assigned_source"],
+            np.asarray([0, 1, 2], dtype=np.int64),
+        )
+        self.assertGreater(float(result["assigned_cost"][1]), 1.2)
+        self.assertAlmostEqual(float(result["unmatched_speech_ratio"]), 1.0 / 3.0, places=6)
 
 
 if __name__ == "__main__":

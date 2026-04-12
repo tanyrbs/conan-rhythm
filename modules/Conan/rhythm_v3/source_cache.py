@@ -72,6 +72,33 @@ def duration_v3_cache_meta_signature(cache_meta: Mapping[str, object] | None) ->
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
+def build_duration_v3_frontend_signature(
+    cache_meta: Mapping[str, object] | None,
+    *,
+    g_variant: str,
+    drop_edge_runs_for_g: int,
+    unit_prior_path: str | None,
+    summary_pool_speech_only: bool,
+    emit_silence_runs: bool | None = None,
+) -> str:
+    normalized = resolve_duration_v3_cache_meta(cache_meta)
+    signature = {
+        "cache_meta": normalized,
+        "g_variant": str(g_variant or "").strip().lower(),
+        "drop_edge_runs_for_g": int(drop_edge_runs_for_g),
+        "unit_prior_path": (
+            str(Path(unit_prior_path).resolve()) if unit_prior_path else None
+        ),
+        "summary_pool_speech_only": bool(summary_pool_speech_only),
+        "emit_silence_runs": (
+            bool(emit_silence_runs)
+            if emit_silence_runs is not None
+            else (None if normalized is None else bool(normalized.get("emit_silence_runs", False)))
+        ),
+    }
+    return json.dumps(signature, sort_keys=True, separators=(",", ":"))
+
+
 def attach_duration_v3_cache_meta(
     cache: dict,
     *,
@@ -170,6 +197,94 @@ def _extract_scalar_meta(value) -> str | None:
     return str(value)
 
 
+def _extract_float_meta(value) -> float | None:
+    scalar = _extract_scalar_meta(value)
+    if scalar is None:
+        return None
+    try:
+        return float(scalar)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_int_meta(value) -> int | None:
+    scalar = _extract_scalar_meta(value)
+    if scalar is None:
+        return None
+    try:
+        return int(float(scalar))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool_prior_mask(value, *, expected_size: int) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        arr = value
+    elif torch.is_tensor(value):
+        arr = value.detach().cpu().numpy()
+    else:
+        arr = np.asarray(value)
+    arr = np.asarray(arr).reshape(-1)
+    if arr.size != int(expected_size):
+        raise ValueError(
+            "unit_log_prior_is_default size mismatch: "
+            f"got {int(arr.size)}, expected {int(expected_size)}"
+        )
+    return arr.astype(bool, copy=False)
+
+
+def _coerce_int_prior_array(value, *, expected_size: int) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        arr = value
+    elif torch.is_tensor(value):
+        arr = value.detach().cpu().numpy()
+    else:
+        arr = np.asarray(value)
+    arr = np.asarray(arr, dtype=np.int64).reshape(-1)
+    if arr.size != int(expected_size):
+        raise ValueError(
+            "unit_count size mismatch: "
+            f"got {int(arr.size)}, expected {int(expected_size)}"
+        )
+    return arr
+
+
+def _resolve_unit_prior_default_mask(bundle: Mapping[str, object], *, expected_size: int) -> np.ndarray | None:
+    default_mask = _coerce_bool_prior_mask(
+        bundle.get("unit_log_prior_is_default", bundle.get("unit_prior_is_default")),
+        expected_size=int(expected_size),
+    )
+    if default_mask is not None:
+        return default_mask
+    min_count = _extract_int_meta(bundle.get("unit_prior_min_count"))
+    if min_count is None:
+        return None
+    counts = _coerce_int_prior_array(
+        bundle.get("unit_count", bundle.get("unit_counts", bundle.get("unit_prior_count"))),
+        expected_size=int(expected_size),
+    )
+    if counts is None:
+        return None
+    return counts < int(min_count)
+
+
+def _resolve_unit_prior_default_value(bundle: Mapping[str, object], prior: np.ndarray) -> float:
+    explicit = _extract_float_meta(bundle.get("global_speech_log_prior"))
+    if explicit is None:
+        explicit = _extract_float_meta(bundle.get("unit_prior_default_value"))
+    if explicit is not None and np.isfinite(explicit):
+        return float(explicit)
+    finite = np.asarray(prior, dtype=np.float32).reshape(-1)
+    finite = finite[np.isfinite(finite)]
+    if finite.size > 0:
+        return float(np.median(finite))
+    return 0.0
+
+
 def _normalize_unit_prior_bundle(
     payload,
     *,
@@ -182,15 +297,62 @@ def _normalize_unit_prior_bundle(
         prior = _coerce_unit_prior_array(prior_value)
         source = _extract_scalar_meta(payload.get("unit_prior_source", default_source))
         version = _extract_scalar_meta(payload.get("unit_prior_version"))
+        min_count = _extract_int_meta(payload.get("unit_prior_min_count"))
+        default_policy = _extract_scalar_meta(payload.get("unit_prior_default_policy", "legacy_prior_median"))
+        default_mask = _resolve_unit_prior_default_mask(
+            payload,
+            expected_size=int(prior.shape[0]),
+        )
+        count_array = _coerce_int_prior_array(
+            payload.get("unit_count", payload.get("unit_counts", payload.get("unit_prior_count"))),
+            expected_size=int(prior.shape[0]),
+        )
     else:
         prior = _coerce_unit_prior_array(payload)
         source = _extract_scalar_meta(default_source)
         version = None
+        min_count = None
+        default_policy = "legacy_prior_median"
+        default_mask = None
+        count_array = None
+    default_value = _resolve_unit_prior_default_value(
+        payload if isinstance(payload, Mapping) else {},
+        prior,
+    )
+    default_count = (
+        None
+        if default_mask is None
+        else int(np.asarray(default_mask, dtype=np.int64).sum())
+    )
+    observed_count = (
+        None
+        if count_array is None
+        else int((np.asarray(count_array, dtype=np.int64) > 0).sum())
+    )
+    low_count_count = (
+        None
+        if count_array is None or min_count is None
+        else int(
+            (
+                (np.asarray(count_array, dtype=np.int64) > 0)
+                & (np.asarray(count_array, dtype=np.int64) < int(min_count))
+            ).sum()
+        )
+    )
     return {
         "unit_log_prior": prior.astype(np.float32, copy=False),
+        "unit_count": count_array,
         "unit_prior_source": source,
         "unit_prior_version": version,
         "unit_prior_vocab_size": int(prior.shape[0]),
+        "global_speech_log_prior": float(default_value),
+        "unit_prior_min_count": min_count,
+        "unit_prior_default_policy": default_policy,
+        "unit_prior_default_value": float(default_value),
+        "unit_log_prior_is_default": default_mask,
+        "unit_prior_default_count": default_count,
+        "unit_prior_observed_count": observed_count,
+        "unit_prior_low_count_count": low_count_count,
     }
 
 
@@ -242,22 +404,63 @@ def attach_unit_log_prior_to_source_cache(
         )
     )
     prior = _coerce_unit_prior_array(bundle["unit_log_prior"])
+    default_value = _resolve_unit_prior_default_value(bundle, prior)
+    default_mask = _resolve_unit_prior_default_mask(
+        bundle,
+        expected_size=int(prior.shape[0]),
+    )
+    count_array = _coerce_int_prior_array(
+        bundle.get("unit_count", bundle.get("unit_counts", bundle.get("unit_prior_count"))),
+        expected_size=int(prior.shape[0]),
+    )
     content_units = np.asarray(cache["content_units"], dtype=np.int64).reshape(-1)
     if content_units.size <= 0:
         cache["unit_log_prior"] = np.zeros((0,), dtype=np.float32)
+        cache["unit_log_prior_is_default"] = np.zeros((0,), dtype=np.int64)
+        out_of_vocab_count = 0
     else:
-        max_unit = int(content_units.max())
-        if max_unit >= int(prior.shape[0]):
-            raise ValueError(
-                "unit_log_prior vocabulary is smaller than the cached content unit ids: "
-                f"max_unit={max_unit}, vocab_size={int(prior.shape[0])}"
-            )
-        cache["unit_log_prior"] = prior[content_units].astype(np.float32, copy=False)
+        in_vocab = (content_units >= 0) & (content_units < int(prior.shape[0]))
+        mapped = np.full((content_units.shape[0],), float(default_value), dtype=np.float32)
+        default_flags = np.ones((content_units.shape[0],), dtype=np.int64)
+        if bool(in_vocab.any()):
+            mapped[in_vocab] = prior[content_units[in_vocab]].astype(np.float32, copy=False)
+            if default_mask is None:
+                default_flags[in_vocab] = 0
+            else:
+                default_flags[in_vocab] = default_mask[content_units[in_vocab]].astype(np.int64, copy=False)
+        cache["unit_log_prior"] = mapped
+        cache["unit_log_prior_is_default"] = default_flags
+        out_of_vocab_count = int((~in_vocab).sum())
+    default_count = int(np.asarray(cache["unit_log_prior_is_default"], dtype=np.int64).sum())
+    min_count = _extract_int_meta(bundle.get("unit_prior_min_count"))
+    observed_count = (
+        None
+        if count_array is None
+        else int((np.asarray(count_array, dtype=np.int64) > 0).sum())
+    )
+    low_count_count = (
+        None
+        if count_array is None or min_count is None
+        else int(
+            (
+                (np.asarray(count_array, dtype=np.int64) > 0)
+                & (np.asarray(count_array, dtype=np.int64) < int(min_count))
+            ).sum()
+        )
+    )
     cache[UNIT_LOG_PRIOR_META_KEY] = {
         "unit_prior_source": _extract_scalar_meta(bundle.get("unit_prior_source")),
         "unit_prior_version": _extract_scalar_meta(bundle.get("unit_prior_version")),
         "unit_prior_vocab_size": int(prior.shape[0]),
         "unit_prior_path": _extract_scalar_meta(bundle.get("unit_prior_path")),
+        "unit_prior_min_count": (None if min_count is None else int(min_count)),
+        "unit_prior_default_value": float(default_value),
+        "unit_prior_default_policy": _extract_scalar_meta(bundle.get("unit_prior_default_policy", "legacy_prior_median")),
+        "unit_prior_default_count": int(default_count),
+        "unit_prior_observed_count": observed_count,
+        "unit_prior_low_count_count": low_count_count,
+        "unit_prior_unseen_count": int(default_count),
+        "unit_prior_out_of_vocab_count": int(out_of_vocab_count),
     }
     return cache
 
@@ -442,6 +645,7 @@ __all__ = [
     "attach_unit_log_prior_to_source_cache",
     "attach_duration_v3_cache_meta",
     "build_duration_v3_cache_meta",
+    "build_duration_v3_frontend_signature",
     "build_source_phrase_cache",
     "build_source_rhythm_cache",
     "build_source_rhythm_cache_v3",

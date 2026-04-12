@@ -4,7 +4,12 @@ import torch
 
 import pytest
 
-from modules.Conan.rhythm_v3.g_stats import build_global_rate_support_mask, compute_global_rate
+from modules.Conan.rhythm_v3.g_stats import (
+    build_global_rate_support_mask,
+    compute_global_rate,
+    true_median_1d,
+    weighted_median_1d,
+)
 
 
 def test_compute_global_rate_raw_median_ignores_silence_duration_changes():
@@ -81,8 +86,32 @@ def test_compute_global_rate_raw_median_batch_fast_path_matches_expected_support
         variant="raw_median",
     )
 
-    expected = torch.log(torch.tensor([[4.0], [3.0]], dtype=torch.float32))
+    expected = torch.stack(
+        [
+            0.5 * (torch.log(torch.tensor(4.0)) + torch.log(torch.tensor(8.0))),
+            0.5 * (torch.log(torch.tensor(3.0)) + torch.log(torch.tensor(9.0))),
+        ]
+    ).reshape(2, 1)
     assert torch.allclose(g, expected)
+
+
+def test_true_median_uses_average_for_even_support():
+    values = torch.log(torch.tensor([2.0, 8.0], dtype=torch.float32))
+
+    median = true_median_1d(values)
+
+    expected = 0.5 * (torch.log(torch.tensor(2.0)) + torch.log(torch.tensor(8.0)))
+    assert torch.allclose(median, expected)
+
+
+def test_weighted_median_with_unit_weights_matches_raw_true_median():
+    values = torch.log(torch.tensor([2.0, 4.0, 8.0, 16.0], dtype=torch.float32))
+    weights = torch.ones_like(values)
+
+    weighted = weighted_median_1d(values, weights)
+    raw = true_median_1d(values)
+
+    assert torch.allclose(weighted, raw)
 
 
 def test_compute_global_rate_trimmed_mean_batch_fast_path_ignores_trimmed_extrema():
@@ -126,5 +155,71 @@ def test_compute_global_rate_raw_median_batch_fast_path_supports_edge_drop():
         drop_edge_runs=1,
     )
 
-    expected = torch.log(torch.tensor([[4.0], [5.0]], dtype=torch.float32))
+    expected = torch.stack(
+        [
+            0.5 * (torch.log(torch.tensor(4.0)) + torch.log(torch.tensor(8.0))),
+            0.5 * (torch.log(torch.tensor(5.0)) + torch.log(torch.tensor(7.0))),
+        ]
+    ).reshape(2, 1)
     assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_unit_norm_accepts_default_filled_run_prior():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[1, 99]], dtype=torch.long)
+    run_prior = torch.log(torch.tensor([[2.0, 4.0]], dtype=torch.float32))
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        unit_ids=unit_ids,
+        unit_prior=run_prior,
+        variant="unit_norm",
+    )
+
+    expected = torch.log(torch.tensor([[2.0]], dtype=torch.float32))
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_unit_norm_uses_default_for_oov_vocab_prior():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[1, 99]], dtype=torch.long)
+    unit_prior = torch.log(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32))
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        unit_ids=unit_ids,
+        unit_prior=unit_prior,
+        unit_prior_default_value=float(torch.log(torch.tensor(4.0)).item()),
+        variant="unit_norm",
+    )
+
+    expected = true_median_1d(
+        torch.tensor(
+            [
+                torch.log(torch.tensor(4.0)) - torch.log(torch.tensor(2.0)),
+                torch.log(torch.tensor(8.0)) - torch.log(torch.tensor(4.0)),
+            ],
+            dtype=torch.float32,
+        )
+    ).reshape(1, 1)
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_unit_norm_rejects_oov_vocab_prior_without_default():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[1, 99]], dtype=torch.long)
+    unit_prior = torch.log(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32))
+
+    with pytest.raises(ValueError, match="unit_prior_default_value"):
+        compute_global_rate(
+            log_dur=log_dur,
+            speech_mask=speech_mask,
+            unit_ids=unit_ids,
+            unit_prior=unit_prior,
+            variant="unit_norm",
+        )

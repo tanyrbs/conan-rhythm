@@ -240,41 +240,26 @@ class StreamingDurationProjector(nn.Module):
                     phrase_final_mask=phrase_final_mask,
                 )
             )
-            row_projected = row_exec.new_empty(row_exec.shape)
-            row_boundary_hit = row_exec.new_zeros(row_exec.shape)
-            row_boundary_decay = row_exec.new_zeros(row_exec.shape)
-            for offset in range(int(row_exec.shape[0])):
-                exec_value = float(row_exec[offset].item())
-                source_count = int(max(0, int(row_source_rounded[offset].item())))
-                is_speech = bool(row_speech[offset].item())
-                is_coarse_only = bool(
-                    isinstance(row_coarse, torch.Tensor) and bool(row_coarse[offset].item())
-                )
-                if (not is_speech) and (not is_coarse_only):
-                    row_projected[offset] = float(source_count)
-                    continue
-                total = max(0.0, float(exec_value) + carry)
-                frames = float(math.floor(total + 0.5))
-                frames = max(1.0, frames)
-                anchor = max(1, source_count)
-                lower = max(1, int(math.ceil(float(anchor - (row_budget_neg + prefix_offset)))))
-                upper = max(lower, int(math.floor(float(anchor + (row_budget_pos - prefix_offset)))))
-                frames = float(min(max(int(frames), lower), upper))
-                row_projected[offset] = frames
-                prefix_offset += float(frames) - float(anchor)
-                carry = total - frames
-                boundary_event = False
-                if isinstance(row_boundary, torch.Tensor) and float(row_boundary[offset].item()) >= float(boundary_reset_thresh):
-                    boundary_event = True
-                if isinstance(row_phrase_final, torch.Tensor) and bool(row_phrase_final[offset].item()):
-                    boundary_event = True
-                if boundary_event:
-                    row_boundary_hit[offset] = 1.0
-                    if float(boundary_carry_decay) < (1.0 - 1.0e-6):
-                        carry = float(carry) * float(boundary_carry_decay)
-                        prefix_offset = float(prefix_offset) * float(boundary_carry_decay)
-                        prefix_offset = max(-float(row_budget_neg), min(float(row_budget_pos), float(prefix_offset)))
-                        row_boundary_decay[offset] = 1.0
+            (
+                row_projected,
+                row_boundary_hit,
+                row_boundary_decay,
+                carry,
+                prefix_offset,
+            ) = StreamingDurationProjector._project_row_python(
+                row_exec=row_exec,
+                row_source_rounded=row_source_rounded,
+                row_speech=row_speech,
+                row_coarse=row_coarse,
+                row_boundary=row_boundary,
+                row_phrase_final=row_phrase_final,
+                carry=carry,
+                prefix_offset=prefix_offset,
+                row_budget_pos=row_budget_pos,
+                row_budget_neg=row_budget_neg,
+                boundary_carry_decay=boundary_carry_decay,
+                boundary_reset_thresh=boundary_reset_thresh,
+            )
             projected[batch_idx, start_unit:row_committed_len] = row_projected.to(
                 device=projected.device,
                 dtype=projected.dtype,
@@ -296,6 +281,82 @@ class StreamingDurationProjector(nn.Module):
             boundary_hit,
             boundary_decay_applied,
         )
+
+    @staticmethod
+    def _project_row_python(
+        *,
+        row_exec: torch.Tensor,
+        row_source_rounded: torch.Tensor,
+        row_speech: torch.Tensor,
+        row_coarse: torch.Tensor | None,
+        row_boundary: torch.Tensor | None,
+        row_phrase_final: torch.Tensor | None,
+        carry: float,
+        prefix_offset: float,
+        row_budget_pos: int,
+        row_budget_neg: int,
+        boundary_carry_decay: float,
+        boundary_reset_thresh: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, float]:
+        exec_values = [float(value) for value in row_exec.tolist()]
+        source_values = [max(0, int(value)) for value in row_source_rounded.tolist()]
+        speech_values = [bool(value) for value in row_speech.tolist()]
+        coarse_values = (
+            [bool(value) for value in row_coarse.tolist()] if isinstance(row_coarse, torch.Tensor) else None
+        )
+        boundary_values = (
+            [float(value) for value in row_boundary.tolist()] if isinstance(row_boundary, torch.Tensor) else None
+        )
+        phrase_final_values = (
+            [bool(value) for value in row_phrase_final.tolist()] if isinstance(row_phrase_final, torch.Tensor) else None
+        )
+
+        projected_values: list[float] = []
+        boundary_hit_values: list[float] = []
+        boundary_decay_values: list[float] = []
+        for offset, exec_value in enumerate(exec_values):
+            source_count = source_values[offset]
+            is_speech = speech_values[offset]
+            is_coarse_only = bool(coarse_values is not None and coarse_values[offset])
+            if (not is_speech) and (not is_coarse_only):
+                projected_values.append(float(source_count))
+                boundary_hit_values.append(0.0)
+                boundary_decay_values.append(0.0)
+                continue
+
+            total = max(0.0, float(exec_value) + carry)
+            frames = float(math.floor(total + 0.5))
+            frames = max(1.0, frames)
+            anchor = max(1, source_count)
+            lower = max(1, int(math.ceil(float(anchor - (row_budget_neg + prefix_offset)))))
+            upper = max(lower, int(math.floor(float(anchor + (row_budget_pos - prefix_offset)))))
+            frames = float(min(max(int(frames), lower), upper))
+            projected_values.append(frames)
+            prefix_offset += float(frames) - float(anchor)
+            carry = total - frames
+
+            boundary_event = False
+            if boundary_values is not None and boundary_values[offset] >= float(boundary_reset_thresh):
+                boundary_event = True
+            if phrase_final_values is not None and phrase_final_values[offset]:
+                boundary_event = True
+            if boundary_event:
+                boundary_hit_values.append(1.0)
+                if float(boundary_carry_decay) < (1.0 - 1.0e-6):
+                    carry = float(carry) * float(boundary_carry_decay)
+                    prefix_offset = float(prefix_offset) * float(boundary_carry_decay)
+                    prefix_offset = max(-float(row_budget_neg), min(float(row_budget_pos), float(prefix_offset)))
+                    boundary_decay_values.append(1.0)
+                else:
+                    boundary_decay_values.append(0.0)
+            else:
+                boundary_hit_values.append(0.0)
+                boundary_decay_values.append(0.0)
+
+        row_projected = torch.as_tensor(projected_values, dtype=row_exec.dtype, device=row_exec.device)
+        row_boundary_hit = torch.as_tensor(boundary_hit_values, dtype=row_exec.dtype, device=row_exec.device)
+        row_boundary_decay = torch.as_tensor(boundary_decay_values, dtype=row_exec.dtype, device=row_exec.device)
+        return row_projected, row_boundary_hit, row_boundary_decay, float(carry), float(prefix_offset)
 
     @staticmethod
     def _extract_projection_row_torch(
@@ -425,7 +486,9 @@ class StreamingDurationProjector(nn.Module):
         coarse_logstretch: torch.Tensor | None = None,
         coarse_path_logstretch: torch.Tensor | None = None,
         coarse_correction: torch.Tensor | None = None,
+        coarse_correction_pred: torch.Tensor | None = None,
         local_residual: torch.Tensor | None = None,
+        local_residual_pred: torch.Tensor | None = None,
         speech_pred: torch.Tensor | None = None,
         silence_pred: torch.Tensor | None = None,
         source_rate_seq: torch.Tensor | None = None,
@@ -531,7 +594,13 @@ class StreamingDurationProjector(nn.Module):
             coarse_logstretch=coarse_logstretch,
             coarse_path_logstretch=coarse_path_logstretch if coarse_path_logstretch is not None else coarse_logstretch,
             coarse_correction=coarse_correction,
+            coarse_correction_pred=(
+                coarse_correction_pred if coarse_correction_pred is not None else coarse_correction
+            ),
             local_residual=local_residual,
+            local_residual_pred=(
+                local_residual_pred if local_residual_pred is not None else local_residual
+            ),
             speech_pred=speech_pred,
             silence_pred=silence_pred,
             source_rate_seq=source_rate_seq,

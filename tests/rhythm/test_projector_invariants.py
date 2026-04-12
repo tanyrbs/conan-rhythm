@@ -28,6 +28,9 @@ from modules.Conan.rhythm.projector import (
     _project_pause_simple_impl,
     _resolve_allocation_mask,
 )
+from modules.Conan.rhythm_v3.projector import (
+    StreamingDurationProjector as StreamingDurationV3Projector,
+)
 from modules.Conan.rhythm.scheduler import MonotonicRhythmScheduler
 
 
@@ -38,6 +41,35 @@ class _ChunkStateHeadStub(nn.Module):
 
     def forward(self, *args, **kwargs) -> ChunkStateBundle:
         return self._chunk_state
+
+
+class DurationV3ProjectorHotPathTests(unittest.TestCase):
+    def test_duration_v3_prefix_projection_keeps_carry_budget_and_boundary_semantics(self):
+        projected, residual, prefix_offset, boundary_hit, boundary_decay = (
+            StreamingDurationV3Projector._project_duration_prefix(
+                unit_duration_exec=torch.tensor([[2.6, 0.2, 4.7, 3.6]], dtype=torch.float32),
+                source_duration_obs=torch.tensor([[2.0, 5.0, 4.0, 3.0]], dtype=torch.float32),
+                commit_mask=torch.ones((1, 4), dtype=torch.float32),
+                speech_commit_mask=torch.tensor([[1.0, 0.0, 0.0, 1.0]], dtype=torch.float32),
+                coarse_only_commit_mask=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
+                source_boundary_cue=torch.tensor([[0.0, 0.0, 0.7, 0.0]], dtype=torch.float32),
+                phrase_final_mask=torch.zeros((1, 4), dtype=torch.float32),
+                residual_prev=torch.tensor([[0.4]], dtype=torch.float32),
+                prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+                committed_units_prev=None,
+                cached_duration_exec_prev=None,
+                budget_pos=1,
+                budget_neg=1,
+                boundary_carry_decay=0.5,
+                boundary_reset_thresh=0.5,
+            )
+        )
+
+        assert torch.allclose(projected, torch.tensor([[3.0, 5.0, 4.0, 3.0]], dtype=torch.float32))
+        assert torch.allclose(residual, torch.tensor([[0.95]], dtype=torch.float32))
+        assert torch.allclose(prefix_offset, torch.tensor([[0.5]], dtype=torch.float32))
+        assert torch.allclose(boundary_hit, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
+        assert torch.allclose(boundary_decay, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
 
 
 class ProjectorInvariantTests(unittest.TestCase):

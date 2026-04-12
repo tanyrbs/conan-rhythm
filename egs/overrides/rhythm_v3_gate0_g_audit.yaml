@@ -1,0 +1,11 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Gate 0: static g audit on the maintained runtime surface.
+# Keep the mainline config, but hard-freeze the analysis knobs here instead of
+# relying on manual comment edits in the parent YAML.
+rhythm_v3_eval_mode: analytic
+rhythm_v3_disable_local_residual: true
+rhythm_v3_disable_coarse_bias: true
+lambda_rhythm_bias: 0.0
+lambda_rhythm_pref: 0.0
+lambda_rhythm_cons: 0.0

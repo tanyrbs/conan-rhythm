@@ -6,6 +6,7 @@ import torch
 from modules.Conan.rhythm_v3.minimal_head import MinimalStreamingDurationHeadV1G
 from modules.Conan.rhythm_v3.projector import StreamingDurationProjector
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
+from modules.Conan.rhythm_v3.summary_memory import StreamingDurationHead
 from modules.Conan.rhythm_v3.unitizer import build_compressed_sequence
 from tasks.Conan.rhythm.common.targets_impl import _build_duration_v3_silence_tau
 
@@ -285,6 +286,46 @@ def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
     assert torch.allclose(output["unit_analytic_logstretch"], expected)
     assert torch.allclose(output["unit_coarse_path_logstretch"], expected)
     assert torch.allclose(output["unit_logstretch"], expected)
+    assert torch.allclose(output["unit_global_term_before_local"], expected)
+    assert torch.allclose(output["unit_residual_gate"], torch.zeros((1, 2), dtype=torch.float32))
+    assert output["unit_silence_tau_surface_kind"] == "constant_clip"
+    assert torch.allclose(output["unit_boundary_shaping"], torch.zeros((1, 2), dtype=torch.float32))
+    assert torch.allclose(output["unit_leading_gate"], torch.ones((1, 2), dtype=torch.float32))
+
+
+def test_rhythm_v3_streaming_head_exports_boundary_aware_silence_debug_surface():
+    head = StreamingDurationHead(
+        vocab_size=32,
+        dim=16,
+        num_slots=2,
+        short_gap_silence_scale=0.25,
+        leading_silence_scale=0.4,
+        disable_coarse_bias=True,
+        disable_local_residual=True,
+        eval_mode="analytic",
+    )
+    output = head(
+        content_units=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        log_anchor=torch.log(torch.tensor([[2.0, 2.0, 8.0]], dtype=torch.float32)),
+        log_base=None,
+        unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        sealed_mask=torch.ones((1, 3), dtype=torch.float32),
+        sep_hint=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
+        edge_cue=torch.zeros((1, 3), dtype=torch.float32),
+        global_rate=torch.zeros((1, 1), dtype=torch.float32),
+        summary_state=torch.zeros((1, 16), dtype=torch.float32),
+        spk_embed=torch.zeros((1, 16), dtype=torch.float32),
+        role_value=None,
+        role_var=None,
+        role_coverage=None,
+        local_rate_ema=torch.zeros((1, 1), dtype=torch.float32),
+        silence_mask=torch.tensor([[0.0, 1.0, 1.0]], dtype=torch.float32),
+        run_stability=torch.ones((1, 3), dtype=torch.float32),
+    )
+    assert output["unit_silence_tau_surface_kind"] == "boundary_aware_clip"
+    assert torch.allclose(output["unit_leading_gate"], torch.tensor([[0.4, 1.0, 1.0]], dtype=torch.float32))
+    assert float(output["unit_boundary_shaping"][0, 2]) > float(output["unit_boundary_shaping"][0, 1])
+    assert torch.allclose(output["unit_global_term_before_local"], output["unit_coarse_path_logstretch"])
 
 
 def test_rhythm_v3_minimal_prompt_summary_uses_global_only_prompt_memory():

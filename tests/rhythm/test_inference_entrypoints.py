@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from inference import Conan as conan_module
 from inference.Conan import StreamingVoiceConversion
 
 
@@ -142,3 +143,69 @@ def test_streaming_inference_runtime_summary_helpers_report_prefix_budget_and_bo
     decay_rate = StreamingVoiceConversion._summarize_boundary_decay_applied_rate(boundary_decay)
     assert p95 == pytest.approx(float(torch.quantile(prefix_offset.abs().reshape(-1), 0.95).item()))
     assert decay_rate == pytest.approx(0.5)
+
+
+def test_streaming_inference_prompt_global_weight_rejects_shape_mismatch_by_default():
+    with pytest.raises(RuntimeError, match="prompt_run_stability shape mismatch"):
+        StreamingVoiceConversion._build_prompt_global_weight(
+            prompt_speech_mask=torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+            prompt_run_stability=torch.tensor([[1.0, 0.2]], dtype=torch.float32),
+        )
+
+
+def test_streaming_inference_prompt_global_weight_can_repair_shape_when_enabled():
+    weight = StreamingVoiceConversion._build_prompt_global_weight(
+        prompt_speech_mask=torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+        prompt_run_stability=torch.tensor([[1.0, 0.2]], dtype=torch.float32),
+        allow_shape_repair=True,
+    )
+    assert torch.allclose(weight, torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32))
+
+
+def test_streaming_inference_frontend_signature_includes_global_stat_knobs(monkeypatch):
+    monkeypatch.setattr(StreamingVoiceConversion, "_build_model", lambda self: object())
+    monkeypatch.setattr(
+        StreamingVoiceConversion,
+        "_build_vocoder",
+        lambda self: SimpleNamespace(supports_native_streaming=lambda: False),
+    )
+    monkeypatch.setattr(StreamingVoiceConversion, "_build_emformer", lambda self: object())
+    monkeypatch.setattr(StreamingVoiceConversion, "_vocoder_warm_zero", lambda self: None)
+    monkeypatch.setattr(conan_module, "resolve_vocoder_left_context_frames", lambda hp: (0, "none"))
+    monkeypatch.setattr(
+        conan_module,
+        "build_streaming_layout_report",
+        lambda *args, **kwargs: SimpleNamespace(to_metadata=lambda: {}),
+    )
+    monkeypatch.setattr(conan_module, "build_streaming_latency_report", lambda *args, **kwargs: {})
+
+    base_hparams = {
+        "work_dir": str(ROOT),
+        "vocoder": "dummy",
+        "chunk_size": 160,
+        "silent_token": 57,
+        "rhythm_separator_aware": True,
+        "rhythm_tail_open_units": 1,
+        "rhythm_v3_emit_silence_runs": True,
+        "rhythm_v3_debounce_min_run_frames": 2,
+        "rhythm_source_phrase_threshold": 0.55,
+        "rhythm_v3_summary_pool_speech_only": True,
+    }
+    raw = StreamingVoiceConversion(
+        {
+            **base_hparams,
+            "rhythm_v3_g_variant": "raw_median",
+            "rhythm_v3_drop_edge_runs_for_g": 0,
+            "rhythm_v3_unit_prior_path": None,
+        }
+    )
+    unit_norm = StreamingVoiceConversion(
+        {
+            **base_hparams,
+            "rhythm_v3_g_variant": "unit_norm",
+            "rhythm_v3_drop_edge_runs_for_g": 1,
+            "rhythm_v3_unit_prior_path": str(ROOT / "tests" / "rhythm" / "fixtures" / "unit_prior_demo.npz"),
+            "rhythm_v3_summary_pool_speech_only": False,
+        }
+    )
+    assert raw.rhythm_v3_frontend_signature != unit_norm.rhythm_v3_frontend_signature

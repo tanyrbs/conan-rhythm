@@ -6,6 +6,7 @@ import torch
 
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from tasks.Conan.rhythm.duration_v3.metrics import (
+    monotonic_triplet_table,
     tempo_explainability,
     tempo_monotonicity,
     tempo_tie_rate,
@@ -391,9 +392,98 @@ def test_tempo_monotonicity_supports_margin_threshold():
     assert torch.allclose(margin, torch.tensor(0.5))
 
 
+def test_tempo_monotonicity_supports_direction_for_duration_like_metrics():
+    slow = torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+    mid = torch.tensor([2.0, 2.7, 2.8], dtype=torch.float32)
+    fast = torch.tensor([1.0, 2.6, 3.1], dtype=torch.float32)
+
+    increasing = tempo_monotonicity(slow, mid, fast, increasing=True)
+    decreasing = tempo_monotonicity(slow, mid, fast, increasing=False)
+    decreasing_margin = tempo_monotonicity(slow, mid, fast, margin=0.2, increasing=False)
+
+    assert torch.allclose(increasing, torch.tensor(0.0))
+    assert torch.allclose(decreasing, torch.tensor(2.0 / 3.0))
+    assert torch.allclose(decreasing_margin, torch.tensor(1.0 / 3.0))
+
+
+def test_monotonic_triplet_table_supports_direction():
+    sample_ids = ["a", "b", "c"]
+    slow = torch.tensor([1.0, 3.0, 3.0], dtype=torch.float32)
+    mid = torch.tensor([2.0, 2.0, 2.8], dtype=torch.float32)
+    fast = torch.tensor([3.0, 1.0, 3.1], dtype=torch.float32)
+
+    inc = monotonic_triplet_table(sample_ids, slow, mid, fast, increasing=True)
+    dec = monotonic_triplet_table(sample_ids, slow, mid, fast, increasing=False)
+
+    assert inc["sample_id"] == sample_ids
+    assert inc["mono_ok"] == [1.0, 0.0, 0.0]
+    assert dec["mono_ok"] == [0.0, 1.0, 0.0]
+    assert inc["valid"] == [1.0, 1.0, 1.0]
+
+
 def test_tempo_tie_rate_counts_near_ties_without_marking_all_invalid():
     slow = torch.tensor([1.0, 1.0, float("nan")], dtype=torch.float32)
     mid = torch.tensor([1.0, 1.2, 1.5], dtype=torch.float32)
     fast = torch.tensor([1.4, 1.2 + 5.0e-5, 1.8], dtype=torch.float32)
     tie_rate = tempo_tie_rate(slow, mid, fast, atol=1.0e-4)
     assert torch.allclose(tie_rate, torch.tensor(1.0))
+
+
+def test_monotonic_triplet_table_supports_margin_for_decreasing_duration_like_metrics():
+    sample_ids = ["a", "b", "c"]
+    slow = torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+    mid = torch.tensor([2.9, 2.7, 2.0], dtype=torch.float32)
+    fast = torch.tensor([2.8, 2.6, 1.0], dtype=torch.float32)
+
+    table = monotonic_triplet_table(
+        sample_ids,
+        slow,
+        mid,
+        fast,
+        increasing=False,
+        margin=0.2,
+    )
+
+    assert table["mono_ok_strict"] == [1.0, 1.0, 1.0]
+    assert table["mono_ok_margin"] == [0.0, 0.0, 1.0]
+
+
+def test_monotonic_triplet_table_reports_ties_and_validity():
+    sample_ids = ["a", "b", "c"]
+    slow = torch.tensor([1.0, 1.0, float("nan")], dtype=torch.float32)
+    mid = torch.tensor([1.0, 1.2, 1.5], dtype=torch.float32)
+    fast = torch.tensor([1.4, 1.20005, 1.8], dtype=torch.float32)
+
+    table = monotonic_triplet_table(
+        sample_ids,
+        slow,
+        mid,
+        fast,
+        increasing=True,
+        tie_atol=1.0e-4,
+    )
+
+    assert table["valid"] == [1.0, 1.0, 0.0]
+    assert table["tie_sm"] == [1.0, 0.0, 0.0]
+    assert table["tie_mf"] == [0.0, 1.0, 0.0]
+    assert table["tie_any"] == [1.0, 1.0, 0.0]
+
+
+def test_tempo_monotonicity_returns_nan_when_no_valid_triplets():
+    slow = torch.tensor([float("nan")], dtype=torch.float32)
+    mid = torch.tensor([1.0], dtype=torch.float32)
+    fast = torch.tensor([2.0], dtype=torch.float32)
+
+    value = tempo_monotonicity(slow, mid, fast)
+
+    assert torch.isnan(value)
+
+
+def test_tempo_tie_rate_respects_atol_boundary():
+    slow = torch.tensor([1.0], dtype=torch.float32)
+    mid = torch.tensor([1.0002], dtype=torch.float32)
+    fast = torch.tensor([1.5], dtype=torch.float32)
+
+    tie_rate = tempo_tie_rate(slow, mid, fast, atol=1.0e-4)
+
+    assert torch.allclose(tie_rate, torch.tensor(0.0))

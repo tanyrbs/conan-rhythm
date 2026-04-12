@@ -20,6 +20,29 @@ from tasks.Conan.rhythm.duration_v3.alignment_projection import (
 from tasks.Conan.rhythm.duration_v3.targets import build_pseudo_source_duration_context
 from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 
+_ALIGNMENT_KIND_DISCRETE = "discrete"
+_ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED = "continuous_precomputed"
+_ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1 = "continuous_viterbi_v1"
+_ALIGNMENT_MODE_ID_CONTINUOUS_PRECOMPUTED = 1
+_ALIGNMENT_MODE_ID_CONTINUOUS_VITERBI_V1 = 2
+_PROMPT_WEIGHT_REPAIR_FLAG = "rhythm_v3_allow_prompt_weight_shape_repair"
+_ALIGNMENT_PROVENANCE_FLOAT_KEYS = (
+    "unit_alignment_band_ratio_tgt",
+    "unit_alignment_lambda_emb_tgt",
+    "unit_alignment_lambda_type_tgt",
+    "unit_alignment_lambda_band_tgt",
+    "unit_alignment_lambda_unit_tgt",
+    "unit_alignment_bad_cost_threshold_tgt",
+)
+_ALIGNMENT_PROVENANCE_VITERBI_DEFAULTS = {
+    "unit_alignment_band_ratio_tgt": 0.08,
+    "unit_alignment_lambda_emb_tgt": 1.0,
+    "unit_alignment_lambda_type_tgt": 0.5,
+    "unit_alignment_lambda_band_tgt": 0.2,
+    "unit_alignment_lambda_unit_tgt": 0.0,
+    "unit_alignment_bad_cost_threshold_tgt": 1.2,
+}
+
 
 def _extract_object_scalar(value):
     if value is None:
@@ -57,9 +80,26 @@ class DurationV3DatasetMixin:
             resolved_mode_id = int(_extract_object_scalar(mode_id)) if mode_id is not None else None
         except Exception:
             resolved_mode_id = None
-        if resolved_mode_id == 1:
-            return "continuous_precomputed"
-        return "discrete"
+        if resolved_mode_id == _ALIGNMENT_MODE_ID_CONTINUOUS_PRECOMPUTED:
+            return _ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED
+        if resolved_mode_id == _ALIGNMENT_MODE_ID_CONTINUOUS_VITERBI_V1:
+            return _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1
+        return _ALIGNMENT_KIND_DISCRETE
+
+    @staticmethod
+    def _extract_optional_float_scalar(value) -> float | None:
+        scalar = _extract_object_scalar(value)
+        if scalar is None:
+            return None
+        if isinstance(scalar, str) and scalar.strip() == "":
+            return None
+        try:
+            return float(scalar)
+        except Exception:
+            return None
+
+    def _allow_prompt_weight_shape_repair(self) -> bool:
+        return bool(self.hparams.get(_PROMPT_WEIGHT_REPAIR_FLAG, False))
 
     def _resolve_duration_v3_unit_prior_path(self) -> str | None:
         path = self.hparams.get("rhythm_v3_unit_prior_path")
@@ -84,6 +124,7 @@ class DurationV3DatasetMixin:
         *,
         prompt_speech_mask: np.ndarray,
         run_stability,
+        allow_shape_repair: bool = False,
     ) -> np.ndarray:
         speech = np.asarray(prompt_speech_mask, dtype=np.float32)
         stability = (
@@ -92,9 +133,15 @@ class DurationV3DatasetMixin:
             else np.asarray(run_stability, dtype=np.float32)
         )
         if stability.shape != speech.shape:
+            if not bool(allow_shape_repair):
+                raise RuntimeError(
+                    "prompt_run_stability shape mismatch: "
+                    f"{tuple(stability.shape)} vs {tuple(speech.shape)}. "
+                    f"Set {_PROMPT_WEIGHT_REPAIR_FLAG}=true only for explicit debug repair."
+                )
             resized = np.ones_like(speech, dtype=np.float32)
-            limit = min(int(resized.shape[0]), int(stability.reshape(-1).shape[0]))
-            resized[:limit] = stability.reshape(-1)[:limit]
+            limit = min(int(resized.size), int(stability.reshape(-1).shape[0]))
+            resized.reshape(-1)[:limit] = stability.reshape(-1)[:limit]
             stability = resized
         stability = stability.clip(0.0, 1.0)
         return (speech * (0.25 + (0.75 * stability))).astype(np.float32)
@@ -105,6 +152,7 @@ class DurationV3DatasetMixin:
         conditioning["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             run_stability=source_cache.get("source_run_stability"),
+            allow_shape_repair=self._allow_prompt_weight_shape_repair(),
         )
         conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
         conditioning["g_trim_ratio"] = np.asarray(
@@ -427,11 +475,6 @@ class DurationV3DatasetMixin:
             alignment_kind = paired_target_conditioning.get("paired_target_alignment_mode")
         if alignment_kind is None:
             alignment_kind = paired_target_conditioning.get("unit_alignment_kind_tgt")
-        normalized_kind = (
-            str(_extract_object_scalar(alignment_kind) or "").strip().lower()
-            if alignment_kind is not None
-            else ""
-        )
         alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_mode_id")
         if alignment_mode_id is None:
             alignment_mode_id = paired_target_conditioning.get("paired_target_alignment_kind_id")
@@ -451,14 +494,16 @@ class DurationV3DatasetMixin:
             normalized_mode_id = int(_extract_object_scalar(alignment_mode_id)) if alignment_mode_id is not None else None
         except Exception:
             normalized_mode_id = None
-        is_continuous_kind = bool(normalized_kind) and normalized_kind.startswith("continuous")
-        if not is_continuous_kind and normalized_mode_id != 1:
+        resolved_kind = DurationV3DatasetMixin._normalize_alignment_kind_export(
+            alignment_kind,
+            mode_id=normalized_mode_id,
+        )
+        if not resolved_kind.startswith("continuous"):
             return None
         normalized_source = str(_extract_object_scalar(alignment_source) or "").strip()
         normalized_version = str(_extract_object_scalar(alignment_version) or "").strip()
         if not normalized_source or not normalized_version:
             return None
-        resolved_kind = normalized_kind if is_continuous_kind else "continuous_precomputed"
         return {
             "assigned_source": _as_int64_1d(assigned_source) if assigned_source is not None else None,
             "assigned_cost": _as_float32_1d(assigned_cost) if assigned_cost is not None else None,
@@ -466,6 +511,85 @@ class DurationV3DatasetMixin:
             "alignment_source": normalized_source,
             "alignment_version": normalized_version,
         }
+
+    @staticmethod
+    def _build_alignment_provenance_exports(
+        *,
+        alignment_kind: str,
+        projection: dict | None = None,
+        paired_target_conditioning: dict | None = None,
+    ) -> dict[str, np.ndarray]:
+        projection = projection if isinstance(projection, dict) else {}
+        paired_target_conditioning = (
+            paired_target_conditioning if isinstance(paired_target_conditioning, dict) else {}
+        )
+        defaults = (
+            _ALIGNMENT_PROVENANCE_VITERBI_DEFAULTS
+            if alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1
+            else {}
+        )
+        float_aliases = {
+            "unit_alignment_band_ratio_tgt": (
+                "alignment_band_ratio",
+                "paired_target_alignment_band_ratio",
+                "unit_alignment_band_ratio_tgt",
+            ),
+            "unit_alignment_lambda_emb_tgt": (
+                "alignment_lambda_emb",
+                "paired_target_alignment_lambda_emb",
+                "unit_alignment_lambda_emb_tgt",
+            ),
+            "unit_alignment_lambda_type_tgt": (
+                "alignment_lambda_type",
+                "paired_target_alignment_lambda_type",
+                "unit_alignment_lambda_type_tgt",
+            ),
+            "unit_alignment_lambda_band_tgt": (
+                "alignment_lambda_band",
+                "paired_target_alignment_lambda_band",
+                "unit_alignment_lambda_band_tgt",
+            ),
+            "unit_alignment_lambda_unit_tgt": (
+                "alignment_lambda_unit",
+                "paired_target_alignment_lambda_unit",
+                "unit_alignment_lambda_unit_tgt",
+            ),
+            "unit_alignment_bad_cost_threshold_tgt": (
+                "alignment_bad_cost_threshold",
+                "paired_target_alignment_bad_cost_threshold",
+                "unit_alignment_bad_cost_threshold_tgt",
+            ),
+        }
+        exports: dict[str, np.ndarray] = {}
+        for export_key, aliases in float_aliases.items():
+            value = None
+            for alias in aliases:
+                value = DurationV3DatasetMixin._extract_optional_float_scalar(projection.get(alias))
+                if value is not None:
+                    break
+                value = DurationV3DatasetMixin._extract_optional_float_scalar(
+                    paired_target_conditioning.get(alias)
+                )
+                if value is not None:
+                    break
+            if value is None:
+                value = defaults.get(export_key, np.nan)
+            exports[export_key] = np.asarray([float(value)], dtype=np.float32)
+        return exports
+
+    def _alignment_provenance_optional_keys(self) -> tuple[str, ...]:
+        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS
+
+    def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
+        keys = list(super()._resolve_optional_sample_keys())
+        keys.extend(self._alignment_provenance_optional_keys())
+        return tuple(dict.fromkeys(keys))
+
+    def _build_optional_collate_spec(self) -> dict[str, tuple[str, float | int | None]]:
+        spec = dict(super()._build_optional_collate_spec())
+        for key in self._alignment_provenance_optional_keys():
+            spec[key] = ("float", 0.0)
+        return spec
 
     @staticmethod
     def _maybe_extract_frame_sidecar(item, *keys: str, dtype=None):
@@ -575,6 +699,24 @@ class DurationV3DatasetMixin:
             ("paired_target_alignment_version", "paired_target_alignment_version"),
             ("alignment_version", "paired_target_alignment_version"),
             ("unit_alignment_version_tgt", "paired_target_alignment_version"),
+            ("paired_target_alignment_band_ratio", "paired_target_alignment_band_ratio"),
+            ("alignment_band_ratio", "paired_target_alignment_band_ratio"),
+            ("unit_alignment_band_ratio_tgt", "paired_target_alignment_band_ratio"),
+            ("paired_target_alignment_lambda_emb", "paired_target_alignment_lambda_emb"),
+            ("alignment_lambda_emb", "paired_target_alignment_lambda_emb"),
+            ("unit_alignment_lambda_emb_tgt", "paired_target_alignment_lambda_emb"),
+            ("paired_target_alignment_lambda_type", "paired_target_alignment_lambda_type"),
+            ("alignment_lambda_type", "paired_target_alignment_lambda_type"),
+            ("unit_alignment_lambda_type_tgt", "paired_target_alignment_lambda_type"),
+            ("paired_target_alignment_lambda_band", "paired_target_alignment_lambda_band"),
+            ("alignment_lambda_band", "paired_target_alignment_lambda_band"),
+            ("unit_alignment_lambda_band_tgt", "paired_target_alignment_lambda_band"),
+            ("paired_target_alignment_lambda_unit", "paired_target_alignment_lambda_unit"),
+            ("alignment_lambda_unit", "paired_target_alignment_lambda_unit"),
+            ("unit_alignment_lambda_unit_tgt", "paired_target_alignment_lambda_unit"),
+            ("paired_target_alignment_bad_cost_threshold", "paired_target_alignment_bad_cost_threshold"),
+            ("alignment_bad_cost_threshold", "paired_target_alignment_bad_cost_threshold"),
+            ("unit_alignment_bad_cost_threshold_tgt", "paired_target_alignment_bad_cost_threshold"),
             ("paired_target_alignment_assigned_source", "paired_target_alignment_assigned_source"),
             ("paired_target_assigned_source", "paired_target_alignment_assigned_source"),
             ("unit_alignment_assigned_source_debug", "paired_target_alignment_assigned_source"),
@@ -672,6 +814,45 @@ class DurationV3DatasetMixin:
         target_frame_weight = paired_target_conditioning.get("paired_target_frame_weight")
         target_frame_valid = paired_target_conditioning.get("paired_target_frame_valid")
         target_frame_unit_hint = paired_target_conditioning.get("paired_target_frame_unit_hint")
+        use_continuous_alignment = bool(
+            self.hparams.get("rhythm_v3_use_continuous_alignment", False)
+        )
+        configured_alignment_mode_raw = self.hparams.get("rhythm_v3_alignment_mode", None)
+        configured_alignment_mode = (
+            str(_extract_object_scalar(configured_alignment_mode_raw) or "").strip().lower()
+            if configured_alignment_mode_raw is not None
+            else "auto"
+        )
+        if configured_alignment_mode and configured_alignment_mode not in {
+            "auto",
+            _ALIGNMENT_KIND_DISCRETE,
+            _ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED,
+            _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1,
+        }:
+            raise RuntimeError(
+                "Unsupported rhythm_v3_alignment_mode. "
+                f"Expected one of: auto, {_ALIGNMENT_KIND_DISCRETE}, "
+                f"{_ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED}, {_ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1}; "
+                f"got {configured_alignment_mode_raw!r}"
+            )
+        if use_continuous_alignment and configured_alignment_mode == _ALIGNMENT_KIND_DISCRETE:
+            raise RuntimeError(
+                "rhythm_v3_use_continuous_alignment=true requires rhythm_v3_alignment_mode "
+                "to be continuous_precomputed or continuous_viterbi_v1."
+            )
+        continuous_aligner_kwargs = None
+        if use_continuous_alignment and configured_alignment_mode == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1:
+            band_width = self.hparams.get("rhythm_v3_alignment_band_width")
+            continuous_aligner_kwargs = {
+                "lambda_emb": float(self.hparams.get("rhythm_v3_alignment_lambda_emb", 1.0)),
+                "lambda_type": float(self.hparams.get("rhythm_v3_alignment_lambda_type", 0.5)),
+                "lambda_band": float(self.hparams.get("rhythm_v3_alignment_lambda_band", 0.2)),
+                "lambda_unit": float(self.hparams.get("rhythm_v3_alignment_lambda_unit", 0.0)),
+                "band_ratio": float(self.hparams.get("rhythm_v3_alignment_band_ratio", 0.08)),
+                "bad_cost_threshold": float(self.hparams.get("rhythm_v3_alignment_bad_cost_threshold", 1.2)),
+            }
+            if band_width is not None:
+                continuous_aligner_kwargs["band_width"] = int(band_width)
         try:
             projection = _project_target_runs_onto_source(
                 source_units=source_units,
@@ -681,9 +862,7 @@ class DurationV3DatasetMixin:
                 target_durations=target_duration,
                 target_valid_mask=target_valid,
                 target_speech_mask=target_speech,
-                use_continuous_alignment=bool(
-                    self.hparams.get("rhythm_v3_use_continuous_alignment", False)
-                ),
+                use_continuous_alignment=use_continuous_alignment,
                 source_frame_states=source_frame_states,
                 target_frame_states=target_frame_states,
                 source_frame_to_run=source_frame_to_run,
@@ -691,6 +870,8 @@ class DurationV3DatasetMixin:
                 target_frame_weight=target_frame_weight,
                 target_frame_valid=target_frame_valid,
                 target_frame_unit_hint=target_frame_unit_hint,
+                continuous_alignment_mode=configured_alignment_mode,
+                continuous_aligner_kwargs=continuous_aligner_kwargs,
                 precomputed_alignment=precomputed_alignment,
             )
         except Exception as exc:
@@ -711,7 +892,13 @@ class DurationV3DatasetMixin:
                 f"source={source_duration.shape[0]}, projected={projected.shape[0]}, "
                 f"confidence_local={confidence_local.shape[0]}, confidence_coarse={confidence_coarse.shape[0]}"
             )
-        return {
+        alignment_kind = self._normalize_alignment_kind_export(projection.get("alignment_kind", _ALIGNMENT_KIND_DISCRETE))
+        alignment_mode_id = 0
+        if alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED:
+            alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_PRECOMPUTED
+        elif alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1:
+            alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_VITERBI_V1
+        out = {
             "unit_duration_tgt": projected.astype(np.float32),
             "unit_duration_proj_raw_tgt": projected.astype(np.float32),
             "unit_confidence_local_tgt": confidence_local.astype(np.float32),
@@ -733,15 +920,11 @@ class DurationV3DatasetMixin:
                 dtype=np.float32,
             ),
             "unit_alignment_mode_id_tgt": np.asarray(
-                [
-                    1
-                    if str(projection.get("alignment_kind", "discrete")).strip().lower() != "discrete"
-                    else 0
-                ],
+                [alignment_mode_id],
                 dtype=np.int64,
             ),
             "unit_alignment_kind_tgt": np.asarray(
-                [self._normalize_alignment_kind_export(projection.get("alignment_kind", "discrete"))],
+                [alignment_kind],
                 dtype=object,
             ),
             "alignment_source": str(
@@ -772,6 +955,14 @@ class DurationV3DatasetMixin:
                 dtype=object,
             ),
         }
+        out.update(
+            self._build_alignment_provenance_exports(
+                alignment_kind=alignment_kind,
+                projection=projection,
+                paired_target_conditioning=paired_target_conditioning,
+            )
+        )
+        return out
 
     def _merge_duration_v3_rhythm_targets(self, item, source_cache, paired_target_conditioning, sample):
         minimal_v1_profile = self._is_enabled_flag(
@@ -845,6 +1036,19 @@ class DurationV3DatasetMixin:
             out["alignment_version"] = str(_extract_object_scalar(alignment_version_value) or "")
             out["unit_alignment_source_tgt"] = np.asarray([out["alignment_source"]], dtype=object)
             out["unit_alignment_version_tgt"] = np.asarray([out["alignment_version"]], dtype=object)
+            alignment_kind = str(np.asarray(out["unit_alignment_kind_tgt"], dtype=object).reshape(-1)[0])
+            for key in self._alignment_provenance_optional_keys():
+                if key in sample:
+                    out[key] = np.asarray(sample[key], dtype=np.float32)
+            out.update(
+                {
+                    key: out.get(key, value)
+                    for key, value in self._build_alignment_provenance_exports(
+                        alignment_kind=alignment_kind,
+                        paired_target_conditioning=sample,
+                    ).items()
+                }
+            )
             out.setdefault("alignment_source", "")
             out.setdefault("alignment_version", "")
             return out
@@ -920,6 +1124,9 @@ class DurationV3DatasetMixin:
                 "unit_alignment_version_tgt": np.asarray([""], dtype=object),
                 "alignment_source": "",
                 "alignment_version": "",
+                **self._build_alignment_provenance_exports(
+                    alignment_kind=_ALIGNMENT_KIND_DISCRETE,
+                ),
             }
 
         raise RuntimeError(

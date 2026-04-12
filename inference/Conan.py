@@ -19,8 +19,8 @@ from modules.Conan.rhythm_v3.source_cache import (
     UNIT_LOG_PRIOR_META_KEY,
     assert_duration_v3_cache_meta_compatible,
     build_duration_v3_cache_meta,
+    build_duration_v3_frontend_signature,
     build_source_rhythm_cache_v3 as build_source_rhythm_cache,
-    duration_v3_cache_meta_signature,
 )
 from modules.Emformer.emformer import EmformerDistillModel
 from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
@@ -90,7 +90,14 @@ class StreamingVoiceConversion:
             debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
-        self.rhythm_v3_frontend_signature = duration_v3_cache_meta_signature(self.rhythm_v3_cache_meta)
+        self.rhythm_v3_frontend_signature = build_duration_v3_frontend_signature(
+            self.rhythm_v3_cache_meta,
+            g_variant=normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median")),
+            drop_edge_runs_for_g=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+            unit_prior_path=self.hparams.get("rhythm_v3_unit_prior_path"),
+            summary_pool_speech_only=bool(self.hparams.get("rhythm_v3_summary_pool_speech_only", True)),
+            emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
+        )
         self.runtime_metadata = self.get_streaming_runtime_metadata()
         self.last_inference_metadata = dict(self.runtime_metadata)
         self.last_rhythm_debug_bundle = None
@@ -263,6 +270,7 @@ class StreamingVoiceConversion:
         *,
         prompt_speech_mask: torch.Tensor,
         prompt_run_stability: torch.Tensor | None,
+        allow_shape_repair: bool = False,
     ) -> torch.Tensor:
         speech = prompt_speech_mask.float().clamp(0.0, 1.0)
         stability = (
@@ -271,6 +279,12 @@ class StreamingVoiceConversion:
             else prompt_run_stability.float().clamp(0.0, 1.0)
         )
         if tuple(stability.shape) != tuple(speech.shape):
+            if not bool(allow_shape_repair):
+                raise RuntimeError(
+                    "prompt_run_stability shape mismatch: "
+                    f"{tuple(stability.shape)} vs {tuple(speech.shape)}. "
+                    "Set rhythm_v3_allow_prompt_weight_shape_repair=true only for explicit debug repair."
+                )
             resized = torch.ones_like(speech)
             flat = stability.reshape(-1)
             limit = min(int(resized.numel()), int(flat.numel()))
@@ -491,6 +505,7 @@ class StreamingVoiceConversion:
         out["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             prompt_run_stability=prompt_run_stability,
+            allow_shape_repair=bool(self.hparams.get("rhythm_v3_allow_prompt_weight_shape_repair", False)),
         )
         out["prompt_global_weight_present"] = torch.ones((1, 1), device=self.device, dtype=torch.float32)
         out["g_trim_ratio"] = torch.full(

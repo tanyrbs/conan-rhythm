@@ -54,12 +54,29 @@ def weighted_median_1d(values: torch.Tensor, weights: torch.Tensor) -> torch.Ten
     weights_sorted = weights[order].float().clamp_min(0.0)
     total = weights_sorted.sum()
     if not torch.isfinite(total) or float(total.item()) <= 0.0:
-        return values_sorted[values_sorted.numel() // 2]
+        return true_median_1d(values_sorted)
+    if values_sorted.numel() == 1:
+        return values_sorted[0]
     cdf = torch.cumsum(weights_sorted, dim=0)
     cutoff = 0.5 * total
-    idx = torch.searchsorted(cdf, cutoff, right=False)
-    idx = idx.clamp(max=values_sorted.numel() - 1)
+    idx = torch.searchsorted(cdf, cutoff, right=False).clamp(max=values_sorted.numel() - 1)
+    next_idx = idx + 1
+    if bool(torch.isclose(cdf[idx], cutoff)) and int(next_idx.item()) < int(values_sorted.numel()):
+        return 0.5 * (values_sorted[idx] + values_sorted[next_idx])
     return values_sorted[idx]
+
+
+def true_median_1d(values: torch.Tensor) -> torch.Tensor:
+    if values.ndim != 1:
+        raise ValueError("true_median_1d expects a 1D tensor.")
+    if values.numel() <= 0:
+        raise ValueError("true_median_1d requires at least one value.")
+    sorted_values = values.float().sort().values
+    count = int(sorted_values.numel())
+    mid = count // 2
+    if count % 2 == 1:
+        return sorted_values[mid]
+    return 0.5 * (sorted_values[mid - 1] + sorted_values[mid])
 
 
 def _normalize_drop_edge_runs(value) -> int:
@@ -135,11 +152,41 @@ def _resolve_unit_prior(
     unit_ids: torch.Tensor | None,
     unit_prior: torch.Tensor | None,
     mask: torch.Tensor,
+    unit_prior_default_value: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if unit_ids is None or unit_prior is None:
-        raise ValueError("unit_norm g_variant requires both unit_ids and unit_prior.")
+    if unit_prior is None:
+        raise ValueError("unit_norm g_variant requires unit_prior.")
+    if unit_ids is None:
+        if tuple(unit_prior.shape) == tuple(mask.shape):
+            return unit_prior.to(device=mask.device, dtype=torch.float32) * mask.float()
+        raise ValueError("unit_norm g_variant requires unit_ids when unit_prior is a vocabulary vector.")
     if unit_prior.dim() == 1:
-        prior = unit_prior.to(device=unit_ids.device, dtype=torch.float32)[unit_ids.long()]
+        unit_ids_long = unit_ids.long()
+        if bool((unit_ids_long < 0).any().item()):
+            raise ValueError("unit_ids contain negative values, which are not valid vocabulary ids.")
+        prior_vocab = unit_prior.to(device=unit_ids.device, dtype=torch.float32)
+        vocab_size = int(prior_vocab.numel())
+        oov = unit_ids_long >= vocab_size
+        if bool(oov.any().item()):
+            if unit_prior_default_value is None:
+                raise ValueError(
+                    "unit_ids contain values outside the unit_prior vocabulary and no "
+                    "unit_prior_default_value was provided. "
+                    f"vocab_size={vocab_size}"
+                )
+            if torch.is_tensor(unit_prior_default_value):
+                default_value = unit_prior_default_value.to(
+                    device=unit_ids.device,
+                    dtype=torch.float32,
+                ).reshape(())
+            else:
+                default_value = prior_vocab.new_tensor(float(unit_prior_default_value))
+            prior = torch.full_like(unit_ids_long, float(default_value.item()), dtype=torch.float32)
+            in_vocab = ~oov
+            if bool(in_vocab.any().item()):
+                prior[in_vocab] = prior_vocab[unit_ids_long[in_vocab]]
+        else:
+            prior = prior_vocab[unit_ids_long]
     elif unit_prior.dim() == 2 and tuple(unit_prior.shape) == tuple(unit_ids.shape):
         prior = unit_prior.to(device=unit_ids.device, dtype=torch.float32)
     else:
@@ -159,6 +206,7 @@ def _compute_single_global_rate(
     trim_ratio: float,
     unit_ids: torch.Tensor | None,
     unit_prior: torch.Tensor | None,
+    unit_prior_default_value: float | torch.Tensor | None,
 ) -> torch.Tensor:
     valid = mask.bool()
     if not bool(valid.any().item()):
@@ -170,14 +218,15 @@ def _compute_single_global_rate(
             unit_ids=unit_ids,
             unit_prior=unit_prior,
             mask=mask,
+            unit_prior_default_value=unit_prior_default_value,
         )
         prior_values = prior[valid]
         values = values - prior_values.float()
         if weights is not None:
             return weighted_median_1d(values, weights)
-        return values.median()
+        return true_median_1d(values)
     if variant == "raw_median":
-        return values.median()
+        return true_median_1d(values)
     if variant == "weighted_median":
         if weights is None:
             weights = torch.ones_like(values)
@@ -202,6 +251,7 @@ def compute_global_rate_1d(
     drop_edge_runs: int = 0,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
+    unit_prior_default_value: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     support_mask = build_global_rate_support_mask(
         speech_mask=speech_mask,
@@ -216,6 +266,7 @@ def compute_global_rate_1d(
         trim_ratio=trim_ratio,
         unit_ids=unit_ids,
         unit_prior=unit_prior,
+        unit_prior_default_value=unit_prior_default_value,
     )
 
 
@@ -230,6 +281,7 @@ def compute_global_rate_batch(
     drop_edge_runs: int = 0,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
+    unit_prior_default_value: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     variant = normalize_global_rate_variant(variant)
     log_dur = log_dur.float()
@@ -244,26 +296,36 @@ def compute_global_rate_batch(
             drop_edge_runs=drop_edge_runs,
             unit_ids=unit_ids,
             unit_prior=unit_prior,
+            unit_prior_default_value=unit_prior_default_value,
         )
     if log_dur.ndim != 2:
         raise ValueError(f"compute_global_rate expects rank-1 or rank-2 log_dur, got {tuple(log_dur.shape)}")
-    if variant == "raw_median" and weight is None and unit_prior is None:
-        support = build_global_rate_support_mask(
-            speech_mask=speech_mask,
-            valid_mask=valid_mask,
-            drop_edge_runs=drop_edge_runs,
+    support = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+    )
+    resolved_unit_prior = None
+    if variant == "unit_norm":
+        resolved_unit_prior = _resolve_unit_prior(
+            unit_ids=unit_ids,
+            unit_prior=unit_prior,
+            mask=support,
+            unit_prior_default_value=unit_prior_default_value,
         )
+    if variant == "raw_median" and weight is None and unit_prior is None:
         support_count = support.sum(dim=1, keepdim=True)
         if bool((support_count <= 0).any().item()):
             raise ValueError("No valid speech duration for global rate.")
-        masked = log_dur.masked_fill(~support, float("nan"))
-        return torch.nanmedian(masked, dim=1).values.unsqueeze(1)
+        invalid_fill = torch.finfo(log_dur.dtype).max
+        sorted_values = torch.sort(log_dur.masked_fill(~support, invalid_fill), dim=1).values
+        counts = support_count.squeeze(1).long()
+        lower_idx = ((counts - 1) // 2).clamp_min(0)
+        upper_idx = (counts // 2).clamp_min(0)
+        row_idx = torch.arange(log_dur.size(0), device=log_dur.device)
+        median = 0.5 * (sorted_values[row_idx, lower_idx] + sorted_values[row_idx, upper_idx])
+        return median.unsqueeze(1)
     if variant == "trimmed_mean" and _normalize_drop_edge_runs(drop_edge_runs) <= 0:
-        support = build_global_rate_support_mask(
-            speech_mask=speech_mask,
-            valid_mask=valid_mask,
-            drop_edge_runs=0,
-        )
         support_count = support.sum(dim=1, keepdim=True)
         if bool((support_count <= 0).any().item()):
             raise ValueError("No valid speech duration for global rate.")
@@ -287,14 +349,19 @@ def compute_global_rate_batch(
             unit_prior_row = unit_prior[batch_idx]
         out[batch_idx, 0] = compute_global_rate_1d(
             log_dur=log_dur[batch_idx],
-            speech_mask=speech_mask[batch_idx],
-            valid_mask=None if valid_mask is None else valid_mask[batch_idx],
+            speech_mask=support[batch_idx],
+            valid_mask=None,
             variant=variant,
             weight=None if weight is None else weight[batch_idx],
             trim_ratio=trim_ratio,
-            drop_edge_runs=drop_edge_runs,
-            unit_ids=None if unit_ids is None else unit_ids[batch_idx],
-            unit_prior=unit_prior_row,
+            drop_edge_runs=0,
+            unit_ids=None if resolved_unit_prior is not None or unit_ids is None else unit_ids[batch_idx],
+            unit_prior=(
+                resolved_unit_prior[batch_idx]
+                if resolved_unit_prior is not None
+                else unit_prior_row
+            ),
+            unit_prior_default_value=unit_prior_default_value,
         )
     return out
 
@@ -310,6 +377,7 @@ def compute_global_rate(
     drop_edge_runs: int = 0,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
+    unit_prior_default_value: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     return compute_global_rate_batch(
         log_dur=log_dur,
@@ -321,6 +389,7 @@ def compute_global_rate(
         drop_edge_runs=drop_edge_runs,
         unit_ids=unit_ids,
         unit_prior=unit_prior,
+        unit_prior_default_value=unit_prior_default_value,
     )
 
 
@@ -332,5 +401,6 @@ __all__ = [
     "compute_global_rate_batch",
     "normalize_falsification_eval_mode",
     "normalize_global_rate_variant",
+    "true_median_1d",
     "weighted_median_1d",
 ]

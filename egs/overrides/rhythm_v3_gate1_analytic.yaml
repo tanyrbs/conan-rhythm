@@ -1,0 +1,9 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Gate 1: analytic monotonicity with both learned/local paths disabled.
+rhythm_v3_eval_mode: analytic
+rhythm_v3_disable_local_residual: true
+rhythm_v3_disable_coarse_bias: true
+lambda_rhythm_bias: 0.0
+lambda_rhythm_pref: 0.0
+lambda_rhythm_cons: 0.0

@@ -74,6 +74,13 @@ For falsification work, stay on that same structural path and only override the
 controlled analysis knobs (`analytic` / `coarse_only`, alternative `g_variant`)
 instead of opening a second runtime branch.
 
+The maintained gate presets are checked in as config overlays rather than left
+as comment-only edits:
+
+- `egs/overrides/rhythm_v3_gate0_g_audit.yaml`
+- `egs/overrides/rhythm_v3_gate1_analytic.yaml`
+- `egs/overrides/rhythm_v3_gate2_coarse_only.yaml`
+
 ## What the default v3 path does
 
 ### Prompt side
@@ -182,11 +189,27 @@ For the maintained `rhythm_v3_minimal_v1_profile`, the pairing rule is:
 - **reference prompt**: same-speaker / different-text
 - **paired target supervision**: same-text target-to-source projection (`rhythm_v3_require_same_text_paired_target: true`), or an explicitly cached `unit_duration_tgt`
 
-`rhythm_v3_use_continuous_alignment: true` now supports
-`continuous_precomputed` and the built-in offline `continuous_viterbi_v1`
-source-run / target-frame aligner. If neither explicit continuous provenance nor
-the required frame-state sidecars are available, the maintained path fails fast
-instead of silently falling back to discrete projection.
+`rhythm_v3_use_continuous_alignment: true` is intentionally split into three
+public layers:
+
+- `continuous_precomputed`: consume external continuous metadata / sidecars
+- `continuous_viterbi_v1`: repo-native offline hard monotonic source-run /
+  target-frame alignment
+- `continuous_fwdbwd_v1`: planned posterior-bearing forward-backward upgrade
+  surface, not the maintained default
+
+The maintained public branch currently ships two continuous-alignment surfaces:
+`continuous_precomputed` for external frame/content-space sidecars, and
+`continuous_viterbi_v1` for repo-native hard monotonic source-run alignment.
+Posterior-bearing forward-backward alignment remains a planned upgrade surface
+rather than the maintained default. If neither explicit continuous provenance
+nor the required frame-state sidecars are available, the maintained path fails
+fast instead of silently falling back to discrete projection.
+
+`continuous_viterbi_v1` is a hard-path aligner: it exports Viterbi/source-run
+occupancy plus heuristic confidence/provenance, not posterior expected
+occupancy. Treat posterior expected-duration surfaces as unavailable until
+`continuous_fwdbwd_v1` exists.
 
 The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
 compatibility alias that inherits the maintained `rhythm_v3` contract; it is no

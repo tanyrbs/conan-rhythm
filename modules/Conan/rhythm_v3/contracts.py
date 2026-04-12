@@ -327,7 +327,9 @@ class DurationExecution:
     coarse_logstretch: Optional[torch.Tensor] = None
     coarse_path_logstretch: Optional[torch.Tensor] = None
     coarse_correction: Optional[torch.Tensor] = None
+    coarse_correction_pred: Optional[torch.Tensor] = None
     local_residual: Optional[torch.Tensor] = None
+    local_residual_pred: Optional[torch.Tensor] = None
     speech_pred: Optional[torch.Tensor] = None
     silence_pred: Optional[torch.Tensor] = None
     source_rate_seq: Optional[torch.Tensor] = None

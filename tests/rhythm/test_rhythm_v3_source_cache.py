@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import pytest
 import numpy as np
+import subprocess
+import sys
+from pathlib import Path
 
 from modules.Conan.rhythm_v3.source_cache import (
     DURATION_V3_CACHE_META_KEY,
     UNIT_LOG_PRIOR_META_KEY,
     assert_duration_v3_cache_meta_compatible,
     attach_unit_log_prior_to_source_cache,
+    build_duration_v3_frontend_signature,
     build_source_rhythm_cache_v3,
     duration_v3_cache_meta_signature,
     load_unit_log_prior_bundle,
@@ -84,6 +88,38 @@ def test_attach_unit_log_prior_to_source_cache_maps_vocab_prior_to_runs():
     assert np.allclose(cache["unit_log_prior"], expected)
     assert cache[UNIT_LOG_PRIOR_META_KEY]["unit_prior_source"] == "unit-test"
     assert cache[UNIT_LOG_PRIOR_META_KEY]["unit_prior_version"] == "v1"
+    assert cache[UNIT_LOG_PRIOR_META_KEY]["unit_prior_unseen_count"] == 0
+    assert np.array_equal(cache["unit_log_prior_is_default"], np.zeros_like(cache["content_units"], dtype=np.int64))
+
+
+def test_attach_unit_log_prior_to_source_cache_uses_global_default_for_unseen_units():
+    cache = {
+        "content_units": np.asarray([1, 4], dtype=np.int64),
+    }
+    default_value = float(np.log(6.0))
+
+    attach_unit_log_prior_to_source_cache(
+        cache,
+        unit_prior_bundle={
+            "unit_log_prior": np.asarray([0.0, np.log(2.0)], dtype=np.float32),
+            "global_speech_log_prior": np.asarray([default_value], dtype=np.float32),
+            "unit_log_prior_is_default": np.asarray([1, 0], dtype=np.int64),
+            "unit_prior_min_count": np.asarray([5], dtype=np.int64),
+            "unit_prior_default_policy": np.asarray(["global_median"], dtype=object),
+            "unit_prior_source": np.asarray(["unit-test"], dtype=object),
+            "unit_prior_version": np.asarray(["v2"], dtype=object),
+        },
+    )
+
+    assert np.allclose(cache["unit_log_prior"], np.asarray([np.log(2.0), default_value], dtype=np.float32))
+    assert np.array_equal(cache["unit_log_prior_is_default"], np.asarray([0, 1], dtype=np.int64))
+    meta = cache[UNIT_LOG_PRIOR_META_KEY]
+    assert meta["unit_prior_min_count"] == 5
+    assert meta["unit_prior_default_policy"] == "global_median"
+    assert meta["unit_prior_default_value"] == pytest.approx(default_value)
+    assert meta["unit_prior_default_count"] == 1
+    assert meta["unit_prior_unseen_count"] == 1
+    assert meta["unit_prior_out_of_vocab_count"] == 1
 
 
 def test_build_source_rhythm_cache_v3_can_attach_prior_from_path(tmp_path):
@@ -104,6 +140,7 @@ def test_build_source_rhythm_cache_v3_can_attach_prior_from_path(tmp_path):
     assert np.allclose(cache["unit_log_prior"], expected)
     assert cache[UNIT_LOG_PRIOR_META_KEY]["unit_prior_vocab_size"] == 58
     assert "unit_prior_path" in cache[UNIT_LOG_PRIOR_META_KEY]
+    assert "unit_prior_default_value" in cache[UNIT_LOG_PRIOR_META_KEY]
 
 
 def test_load_unit_log_prior_bundle_reads_npz_metadata(tmp_path):
@@ -114,9 +151,117 @@ def test_load_unit_log_prior_bundle_reads_npz_metadata(tmp_path):
         unit_prior_source=np.asarray(["demo"], dtype=object),
         unit_prior_version=np.asarray(["v2"], dtype=object),
         unit_prior_vocab_size=np.asarray([3], dtype=np.int64),
+        global_speech_log_prior=np.asarray([0.31], dtype=np.float32),
+        unit_prior_min_count=np.asarray([7], dtype=np.int64),
+        unit_prior_default_policy=np.asarray(["global_median"], dtype=object),
+        unit_log_prior_is_default=np.asarray([1, 0, 0], dtype=np.int64),
     )
     bundle = load_unit_log_prior_bundle(str(prior_path))
     assert np.allclose(bundle["unit_log_prior"], np.asarray([0.0, 0.2, 0.4], dtype=np.float32))
     assert bundle["unit_prior_source"] == "demo"
     assert bundle["unit_prior_version"] == "v2"
     assert bundle["unit_prior_vocab_size"] == 3
+    assert bundle["unit_prior_min_count"] == 7
+    assert bundle["unit_prior_default_policy"] == "global_median"
+    assert bundle["unit_prior_default_value"] == pytest.approx(0.31)
+    assert np.array_equal(bundle["unit_log_prior_is_default"], np.asarray([True, False, False]))
+
+
+def test_load_unit_log_prior_bundle_rejects_default_mask_size_mismatch(tmp_path):
+    prior_path = tmp_path / "bad_prior.npz"
+    np.savez(
+        prior_path,
+        unit_log_prior=np.asarray([0.0, 0.2, 0.4], dtype=np.float32),
+        unit_log_prior_is_default=np.asarray([1, 0], dtype=np.int64),
+    )
+
+    with pytest.raises(ValueError, match="size mismatch"):
+        load_unit_log_prior_bundle(str(prior_path))
+
+
+def test_load_unit_log_prior_bundle_inferrs_default_mask_from_counts(tmp_path):
+    prior_path = tmp_path / "prior_counts.npz"
+    np.savez(
+        prior_path,
+        unit_log_prior=np.asarray([0.1, 0.2, 0.3], dtype=np.float32),
+        unit_count=np.asarray([0, 3, 8], dtype=np.int64),
+        unit_prior_min_count=np.asarray([5], dtype=np.int64),
+    )
+
+    bundle = load_unit_log_prior_bundle(str(prior_path))
+
+    assert np.array_equal(bundle["unit_log_prior_is_default"], np.asarray([True, True, False]))
+    assert bundle["unit_prior_observed_count"] == 2
+    assert bundle["unit_prior_low_count_count"] == 1
+    assert bundle["unit_prior_default_count"] == 2
+
+
+def test_build_duration_v3_frontend_signature_tracks_global_stat_knobs(tmp_path):
+    meta = build_source_rhythm_cache_v3(
+        [1, 57, 2],
+        silent_token=57,
+    )[DURATION_V3_CACHE_META_KEY]
+    prior_path = tmp_path / "unit_prior.npz"
+    np.savez(prior_path, unit_log_prior=np.asarray([0.0, 0.2, 0.4], dtype=np.float32))
+    signature_a = build_duration_v3_frontend_signature(
+        meta,
+        g_variant="raw_median",
+        drop_edge_runs_for_g=0,
+        unit_prior_path=None,
+        summary_pool_speech_only=True,
+        emit_silence_runs=True,
+    )
+    signature_b = build_duration_v3_frontend_signature(
+        meta,
+        g_variant="unit_norm",
+        drop_edge_runs_for_g=1,
+        unit_prior_path=str(prior_path),
+        summary_pool_speech_only=False,
+        emit_silence_runs=True,
+    )
+    assert signature_a != signature_b
+    assert '"g_variant":"unit_norm"' in signature_b
+    assert '"drop_edge_runs_for_g":1' in signature_b
+    assert str(prior_path.resolve()).replace("\\", "\\\\") in signature_b
+
+
+def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
+    input_path = tmp_path / "source_cache.npz"
+    output_path = tmp_path / "unit_prior.npz"
+    repo_root = Path(__file__).resolve().parents[2]
+    np.savez(
+        input_path,
+        content_units=np.asarray([1, 1, 2], dtype=np.int64),
+        dur_anchor_src=np.asarray([1.0, 9.0, 100.0], dtype=np.float32),
+        source_silence_mask=np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_unit_log_prior.py",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--min-count",
+            "2",
+            "--default-prior",
+            "global_median",
+        ],
+        check=True,
+        cwd=str(repo_root),
+    )
+
+    with np.load(output_path, allow_pickle=True) as bundle:
+        prior = bundle["unit_log_prior"]
+        is_default = bundle["unit_log_prior_is_default"]
+        assert bundle["unit_prior_min_count"].reshape(-1)[0] == 2
+        assert bundle["unit_prior_default_policy"].reshape(-1)[0] == "global_median"
+        assert bundle["global_speech_log_prior"].reshape(-1)[0] == pytest.approx(np.log(9.0))
+        assert bundle["unit_prior_observed_count"].reshape(-1)[0] == 2
+        assert bundle["unit_prior_low_count_count"].reshape(-1)[0] == 1
+        assert bundle["unit_prior_default_count"].reshape(-1)[0] == 2
+        assert prior[1] == pytest.approx(np.log(3.0))
+        assert prior[2] == pytest.approx(np.log(9.0))
+        assert np.array_equal(is_default, np.asarray([1, 0, 1], dtype=np.int64))

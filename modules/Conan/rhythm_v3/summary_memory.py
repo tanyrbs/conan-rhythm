@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
-from .silence_surface import build_silence_tau_surface
+from .silence_surface import build_silence_tau_surface_meta
 from .g_stats import (
     build_global_rate_support_mask,
     compute_global_rate,
@@ -675,7 +675,7 @@ class StreamingDurationHead(nn.Module):
         local_rate_ema: torch.Tensor,
         silence_mask: torch.Tensor | None = None,
         run_stability: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | str]:
         mask = unit_mask.float().clamp(0.0, 1.0)
         sealed = sealed_mask.float().clamp(0.0, 1.0)
         silence = silence_mask.float().clamp(0.0, 1.0) if isinstance(silence_mask, torch.Tensor) else torch.zeros_like(mask)
@@ -821,7 +821,7 @@ class StreamingDurationHead(nn.Module):
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
-        silence_tau = build_silence_tau_surface(
+        silence_surface = build_silence_tau_surface_meta(
             prediction_anchor=torch.exp(log_anchor.float()),
             committed_silence_mask=silence_commit_mask,
             sep_hint=sep_hint,
@@ -830,6 +830,7 @@ class StreamingDurationHead(nn.Module):
             short_gap_scale=self.short_gap_silence_scale,
             minimal_v1_profile=False,
         )
+        silence_tau = silence_surface["silence_tau"]
         leading_gate = torch.where(
             prefix_speech_prev > 0.0,
             torch.ones_like(prefix_speech_prev),
@@ -842,6 +843,7 @@ class StreamingDurationHead(nn.Module):
         coarse_delta = coarse_correction * mask
         coarse_delta_pred = predicted_coarse * mask
         coarse_path = global_term * mask
+        global_term_before_local = global_term * mask
         residual_used = residual * mask
         residual_pred = predicted_residual * mask
 
@@ -859,14 +861,21 @@ class StreamingDurationHead(nn.Module):
             "unit_coarse_delta": coarse_delta,
             "unit_coarse_correction_predicted": coarse_delta_pred,
             "unit_coarse_correction_pred": coarse_delta_pred,
+            "unit_global_term_before_local": global_term_before_local,
             "unit_local_residual_used": residual_used,
             "unit_residual_logstretch": residual_used,
             "unit_residual_logstretch_pred": residual_pred,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
-            "unit_silence_tau": silence_tau * silence_commit_mask,
+            "unit_silence_tau": silence_tau,
+            "unit_silence_tau_surface_kind": silence_surface["silence_surface_kind"],
+            "unit_leading_gate": leading_gate * commit_valid_mask,
+            "unit_boundary_shaping": silence_surface["silence_boundary_shaping"],
             "unit_speech_pred": pred_speech,
             "unit_silence_pred": pred_silence,
+            "runtime_surface_kind": "nonminimal_boundary_aware",
+            "runtime_silence_tau_mode": "boundary_aware",
+            "runtime_leading_silence_mode": "scaled",
             "role_attn_unit": (attn if attn is not None else mask.unsqueeze(-1)),
             "role_value_unit": (
                 role_value_unit * mask

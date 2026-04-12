@@ -4,6 +4,9 @@ import numpy as np
 
 
 CONTINUOUS_ALIGNER_VERSION = "2026-04-13"
+_ALIGNMENT_MODE_DISCRETE = "discrete"
+_ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED = "continuous_precomputed"
+_ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1 = "continuous_viterbi_v1"
 
 
 def as_int64_1d(value) -> np.ndarray:
@@ -28,6 +31,100 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 def _normalize_rows(x: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(norm, 1.0e-6, None)
+
+
+def _build_progress_from_anchor(durations: np.ndarray) -> np.ndarray:
+    dur = as_float32_1d(durations)
+    if dur.size <= 1:
+        return np.zeros((dur.size,), dtype=np.float32)
+    dur = np.clip(dur, 1.0e-4, None)
+    cdf = np.cumsum(dur, dtype=np.float64)
+    total = max(float(cdf[-1]), 1.0e-6)
+    progress = (cdf / total).astype(np.float32, copy=False)
+    progress[-1] = np.float32(1.0)
+    return progress
+
+
+def _build_uniform_progress(size: int) -> np.ndarray:
+    if int(size) <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    if int(size) == 1:
+        return np.zeros((1,), dtype=np.float32)
+    return np.linspace(0.0, 1.0, int(size), dtype=np.float32)
+
+
+def _build_progress_from_weights(weights: np.ndarray) -> np.ndarray:
+    w = as_float32_1d(weights)
+    if w.size <= 1:
+        return np.zeros((w.size,), dtype=np.float32)
+    w = np.clip(w, 1.0e-4, None)
+    cdf = np.cumsum(w, dtype=np.float64)
+    total = max(float(cdf[-1]), 1.0e-6)
+    progress = (cdf / total).astype(np.float32, copy=False)
+    progress[-1] = np.float32(1.0)
+    return progress
+
+
+def _nearest_progress_index(progress: np.ndarray, value: float) -> int:
+    if progress.size <= 1:
+        return 0
+    idx = int(np.searchsorted(progress, np.float32(value), side="left"))
+    if idx <= 0:
+        return 0
+    if idx >= progress.size:
+        return int(progress.size - 1)
+    prev_value = float(progress[idx - 1])
+    next_value = float(progress[idx])
+    if abs(value - prev_value) <= abs(next_value - value):
+        return int(idx - 1)
+    return int(idx)
+
+
+def _resolve_optional_run_signal(
+    value,
+    *,
+    num_source_runs: int,
+    name: str,
+) -> np.ndarray | None:
+    if value is None:
+        return None
+    arr = as_float32_1d(value)
+    if arr.shape[0] != int(num_source_runs):
+        raise ValueError(f"{name} length mismatch: expected {int(num_source_runs)}, got {int(arr.shape[0])}")
+    return arr.astype(np.float32, copy=False)
+
+
+def _normalize_continuous_alignment_mode(
+    value,
+    *,
+    precomputed_alignment=None,
+) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "auto"}:
+        return (
+            _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED
+            if precomputed_alignment is not None
+            else _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1
+        )
+    aliases = {
+        "precomputed": _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED,
+        "continuous": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
+        "viterbi": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
+        "run_state_viterbi": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {
+        _ALIGNMENT_MODE_DISCRETE,
+        _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED,
+        _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
+    }:
+        raise ValueError(
+            "Unsupported continuous alignment mode. "
+            f"Expected one of: {_ALIGNMENT_MODE_DISCRETE}, "
+            f"{_ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED}, "
+            f"{_ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1}; got {value!r}"
+        )
+    return normalized
 
 
 def resolve_precomputed_alignment(
@@ -121,7 +218,16 @@ class ContinuousRunAligner:
     def _resolve_band_width(self, *, num_source: int) -> int:
         if self.band_width is not None:
             return int(self.band_width)
-        return int(max(16, round(self.band_ratio * float(max(1, num_source)))))
+        resolved = int(max(4, round(self.band_ratio * float(max(1, num_source)))))
+        return int(min(resolved, max(4, int(num_source) // 2)))
+
+    def _resolve_band_slack(self, *, num_source: int, num_target: int) -> np.float32:
+        if self.band_width is not None:
+            slack = float(self.band_width) / float(max(1, num_source - 1))
+        else:
+            slack = float(self.band_ratio)
+        slack = max(slack, 1.0 / float(max(1, num_target)))
+        return np.float32(min(0.30, max(0.02, slack)))
 
     @staticmethod
     def _build_source_run_prototypes(
@@ -130,7 +236,9 @@ class ContinuousRunAligner:
         source_frame_to_run: np.ndarray,
         num_source_runs: int,
         source_valid_run_index: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        source_run_stability: np.ndarray | None = None,
+        source_boundary_cue: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         frame_states = as_float32_2d(source_frame_states, name="source_frame_states")
         frame_to_run = as_int64_1d(source_frame_to_run)
         if frame_states.shape[0] != frame_to_run.shape[0]:
@@ -172,18 +280,63 @@ class ContinuousRunAligner:
         frame_states = frame_states[keep]
         frame_to_run = frame_to_run[keep]
 
+        run_stability = _resolve_optional_run_signal(
+            source_run_stability,
+            num_source_runs=num_source_runs,
+            name="source_run_stability",
+        )
+        if run_stability is None:
+            run_stability = np.ones((int(num_source_runs),), dtype=np.float32)
+        else:
+            run_stability = np.clip(run_stability, 0.0, 1.0)
+        boundary_cue = _resolve_optional_run_signal(
+            source_boundary_cue,
+            num_source_runs=num_source_runs,
+            name="source_boundary_cue",
+        )
+        if boundary_cue is None:
+            boundary_cue = np.zeros((int(num_source_runs),), dtype=np.float32)
+        else:
+            boundary_cue = np.clip(boundary_cue, 0.0, 1.0)
+
+        frame_count = np.bincount(frame_to_run, minlength=int(num_source_runs)).astype(np.float32, copy=False)
+        frame_pos = np.zeros((frame_to_run.shape[0],), dtype=np.int64)
+        seen = np.zeros((int(num_source_runs),), dtype=np.int64)
+        for frame_idx, run_idx in enumerate(frame_to_run.tolist()):
+            frame_pos[frame_idx] = seen[run_idx]
+            seen[run_idx] += 1
+
+        run_len = np.clip(frame_count[frame_to_run].astype(np.float32, copy=False), 1.0, None)
+        max_pos = np.maximum(run_len - 1.0, 1.0)
+        dist_to_edge = np.minimum(frame_pos.astype(np.float32, copy=False), max_pos - frame_pos.astype(np.float32, copy=False))
+        center_emphasis = np.clip((2.0 * dist_to_edge) / max_pos, 0.0, 1.0)
+        stability_frame = run_stability[frame_to_run]
+        boundary_frame = boundary_cue[frame_to_run]
+        edge_strength = np.clip(boundary_frame * (1.25 - 0.75 * stability_frame), 0.0, 1.0)
+        edge_floor = 1.0 - (0.75 * edge_strength)
+        edge_profile = edge_floor + ((1.0 - edge_floor) * center_emphasis)
+        frame_weight = np.clip((0.35 + 0.65 * stability_frame) * edge_profile, 1.0e-4, None).astype(np.float32, copy=False)
+
         proto = np.zeros((int(num_source_runs), int(frame_states.shape[1])), dtype=np.float32)
-        count = np.zeros((int(num_source_runs),), dtype=np.float32)
-        np.add.at(proto, frame_to_run, frame_states)
-        np.add.at(count, frame_to_run, 1.0)
-        missing = np.nonzero(count <= 0.0)[0]
+        proto_sq = np.zeros_like(proto)
+        weight_sum = np.zeros((int(num_source_runs),), dtype=np.float32)
+        np.add.at(proto, frame_to_run, frame_states * frame_weight[:, None])
+        np.add.at(proto_sq, frame_to_run, np.square(frame_states) * frame_weight[:, None])
+        np.add.at(weight_sum, frame_to_run, frame_weight)
+        missing = np.nonzero(weight_sum <= 0.0)[0]
         if missing.size > 0:
             raise RuntimeError(
                 "continuous aligner requires source frame support for every valid run; "
                 f"missing run ids={missing.tolist()}"
             )
-        proto /= count[:, None]
-        return proto.astype(np.float32), count.astype(np.float32)
+        proto /= weight_sum[:, None]
+        proto_var = np.maximum((proto_sq / weight_sum[:, None]) - np.square(proto), 0.0).astype(np.float32, copy=False)
+        return (
+            proto.astype(np.float32),
+            frame_count.astype(np.float32),
+            weight_sum.astype(np.float32),
+            proto_var.astype(np.float32),
+        )
 
     def build_local_cost(
         self,
@@ -191,8 +344,10 @@ class ContinuousRunAligner:
         source_run_types: np.ndarray,
         target_frame_state: np.ndarray,
         target_frame_speech_prob: np.ndarray,
+        target_frame_weight: np.ndarray | None = None,
         target_frame_unit_hint: np.ndarray | None = None,
         source_run_units: np.ndarray | None = None,
+        source_durations: np.ndarray | None = None,
     ) -> np.ndarray:
         source_run_proto = as_float32_2d(source_run_proto, name="source_run_proto")
         target_frame_state = as_float32_2d(target_frame_state, name="target_frame_state")
@@ -227,19 +382,15 @@ class ContinuousRunAligner:
 
         num_target = int(target_frame_state.shape[0])
         num_source = int(source_run_proto.shape[0])
-        target_progress = np.zeros((num_target, 1), dtype=np.float32)
-        source_progress = np.zeros((1, num_source), dtype=np.float32)
-        if num_target > 1:
-            target_progress[:, 0] = np.linspace(0.0, 1.0, num_target, dtype=np.float32)
-        if num_source > 1:
-            source_progress[0, :] = np.linspace(0.0, 1.0, num_source, dtype=np.float32)
-        band_slack = min(
-            0.45,
-            max(
-                1.0 / float(max(1, num_source - 1)),
-                float(self._resolve_band_width(num_source=num_source)) / float(max(1, num_source - 1)),
-            ),
-        )
+        if target_frame_weight is None:
+            target_progress = _build_uniform_progress(num_target).reshape(num_target, 1)
+        else:
+            target_progress = _build_progress_from_weights(target_frame_weight).reshape(num_target, 1)
+        if source_durations is None:
+            source_progress = _build_uniform_progress(num_source).reshape(1, num_source)
+        else:
+            source_progress = _build_progress_from_anchor(source_durations).reshape(1, num_source)
+        band_slack = self._resolve_band_slack(num_source=num_source, num_target=num_target)
         band_cost = np.square(np.maximum(0.0, np.abs(target_progress - source_progress) - band_slack)).astype(np.float32)
 
         unit_cost = np.zeros_like(emb_cost, dtype=np.float32)
@@ -273,6 +424,9 @@ class ContinuousRunAligner:
     def viterbi_align(
         self,
         local_cost: np.ndarray,
+        *,
+        source_progress: np.ndarray | None = None,
+        target_progress: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.float32, np.ndarray]:
         local_cost = as_float32_2d(local_cost, name="local_cost")
         num_target, num_source = local_cost.shape
@@ -283,6 +437,19 @@ class ContinuousRunAligner:
                 "continuous aligner requires at least one target frame per source run under strict monotonicity: "
                 f"target_frames={num_target}, source_runs={num_source}"
             )
+
+        if source_progress is None:
+            source_progress = _build_uniform_progress(num_source)
+        else:
+            source_progress = as_float32_1d(source_progress)
+        if target_progress is None:
+            target_progress = _build_uniform_progress(num_target)
+        else:
+            target_progress = as_float32_1d(target_progress)
+        if source_progress.shape[0] != num_source:
+            raise ValueError("source_progress/local_cost width mismatch")
+        if target_progress.shape[0] != num_target:
+            raise ValueError("target_progress/local_cost height mismatch")
 
         band_width = self._resolve_band_width(num_source=num_source)
         inf = np.float32(1.0e12)
@@ -300,7 +467,7 @@ class ContinuousRunAligner:
             dp_curr.fill(inf)
             hard_left = max(0, num_source - num_target + tgt_idx)
             hard_right = min(num_source - 1, tgt_idx)
-            center = int(round((tgt_idx * max(0, num_source - 1)) / float(max(1, num_target - 1))))
+            center = _nearest_progress_index(source_progress, float(target_progress[tgt_idx]))
             left = max(hard_left, center - band_width)
             right = min(hard_right, center + band_width)
             if left > right:
@@ -521,6 +688,9 @@ class ContinuousRunAligner:
         source_frame_to_run: np.ndarray,
         target_frame_states: np.ndarray,
         source_valid_run_index: np.ndarray | None = None,
+        source_durations: np.ndarray | None = None,
+        source_run_stability: np.ndarray | None = None,
+        source_boundary_cue: np.ndarray | None = None,
         target_frame_speech_prob: np.ndarray | None = None,
         target_frame_weight: np.ndarray | None = None,
         target_frame_valid: np.ndarray | None = None,
@@ -561,6 +731,7 @@ class ContinuousRunAligner:
                     f"{target_frame_speech_prob.shape[0]} vs {num_target_frames}"
                 )
             target_frame_speech_prob_valid = target_frame_speech_prob[valid_frame].astype(np.float32, copy=False)
+        has_target_frame_weight = target_frame_weight is not None
         if target_frame_weight is None:
             target_frame_weight_valid = np.ones((target_valid_index.size,), dtype=np.float32)
         else:
@@ -582,21 +753,39 @@ class ContinuousRunAligner:
                 )
             target_frame_unit_hint_valid = target_frame_unit_hint[valid_frame].astype(np.int64, copy=False)
 
-        source_run_proto, source_frame_count = self._build_source_run_prototypes(
+        source_run_proto, source_frame_count, source_frame_weight_sum, source_run_proto_var = self._build_source_run_prototypes(
             source_frame_states=source_frame_states,
             source_frame_to_run=source_frame_to_run,
             num_source_runs=int(source_run_units.shape[0]),
             source_valid_run_index=source_valid_run_index,
+            source_run_stability=source_run_stability,
+            source_boundary_cue=source_boundary_cue,
         )
         local_cost = self.build_local_cost(
             source_run_proto=source_run_proto,
             source_run_types=source_run_types,
             target_frame_state=target_frame_states_valid,
             target_frame_speech_prob=target_frame_speech_prob_valid,
+            target_frame_weight=target_frame_weight_valid if has_target_frame_weight else None,
             target_frame_unit_hint=target_frame_unit_hint_valid,
             source_run_units=source_run_units,
+            source_durations=source_durations,
         )
-        assigned_run, assigned_local_cost, global_path_cost, path_margin = self.viterbi_align(local_cost)
+        source_progress = (
+            _build_progress_from_anchor(source_durations)
+            if source_durations is not None
+            else _build_uniform_progress(source_run_units.shape[0])
+        )
+        target_progress = (
+            _build_progress_from_weights(target_frame_weight_valid)
+            if has_target_frame_weight
+            else _build_uniform_progress(target_frame_states_valid.shape[0])
+        )
+        assigned_run, assigned_local_cost, global_path_cost, path_margin = self.viterbi_align(
+            local_cost,
+            source_progress=source_progress,
+            target_progress=target_progress,
+        )
         summary = self.summarize_alignment(
             assigned_run=assigned_run,
             assigned_local_cost=assigned_local_cost,
@@ -607,24 +796,50 @@ class ContinuousRunAligner:
             source_run_units=source_run_units,
             path_margin=path_margin,
         )
+        source_progress_kind = "anchor_duration_cdf" if source_durations is not None else "uniform_index"
+        target_progress_kind = "weighted_cdf" if has_target_frame_weight else "uniform_index"
         summary.update(
             {
-                "alignment_kind": "continuous_viterbi_v1",
+                "alignment_kind": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
+                "alignment_mode": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
                 "alignment_source": "run_state_viterbi",
                 "alignment_version": CONTINUOUS_ALIGNER_VERSION,
                 "posterior_kind": "none",
+                "confidence_kind": "heuristic_v1",
+                "confidence_formula_version": "heuristic_margin_cost_type_v1",
                 "assigned_source": assigned_run.astype(np.int64),
                 "assigned_cost": assigned_local_cost.astype(np.float32),
                 "target_valid_observation_index": target_valid_index.astype(np.int64),
                 "source_frame_count": source_frame_count.astype(np.float32),
+                "source_frame_weight_sum": source_frame_weight_sum.astype(np.float32),
                 "source_run_proto": source_run_proto.astype(np.float32),
-                "run_occ_expected": summary["run_occ_weighted"],
+                "source_run_proto_var": source_run_proto_var.astype(np.float32),
+                "source_run_proto_kind": "stability_boundary_weighted_mean_v1",
+                "source_run_proto_weighting_uses_stability": np.asarray([1], dtype=np.int64),
+                "source_run_proto_weighting_uses_boundary": np.asarray([1], dtype=np.int64),
+                "source_progress_kind": source_progress_kind,
+                "target_progress_kind": target_progress_kind,
+                "alignment_lambda_emb": np.asarray([self.lambda_emb], dtype=np.float32),
+                "alignment_lambda_type": np.asarray([self.lambda_type], dtype=np.float32),
+                "alignment_lambda_band": np.asarray([self.lambda_band], dtype=np.float32),
+                "alignment_lambda_unit": np.asarray([self.lambda_unit], dtype=np.float32),
+                "alignment_band_ratio": np.asarray([self.band_ratio], dtype=np.float32),
+                "alignment_bad_cost_threshold": np.asarray([self.bad_cost_threshold], dtype=np.float32),
+                "alignment_band_width": np.asarray(
+                    [-1 if self.band_width is None else int(self.band_width)],
+                    dtype=np.int64,
+                ),
+                "run_occ_hard": summary["run_occ_viterbi"],
+                "run_occ_expected": summary["run_occ_viterbi"],
+                "run_occ_expected_is_hard_proxy": np.asarray([1], dtype=np.int64),
+                "run_occ_expected_semantics": "hard_viterbi_proxy",
                 "run_entropy": np.zeros_like(summary["run_occ_viterbi"], dtype=np.float32),
                 "run_posterior_mass_on_path": np.where(
                     np.asarray(summary["run_occ_viterbi"], dtype=np.float32) > 0.0,
                     1.0,
                     0.0,
                 ).astype(np.float32),
+                "run_posterior_mass_on_path_is_hard_proxy": np.asarray([1], dtype=np.int64),
                 "global_path_cost": np.asarray([global_path_cost], dtype=np.float32),
             }
         )
@@ -728,18 +943,28 @@ def align_target_frames_to_source_runs(
     target_frame_states: np.ndarray | None = None,
     source_frame_to_run: np.ndarray | None = None,
     source_valid_run_index: np.ndarray | None = None,
+    source_run_stability: np.ndarray | None = None,
+    source_boundary_cue: np.ndarray | None = None,
     target_frame_speech_prob: np.ndarray | None = None,
     target_frame_weight: np.ndarray | None = None,
     target_frame_valid: np.ndarray | None = None,
     target_frame_unit_hint: np.ndarray | None = None,
+    continuous_alignment_mode: str | None = None,
+    continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
 ) -> dict[str, np.ndarray | np.float32 | str] | None:
+    resolved_mode = _normalize_continuous_alignment_mode(
+        continuous_alignment_mode,
+        precomputed_alignment=precomputed_alignment,
+    )
     resolved = resolve_precomputed_alignment(
         precomputed_alignment=precomputed_alignment,
         num_target=int(target_units.shape[0]),
     )
-    if resolved is not None:
-        alignment_kind = "continuous_precomputed"
+    if resolved_mode == _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED:
+        if resolved is None:
+            return None
+        alignment_kind = _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED
         alignment_source = ""
         alignment_version = ""
         if isinstance(precomputed_alignment, dict):
@@ -750,13 +975,16 @@ def align_target_frames_to_source_runs(
             "assigned_source": resolved[0].astype(np.int64),
             "assigned_cost": resolved[1].astype(np.float32),
             "alignment_kind": alignment_kind,
+            "alignment_mode": _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED,
             "alignment_source": alignment_source,
             "alignment_version": alignment_version,
         }
+    if resolved_mode != _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1:
+        raise ValueError(f"Unsupported continuous alignment mode for frame/run aligner: {resolved_mode!r}")
     if source_frame_states is None or target_frame_states is None or source_frame_to_run is None:
         return None
-    del source_durations, target_durations, target_silence
-    aligner = ContinuousRunAligner()
+    del target_durations, target_silence
+    aligner = ContinuousRunAligner(**(continuous_aligner_kwargs or {}))
     return aligner.align(
         source_run_units=source_units,
         source_run_types=source_silence,
@@ -764,6 +992,9 @@ def align_target_frames_to_source_runs(
         source_frame_to_run=source_frame_to_run,
         target_frame_states=target_frame_states,
         source_valid_run_index=source_valid_run_index,
+        source_durations=source_durations,
+        source_run_stability=source_run_stability,
+        source_boundary_cue=source_boundary_cue,
         target_frame_speech_prob=target_frame_speech_prob,
         target_frame_weight=target_frame_weight,
         target_frame_valid=target_frame_valid,
@@ -784,10 +1015,14 @@ def align_target_to_source(
     target_frame_states: np.ndarray | None = None,
     source_frame_to_run: np.ndarray | None = None,
     source_valid_run_index: np.ndarray | None = None,
+    source_run_stability: np.ndarray | None = None,
+    source_boundary_cue: np.ndarray | None = None,
     target_frame_speech_prob: np.ndarray | None = None,
     target_frame_weight: np.ndarray | None = None,
     target_frame_valid: np.ndarray | None = None,
     target_frame_unit_hint: np.ndarray | None = None,
+    continuous_alignment_mode: str | None = None,
+    continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
 ) -> dict[str, np.ndarray | np.float32 | str]:
     if use_continuous_alignment:
@@ -802,17 +1037,29 @@ def align_target_to_source(
             target_frame_states=target_frame_states,
             source_frame_to_run=source_frame_to_run,
             source_valid_run_index=source_valid_run_index,
+            source_run_stability=source_run_stability,
+            source_boundary_cue=source_boundary_cue,
             target_frame_speech_prob=target_frame_speech_prob,
             target_frame_weight=target_frame_weight,
             target_frame_valid=target_frame_valid,
             target_frame_unit_hint=target_frame_unit_hint,
+            continuous_alignment_mode=continuous_alignment_mode,
+            continuous_aligner_kwargs=continuous_aligner_kwargs,
             precomputed_alignment=precomputed_alignment,
         )
         if continuous is not None:
             return continuous
+        resolved_mode = _normalize_continuous_alignment_mode(
+            continuous_alignment_mode,
+            precomputed_alignment=precomputed_alignment,
+        )
+        if resolved_mode == _ALIGNMENT_MODE_CONTINUOUS_PRECOMPUTED:
+            raise RuntimeError(
+                "rhythm_v3_alignment_mode=continuous_precomputed requires explicit continuous_precomputed metadata."
+            )
         raise RuntimeError(
-            "rhythm_v3_use_continuous_alignment=true requires either continuous_precomputed metadata "
-            "or explicit source_frame_states/source_frame_to_run/target_frame_states sidecars."
+            "rhythm_v3_use_continuous_alignment=true requires explicit source_frame_states/source_frame_to_run/"
+            "target_frame_states sidecars for continuous_viterbi_v1."
         )
     assigned_source, assigned_cost = align_target_runs_to_source_discrete(
         source_units=source_units,
@@ -844,10 +1091,14 @@ def project_target_runs_onto_source(
     source_frame_states: np.ndarray | None = None,
     target_frame_states: np.ndarray | None = None,
     source_frame_to_run: np.ndarray | None = None,
+    source_run_stability: np.ndarray | None = None,
+    source_boundary_cue: np.ndarray | None = None,
     target_frame_speech_prob: np.ndarray | None = None,
     target_frame_weight: np.ndarray | None = None,
     target_frame_valid: np.ndarray | None = None,
     target_frame_unit_hint: np.ndarray | None = None,
+    continuous_alignment_mode: str | None = None,
+    continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
 ) -> dict[str, np.ndarray | np.float32 | str]:
     source_silence_mask = resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
@@ -889,11 +1140,23 @@ def project_target_runs_onto_source(
         source_frame_states=source_frame_states,
         target_frame_states=target_frame_states,
         source_frame_to_run=source_frame_to_run,
+        source_run_stability=(
+            None
+            if source_run_stability is None
+            else as_float32_1d(source_run_stability)[src_run_index]
+        ),
+        source_boundary_cue=(
+            None
+            if source_boundary_cue is None
+            else as_float32_1d(source_boundary_cue)[src_run_index]
+        ),
         source_valid_run_index=src_run_index,
         target_frame_speech_prob=target_frame_speech_prob,
         target_frame_weight=target_frame_weight,
         target_frame_valid=target_frame_valid,
         target_frame_unit_hint=target_frame_unit_hint,
+        continuous_alignment_mode=continuous_alignment_mode,
+        continuous_aligner_kwargs=continuous_aligner_kwargs,
         precomputed_alignment=precomputed_alignment,
     )
 
@@ -1057,8 +1320,17 @@ def project_target_runs_onto_source(
         "mean_local_confidence_speech": np.float32(mean_local_confidence_speech),
         "mean_coarse_confidence_speech": np.float32(mean_coarse_confidence_speech),
         "alignment_kind": alignment_kind,
+        "alignment_mode": str(
+            alignment.get("alignment_mode", alignment_kind or _ALIGNMENT_MODE_DISCRETE)
+            or (alignment_kind or _ALIGNMENT_MODE_DISCRETE)
+        ),
         "alignment_source": str(alignment.get("alignment_source", "") or ""),
         "alignment_version": str(alignment.get("alignment_version", "") or ""),
+        "confidence_kind": str(alignment.get("confidence_kind", "heuristic_v1") or "heuristic_v1"),
+        "confidence_formula_version": str(
+            alignment.get("confidence_formula_version", "heuristic_margin_cost_type_v1")
+            or "heuristic_margin_cost_type_v1"
+        ),
         "assigned_source": assigned_source.astype(np.int64),
         "assigned_cost": assigned_cost.astype(np.float32),
         "source_valid_run_index": src_run_index.astype(np.int64),
@@ -1067,10 +1339,38 @@ def project_target_runs_onto_source(
             alignment.get("target_valid_observation_index", tgt_run_index),
             dtype=np.int64,
         ),
+        "run_occ_hard": np.asarray(
+            alignment.get("run_occ_hard", alignment.get("run_occ_viterbi", projected[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32))),
+            dtype=np.float32,
+        ),
+        "run_occ_weighted": np.asarray(
+            alignment.get("run_occ_weighted", projected_weighted[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32)),
+            dtype=np.float32,
+        ),
         "posterior_kind": str(alignment.get("posterior_kind", "none") or "none"),
         "run_occ_expected": np.asarray(
-            alignment.get("run_occ_expected", projected[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32)),
+            alignment.get(
+                "run_occ_expected",
+                alignment.get(
+                    "run_occ_viterbi",
+                    projected[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32),
+                ),
+            ),
             dtype=np.float32,
+        ),
+        "run_occ_expected_is_hard_proxy": np.asarray(
+            alignment.get(
+                "run_occ_expected_is_hard_proxy",
+                np.asarray([1], dtype=np.int64) if str(alignment.get("posterior_kind", "none") or "none") == "none" else np.asarray([0], dtype=np.int64),
+            ),
+            dtype=np.int64,
+        ),
+        "run_occ_expected_semantics": str(
+            alignment.get(
+                "run_occ_expected_semantics",
+                "hard_viterbi_proxy" if str(alignment.get("posterior_kind", "none") or "none") == "none" else "",
+            )
+            or ("hard_viterbi_proxy" if str(alignment.get("posterior_kind", "none") or "none") == "none" else "")
         ),
         "run_entropy": np.asarray(
             alignment.get("run_entropy", np.zeros((src_run_index.size,), dtype=np.float32)),
@@ -1079,6 +1379,68 @@ def project_target_runs_onto_source(
         "run_posterior_mass_on_path": np.asarray(
             alignment.get("run_posterior_mass_on_path", np.zeros((src_run_index.size,), dtype=np.float32)),
             dtype=np.float32,
+        ),
+        "run_posterior_mass_on_path_is_hard_proxy": np.asarray(
+            alignment.get("run_posterior_mass_on_path_is_hard_proxy", np.asarray([0], dtype=np.int64)),
+            dtype=np.int64,
+        ),
+        "source_frame_count": np.asarray(
+            alignment.get("source_frame_count", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "source_frame_weight_sum": np.asarray(
+            alignment.get("source_frame_weight_sum", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "source_run_proto": np.asarray(
+            alignment.get("source_run_proto", np.zeros((src_run_index.size, 0), dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "source_run_proto_var": np.asarray(
+            alignment.get("source_run_proto_var", np.zeros((src_run_index.size, 0), dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "source_run_proto_kind": str(
+            alignment.get("source_run_proto_kind", "stability_boundary_weighted_mean_v1")
+            or "stability_boundary_weighted_mean_v1"
+        ),
+        "source_run_proto_weighting_uses_stability": np.asarray(
+            alignment.get("source_run_proto_weighting_uses_stability", np.asarray([0], dtype=np.int64)),
+            dtype=np.int64,
+        ),
+        "source_run_proto_weighting_uses_boundary": np.asarray(
+            alignment.get("source_run_proto_weighting_uses_boundary", np.asarray([0], dtype=np.int64)),
+            dtype=np.int64,
+        ),
+        "source_progress_kind": str(alignment.get("source_progress_kind", "") or ""),
+        "target_progress_kind": str(alignment.get("target_progress_kind", "") or ""),
+        "alignment_lambda_emb": np.asarray(
+            alignment.get("alignment_lambda_emb", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_lambda_type": np.asarray(
+            alignment.get("alignment_lambda_type", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_lambda_band": np.asarray(
+            alignment.get("alignment_lambda_band", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_lambda_unit": np.asarray(
+            alignment.get("alignment_lambda_unit", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_band_ratio": np.asarray(
+            alignment.get("alignment_band_ratio", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_bad_cost_threshold": np.asarray(
+            alignment.get("alignment_bad_cost_threshold", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_band_width": np.asarray(
+            alignment.get("alignment_band_width", np.asarray([-1], dtype=np.int64)),
+            dtype=np.int64,
         ),
         "global_path_cost": np.asarray(
             alignment.get("global_path_cost", np.asarray([0.0], dtype=np.float32)),

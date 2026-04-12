@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .g_stats import normalize_falsification_eval_mode
 from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
-from .silence_surface import build_silence_tau_surface
+from .silence_surface import build_silence_tau_surface_meta
 from .summary_memory import CausalUnitRunEncoder
 
 
@@ -122,7 +122,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         local_rate_ema: torch.Tensor,
         silence_mask: torch.Tensor | None = None,
         run_stability: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | str]:
         del log_base
         if any(isinstance(value, torch.Tensor) for value in (summary_state, role_value, role_var, role_coverage)):
             raise ValueError("MinimalStreamingDurationHeadV1G forbids summary/role conditioning inputs.")
@@ -169,7 +169,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         ) * mask.unsqueeze(-1)
 
         batch_size = int(query.size(0))
-        global_rate_col = self._resolve_scalar_column(global_rate, batch_size=batch_size)
+        g_ref_col = self._resolve_scalar_column(global_rate, batch_size=batch_size)
         if isinstance(spk_embed, torch.Tensor):
             spk = spk_embed.float()
             if spk.dim() == 3 and spk.size(-1) == 1:
@@ -191,11 +191,11 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             spk_ctx = query.new_zeros((batch_size, self.query_dim))
 
         analytic_gap = apply_analytic_gap_clip(
-            global_rate_col - local_rate_seq.float(),
+            g_ref_col - local_rate_seq.float(),
             self.analytic_gap_clip,
         )
         global_shift_analytic = analytic_gap * commit_valid_mask
-        coarse_context = torch.cat([spk_ctx, global_rate_col], dim=-1)
+        coarse_context = torch.cat([spk_ctx, g_ref_col], dim=-1)
         coarse_scalar = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_context).squeeze(-1))
         predicted_coarse = coarse_scalar.unsqueeze(1).expand_as(global_shift_analytic) * commit_valid_mask
         coarse_correction = predicted_coarse
@@ -232,7 +232,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             min=-self.max_logstretch,
             max=self.max_logstretch,
         ) * speech_mask
-        silence_tau = build_silence_tau_surface(
+        silence_surface = build_silence_tau_surface_meta(
             prediction_anchor=torch.exp(log_anchor.float()),
             committed_silence_mask=silence_commit_mask,
             sep_hint=sep_hint,
@@ -241,6 +241,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             short_gap_scale=0.35,
             minimal_v1_profile=True,
         )
+        silence_tau = silence_surface["silence_tau"]
         pred_silence = torch.clamp(global_term, min=-silence_tau, max=silence_tau)
         pred_silence = pred_silence * silence_commit_mask
         pred = pred_speech + pred_silence
@@ -249,8 +250,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         coarse_delta = coarse_correction * mask
         coarse_delta_pred = predicted_coarse * mask
         coarse_path = global_term * mask
+        global_term_before_local = global_term * mask
         residual_used = residual * mask
         residual_pred = predicted_residual * mask
+        leading_gate = torch.ones_like(mask) * commit_valid_mask
 
         return {
             "unit_logstretch": pred,
@@ -266,14 +269,22 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "unit_coarse_delta": coarse_delta,
             "unit_coarse_correction_pred": coarse_delta_pred,
             "unit_coarse_correction_predicted": coarse_delta_pred,
+            "unit_global_term_before_local": global_term_before_local,
             "unit_residual_logstretch": residual_used,
             "unit_local_residual_used": residual_used,
             "unit_residual_logstretch_pred": residual_pred,
             "unit_residual_gate": residual_gate * mask,
             "unit_runtime_stability": runtime_stability * mask,
-            "unit_silence_tau": silence_tau * silence_commit_mask,
+            "unit_silence_tau": silence_tau,
+            "unit_silence_tau_surface_kind": silence_surface["silence_surface_kind"],
+            "unit_boundary_shaping": silence_surface["silence_boundary_shaping"],
+            "unit_leading_gate": leading_gate,
+            "unit_leading_gate_mode": "disabled_constant_one",
             "unit_speech_pred": pred_speech,
             "unit_silence_pred": pred_silence,
+            "runtime_surface_kind": "minimal_v1_constant_clip",
+            "runtime_silence_tau_mode": "constant",
+            "runtime_local_residual_mode": "speech_only",
             "role_attn_unit": mask.unsqueeze(-1),
             "role_value_unit": mask.new_zeros(mask.shape),
             "role_var_unit": mask.new_zeros(mask.shape),
@@ -284,7 +295,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "local_rate_seq": local_rate_seq * mask,
             "local_rate_final": local_rate_final,
             "source_rate_seq": local_rate_seq * mask,
-            "g_ref": global_rate_col.squeeze(-1),
+            "g_ref": g_ref_col.squeeze(-1),
             "g_src_prefix": local_rate_seq * mask,
             "eval_mode": self.eval_mode,
             "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
