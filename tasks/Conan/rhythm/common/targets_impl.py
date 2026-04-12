@@ -100,6 +100,7 @@ class DurationV3TargetBuildConfig:
     use_log_base_rate: bool = False
     simple_global_stats: bool = False
     rate_mode: str = "log_base"
+    minimal_v1_profile: bool = False
 
     @property
     def lambda_mem(self) -> float:
@@ -923,6 +924,17 @@ def build_duration_v3_loss_targets(
     output: dict,
     config: DurationV3TargetBuildConfig,
 ) -> DurationV3LossTargets | None:
+    if bool(getattr(config, "minimal_v1_profile", False)):
+        if float(config.lambda_op) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids prompt summary/operator loss (lambda_op=0 required).")
+        if float(config.lambda_zero) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids zero-mean identifiability loss (lambda_zero=0 required).")
+        if float(config.lambda_ortho) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids orthogonality loss (lambda_ortho=0 required).")
+        if float(config.lambda_base) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids baseline/log-base loss (lambda_base=0 required).")
+        if str(config.baseline_train_mode or "joint").strip().lower() == "pretrain":
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids baseline pretrain mode.")
     execution = output.get("rhythm_execution")
     unit_batch = output.get("rhythm_unit_batch")
     if execution is None or unit_batch is None:
@@ -948,22 +960,36 @@ def build_duration_v3_loss_targets(
     prediction_anchor = _resolve_duration_v3_prediction_anchor(
         unit_batch=unit_batch,
         unit_mask=unit_mask,
-        speech_mask=unit_mask,
+        speech_mask=speech_mask,
         anchor_mode=str(config.anchor_mode or "baseline").strip().lower(),
     )
     baseline_pretrain_only = (str(config.baseline_train_mode or "joint").strip().lower() == "pretrain")
-    baseline_duration_tgt, baseline_mask, baseline_global_tgt = _build_duration_v3_baseline_targets(
-        unit_duration_tgt=unit_duration_tgt,
-        unit_anchor_base=unit_anchor_base.float().detach(),
-        speech_mask=speech_mask.float(),
-        baseline_target_mode=str(config.baseline_target_mode or "deglobalized").strip().lower(),
-    )
-    prompt_targets = _resolve_duration_v3_prompt_targets(
-        ref_memory=output.get("rhythm_ref_conditioning"),
-        lambda_op=(0.0 if baseline_pretrain_only else float(config.lambda_op)),
-        lambda_zero=(0.0 if baseline_pretrain_only else float(config.lambda_zero)),
-        lambda_ortho=(0.0 if baseline_pretrain_only else float(config.lambda_ortho)),
-    )
+    if bool(getattr(config, "minimal_v1_profile", False)):
+        baseline_pretrain_only = False
+        baseline_duration_tgt, baseline_mask, baseline_global_tgt = None, None, None
+    else:
+        baseline_duration_tgt, baseline_mask, baseline_global_tgt = _build_duration_v3_baseline_targets(
+            unit_duration_tgt=unit_duration_tgt,
+            unit_anchor_base=unit_anchor_base.float().detach(),
+            speech_mask=speech_mask.float(),
+            baseline_target_mode=str(config.baseline_target_mode or "deglobalized").strip().lower(),
+        )
+    if bool(getattr(config, "minimal_v1_profile", False)):
+        prompt_targets = _resolve_duration_v3_minimal_prompt_targets(
+            ref_memory=output.get("rhythm_ref_conditioning"),
+        )
+        if not isinstance(prompt_targets["global_rate"], torch.Tensor):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_ref_conditioning.global_rate "
+                "to build source-anchored global/coarse/local targets."
+            )
+    else:
+        prompt_targets = _resolve_duration_v3_prompt_targets(
+            ref_memory=output.get("rhythm_ref_conditioning"),
+            lambda_op=(0.0 if baseline_pretrain_only else float(config.lambda_op)),
+            lambda_zero=(0.0 if baseline_pretrain_only else float(config.lambda_zero)),
+            lambda_ortho=(0.0 if baseline_pretrain_only else float(config.lambda_ortho)),
+        )
     def _resolve_optional_unit_surface(key: str) -> torch.Tensor | None:
         if key not in sample:
             return None
@@ -1139,6 +1165,11 @@ def build_duration_v3_loss_targets(
                     else global_shift_tgt.float()
                 )
             ) * (consistency_mask.float() * speech_mask.float())
+    silence_coarse_weight = (
+        0.0
+        if bool(getattr(config, "minimal_v1_profile", False))
+        else float(config.silence_coarse_weight)
+    )
     return DurationV3LossTargets(
         unit_duration_tgt=unit_duration_tgt.float(),
         unit_anchor_base=unit_anchor_base.float().detach(),
@@ -1146,7 +1177,7 @@ def build_duration_v3_loss_targets(
         silence_mask=silence_mask.float(),
         committed_speech_mask=committed_speech_mask.float(),
         committed_silence_mask=committed_silence_mask.float(),
-        silence_coarse_weight=float(config.silence_coarse_weight),
+        silence_coarse_weight=silence_coarse_weight,
         unit_confidence_local_tgt=unit_confidence_local_tgt,
         unit_confidence_coarse_tgt=unit_confidence_coarse_tgt,
         unit_confidence_tgt=unit_confidence_tgt,
@@ -1191,6 +1222,7 @@ def build_duration_v3_loss_targets(
         lambda_zero=float(config.lambda_zero),
         lambda_ortho=float(config.lambda_ortho),
         baseline_pretrain_only=baseline_pretrain_only,
+        minimal_v1_profile=bool(getattr(config, "minimal_v1_profile", False)),
     )
 
 
@@ -1464,6 +1496,29 @@ def _resolve_duration_v3_prompt_targets(
         "prompt_log_residual": (
             prompt_log_residual.float().detach() if isinstance(prompt_log_residual, torch.Tensor) else None
         ),
+    }
+
+
+def _resolve_duration_v3_minimal_prompt_targets(
+    *,
+    ref_memory,
+) -> dict[str, torch.Tensor | None]:
+    global_rate = getattr(ref_memory, "global_rate", None)
+    return {
+        "global_rate": global_rate.float().detach() if isinstance(global_rate, torch.Tensor) else None,
+        "prompt_basis_activation": None,
+        "prompt_random_target_tgt": None,
+        "prompt_mask": None,
+        "prompt_fit_mask": None,
+        "prompt_eval_mask": None,
+        "prompt_operator_fit_pred": None,
+        "prompt_operator_cv_fit_pred": None,
+        "prompt_role_attn": None,
+        "prompt_role_fit_pred": None,
+        "prompt_role_value": None,
+        "prompt_role_var": None,
+        "prompt_log_duration": None,
+        "prompt_log_residual": None,
     }
 
 

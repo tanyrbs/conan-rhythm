@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from modules.Conan.rhythm_v3.minimal_head import MinimalStreamingDurationHeadV1G
 from modules.Conan.rhythm_v3.projector import StreamingDurationProjector
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from modules.Conan.rhythm_v3.unitizer import build_compressed_sequence
@@ -175,6 +176,118 @@ def test_rhythm_v3_prompt_summary_threads_minimal_v1_global_stat_switches():
     assert adapter.module.duration_head.simple_global_stats is True
     assert adapter.module.duration_head.use_log_base_rate is False
     assert adapter.module.duration_head.use_learned_residual_gate is False
+
+
+def test_rhythm_v3_minimal_prompt_summary_uses_global_only_prompt_memory():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    prompt_a = {
+        "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
+        "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
+        "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+    }
+    prompt_b = {
+        **prompt_a,
+        "prompt_duration_obs": torch.tensor([[4.0, 24.0, 8.0]], dtype=torch.float32),
+    }
+    memory_a = adapter.module.build_reference_conditioning(ref_conditioning=prompt_a)
+    memory_b = adapter.module.build_reference_conditioning(ref_conditioning=prompt_b)
+    assert torch.allclose(memory_a.global_rate, memory_b.global_rate)
+    assert adapter.module.summary_codebook is None
+    assert adapter.module.role_codebook is None
+    assert isinstance(adapter.module.duration_head, MinimalStreamingDurationHeadV1G)
+    assert memory_a.summary_state is None
+    assert memory_a.role_value is None
+    assert memory_a.role_var is None
+    assert memory_a.role_coverage is None
+    assert memory_a.prompt_role_attn is None
+
+
+def test_rhythm_v3_minimal_prompt_summary_ignores_spurious_prompt_log_base():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    prompt = {
+        "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
+        "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
+        "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+    }
+    with_base = {
+        **prompt,
+        "prompt_log_base": torch.tensor([[9.0, 9.0, 9.0]], dtype=torch.float32),
+        "prompt_unit_anchor_base": torch.tensor([[99.0, 99.0, 99.0]], dtype=torch.float32),
+    }
+    memory_plain = adapter.module.build_reference_conditioning(ref_conditioning=prompt)
+    memory_with_base = adapter.module.build_reference_conditioning(ref_conditioning=with_base)
+    assert torch.allclose(memory_plain.global_rate, memory_with_base.global_rate)
+    assert memory_with_base.prompt_log_base is not None
+    assert torch.allclose(memory_with_base.prompt_log_base, torch.zeros_like(memory_with_base.prompt_log_base))
+
+
+def test_rhythm_v3_minimal_prompt_summary_uses_constant_silence_clip():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_silence_max_logstretch"] = 0.22
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 57, 2]], dtype=torch.long),
+        ref=None,
+        ref_conditioning={
+            "prompt_content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+        },
+    )
+    execution = ret["rhythm_execution"]
+    assert torch.allclose(execution.local_residual[0, 1], torch.tensor(0.0))
+    expected = execution.coarse_logstretch[0, 1].clamp(min=-0.22, max=0.22)
+    assert torch.allclose(execution.unit_logstretch[0, 1], expected)
+
+
+def test_rhythm_v3_prompt_summary_prediction_anchor_keeps_open_visible_units():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    source_batch = adapter.unit_frontend.from_precomputed(
+        content_units=torch.tensor([[1, 57, 2]], dtype=torch.long),
+        source_duration_obs=torch.tensor([[2.0, 3.0, 4.0]], dtype=torch.float32),
+        unit_anchor_base=torch.tensor([[9.0, 1.0, 1.0]], dtype=torch.float32),
+        unit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+        sealed_mask=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+        source_silence_mask=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+    )
+    commit_mask = source_batch.unit_mask.float() * source_batch.sealed_mask.float()
+    speech_commit_mask = commit_mask * (1.0 - source_batch.source_silence_mask.float())
+    anchor = adapter.module._resolve_prediction_anchor(
+        source_batch=source_batch,
+        speech_commit_mask=speech_commit_mask,
+        commit_mask=commit_mask,
+    )
+    assert torch.allclose(anchor, source_batch.source_duration_obs.float())
 
 
 def test_rhythm_v3_prompt_summary_coarse_correction_is_scalar_broadcast():
@@ -352,6 +465,50 @@ def test_rhythm_v3_prompt_summary_cached_source_requires_silence_mask():
                 "content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
                 "source_duration_obs": torch.tensor([[2.0, 1.0, 2.0]], dtype=torch.float32),
                 "unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            },
+            rhythm_offline_source_cache=None,
+            speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+        )
+
+
+def test_rhythm_v3_minimal_prompt_summary_cached_source_requires_cache_meta():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = {}
+    with pytest.raises(ValueError, match="rhythm_v3_cache_meta"):
+        adapter(
+            ret=ret,
+            content=torch.tensor([[1, 1, 57, 57]], dtype=torch.long),
+            ref=None,
+            target=None,
+            f0=None,
+            uv=None,
+            infer=True,
+            global_steps=0,
+            content_embed=torch.randn(1, 4, 32),
+            tgt_nonpadding=torch.ones(1, 4, 1),
+            content_lengths=torch.tensor([4], dtype=torch.long),
+            rhythm_state=None,
+            rhythm_ref_conditioning=_build_prompt_conditioning(prompt_units=3),
+            rhythm_apply_override=None,
+            rhythm_runtime_overrides=None,
+            rhythm_source_cache={
+                "content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
+                "source_duration_obs": torch.tensor([[2.0, 1.0, 2.0]], dtype=torch.float32),
+                "unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+                "sealed_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+                "sep_mask": torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32),
+                "source_silence_mask": torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+                "source_run_stability": torch.ones((1, 3), dtype=torch.float32),
+                "source_boundary_cue": torch.zeros((1, 3), dtype=torch.float32),
+                "unit_anchor_base": torch.tensor([[2.0, 1.0, 2.0]], dtype=torch.float32),
             },
             rhythm_offline_source_cache=None,
             speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),

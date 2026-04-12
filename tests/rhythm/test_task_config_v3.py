@@ -272,6 +272,111 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_si
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_speech_only_summary_pooling():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_summary_pool_speech_only": False,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_summary_pool_speech_only=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_cross_text_reference_contract():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_disallow_same_text_reference": False,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_disallow_same_text_reference=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_self_target_fallback():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_allow_source_self_target_fallback": True,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_allow_source_self_target_fallback=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silence_aux_weight():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "rhythm_num_summary_slots": 1,
+            "rhythm_v3_summary_use_unit_embedding": False,
+            "rhythm_v3_summary_pool_speech_only": True,
+            "rhythm_v3_disallow_same_text_reference": True,
+            "rhythm_v3_disallow_same_text_paired_target": False,
+            "rhythm_v3_require_same_text_paired_target": True,
+            "rhythm_v3_allow_source_self_target_fallback": False,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_rate_mode": "simple_global",
+            "rhythm_v3_use_log_base_rate": False,
+            "rhythm_v3_use_reference_summary": False,
+            "rhythm_v3_use_learned_residual_gate": False,
+            "rhythm_v3_disable_learned_gate": True,
+            "rhythm_v3_silence_coarse_weight": 0.1,
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_v3_silence_coarse_weight=0"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_strict_streaming():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_streaming_mode": "lookahead",
+        }
+    )
+    with pytest.raises(ValueError, match="rhythm_streaming_mode='strict'"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_unknown_v3_baseline_train_mode():
     hparams = _minimal_v3_hparams()
     hparams["rhythm_v3_baseline_train_mode"] = "alternating"
@@ -894,6 +999,7 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_use_reference_summary: false" in source
     assert "rhythm_v3_use_learned_residual_gate: false" in source
     assert "rhythm_v3_disable_learned_gate: true" in source
+    assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_num_summary_slots: 1" in source
     assert "rhythm_v3_summary_use_unit_embedding: false" in source
     assert "rhythm_v3_disallow_same_text_reference: true" in source

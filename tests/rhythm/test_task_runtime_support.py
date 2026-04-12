@@ -223,6 +223,26 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
             config = support.build_duration_v3_target_build_config()
         self.assertEqual(config.lambda_op, 0.0)
 
+    def test_build_duration_v3_target_build_config_forces_silence_aux_off_for_minimal_profile(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_simple_global_stats": True,
+                "rhythm_v3_rate_mode": "simple_global",
+                "rhythm_v3_silence_coarse_weight": 0.45,
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_pref": 0.10,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertEqual(config.silence_coarse_weight, 0.0)
+
     def test_attach_acoustic_target_bundle_exposes_alignment_observability(self) -> None:
         class DummyOwner:
             mel_losses = {"l1": 1.0}

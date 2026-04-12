@@ -10,6 +10,8 @@ If you are doing new work in this repository, start from:
 - `modules/Conan/rhythm_v3/`
 
 For the architecture/spec reading, see `docs/rhythm_migration_plan.md`.
+For validation/debug export before adding plotting back, see
+`docs/rhythm_v3_validation_stack.md`.
 
 ---
 

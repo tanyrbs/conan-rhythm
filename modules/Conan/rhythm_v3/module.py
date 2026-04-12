@@ -18,7 +18,13 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
-from .summary_memory import PromptDurationMemoryEncoder, SharedSummaryCodebook, StreamingDurationHead
+from .minimal_head import MinimalStreamingDurationHeadV1G
+from .summary_memory import (
+    PromptDurationMemoryEncoder,
+    PromptGlobalConditionEncoderV1G,
+    SharedSummaryCodebook,
+    StreamingDurationHead,
+)
 
 
 _PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory", "unit_run"}
@@ -469,49 +475,72 @@ class MixedEffectsDurationModule(nn.Module):
         self.prompt_memory_encoder = None
         self.duration_head = None
         if self.backbone_mode == "prompt_summary":
-            summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
-            self.summary_codebook = summary_codebook
-            self.role_codebook = summary_codebook
-            prompt_memory_kwargs = dict(
-                vocab_size=vocab_size,
-                dim=summary_dim,
-                num_slots=summary_slots,
-                operator_rank=basis_rank,
-                coverage_floor=summary_cov_floor,
-                summary_pool_speech_only=summary_pool_speech_only,
-                summary_use_unit_embedding=summary_use_unit_embedding,
-                codebook=self.summary_codebook,
-            )
-            if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
-                prompt_memory_kwargs["simple_global_stats"] = self.simple_global_stats
-            if _init_accepts_kwarg(PromptDurationMemoryEncoder, "use_log_base_rate"):
-                prompt_memory_kwargs["use_log_base_rate"] = self.use_log_base_rate
-            self.prompt_memory_encoder = PromptDurationMemoryEncoder(**prompt_memory_kwargs)
+            if self.minimal_v1_profile:
+                self.prompt_memory_encoder = PromptGlobalConditionEncoderV1G(
+                    operator_rank=basis_rank,
+                    use_log_base_rate=self.use_log_base_rate,
+                )
+                self.duration_head = MinimalStreamingDurationHeadV1G(
+                    vocab_size=vocab_size,
+                    dim=summary_dim,
+                    num_slots=1,
+                    spk_dim=hidden_size,
+                    simple_global_stats=self.simple_global_stats,
+                    use_log_base_rate=self.use_log_base_rate,
+                    use_learned_residual_gate=self.use_learned_residual_gate,
+                    max_logstretch=max_logstretch,
+                    max_silence_logstretch=max_silence_logstretch,
+                    local_cold_start_runs=local_cold_start_runs,
+                    local_short_run_min_duration=local_short_run_min_duration,
+                    local_rate_decay=local_rate_decay,
+                    short_gap_silence_scale=short_gap_silence_scale,
+                    leading_silence_scale=leading_silence_scale,
+                )
+            else:
+                summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
+                self.summary_codebook = summary_codebook
+                self.role_codebook = summary_codebook
+                prompt_memory_kwargs = dict(
+                    vocab_size=vocab_size,
+                    dim=summary_dim,
+                    num_slots=summary_slots,
+                    operator_rank=basis_rank,
+                    coverage_floor=summary_cov_floor,
+                    summary_pool_speech_only=summary_pool_speech_only,
+                    summary_use_unit_embedding=summary_use_unit_embedding,
+                    codebook=self.summary_codebook,
+                )
+                if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
+                    prompt_memory_kwargs["simple_global_stats"] = self.simple_global_stats
+                if _init_accepts_kwarg(PromptDurationMemoryEncoder, "use_log_base_rate"):
+                    prompt_memory_kwargs["use_log_base_rate"] = self.use_log_base_rate
+                self.prompt_memory_encoder = PromptDurationMemoryEncoder(**prompt_memory_kwargs)
             self.prompt_memory_encoder.rate_mode = self.rate_mode
             self.prompt_memory_encoder.simple_global_stats = self.simple_global_stats
             self.prompt_memory_encoder.use_log_base_rate = self.use_log_base_rate
 
-            duration_head_kwargs = dict(
-                vocab_size=vocab_size,
-                dim=summary_dim,
-                num_slots=summary_slots,
-                spk_dim=hidden_size,
-                max_logstretch=max_logstretch,
-                max_silence_logstretch=max_silence_logstretch,
-                local_cold_start_runs=local_cold_start_runs,
-                local_short_run_min_duration=local_short_run_min_duration,
-                local_rate_decay=local_rate_decay,
-                short_gap_silence_scale=short_gap_silence_scale,
-                leading_silence_scale=leading_silence_scale,
-                codebook=self.summary_codebook,
-            )
-            if _init_accepts_kwarg(StreamingDurationHead, "simple_global_stats"):
-                duration_head_kwargs["simple_global_stats"] = self.simple_global_stats
-            if _init_accepts_kwarg(StreamingDurationHead, "use_log_base_rate"):
-                duration_head_kwargs["use_log_base_rate"] = self.use_log_base_rate
-            if _init_accepts_kwarg(StreamingDurationHead, "use_learned_residual_gate"):
-                duration_head_kwargs["use_learned_residual_gate"] = self.use_learned_residual_gate
-            self.duration_head = StreamingDurationHead(**duration_head_kwargs)
+            if not self.minimal_v1_profile:
+                duration_head_kwargs = dict(
+                    vocab_size=vocab_size,
+                    dim=summary_dim,
+                    num_slots=summary_slots,
+                    spk_dim=hidden_size,
+                    max_logstretch=max_logstretch,
+                    max_silence_logstretch=max_silence_logstretch,
+                    local_cold_start_runs=local_cold_start_runs,
+                    local_short_run_min_duration=local_short_run_min_duration,
+                    local_rate_decay=local_rate_decay,
+                    short_gap_silence_scale=short_gap_silence_scale,
+                    leading_silence_scale=leading_silence_scale,
+                    codebook=self.summary_codebook,
+                )
+                if _init_accepts_kwarg(StreamingDurationHead, "simple_global_stats"):
+                    duration_head_kwargs["simple_global_stats"] = self.simple_global_stats
+                if _init_accepts_kwarg(StreamingDurationHead, "use_log_base_rate"):
+                    duration_head_kwargs["use_log_base_rate"] = self.use_log_base_rate
+                if _init_accepts_kwarg(StreamingDurationHead, "use_learned_residual_gate"):
+                    duration_head_kwargs["use_learned_residual_gate"] = self.use_learned_residual_gate
+                self.duration_head = StreamingDurationHead(**duration_head_kwargs)
             self.duration_head.rate_mode = self.rate_mode
             self.duration_head.simple_global_stats = self.simple_global_stats
             self.duration_head.use_log_base_rate = self.use_log_base_rate
@@ -833,12 +862,12 @@ class MixedEffectsDurationModule(nn.Module):
         speech_commit_mask: torch.Tensor,
         commit_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        del speech_commit_mask, commit_mask
         if self.backbone_mode == "prompt_summary":
             observed = source_batch.source_duration_obs.float().clamp_min(1.0e-4)
             baseline = source_batch.unit_anchor_base.float().clamp_min(1.0e-4)
-            valid_mask = commit_mask.float() if isinstance(commit_mask, torch.Tensor) else source_batch.unit_mask.float()
-            anchor = torch.where(valid_mask > 0.5, observed, torch.zeros_like(observed))
-            return torch.where(anchor > 0.0, anchor, baseline * valid_mask)
+            visible_mask = source_batch.unit_mask.float()
+            return torch.where(visible_mask > 0.5, observed, baseline * visible_mask)
         return source_batch.unit_anchor_base.float()
 
     @staticmethod
@@ -938,6 +967,12 @@ class MixedEffectsDurationModule(nn.Module):
                 silence_mask=getattr(source_batch, "source_silence_mask", None),
                 run_stability=getattr(source_batch, "source_run_stability", None),
             )
+            if self.minimal_v1_profile and isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
+                residual = role_plan.get("unit_residual_logstretch")
+                if isinstance(residual, torch.Tensor):
+                    silence_local = residual.float().abs() * source_batch.source_silence_mask.float().clamp(0.0, 1.0)
+                    if bool((silence_local > 1.0e-6).any().item()):
+                        raise RuntimeError("rhythm_v3_minimal_v1_profile forbids silence local residual.")
             unit_logstretch = role_plan["unit_logstretch"] * commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
                 prediction_anchor=prediction_anchor,

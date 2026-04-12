@@ -261,6 +261,7 @@ Not claimed ready:
 
 - `README.md`
 - `docs/rhythm_v3_training_guide.md`
+- `docs/rhythm_v3_validation_stack.md`
 - `docs/rhythm_migration_plan.md`
 - `inference/README.md`
 
@@ -269,6 +270,7 @@ Not claimed ready:
 If you want the repo-specific "what files matter / how do I prepare data / how do I actually train" walkthrough, use:
 
 - `docs/rhythm_v3_training_guide.md`
+- `docs/rhythm_v3_validation_stack.md` for pre-train label audit / runtime debug-record export
 
 Short version:
 

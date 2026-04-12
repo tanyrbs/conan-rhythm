@@ -69,6 +69,14 @@ Maintained helpers:
 - `inference/run_streaming_latency_report.py`
 - `inference/streaming_runtime.py`
 
+For runtime-side debug export, `StreamingVoiceConversion.infer_once(...)` also
+accepts:
+
+- `return_debug_bundle=True`
+
+which emits a serializable rhythm-v3 debug record compatible with
+`utils.plot.rhythm_v3_viz`.
+
 These are suitable for:
 
 - streaming-oriented evaluation

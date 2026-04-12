@@ -181,6 +181,14 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_use_unit_embedding=false."
             )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_summary_pool_speech_only", True)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_pool_speech_only=true."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_disallow_same_text_reference", True)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_disallow_same_text_reference=true."
+            )
         if _is_enabled_flag(hparams.get("rhythm_v3_disallow_same_text_paired_target", False)):
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_disallow_same_text_paired_target=false."
@@ -188,6 +196,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         if not _is_enabled_flag(hparams.get("rhythm_v3_require_same_text_paired_target", True)):
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_require_same_text_paired_target=true."
+            )
+        if _is_enabled_flag(hparams.get("rhythm_v3_allow_source_self_target_fallback", False)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_allow_source_self_target_fallback=false."
             )
         if not _is_enabled_flag(hparams.get("rhythm_v3_simple_global_stats", True)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_simple_global_stats=true.")
@@ -201,10 +213,19 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_learned_residual_gate=false.")
         if not _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", True)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_disable_learned_gate=true.")
+        if str(hparams.get("rhythm_streaming_mode", "strict") or "strict").strip().lower() != "strict":
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_streaming_mode='strict'.")
+        if int(hparams.get("rhythm_response_window_right", 0) or 0) != 0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_response_window_right=0.")
+        micro_lookahead = hparams.get("rhythm_micro_lookahead_units")
+        if micro_lookahead is not None and int(micro_lookahead or 0) != 0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_micro_lookahead_units=0 or unset.")
         if float(hparams.get("lambda_rhythm_summary", hparams.get("lambda_rhythm_mem", 0.0)) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_summary=0.")
         if float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_base=0.")
+        if float(hparams.get("rhythm_v3_silence_coarse_weight", 0.0) or 0.0) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_silence_coarse_weight=0.")
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)
     ):

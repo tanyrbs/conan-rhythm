@@ -18,6 +18,7 @@ from .summary_memory import (
     SharedSummaryCodebook,
     StreamingDurationHead,
 )
+from .minimal_head import MinimalStreamingDurationHeadV1G
 
 SharedRoleCodebook = SharedSummaryCodebook
 PromptSummaryProbeBank = SharedSummaryCodebook
@@ -33,5 +34,6 @@ __all__ = [
     "PromptSummaryProbeBank",
     "SharedSummaryCodebook",
     "SharedRoleCodebook",
+    "MinimalStreamingDurationHeadV1G",
     "StreamingDurationHead",
 ]

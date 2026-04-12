@@ -224,6 +224,89 @@ def test_rhythm_v3_prompt_summary_targets_use_source_anchor_and_prompt_memory_lo
     assert torch.isfinite(losses["rhythm_v3_summary"]).all()
 
 
+def test_rhythm_v3_source_observed_prediction_anchor_masks_out_silence_runs():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 57, 57, 2, 2]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    targets = build_duration_v3_loss_targets(
+        sample={"unit_duration_tgt": ret["speech_duration_exec"].detach().clamp_min(1.0) + 0.2},
+        output=ret,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.0,
+            lambda_pref=0.0,
+            lambda_cons=0.0,
+            lambda_zero=0.0,
+            lambda_ortho=0.0,
+            anchor_mode="source_observed",
+        ),
+    )
+    assert targets is not None
+    silence_mask = ret["rhythm_unit_batch"].source_silence_mask.float()
+    silence_positions = (silence_mask > 0.5).nonzero(as_tuple=False)
+    assert silence_positions.numel() > 0
+    for row, col in silence_positions.tolist():
+        assert torch.allclose(targets.prediction_anchor[row, col], torch.tensor(0.0))
+
+
+def test_rhythm_v3_minimal_profile_target_builder_rejects_baseline_loss_surface():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    with pytest.raises(ValueError, match="forbids baseline/log-base loss"):
+        build_duration_v3_loss_targets(
+            sample={"unit_duration_tgt": ret["speech_duration_exec"].detach() + 0.2},
+            output=ret,
+            config=DurationV3TargetBuildConfig(
+                lambda_dur=1.0,
+                lambda_op=0.0,
+                lambda_pref=0.0,
+                lambda_base=1.0,
+                minimal_v1_profile=True,
+            ),
+        )
+
+
 def test_prompt_summary_global_rate_uses_raw_log_by_default():
     encoder = PromptDurationMemoryEncoder(
         vocab_size=16,
@@ -906,6 +989,138 @@ def test_rhythm_v3_bias_loss_prefers_global_bias_scalar_when_available():
     )
     losses = build_rhythm_loss_dict(execution, targets)
     assert torch.allclose(losses["rhythm_v3_bias"], torch.tensor(0.0))
+
+
+def test_rhythm_v3_minimal_profile_loss_builder_rejects_prompt_operator_surface():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.25,
+        lambda_pref=0.0,
+        minimal_v1_profile=True,
+    )
+    with pytest.raises(ValueError, match="forbids prompt summary/operator loss"):
+        build_rhythm_loss_dict(execution, targets)
+
+
+def test_rhythm_v3_minimal_profile_target_builder_requires_global_rate():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 57, 57, 2, 2]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    broken = dict(ret)
+    broken["rhythm_ref_conditioning"] = object()
+    with pytest.raises(ValueError, match="requires rhythm_ref_conditioning.global_rate"):
+        build_duration_v3_loss_targets(
+            sample={"unit_duration_tgt": ret["speech_duration_exec"].detach() + 0.1},
+            output=broken,
+            config=DurationV3TargetBuildConfig(
+                lambda_dur=1.0,
+                lambda_op=0.0,
+                lambda_pref=0.10,
+                lambda_bias=0.20,
+                lambda_zero=0.0,
+                lambda_ortho=0.0,
+                minimal_v1_profile=True,
+            ),
+        )
+
+
+def test_rhythm_v3_minimal_profile_target_builder_omits_prompt_and_silence_aux_surfaces():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 57, 57, 2, 2]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    targets = build_duration_v3_loss_targets(
+        sample={"unit_duration_tgt": ret["speech_duration_exec"].detach() + 0.1},
+        output=ret,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.0,
+            lambda_pref=0.10,
+            lambda_bias=0.20,
+            lambda_zero=0.0,
+            lambda_ortho=0.0,
+            silence_coarse_weight=0.45,
+            minimal_v1_profile=True,
+        ),
+    )
+    assert targets is not None
+    assert targets.silence_coarse_weight == pytest.approx(0.0)
+    assert targets.baseline_duration_tgt is None
+    assert targets.baseline_mask is None
+    assert targets.baseline_global_tgt is None
+    assert targets.prompt_basis_activation is None
+    assert targets.prompt_random_target_tgt is None
+    assert targets.prompt_mask is None
+    assert targets.prompt_role_attn is None
+    assert targets.prompt_log_residual is None
 
 
 def test_prompt_summary_runtime_uses_learned_source_rate_init_without_history():

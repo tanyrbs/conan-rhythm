@@ -76,6 +76,20 @@ def test_duration_unit_frontend_from_precomputed_preserves_source_run_stability(
     assert torch.allclose(batch.source_run_stability, torch.tensor([[0.9, 0.2, 0.8]], dtype=torch.float32))
 
 
+def test_duration_unit_frontend_simple_global_stats_omits_rate_log_base():
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        simple_global_stats=True,
+    )
+    batch = frontend.from_content_tensor(
+        torch.tensor([[1, 1, 57, 2, 2]], dtype=torch.long),
+        mark_last_open=False,
+    )
+    assert batch.unit_rate_log_base is None
+
+
 def test_shared_source_cache_builder_can_materialize_explicit_silence_runs():
     cache = build_source_rhythm_cache(
         [1, 1, 57, 57, 2, 57, 57, 3],
@@ -116,6 +130,18 @@ def test_shared_source_cache_builder_debounces_short_silence_flicker_in_offline_
     assert cache["content_units"].tolist() == [1]
     assert cache["dur_anchor_src"].tolist() == [3]
     assert cache["source_silence_mask"].tolist() == [0.0]
+
+
+def test_shared_source_cache_builder_suppresses_micro_silence_between_different_units():
+    cache = build_source_rhythm_cache(
+        [1, 57, 2],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=1,
+    )
+    assert cache["content_units"].tolist() == [1, 2]
+    assert cache["dur_anchor_src"].tolist() == [2, 1]
+    assert cache["source_silence_mask"].tolist() == [0.0, 0.0]
 
 
 def test_duration_unit_frontend_stream_state_debounces_short_tail_silence_flicker():

@@ -135,6 +135,7 @@ class DurationV3LossTargets:
     lambda_zero: float = 0.0
     lambda_ortho: float = 0.0
     baseline_pretrain_only: bool = False
+    minimal_v1_profile: bool = False
 
     @property
     def lambda_mem(self) -> float:
@@ -1569,6 +1570,11 @@ def _build_duration_v3_bias_loss(
             beta=0.25,
             reduction="mean",
         )
+    if bool(getattr(targets, "minimal_v1_profile", False)):
+        raise ValueError(
+            "rhythm_v3_minimal_v1_profile requires utterance-level scalar coarse bias "
+            "(execution.global_bias_scalar and targets.global_bias_tgt)."
+        )
 
     # Compatibility fallback for checkpoints that only expose sequence coarse outputs.
     committed_mask = (
@@ -1630,6 +1636,17 @@ def _rebuild_duration_v3_sgbase_prediction(
 
 
 def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> dict[str, torch.Tensor]:
+    if bool(getattr(targets, "minimal_v1_profile", False)):
+        if float(targets.lambda_op) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids prompt summary/operator loss (lambda_op=0 required).")
+        if float(targets.lambda_zero) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids zero-mean identifiability loss (lambda_zero=0 required).")
+        if float(targets.lambda_ortho) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids orthogonality loss (lambda_ortho=0 required).")
+        if float(targets.lambda_base) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids baseline/log-base loss (lambda_base=0 required).")
+        if bool(targets.baseline_pretrain_only):
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids baseline pretrain mode.")
     unit_mask = targets.unit_mask.float()
     committed_mask = targets.committed_mask.float() * unit_mask
     pred_speech = execution.speech_duration_exec.float()

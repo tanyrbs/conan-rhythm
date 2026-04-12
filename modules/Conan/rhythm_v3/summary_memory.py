@@ -321,10 +321,13 @@ class PromptDurationMemoryEncoder(nn.Module):
         speech_mask = prompt_speech_mask.float().clamp(0.0, 1.0) if isinstance(prompt_speech_mask, torch.Tensor) else valid_mask
         speech_mask = speech_mask * valid_mask
         logdur = torch.log(prompt_duration_obs.float().clamp_min(1.0e-4)) * valid_mask
-        if isinstance(prompt_log_base, torch.Tensor):
-            log_base = prompt_log_base.float().detach() * valid_mask
-        elif isinstance(prompt_unit_anchor_base, torch.Tensor):
-            log_base = torch.log(prompt_unit_anchor_base.float().detach().clamp_min(1.0e-6)) * valid_mask
+        if self.use_log_base_rate:
+            if isinstance(prompt_log_base, torch.Tensor):
+                log_base = prompt_log_base.float().detach() * valid_mask
+            elif isinstance(prompt_unit_anchor_base, torch.Tensor):
+                log_base = torch.log(prompt_unit_anchor_base.float().detach().clamp_min(1.0e-6)) * valid_mask
+            else:
+                log_base = torch.zeros_like(logdur)
         else:
             log_base = torch.zeros_like(logdur)
         rate_logdur = (
@@ -398,6 +401,98 @@ class PromptDurationMemoryEncoder(nn.Module):
         )
 
 
+class PromptGlobalConditionEncoderV1G(nn.Module):
+    """Minimal prompt encoder that only exposes speech-only global tempo and speaker state."""
+
+    def __init__(
+        self,
+        *,
+        operator_rank: int,
+        min_speech_ratio: float = 0.6,
+        use_log_base_rate: bool = False,
+    ) -> None:
+        super().__init__()
+        self.operator_rank = int(max(1, operator_rank))
+        self.min_speech_ratio = float(max(0.0, min(1.0, min_speech_ratio)))
+        self.use_log_base_rate = bool(use_log_base_rate)
+        self.rate_mode = "log_base" if self.use_log_base_rate else "simple_global"
+        self.simple_global_stats = not self.use_log_base_rate
+
+    def forward(
+        self,
+        *,
+        prompt_content_units: torch.Tensor,
+        prompt_duration_obs: torch.Tensor,
+        prompt_mask: torch.Tensor | None = None,
+        prompt_valid_mask: torch.Tensor | None = None,
+        prompt_speech_mask: torch.Tensor | None = None,
+        prompt_unit_anchor_base: torch.Tensor | None = None,
+        prompt_log_base: torch.Tensor | None = None,
+        prompt_spk_embed: torch.Tensor | None = None,
+        prompt_edge_cue: torch.Tensor | None = None,
+        prompt_phrase_final_mask: torch.Tensor | None = None,
+    ) -> ReferenceDurationMemory:
+        del prompt_content_units, prompt_edge_cue, prompt_phrase_final_mask
+        valid_mask = prompt_valid_mask
+        if not isinstance(valid_mask, torch.Tensor):
+            valid_mask = prompt_mask
+        if not isinstance(valid_mask, torch.Tensor):
+            valid_mask = prompt_duration_obs.float().gt(0.0).float()
+        valid_mask = valid_mask.float().clamp(0.0, 1.0)
+        speech_mask = (
+            prompt_speech_mask.float().clamp(0.0, 1.0)
+            if isinstance(prompt_speech_mask, torch.Tensor)
+            else valid_mask
+        )
+        speech_mask = speech_mask * valid_mask
+        speech_mass = speech_mask.sum(dim=1, keepdim=True)
+        if bool((speech_mass <= 0.0).any().item()):
+            raise ValueError("V1-G prompt conditioning requires at least one speech run.")
+        valid_mass = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        speech_ratio = speech_mass / valid_mass
+        if self.min_speech_ratio > 0.0 and bool((speech_ratio < self.min_speech_ratio).any().item()):
+            raise ValueError(
+                f"V1-G prompt conditioning requires speech-dominant prompts "
+                f"(speech_ratio >= {self.min_speech_ratio:.2f})."
+            )
+
+        logdur = torch.log(prompt_duration_obs.float().clamp_min(1.0e-4)) * valid_mask
+        if self.use_log_base_rate:
+            if isinstance(prompt_log_base, torch.Tensor):
+                log_base = prompt_log_base.float().detach() * valid_mask
+            elif isinstance(prompt_unit_anchor_base, torch.Tensor):
+                log_base = torch.log(prompt_unit_anchor_base.float().detach().clamp_min(1.0e-6)) * valid_mask
+            else:
+                log_base = torch.zeros_like(logdur)
+        else:
+            log_base = torch.zeros_like(logdur)
+        rate_logdur = ((logdur - log_base) * valid_mask) if self.use_log_base_rate else logdur
+        global_rate = _masked_median(rate_logdur, speech_mask)
+        prompt_residual = (rate_logdur - global_rate) * speech_mask
+        operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
+
+        return validate_reference_duration_memory(
+            ReferenceDurationMemory(
+                global_rate=global_rate,
+                operator=StructuredDurationOperatorMemory(operator_coeff=operator_coeff),
+                summary_state=None,
+                spk_embed=(
+                    prompt_spk_embed.float()
+                    if isinstance(prompt_spk_embed, torch.Tensor)
+                    else None
+                ),
+                prompt_valid_mask=valid_mask,
+                prompt_speech_mask=speech_mask,
+                prompt=PromptConditioningEvidence(
+                    prompt_mask=valid_mask,
+                    prompt_log_base=log_base,
+                    prompt_log_duration=logdur,
+                    prompt_log_residual=prompt_residual,
+                ),
+            )
+        )
+
+
 class StreamingDurationHead(nn.Module):
     """Source-anchored unit-run writer with prefix coarse control and local residual."""
 
@@ -438,7 +533,7 @@ class StreamingDurationHead(nn.Module):
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
         self.spk_proj = nn.Linear(self.spk_dim, self.query_dim)
         self.coarse_head = nn.Sequential(
-            nn.Linear(self.query_dim * 2, self.query_dim),
+            nn.Linear((self.query_dim * 2) + 1, self.query_dim),
             nn.GELU(),
             nn.Linear(self.query_dim, 1),
         )
@@ -572,6 +667,7 @@ class StreamingDurationHead(nn.Module):
             [
                 summary,
                 spk_ctx,
+                global_rate.float(),
             ],
             dim=-1,
         )

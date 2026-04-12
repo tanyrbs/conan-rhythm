@@ -13,7 +13,13 @@ if _REPO_ROOT not in sys.path:
 
 from modules.Conan.Conan import Conan
 from modules.Conan.rhythm_v3.contracts import export_duration_v3_source_cache
-from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3 as build_source_rhythm_cache
+from modules.Conan.rhythm_v3.source_cache import (
+    DURATION_V3_CACHE_META_KEY,
+    assert_duration_v3_cache_meta_compatible,
+    build_duration_v3_cache_meta,
+    build_source_rhythm_cache_v3 as build_source_rhythm_cache,
+    duration_v3_cache_meta_signature,
+)
 from modules.Emformer.emformer import EmformerDistillModel
 from tasks.Conan.rhythm.streaming_commit import extract_incremental_committed_mel
 from tasks.tts.vocoder_infer.base_vocoder import get_vocoder_cls
@@ -21,6 +27,7 @@ from utils.audio import librosa_wav2spec
 from utils.audio.io import save_wav
 from utils.commons.ckpt_utils import load_ckpt
 from utils.commons.hparams import hparams, set_hparams
+from utils.plot.rhythm_v3_viz import build_debug_record
 
 try:
     from inference.streaming_runtime import (
@@ -73,8 +80,18 @@ class StreamingVoiceConversion:
             0,
             int(self.hparams.get("rhythm_prompt_conditioning_cache_size", 4) or 0),
         )
+        self.rhythm_v3_cache_meta = build_duration_v3_cache_meta(
+            silent_token=int(self.hparams.get("silent_token", 57)),
+            separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
+            tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+            emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
+            debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
+            phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+        )
+        self.rhythm_v3_frontend_signature = duration_v3_cache_meta_signature(self.rhythm_v3_cache_meta)
         self.runtime_metadata = self.get_streaming_runtime_metadata()
         self.last_inference_metadata = dict(self.runtime_metadata)
+        self.last_rhythm_debug_bundle = None
         self._vocoder_warm_zero()
 
     def _build_model(self):
@@ -149,6 +166,48 @@ class StreamingVoiceConversion:
         return int(torch.round(committed_src).sum().item())
 
     @staticmethod
+    def _assert_monotone_committed_frontier(
+        *,
+        previous_frontier: int | None,
+        current_frontier: int | None,
+    ) -> None:
+        if previous_frontier is None or current_frontier is None:
+            return
+        if int(current_frontier) < int(previous_frontier):
+            raise RuntimeError(
+                f"commit_frontier must be monotone non-decreasing: prev={int(previous_frontier)}, current={int(current_frontier)}"
+            )
+
+    @staticmethod
+    def _assert_committed_prefix_not_rewritten(
+        *,
+        prev_state,
+        next_state,
+    ) -> None:
+        prev_cached = getattr(prev_state, "cached_duration_exec", None) if prev_state is not None else None
+        next_cached = getattr(next_state, "cached_duration_exec", None) if next_state is not None else None
+        prev_committed = getattr(prev_state, "committed_units", None) if prev_state is not None else None
+        next_committed = getattr(next_state, "committed_units", None) if next_state is not None else None
+        if not all(isinstance(value, torch.Tensor) for value in (prev_cached, next_cached, prev_committed, next_committed)):
+            return
+        batch_size = min(int(prev_cached.size(0)), int(next_cached.size(0)), int(prev_committed.size(0)), int(next_committed.size(0)))
+        for batch_idx in range(batch_size):
+            prefix = min(
+                int(prev_committed[batch_idx].item()),
+                int(next_committed[batch_idx].item()),
+                int(prev_cached.size(1)),
+                int(next_cached.size(1)),
+            )
+            if prefix <= 0:
+                continue
+            prev_prefix = prev_cached[batch_idx, :prefix].float()
+            next_prefix = next_cached[batch_idx, :prefix].float()
+            if not torch.allclose(prev_prefix, next_prefix, atol=1.0e-5, rtol=1.0e-4):
+                raise RuntimeError(
+                    f"Committed prefix was rewritten for batch={batch_idx}, prefix_units={prefix}."
+                )
+
+    @staticmethod
     def _wav_to_mel(path: str) -> np.ndarray:
         mel = librosa_wav2spec(
             path,
@@ -198,10 +257,11 @@ class StreamingVoiceConversion:
         return spk_embed
 
     @staticmethod
-    def _make_prompt_conditioning_cache_key(ref_mel_batch: torch.Tensor) -> str:
+    def _make_prompt_conditioning_cache_key(ref_mel_batch: torch.Tensor, *, frontend_signature: str) -> str:
         ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
         array = ref_cpu.numpy()
         digest = hashlib.sha1()
+        digest.update(str(frontend_signature).encode("utf-8"))
         digest.update(str(tuple(array.shape)).encode("utf-8"))
         digest.update(array.tobytes())
         return digest.hexdigest()
@@ -238,7 +298,10 @@ class StreamingVoiceConversion:
     ) -> Dict[str, torch.Tensor]:
         cache_key = None
         if self._prompt_conditioning_cache_size > 0:
-            cache_key = self._make_prompt_conditioning_cache_key(ref_mel_batch)
+            cache_key = self._make_prompt_conditioning_cache_key(
+                ref_mel_batch,
+                frontend_signature=self.rhythm_v3_frontend_signature,
+            )
             cached = self._prompt_conditioning_cache.get(cache_key)
             if cached is not None:
                 out = self._clone_prompt_conditioning_to_device(cached, device=self.device)
@@ -271,14 +334,30 @@ class StreamingVoiceConversion:
             debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         )
+        assert_duration_v3_cache_meta_compatible(
+            cache.get(DURATION_V3_CACHE_META_KEY),
+            silent_token=int(self.hparams.get("silent_token", 57)),
+            separator_aware=bool(self.hparams.get("rhythm_separator_aware", True)),
+            tail_open_units=int(self.hparams.get("rhythm_tail_open_units", 1)),
+            emit_silence_runs=bool(self.hparams.get("rhythm_v3_emit_silence_runs", True)),
+            debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
+            phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+        )
         prompt_content_units = torch.tensor(cache["content_units"], device=self.device, dtype=torch.long).unsqueeze(0)
         prompt_duration_obs = torch.tensor(cache["dur_anchor_src"], device=self.device, dtype=torch.float32).unsqueeze(0)
         prompt_valid_mask = (prompt_duration_obs > 0).float()
         prompt_silence = cache.get("source_silence_mask")
+        minimal_v1_profile = bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False))
         if prompt_silence is not None:
             prompt_silence_mask = torch.tensor(prompt_silence, device=self.device, dtype=torch.float32).unsqueeze(0)
             prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clamp(0.0, 1.0))
         else:
+            if minimal_v1_profile:
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires cached prompt source_silence_mask "
+                    "to preserve speech-only global tempo statistics."
+                )
+            prompt_silence_mask = None
             prompt_speech_mask = prompt_valid_mask
         out = {
             "prompt_content_units": prompt_content_units,
@@ -302,6 +381,8 @@ class StreamingVoiceConversion:
                 dtype=torch.float32,
             ).unsqueeze(0),
         }
+        if prompt_silence is not None:
+            out["prompt_silence_mask"] = prompt_silence_mask
         rhythm_frontend = getattr(self.model, "rhythm_unit_frontend", None)
         rhythm_module = getattr(self.model, "rhythm_module", None)
         rate_mode = str(getattr(rhythm_module, "rate_mode", "") or "").strip().lower()
@@ -353,7 +434,13 @@ class StreamingVoiceConversion:
         end_sample = min(len(wav_window), start_sample + new_frames * hop_size)
         return wav_window[start_sample:end_sample]
 
-    def infer_once(self, inp: Dict, spk_embed=None, return_metadata: bool = False):
+    def infer_once(
+        self,
+        inp: Dict,
+        spk_embed=None,
+        return_metadata: bool = False,
+        return_debug_bundle: bool = False,
+    ):
         if hasattr(self.vocoder, "reset_stream"):
             self.vocoder.reset_stream()
             self._vocoder_warm_zero()
@@ -389,7 +476,9 @@ class StreamingVoiceConversion:
         eos_tail_closed = False
         content_window_left_tokens = self._resolve_content_window_left_tokens()
         committed_token_frontier = 0
+        previous_resolved_frontier = None
         max_content_window_start = 0
+        final_debug_bundle = None
 
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
@@ -457,6 +546,7 @@ class StreamingVoiceConversion:
                     for key, value in export_duration_v3_source_cache(unit_batch).items()
                     if value is not None
                 }
+                rhythm_source_cache[DURATION_V3_CACHE_META_KEY] = dict(self.rhythm_v3_cache_meta)
                 cache_total = int(rhythm_source_cache["source_duration_obs"].sum().item())
                 if cache_total != int(all_codes.size(1)):
                     raise RuntimeError(
@@ -488,7 +578,12 @@ class StreamingVoiceConversion:
                     rhythm_source_cache=rhythm_source_cache,
                     decoder_cache=decoder_cache,
                 )
-                rhythm_state = out.get("rhythm_state_next", rhythm_state)
+                next_rhythm_state = out.get("rhythm_state_next", rhythm_state)
+                self._assert_committed_prefix_not_rewritten(
+                    prev_state=rhythm_state,
+                    next_state=next_rhythm_state,
+                )
+                rhythm_state = next_rhythm_state
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
                 decoder_cache = out.get("decoder_cache", decoder_cache)
                 last_mel_out = out["mel_out"][0]
@@ -498,7 +593,22 @@ class StreamingVoiceConversion:
                     batch_index=0,
                 )
                 if isinstance(resolved_committed_frontier, int):
+                    self._assert_monotone_committed_frontier(
+                        previous_frontier=previous_resolved_frontier,
+                        current_frontier=resolved_committed_frontier,
+                    )
+                    previous_resolved_frontier = resolved_committed_frontier
                     committed_token_frontier = max(committed_token_frontier, resolved_committed_frontier)
+                if return_debug_bundle:
+                    final_debug_bundle = build_debug_record(
+                        model_output=out,
+                        metadata={
+                            "phase": "inference",
+                            "src_wav": inp.get("src_wav"),
+                            "ref_wav": inp.get("ref_wav"),
+                            "streaming_chunk_index": int(num_chunks),
+                        },
+                    ).to_dict()
 
             mel_new, prev_committed_len = extract_incremental_committed_mel(
                 out,
@@ -553,7 +663,12 @@ class StreamingVoiceConversion:
                     rhythm_source_cache=final_cache,
                     decoder_cache=decoder_cache,
                 )
-            rhythm_state = final_out.get("rhythm_state_next", rhythm_state)
+            next_rhythm_state = final_out.get("rhythm_state_next", rhythm_state)
+            self._assert_committed_prefix_not_rewritten(
+                prev_state=rhythm_state,
+                next_state=next_rhythm_state,
+            )
+            rhythm_state = next_rhythm_state
             decoder_cache = final_out.get("decoder_cache", decoder_cache)
             last_mel_out = final_out["mel_out"][0]
             final_committed_frontier = self._resolve_committed_token_frontier_from_cache(
@@ -562,7 +677,23 @@ class StreamingVoiceConversion:
                 batch_index=0,
             )
             if isinstance(final_committed_frontier, int):
+                self._assert_monotone_committed_frontier(
+                    previous_frontier=previous_resolved_frontier,
+                    current_frontier=final_committed_frontier,
+                )
+                previous_resolved_frontier = final_committed_frontier
                 committed_token_frontier = max(committed_token_frontier, final_committed_frontier)
+            if return_debug_bundle:
+                final_debug_bundle = build_debug_record(
+                    model_output=final_out,
+                    metadata={
+                        "phase": "inference",
+                        "src_wav": inp.get("src_wav"),
+                        "ref_wav": inp.get("ref_wav"),
+                        "streaming_chunk_index": int(num_chunks),
+                        "eos_tail_closed": True,
+                    },
+                ).to_dict()
             final_mel_new, prev_committed_len = extract_incremental_committed_mel(
                 final_out,
                 prev_committed_len=prev_committed_len,
@@ -628,9 +759,14 @@ class StreamingVoiceConversion:
                 "full_end_to_end_stateful_streaming": False,
             }
         )
+        self.last_rhythm_debug_bundle = final_debug_bundle
 
+        if return_metadata and return_debug_bundle:
+            return wav_pred, mel_pred.cpu().numpy(), self.last_inference_metadata, final_debug_bundle
         if return_metadata:
             return wav_pred, mel_pred.cpu().numpy(), self.last_inference_metadata
+        if return_debug_bundle:
+            return wav_pred, mel_pred.cpu().numpy(), final_debug_bundle
         return wav_pred, mel_pred.cpu().numpy()
 
     def test_multiple_sentences(self, test_cases: List[Dict]):

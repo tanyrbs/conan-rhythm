@@ -106,7 +106,7 @@ rhythm_pseudo_source_local_scale_max: 1.30
 rhythm_pseudo_source_mask_prob: 0.10
 rhythm_pseudo_source_flatten_boundary_prob: 0.0
 # Silence has no independent writer in V1; any auxiliary silence target must stay coarse-derived.
-rhythm_v3_silence_coarse_weight: 0.25
+rhythm_v3_silence_coarse_weight: 0.0
 rhythm_v3_silence_max_logstretch: 0.25
 
 lambda_rhythm_dur: 1.0
