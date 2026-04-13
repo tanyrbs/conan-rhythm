@@ -2137,6 +2137,71 @@ class RhythmCacheContractTests(unittest.TestCase):
                 sample=sample,
             )
 
+    def test_duration_v3_target_merge_rejects_cached_alignment_with_degraded_health_bucket(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        sample = {
+            "unit_duration_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_duration_proj_raw_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+            "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
+            "unit_alignment_source_tgt": np.asarray(["cached"], dtype=object),
+            "unit_alignment_version_tgt": np.asarray(["2026-04-14"], dtype=object),
+            "unit_alignment_source_cache_signature_tgt": np.asarray(["src_sign"], dtype=object),
+            "unit_alignment_target_cache_signature_tgt": np.asarray(["tgt_sign"], dtype=object),
+            "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar_sign"], dtype=object),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.1], dtype=np.float32),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.7], dtype=np.float32),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.8], dtype=np.float32),
+            "unit_alignment_projection_fallback_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+            "unit_alignment_projection_health_bucket_tgt": np.asarray(["degraded"], dtype=object),
+        }
+        with self.assertRaisesRegex(RuntimeError, "requires clean health bucket"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "cached_degraded_bucket"},
+                source_cache={},
+                paired_target_conditioning={},
+                sample=sample,
+            )
+
+    def test_duration_v3_target_merge_rejects_cached_alignment_with_fallback_reason(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        sample = {
+            "unit_duration_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_duration_proj_raw_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+            "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
+            "unit_alignment_source_tgt": np.asarray(["cached"], dtype=object),
+            "unit_alignment_version_tgt": np.asarray(["2026-04-14"], dtype=object),
+            "unit_alignment_source_cache_signature_tgt": np.asarray(["src_sign"], dtype=object),
+            "unit_alignment_target_cache_signature_tgt": np.asarray(["tgt_sign"], dtype=object),
+            "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar_sign"], dtype=object),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.1], dtype=np.float32),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.7], dtype=np.float32),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.8], dtype=np.float32),
+            "unit_alignment_projection_fallback_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+            "unit_alignment_projection_health_bucket_tgt": np.asarray(["clean"], dtype=object),
+            "unit_alignment_fallback_reason_tgt": np.asarray(["projection_retry"], dtype=object),
+        }
+        with self.assertRaisesRegex(RuntimeError, "forbids non-empty fallback_reason"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "cached_fallback_reason"},
+                source_cache={},
+                paired_target_conditioning={},
+                sample=sample,
+            )
+
     def test_duration_v3_projection_conditioning_copies_item_level_alignment_provenance_aliases(self) -> None:
         dataset = _DummyDataset({"rhythm_enable_v3": True})
         conditioning = dataset._build_paired_target_projection_conditioning(

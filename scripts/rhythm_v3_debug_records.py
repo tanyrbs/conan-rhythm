@@ -34,6 +34,8 @@ _GATE0_EXPLAINABILITY_SLOPE_MIN = 0.0
 _GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
 _GATE1_SAME_TEXT_GAP_MAX = 0.10
 _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN = 0.02
+_ALIGNMENT_MEAN_LOCAL_CONF_MIN = 0.55
+_ALIGNMENT_MEAN_COARSE_CONF_MIN = 0.60
 _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
     "silence_leakage": 0.05,
     "prefix_discrepancy": 0.05,
@@ -136,6 +138,16 @@ def collect_gate_issues(frame) -> list[str]:
         unmatched_p95 = float(np.nanpercentile(unmatched, 95)) if np.isfinite(unmatched).any() else float("nan")
         if np.isfinite(unmatched_p95) and unmatched_p95 > 0.15:
             quality_issues.append(f"alignment_unmatched_speech_ratio_p95={unmatched_p95:.3f}>0.150")
+    for column, threshold in (
+        ("alignment_mean_local_confidence_speech", _ALIGNMENT_MEAN_LOCAL_CONF_MIN),
+        ("alignment_mean_coarse_confidence_speech", _ALIGNMENT_MEAN_COARSE_CONF_MIN),
+    ):
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=np.float32)
+        mean_value = float(np.nanmean(values)) if np.isfinite(values).any() else float("nan")
+        if np.isfinite(mean_value) and mean_value < threshold:
+            quality_issues.append(f"{column}_mean={mean_value:.3f}<{threshold:.3f}")
     if "alignment_kind" in frame.columns:
         alignment_kind = frame["alignment_kind"].astype(str).str.strip().str.lower()
         observed = alignment_kind[(alignment_kind != "") & (alignment_kind != "nan")]
@@ -288,6 +300,8 @@ def build_gate_status(frame) -> dict[str, object]:
             "analytic_same_text_gap": float("nan"),
             "analytic_same_text_gap_max": float("nan"),
             "analytic_tempo_monotonicity_rate": float("nan"),
+            "alignment_mean_local_confidence_speech": float("nan"),
+            "alignment_mean_coarse_confidence_speech": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
             "coarse_only_runtime_metrics": {},
             "learned_runtime_metrics": {},
@@ -308,6 +322,8 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_same_text_gap_max = float("nan")
     analytic_alignment_local_margin_p10 = float("nan")
     analytic_tempo_monotonicity_rate = float("nan")
+    alignment_mean_local_confidence_speech = float("nan")
+    alignment_mean_coarse_confidence_speech = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
     coarse_only_runtime_metrics: dict[str, float] = {}
     learned_runtime_metrics: dict[str, float] = {}
@@ -325,6 +341,16 @@ def build_gate_status(frame) -> dict[str, object]:
     if "alignment_unmatched_speech_ratio" in frame.columns:
         unmatched = pd.to_numeric(frame["alignment_unmatched_speech_ratio"], errors="coerce").to_numpy(dtype=np.float32)
         unmatched_speech_ratio_p95 = float(np.nanpercentile(unmatched, 95)) if np.isfinite(unmatched).any() else float("nan")
+    if "alignment_mean_local_confidence_speech" in frame.columns:
+        values = pd.to_numeric(frame["alignment_mean_local_confidence_speech"], errors="coerce").to_numpy(dtype=np.float32)
+        alignment_mean_local_confidence_speech = (
+            float(np.nanmean(values)) if np.isfinite(values).any() else float("nan")
+        )
+    if "alignment_mean_coarse_confidence_speech" in frame.columns:
+        values = pd.to_numeric(frame["alignment_mean_coarse_confidence_speech"], errors="coerce").to_numpy(dtype=np.float32)
+        alignment_mean_coarse_confidence_speech = (
+            float(np.nanmean(values)) if np.isfinite(values).any() else float("nan")
+        )
     if "alignment_kind" in frame.columns:
         alignment_kind = frame["alignment_kind"].astype(str).str.strip().str.lower()
         observed = alignment_kind[(alignment_kind != "") & (alignment_kind != "nan")]
@@ -405,6 +431,10 @@ def build_gate_status(frame) -> dict[str, object]:
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
         and np.isfinite(analytic_explainability_slope)
         and analytic_explainability_slope > _GATE0_EXPLAINABILITY_SLOPE_MIN
+        and np.isfinite(alignment_mean_local_confidence_speech)
+        and alignment_mean_local_confidence_speech >= _ALIGNMENT_MEAN_LOCAL_CONF_MIN
+        and np.isfinite(alignment_mean_coarse_confidence_speech)
+        and alignment_mean_coarse_confidence_speech >= _ALIGNMENT_MEAN_COARSE_CONF_MIN
         and np.isfinite(analytic_alignment_local_margin_p10)
         and analytic_alignment_local_margin_p10 >= _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN
     )
@@ -446,6 +476,8 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_same_text_gap_max": analytic_same_text_gap_max,
         "analytic_alignment_local_margin_p10": analytic_alignment_local_margin_p10,
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
+        "alignment_mean_local_confidence_speech": alignment_mean_local_confidence_speech,
+        "alignment_mean_coarse_confidence_speech": alignment_mean_coarse_confidence_speech,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
         "coarse_only_runtime_metrics": coarse_only_runtime_metrics,
         "learned_runtime_metrics": learned_runtime_metrics,

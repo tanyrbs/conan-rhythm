@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 from modules.Conan.rhythm.policy import is_duration_operator_mode
 
@@ -126,6 +128,43 @@ def _get_hparam_alias(hparams, primary: str, alias: str, default=None):
     if alias in hparams:
         return hparams.get(alias)
     return default
+
+
+def _validate_rhythm_v3_gate_status_json(
+    hparams,
+    *,
+    gate_status_json,
+) -> None:
+    gate_path = Path(str(gate_status_json))
+    try:
+        payload = json.loads(gate_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            f"rhythm_v3_required_gate_status_json must contain valid JSON: {gate_path}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "rhythm_v3_required_gate_status_json must contain a JSON object with gate pass keys."
+        )
+    required = ("gate0_pass", "gate1_pass")
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(
+            "rhythm_v3_required_gate_status_json is missing required keys: "
+            + ", ".join(missing)
+        )
+    if not bool(payload["gate0_pass"]) or not bool(payload["gate1_pass"]):
+        raise ValueError(
+            "rhythm_v3_gate_quality_strict requires gate0_pass=true and gate1_pass=true in "
+            "rhythm_v3_required_gate_status_json."
+        )
+    if _is_enabled_flag(hparams.get("rhythm_v3_require_gate2_for_official_train", False)) and not bool(
+        payload.get("gate2_pass", False)
+    ):
+        raise ValueError(
+            "rhythm_v3_require_gate2_for_official_train requires gate2_pass=true in "
+            "rhythm_v3_required_gate_status_json."
+        )
 
 
 def validate_duration_v3_training_hparams(hparams) -> None:
@@ -511,6 +550,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             )
         _validate_optional_existing_path(
             gate_status_json, key="rhythm_v3_required_gate_status_json"
+        )
+        _validate_rhythm_v3_gate_status_json(
+            hparams,
+            gate_status_json=gate_status_json,
         )
     for key in (
         "rhythm_v3_alignment_unmatched_speech_ratio_max",

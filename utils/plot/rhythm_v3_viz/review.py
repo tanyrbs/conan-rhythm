@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from modules.Conan.rhythm_v3.g_stats import compute_global_rate
+from modules.Conan.rhythm_v3.g_stats import compute_global_rate, summarize_global_rate_support
 from tasks.Conan.rhythm.duration_v3.metrics import (
     budget_hit_rate,
     cumulative_drift,
@@ -295,6 +295,10 @@ def compute_g(
     weight: Any | None = None,
     unit_ids: Any | None = None,
     unit_log_prior: Any | None = None,
+    closed_mask: Any | None = None,
+    boundary_confidence: Any | None = None,
+    min_boundary_confidence: float | None = None,
+    support_mask: Any | None = None,
     return_status: bool = False,
 ) -> float | tuple[float, str]:
     duration = _safe_array(duration_obs, dtype=np.float32)
@@ -309,10 +313,48 @@ def compute_g(
             return_status=return_status,
         )
     try:
+        duration_tensor = torch.as_tensor(duration.reshape(1, -1), dtype=torch.float32)
+        speech_tensor = torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32)
+        valid_tensor = (
+            None
+            if valid is None
+            else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32)
+        )
+        resolved_support = None
+        if support_mask is not None:
+            resolved_support = torch.as_tensor(
+                np.asarray(support_mask, dtype=np.float32).reshape(1, -1),
+                dtype=torch.float32,
+            )
+        elif closed_mask is not None or boundary_confidence is not None:
+            support_stats = summarize_global_rate_support(
+                speech_mask=speech_tensor,
+                valid_mask=valid_tensor,
+                duration_obs=duration_tensor,
+                drop_edge_runs=int(drop_edge_runs),
+                closed_mask=(
+                    None
+                    if closed_mask is None
+                    else torch.as_tensor(
+                        np.asarray(closed_mask, dtype=np.float32).reshape(1, -1),
+                        dtype=torch.float32,
+                    )
+                ),
+                boundary_confidence=(
+                    None
+                    if boundary_confidence is None
+                    else torch.as_tensor(
+                        np.asarray(boundary_confidence, dtype=np.float32).reshape(1, -1),
+                        dtype=torch.float32,
+                    )
+                ),
+                min_boundary_confidence=min_boundary_confidence,
+            )
+            resolved_support = support_stats.support_mask.float()
         value = compute_global_rate(
-            log_dur=torch.log(torch.as_tensor(duration.reshape(1, -1), dtype=torch.float32).clamp_min(1.0e-4)),
-            speech_mask=torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32),
-            valid_mask=None if valid is None else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32),
+            log_dur=torch.log(duration_tensor.clamp_min(1.0e-4)),
+            speech_mask=speech_tensor,
+            valid_mask=valid_tensor,
             variant=variant,
             trim_ratio=float(trim_ratio),
             drop_edge_runs=int(drop_edge_runs),
@@ -325,6 +367,7 @@ def compute_g(
             unit_prior=None
             if unit_log_prior is None
             else torch.as_tensor(np.asarray(unit_log_prior, dtype=np.float32), dtype=torch.float32),
+            support_mask=resolved_support,
         )
         return _maybe_with_status(
             float(value.reshape(-1)[0].item()),
@@ -353,6 +396,10 @@ def compute_source_global_rate_for_analysis(
     source_unit_prior: Any | None = None,
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    source_closed_mask: Any | None = None,
+    source_boundary_confidence: Any | None = None,
+    min_boundary_confidence: float | None = None,
+    support_mask: Any | None = None,
     require_explicit_speech_mask: bool = False,
     return_status: bool = False,
 ) -> float | tuple[float, str]:
@@ -377,10 +424,51 @@ def compute_source_global_rate_for_analysis(
             return_status=return_status,
         )
     try:
+        log_dur_tensor = torch.as_tensor(log_dur.reshape(1, -1), dtype=torch.float32)
+        speech_tensor = torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32)
+        valid_tensor = (
+            None
+            if valid is None
+            else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32)
+        )
+        resolved_support = None
+        if support_mask is not None:
+            resolved_support = torch.as_tensor(
+                np.asarray(support_mask, dtype=np.float32).reshape(1, -1),
+                dtype=torch.float32,
+            )
+        elif source_closed_mask is not None or source_boundary_confidence is not None:
+            duration_for_support = _safe_array(source_duration_obs, dtype=np.float32)
+            if duration_for_support is None:
+                duration_for_support = np.exp(log_dur).astype(np.float32, copy=False)
+            support_stats = summarize_global_rate_support(
+                speech_mask=speech_tensor,
+                valid_mask=valid_tensor,
+                duration_obs=torch.as_tensor(duration_for_support.reshape(1, -1), dtype=torch.float32),
+                drop_edge_runs=int(drop_edge_runs),
+                closed_mask=(
+                    None
+                    if source_closed_mask is None
+                    else torch.as_tensor(
+                        np.asarray(source_closed_mask, dtype=np.float32).reshape(1, -1),
+                        dtype=torch.float32,
+                    )
+                ),
+                boundary_confidence=(
+                    None
+                    if source_boundary_confidence is None
+                    else torch.as_tensor(
+                        np.asarray(source_boundary_confidence, dtype=np.float32).reshape(1, -1),
+                        dtype=torch.float32,
+                    )
+                ),
+                min_boundary_confidence=min_boundary_confidence,
+            )
+            resolved_support = support_stats.support_mask.float()
         value = compute_global_rate(
-            log_dur=torch.as_tensor(log_dur.reshape(1, -1), dtype=torch.float32),
-            speech_mask=torch.as_tensor(speech.reshape(1, -1), dtype=torch.float32),
-            valid_mask=None if valid is None else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32),
+            log_dur=log_dur_tensor,
+            speech_mask=speech_tensor,
+            valid_mask=valid_tensor,
             variant=g_variant,
             trim_ratio=float(g_trim_ratio),
             drop_edge_runs=int(drop_edge_runs),
@@ -393,6 +481,7 @@ def compute_source_global_rate_for_analysis(
             unit_prior=None
             if source_unit_prior is None
             else torch.as_tensor(np.asarray(source_unit_prior, dtype=np.float32), dtype=torch.float32),
+            support_mask=resolved_support,
         )
         return _maybe_with_status(
             float(value.reshape(-1)[0].item()),

@@ -693,6 +693,12 @@ class MixedEffectsDurationModule(nn.Module):
                 unused_kwargs.pop("rhythm_v3_freeze_src_rate_init", bool(self.minimal_v1_profile)),
             )
         )
+        self.strict_eval_invalid_g = bool(
+            unused_kwargs.pop(
+                "strict_eval_invalid_g",
+                unused_kwargs.pop("rhythm_v3_strict_eval_invalid_g", bool(self.minimal_v1_profile)),
+            )
+        )
         detach_global_term_default = bool(self.minimal_v1_profile)
         self.detach_global_term_in_local_head = bool(
             unused_kwargs.pop(
@@ -820,6 +826,7 @@ class MixedEffectsDurationModule(nn.Module):
                     g_trim_ratio=self.g_trim_ratio,
                     drop_edge_runs_for_g=self.g_drop_edge_runs,
                     min_boundary_confidence=self.min_boundary_confidence_for_g,
+                    strict_eval_invalid_g=self.strict_eval_invalid_g,
                 )
                 self.duration_head = MinimalStreamingDurationWriterV1G(
                     vocab_size=vocab_size,
@@ -910,6 +917,16 @@ class MixedEffectsDurationModule(nn.Module):
                     duration_head_kwargs["use_log_base_rate"] = self.use_log_base_rate
                 if _init_accepts_kwarg(StreamingDurationHead, "use_learned_residual_gate"):
                     duration_head_kwargs["use_learned_residual_gate"] = self.use_learned_residual_gate
+                if _init_accepts_kwarg(StreamingDurationHead, "coarse_delta_scale"):
+                    duration_head_kwargs["coarse_delta_scale"] = self.coarse_delta_scale
+                if _init_accepts_kwarg(StreamingDurationHead, "local_residual_scale"):
+                    duration_head_kwargs["local_residual_scale"] = self.local_residual_scale
+                if _init_accepts_kwarg(StreamingDurationHead, "src_rate_init_mode"):
+                    duration_head_kwargs["src_rate_init_mode"] = self.src_rate_init_mode
+                if _init_accepts_kwarg(StreamingDurationHead, "src_rate_init_value"):
+                    duration_head_kwargs["src_rate_init_value"] = self.src_rate_init_value
+                if _init_accepts_kwarg(StreamingDurationHead, "freeze_src_rate_init"):
+                    duration_head_kwargs["freeze_src_rate_init"] = self.freeze_src_rate_init
                 self.duration_head = StreamingDurationHead(**duration_head_kwargs)
             self.duration_head.rate_mode = self.rate_mode
             self.duration_head.simple_global_stats = self.simple_global_stats

@@ -504,6 +504,40 @@ def test_compute_g_and_source_global_rate_report_failure_status_without_silent_d
     assert g_src_status == "missing:source_speech_mask"
 
 
+def test_compute_g_and_source_global_rate_respect_clean_support_surface():
+    duration_obs = np.asarray([2.0, 100.0, 8.0], dtype=np.float32)
+    speech_mask = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    valid_mask = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    closed_mask = np.asarray([1.0, 0.0, 1.0], dtype=np.float32)
+    boundary_confidence = np.asarray([0.9, 0.1, 0.95], dtype=np.float32)
+
+    unfiltered = compute_g(
+        duration_obs,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+    )
+    filtered = compute_g(
+        duration_obs,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=0.8,
+    )
+    assert filtered == pytest.approx(float(np.log(4.0)), abs=1.0e-6)
+    assert filtered < unfiltered
+
+    source_filtered = compute_source_global_rate_for_analysis(
+        source_duration_obs=duration_obs,
+        source_speech_mask=speech_mask,
+        source_valid_mask=valid_mask,
+        source_closed_mask=closed_mask,
+        source_boundary_confidence=boundary_confidence,
+        min_boundary_confidence=0.8,
+    )
+    assert source_filtered == pytest.approx(filtered, abs=1.0e-6)
+
+
 def test_compute_source_global_rate_for_analysis_strict_mode_requires_explicit_speech_mask():
     g_src, g_src_status = compute_source_global_rate_for_analysis(
         source_duration_obs=np.asarray([2.0, 3.0], dtype=np.float32),
@@ -831,6 +865,29 @@ def test_collect_gate_issues_flags_low_alignment_local_margin():
     assert any(issue.startswith("analytic_alignment_local_margin_p10") for issue in issues)
     status = build_gate_status(frame)
     assert status["gate0_pass"] is False
+
+
+def test_collect_gate_issues_flags_low_alignment_confidence_means():
+    row = _make_debug_records_cli_row(
+        eval_mode="analytic",
+        ref_bin="mid",
+        ref_condition="real",
+        explainability_slope=0.4,
+        negative_control_gap=0.3,
+        same_text_gap=0.0,
+        tempo_monotonicity_rate=1.0,
+        alignment_local_margin_p10=0.05,
+        alignment_mean_local_confidence_speech=0.50,
+        alignment_mean_coarse_confidence_speech=0.55,
+    )
+    frame = pd.DataFrame([row])
+    issues = collect_gate_issues(frame)
+    assert "alignment_mean_local_confidence_speech_mean=0.500<0.550" in issues
+    assert "alignment_mean_coarse_confidence_speech_mean=0.550<0.600" in issues
+    status = build_gate_status(frame)
+    assert status["gate0_pass"] is False
+    assert status["alignment_mean_local_confidence_speech"] == pytest.approx(0.5)
+    assert status["alignment_mean_coarse_confidence_speech"] == pytest.approx(0.55)
 
 
 def test_collect_gate_issues_flags_large_analytic_same_text_gap():

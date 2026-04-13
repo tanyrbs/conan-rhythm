@@ -49,8 +49,11 @@ Operationally, the maintained default means:
 - `rhythm_v3_freeze_src_rate_init: true`
 - `rhythm_v3_gate_quality_strict: true`
 - `rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json`
+- `rhythm_v3_strict_eval_invalid_g: true`
 - `rhythm_v3_eval_mode: learned`
-- speech-only prompt global-rate estimation, with closed/boundary-clean support when prompt sidecars are available
+- duration-weighted speech-ratio gating end-to-end for prompt-domain checks
+- speech-only prompt global-rate estimation on the same closed/boundary-clean support surface used by runtime review
+- fail-closed prompt conditioning in both training and maintained eval when the prompt falls outside the 3-8s speech-dominant clean-support domain
 - speech = coarse + local
 - silence = clipped coarse-only follower
 - carry rounding + prefix budget at execution time
@@ -64,6 +67,9 @@ So this branch is **not** training a free-form pause planner. It is training a *
 The maintained runtime default is therefore `raw_median + learned(detach)`; the
 falsification ladder should only override `eval_mode` (and, when needed,
 `g_variant`) on that same surface.
+Minimal-V1 training now also fail-fast checks the prompt-side domain sidecars
+(`prompt_speech_mask`, `prompt_closed_mask`, `prompt_boundary_confidence`,
+`prompt_ref_len_sec`) before entering the model forward path.
 
 ### 1.1 Recommended falsification profiles
 
@@ -643,7 +649,11 @@ py -3 scripts\rhythm_v3_debug_records.py ^
 The maintained training config also treats strict gate as a startup contract:
 `rhythm_v3_gate_quality_strict=true` now requires
 `rhythm_v3_required_gate_status_json` and refuses training when the recorded
-gate bundle does not pass.
+gate bundle does not pass. The strict gate now also fails on low
+`alignment_mean_local_confidence_speech`,
+`alignment_mean_coarse_confidence_speech`, and low
+`alignment_local_margin_p10`, so the startup contract and the review script use
+the same quality floor.
 
 This keeps the current workflow aligned with the falsification-first order:
 

@@ -462,6 +462,40 @@ def test_validate_rhythm_training_hparams_rejects_strict_gate_without_debug_expo
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_strict_gate_when_gate_status_fails(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text('{"gate0_pass": true, "gate1_pass": false, "gate2_pass": true}', encoding="utf-8")
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="gate0_pass=true and gate1_pass=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_strict_gate_when_gate_status_missing_required_keys(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text('{"gate0_pass": true}', encoding="utf-8")
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="missing required keys: gate1_pass"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_train_requires_it(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text('{"gate0_pass": true, "gate1_pass": true, "gate2_pass": false}', encoding="utf-8")
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    hparams["rhythm_v3_require_gate2_for_official_train"] = True
+    with pytest.raises(ValueError, match="requires gate2_pass=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     (
@@ -1399,11 +1433,19 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_strict_minimal_claim_profile: true" in source
     assert "rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json" in source
+    assert "rhythm_v3_strict_eval_invalid_g: true" in source
     assert "rhythm_v3_use_src_gap_in_coarse_head: false" in source
+    assert "rhythm_v3_min_prompt_speech_ratio: 0.60" in source
+    assert "rhythm_v3_min_prompt_ref_len_sec: 3.0" in source
+    assert "rhythm_v3_max_prompt_ref_len_sec: 8.0" in source
+    assert "rhythm_v3_coarse_delta_scale: 0.20" in source
+    assert "rhythm_v3_local_residual_scale: 0.35" in source
     assert "rhythm_v3_boundary_offset_decay: 0.60" in source
     assert "rhythm_v3_src_rate_init_mode: first_speech" in source
     assert "rhythm_v3_src_rate_init_value: 0.0" in source
     assert "rhythm_v3_export_projector_telemetry: true" in source
+    assert "rhythm_v3_alignment_prefilter_bad_samples: true" in source
+    assert "rhythm_v3_alignment_prefilter_max_attempts: 2" in source
     assert "rhythm_prompt_dropout: 0.0" in source
     assert "rhythm_prompt_truncation: 0.0" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source

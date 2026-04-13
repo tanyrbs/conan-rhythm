@@ -32,6 +32,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         g_trim_ratio: float = 0.2,
         drop_edge_runs_for_g: int = 0,
         min_boundary_confidence: float | None = None,
+        strict_eval_invalid_g: bool = False,
     ) -> None:
         super().__init__()
         self.operator_rank = int(max(1, operator_rank))
@@ -47,6 +48,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         self.min_boundary_confidence = (
             None if min_boundary_confidence is None else float(max(0.0, min(1.0, min_boundary_confidence)))
         )
+        self.strict_eval_invalid_g = bool(strict_eval_invalid_g)
 
     def forward(
         self,
@@ -156,6 +158,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         support_stats = summarize_global_rate_support(
             speech_mask=speech_mask,
             valid_mask=valid_mask,
+            duration_obs=prompt_duration_obs.float(),
             drop_edge_runs=self.g_drop_edge_runs,
             closed_mask=closed_mask,
             boundary_confidence=boundary_confidence,
@@ -190,7 +193,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         domain_invalid_rows = no_speech_rows | low_speech_ratio_rows | invalid_ref_len_rows
         invalid_rows = invalid_support_rows | invalid_clean_rows | domain_invalid_rows
         if bool(invalid_rows.any().item()):
-            if self.training:
+            if self.training or self.strict_eval_invalid_g:
                 raise ValueError(
                     "V1-G prompt conditioning requires non-empty closed/boundary-clean support for g."
                 )

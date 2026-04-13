@@ -43,9 +43,13 @@ rhythm_v3_eval_mode: learned
 rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
 rhythm_v3_drop_edge_runs_for_g: 1
+rhythm_v3_min_prompt_speech_ratio: 0.60
+rhythm_v3_min_prompt_ref_len_sec: 3.0
+rhythm_v3_max_prompt_ref_len_sec: 8.0
 rhythm_v3_min_boundary_confidence_for_g: 0.5
 rhythm_v3_gate_quality_strict: true  # strict gate enforcement now baked into config validation
 rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # replace with scripts/rhythm_v3_debug_records.py output before training
+rhythm_v3_strict_eval_invalid_g: true
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
 rhythm_v3_disable_local_residual: false
@@ -108,6 +112,8 @@ rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
 rhythm_v3_analytic_gap_clip: 0.35
+rhythm_v3_coarse_delta_scale: 0.20
+rhythm_v3_local_residual_scale: 0.35
 rhythm_v3_use_src_gap_in_coarse_head: false
 # The minimal-V1 contract keeps the local head detached from the shared global term
 # and freezes the source-rate initialization; flip either flag only for explicit
@@ -170,6 +176,8 @@ rhythm_v3_alignment_lambda_unit: 0.0
 rhythm_v3_alignment_band_ratio: 0.08
 rhythm_v3_alignment_bad_cost_threshold: 1.2
 rhythm_v3_alignment_min_dp_weight: 0.20
+rhythm_v3_alignment_prefilter_bad_samples: true
+rhythm_v3_alignment_prefilter_max_attempts: 2
 rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15
 rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55
 rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60

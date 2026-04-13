@@ -56,6 +56,16 @@ def _masked_mean_1d(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return torch.where(has_support, mean, torch.zeros_like(mean))
 
 
+def _first_valid_speech_init(observed_log: torch.Tensor, speech_mask: torch.Tensor) -> torch.Tensor:
+    batch_size = int(observed_log.size(0))
+    out = observed_log.new_zeros((batch_size, 1))
+    for batch_idx in range(batch_size):
+        keep = torch.nonzero(speech_mask[batch_idx] > 0.5, as_tuple=False).reshape(-1)
+        if int(keep.numel()) > 0:
+            out[batch_idx, 0] = observed_log[batch_idx, int(keep[0].item())]
+    return out
+
+
 class SharedSummaryCodebook(nn.Module):
     """Prompt-summary sidecar kept for diagnostics and legacy compatibility."""
 
@@ -295,6 +305,7 @@ class PromptDurationMemoryEncoder(nn.Module):
         support_stats = summarize_global_rate_support(
             speech_mask=speech_mask,
             valid_mask=valid_mask,
+            duration_obs=prompt_duration_obs.float(),
             drop_edge_runs=self.g_drop_edge_runs,
             closed_mask=closed_mask,
             boundary_confidence=boundary_confidence,
@@ -554,6 +565,11 @@ class StreamingDurationHead(nn.Module):
         eval_mode: str = "learned",
         disable_local_residual: bool = False,
         disable_coarse_bias: bool = False,
+        coarse_delta_scale: float = 0.20,
+        local_residual_scale: float = 0.35,
+        src_rate_init_mode: str = "learned",
+        src_rate_init_value: float = 0.0,
+        freeze_src_rate_init: bool = False,
         codebook: SharedSummaryCodebook | None = None,
     ) -> None:
         super().__init__()
@@ -577,6 +593,13 @@ class StreamingDurationHead(nn.Module):
         self.codebook = codebook if codebook is not None else SharedSummaryCodebook(num_slots=num_slots, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
         self.spk_proj = nn.Linear(self.spk_dim, self.query_dim)
+        normalized_src_rate_init_mode = str(src_rate_init_mode or "learned").strip().lower()
+        if normalized_src_rate_init_mode in {"", "auto"}:
+            normalized_src_rate_init_mode = "learned"
+        if normalized_src_rate_init_mode not in {"learned", "zero", "first_speech"}:
+            raise ValueError(
+                "StreamingDurationHead.src_rate_init_mode must be one of: learned, zero, first_speech."
+            )
         self.coarse_head = nn.Sequential(
             nn.Linear((self.query_dim * 2) + 1, self.query_dim),
             nn.GELU(),
@@ -596,9 +619,15 @@ class StreamingDurationHead(nn.Module):
             if self.use_learned_residual_gate
             else None
         )
-        self.coarse_delta_scale = 0.20
-        self.local_residual_scale = 0.35
-        self.src_rate_init = nn.Parameter(torch.zeros((1,)))
+        self.coarse_delta_scale = float(max(0.0, coarse_delta_scale))
+        self.local_residual_scale = float(max(0.0, local_residual_scale))
+        self.src_rate_init_mode = normalized_src_rate_init_mode
+        init_tensor = torch.full((1,), float(src_rate_init_value))
+        if freeze_src_rate_init:
+            self.register_buffer("src_rate_init", init_tensor)
+        else:
+            self.src_rate_init = nn.Parameter(init_tensor)
+        self.freeze_src_rate_init = bool(freeze_src_rate_init)
 
     def forward(
         self,
@@ -646,11 +675,16 @@ class StreamingDurationHead(nn.Module):
             if (self.use_log_base_rate and isinstance(log_base, torch.Tensor))
             else log_anchor.float()
         )
+        default_init_rate = self.src_rate_init
+        if self.src_rate_init_mode == "zero":
+            default_init_rate = observed_log_anchor.new_zeros((mask.size(0), 1))
+        elif self.src_rate_init_mode == "first_speech":
+            default_init_rate = _first_valid_speech_init(observed_log_anchor.float(), speech_mask)
         local_rate_seq, local_rate_final = build_causal_local_rate_seq(
             observed_log=observed_log_anchor,
             speech_mask=speech_mask,
             init_rate=init_local_rate,
-            default_init_rate=self.src_rate_init,
+            default_init_rate=default_init_rate,
             decay=self.local_rate_decay,
         )
 

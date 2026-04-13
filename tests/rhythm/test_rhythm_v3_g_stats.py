@@ -356,6 +356,23 @@ def test_summarize_global_rate_support_reports_edge_drop_from_support_seed():
     assert torch.allclose(summary.edge_runs_dropped, torch.tensor([[2.0]]))
 
 
+def test_summarize_global_rate_support_tracks_duration_weighted_and_count_speech_ratios():
+    speech_mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+    valid_mask = torch.ones_like(speech_mask)
+    duration_obs = torch.tensor([[1.0, 100.0, 1.0]], dtype=torch.float32)
+
+    summary = summarize_global_rate_support(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        duration_obs=duration_obs,
+        min_speech_ratio=0.5,
+    )
+
+    assert torch.allclose(summary.speech_ratio_count, torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(summary.speech_ratio, torch.tensor([[2.0 / 102.0]], dtype=torch.float32))
+    assert torch.allclose(summary.domain_valid, torch.tensor([[0.0]], dtype=torch.float32))
+
+
 def test_compute_global_rate_accepts_reused_support_mask_for_weighted_median():
     log_dur = torch.log(torch.tensor([[2.0, 4.0, 8.0, 16.0]], dtype=torch.float32))
     speech_mask = torch.ones_like(log_dur)

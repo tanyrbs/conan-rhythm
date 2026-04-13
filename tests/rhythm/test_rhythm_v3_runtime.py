@@ -250,6 +250,37 @@ def test_rhythm_v3_prompt_summary_threads_minimal_v1_global_stat_switches():
     assert float(adapter.module.duration_head.src_rate_init.detach().item()) == pytest.approx(0.75)
 
 
+def test_minimal_duration_head_defaults_coarse_head_without_src_gap():
+    head = MinimalStreamingDurationHeadV1G(
+        vocab_size=128,
+        dim=32,
+        num_slots=1,
+        simple_global_stats=True,
+        use_log_base_rate=False,
+        use_learned_residual_gate=False,
+    )
+    assert head.use_src_gap_in_coarse_head is False
+    assert head.coarse_head[0].in_features == head.query_dim + 1
+
+
+def test_rhythm_v3_nonminimal_prompt_summary_threads_shared_duration_head_runtime_knobs():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_coarse_delta_scale"] = 0.30
+    hparams["rhythm_v3_local_residual_scale"] = 0.15
+    hparams["rhythm_v3_src_rate_init_mode"] = "zero"
+    hparams["rhythm_v3_src_rate_init_value"] = 0.75
+    hparams["rhythm_v3_freeze_src_rate_init"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    assert isinstance(adapter.module.duration_head, StreamingDurationHead)
+    assert adapter.module.duration_head.coarse_delta_scale == pytest.approx(0.30)
+    assert adapter.module.duration_head.local_residual_scale == pytest.approx(0.15)
+    assert adapter.module.duration_head.src_rate_init_mode == "zero"
+    assert adapter.module.duration_head.freeze_src_rate_init is True
+    assert "src_rate_init" not in dict(adapter.module.duration_head.named_parameters())
+    assert "src_rate_init" in dict(adapter.module.duration_head.named_buffers())
+    assert float(adapter.module.duration_head.src_rate_init.detach().item()) == pytest.approx(0.75)
+
+
 def test_rhythm_v3_minimal_prompt_summary_defaults_to_frozen_src_rate_init():
     hparams = _build_prompt_summary_hparams()
     hparams["rhythm_v3_minimal_v1_profile"] = True
@@ -264,6 +295,38 @@ def test_rhythm_v3_minimal_prompt_summary_defaults_to_frozen_src_rate_init():
     assert adapter.module.freeze_src_rate_init is True
     assert adapter.module.duration_head.freeze_src_rate_init is True
     assert adapter.module.duration_head.src_rate_init.requires_grad is False
+
+
+def test_prompt_summary_shared_duration_head_respects_zero_src_rate_init_without_history():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_src_rate_init_mode"] = "zero"
+    hparams["rhythm_v3_freeze_src_rate_init"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4]], dtype=torch.long)
+    ret = {}
+    adapter(
+        ret=ret,
+        content=content,
+        ref=None,
+        target=None,
+        f0=None,
+        uv=None,
+        infer=False,
+        global_steps=0,
+        content_embed=torch.randn(content.size(0), content.size(1), 32),
+        tgt_nonpadding=torch.ones(content.size(0), content.size(1), 1),
+        content_lengths=torch.full((content.size(0),), int(content.size(1)), dtype=torch.long),
+        rhythm_state=None,
+        rhythm_ref_conditioning=_build_prompt_conditioning(),
+        rhythm_apply_override=None,
+        rhythm_runtime_overrides=None,
+        rhythm_source_cache=None,
+        rhythm_offline_source_cache=None,
+        speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+    )
+    source_rate_seq = ret["rhythm_execution"].source_rate_seq
+    assert source_rate_seq is not None
+    assert torch.allclose(source_rate_seq[0, 0], source_rate_seq.new_tensor(0.0), atol=1e-6)
 
 
 def test_rhythm_v3_minimal_prompt_summary_uses_closed_boundary_clean_global_support():
@@ -604,6 +667,8 @@ def test_rhythm_v3_debug_g_support_stats_respect_clean_support_sidecars():
     assert torch.allclose(debug["g_support_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.equal(ret["rhythm_prompt_g_support_mask"], torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32))
+    assert torch.equal(ret["rhythm_prompt_g_clean_mask"], torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32))
 
 
 def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
@@ -616,6 +681,7 @@ def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
     hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = False
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
     adapter.eval()
     ret = _run_adapter(
@@ -636,6 +702,72 @@ def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
     assert torch.allclose(ret["rhythm_prompt_domain_valid"], torch.tensor([[0.0]], dtype=torch.float32))
     assert ret["rhythm_domain_invalid_any"] == 1.0
     assert ret["rhythm_render_skipped_invalid_prompt"] == 1.0
+
+
+def test_rhythm_v3_minimal_prompt_summary_eval_rejects_invalid_prompt_when_strict_eval_enabled():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    adapter.eval()
+    with pytest.raises(ValueError, match="closed/boundary-clean support"):
+        _run_adapter(
+            adapter,
+            content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ref=None,
+            ref_conditioning={
+                **_build_prompt_conditioning(prompt_units=3, prompt_ref_len_sec=2.5),
+                "prompt_content_units": torch.tensor([[5, 6, 7]], dtype=torch.long),
+                "prompt_duration_obs": torch.tensor([[3.0, 3.0, 3.0]], dtype=torch.float32),
+                "prompt_speech_mask": torch.ones((1, 3), dtype=torch.float32),
+                "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
+            },
+        )
+
+
+def test_rhythm_v3_training_rejects_missing_minimal_prompt_domain_sidecars_before_forward():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = {}
+    content = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    with pytest.raises(ValueError, match="prompt-side domain metadata"):
+        adapter(
+            ret=ret,
+            content=content,
+            ref=None,
+            target=None,
+            f0=None,
+            uv=None,
+            infer=False,
+            global_steps=0,
+            content_embed=torch.randn(1, 3, 32),
+            tgt_nonpadding=torch.ones(1, 3, 1),
+            content_lengths=torch.tensor([3], dtype=torch.long),
+            ref_lengths=None,
+            rhythm_state=None,
+            rhythm_ref_conditioning={
+                "prompt_content_units": torch.tensor([[5, 6, 7]], dtype=torch.long),
+                "prompt_duration_obs": torch.tensor([[3.0, 3.0, 3.0]], dtype=torch.float32),
+                "prompt_unit_mask": torch.ones((1, 3), dtype=torch.float32),
+            },
+            rhythm_apply_override=None,
+            rhythm_runtime_overrides=None,
+            rhythm_source_cache=None,
+            rhythm_offline_source_cache=None,
+            speech_state_fn=lambda x: torch.randn(x.size(0), x.size(1), 32),
+        )
 
 
 def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
@@ -1561,6 +1693,7 @@ def test_rhythm_v3_minimal_v1_invalid_prompt_prefers_skip_and_reports_status():
     hparams["rhythm_v3_use_reference_summary"] = False
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = False
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
     adapter.eval()
     invalid_prompt = {

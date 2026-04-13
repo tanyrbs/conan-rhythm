@@ -202,6 +202,12 @@ class ConanDurationAdapter(nn.Module):
                     bool(hparams.get("rhythm_v3_minimal_v1_profile", False)),
                 )
             ),
+            strict_eval_invalid_g=bool(
+                hparams.get(
+                    "rhythm_v3_strict_eval_invalid_g",
+                    bool(hparams.get("rhythm_v3_minimal_v1_profile", False)),
+                )
+            ),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
             export_projector_telemetry=bool(
                 hparams.get(
@@ -638,6 +644,23 @@ class ConanDurationAdapter(nn.Module):
                 for key in (*_PROMPT_UNIT_REQUIRED_KEYS, "prompt_unit_mask")
             )
             if has_prompt_units:
+                if bool(getattr(self.module, "is_minimal_v1", False)):
+                    required_meta = (
+                        "prompt_speech_mask",
+                        "prompt_closed_mask",
+                        "prompt_boundary_confidence",
+                        "prompt_ref_len_sec",
+                    )
+                    missing_meta = [
+                        key
+                        for key in required_meta
+                        if not isinstance(ref_conditioning.get(key), torch.Tensor)
+                    ]
+                    if missing_meta:
+                        raise ValueError(
+                            "rhythm_v3 minimal_v1 training requires explicit prompt-side domain metadata: "
+                            + ", ".join(missing_meta)
+                        )
                 return
             raise ValueError(
                 "rhythm_v3 mainline training requires explicit prompt units "
@@ -777,6 +800,11 @@ class ConanDurationAdapter(nn.Module):
                         if isinstance(prompt_valid_mask, torch.Tensor)
                         else None
                     ),
+                    duration_obs=(
+                        prompt_duration_obs.float().clamp_min(0.0)
+                        if isinstance(prompt_duration_obs, torch.Tensor)
+                        else None
+                    ),
                     drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
                     closed_mask=(
                         prompt_closed_mask.float().clamp(0.0, 1.0)
@@ -912,6 +940,8 @@ class ConanDurationAdapter(nn.Module):
                         else None
                     ),
                     "g_strict_speech_only": support_count.new_ones(support_count.shape),
+                    "prompt_g_support_mask": support_mask.detach(),
+                    "prompt_g_clean_mask": clean_mask.detach(),
                 }
             coarse_correction_used = (
                 execution.coarse_correction.detach()
@@ -1331,6 +1361,12 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_prompt_g_support_ratio_vs_valid"] = debug_bundle["prompt_g_support_ratio_vs_valid"]
             ret["rhythm_debug_prompt_g_clean_ratio_vs_speech"] = debug_bundle["prompt_g_clean_ratio_vs_speech"]
             ret["rhythm_debug_prompt_g_clean_ratio_vs_valid"] = debug_bundle["prompt_g_clean_ratio_vs_valid"]
+            if isinstance(g_debug_stats.get("prompt_g_support_mask"), torch.Tensor):
+                ret["rhythm_prompt_g_support_mask"] = g_debug_stats["prompt_g_support_mask"]
+                ret["rhythm_debug_prompt_g_support_mask"] = g_debug_stats["prompt_g_support_mask"]
+            if isinstance(g_debug_stats.get("prompt_g_clean_mask"), torch.Tensor):
+                ret["rhythm_prompt_g_clean_mask"] = g_debug_stats["prompt_g_clean_mask"]
+                ret["rhythm_debug_prompt_g_clean_mask"] = g_debug_stats["prompt_g_clean_mask"]
 
     @staticmethod
     def _pad_tail_sequences(

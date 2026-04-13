@@ -24,6 +24,7 @@ class GlobalRateSupportStats:
     domain_valid: torch.Tensor
     clean_mask: torch.Tensor | None = None
     clean_count: torch.Tensor | None = None
+    speech_ratio_count: torch.Tensor | None = None
 
 
 def compute_duration_weighted_speech_ratio(
@@ -343,6 +344,7 @@ def summarize_global_rate_support(
     *,
     speech_mask: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
+    duration_obs: torch.Tensor | None = None,
     drop_edge_runs: int = 0,
     min_speech_ratio: float = 0.0,
     min_speech_runs: int = 1,
@@ -395,7 +397,12 @@ def summarize_global_rate_support(
     speech_count = (speech & valid).sum(dim=reduce_dim, keepdim=True).float()
     valid_count = valid.sum(dim=reduce_dim, keepdim=True).float()
     clean_count = clean_mask.sum(dim=reduce_dim, keepdim=True).float()
-    speech_ratio = speech_count / valid_count.clamp_min(1.0)
+    speech_ratio_count = speech_count / valid_count.clamp_min(1.0)
+    speech_ratio = compute_duration_weighted_speech_ratio(
+        duration_obs=duration_obs,
+        speech_mask=speech_mask.float(),
+        valid_mask=valid_mask.float() if isinstance(valid_mask, torch.Tensor) else None,
+    )
     support_fraction = support_count / speech_count.clamp_min(1.0)
     edge_runs_dropped = (support_seed_count - support_count).clamp_min(0.0)
     domain_valid = (
@@ -409,6 +416,7 @@ def summarize_global_rate_support(
         speech_count=speech_count,
         valid_count=valid_count,
         speech_ratio=speech_ratio,
+        speech_ratio_count=speech_ratio_count,
         support_fraction=support_fraction,
         edge_runs_dropped=edge_runs_dropped,
         domain_valid=domain_valid,

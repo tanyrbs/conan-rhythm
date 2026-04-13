@@ -176,7 +176,9 @@ Important convenience fields now emitted by the single export path:
   `projector_boundary_decay_rate`
 - monotonicity table: `sample_id`, `pair_id`, `tempo_delta`, `mono_triplet_ok`
 - ladder table: `tempo_transfer_slope`
-- gate status: `analytic_negative_control_gap`, `analytic_same_text_gap`
+- gate status: `analytic_negative_control_gap`, `analytic_same_text_gap`,
+  `alignment_mean_local_confidence_speech`,
+  `alignment_mean_coarse_confidence_speech`
 
 Gate-1 interpretation is now stricter than an earlier "record-only" phase:
 
@@ -184,6 +186,14 @@ Gate-1 interpretation is now stricter than an earlier "record-only" phase:
 - large positive `analytic_same_text_gap` is a hard gate failure
 - the same threshold is used in both the issue list and `gate1_pass`, so the
   audit summary and the pass/fail verdict no longer diverge
+
+Gate-0 is also now tied to the maintained runtime support surface:
+
+- static `g` review uses the same clean-support builder as runtime when
+  `closed_mask` / `boundary_confidence` sidecars are present
+- prompt speech-ratio auditing is duration-weighted, matching dataset/runtime
+- strict gate fails on low alignment confidence means and low
+  `alignment_local_margin_p10`, not just on missing metadata
 
 ## 4. Review util entry points
 
