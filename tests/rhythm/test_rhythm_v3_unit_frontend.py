@@ -132,6 +132,9 @@ def test_streaming_unitizer_tensor_export_matches_python_export():
     python_seq = unitizer.compress(tokens, mark_last_open=True)
     tensor_seq = unitizer.compress_tensor(tokens, mark_last_open=True)
     assert tensor_seq.to_python() == python_seq
+    python_seq_closed = unitizer.compress(tokens, mark_last_open=False)
+    tensor_seq_closed = unitizer.compress_tensor(tokens, mark_last_open=False)
+    assert tensor_seq_closed.to_python() == python_seq_closed
 
     frontend = DurationUnitFrontend(
         vocab_size=64,

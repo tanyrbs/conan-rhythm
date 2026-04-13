@@ -390,7 +390,7 @@ def estimate_run_stability(
     ).tolist()
 
 
-def build_compressed_sequence(
+def _compress_sequence_lists(
     token_sequence: Sequence[int],
     *,
     silent_token: int | None = None,
@@ -399,7 +399,7 @@ def build_compressed_sequence(
     mark_last_open: bool = True,
     emit_silence_runs: bool = False,
     debounce_min_run_frames: int = 1,
-) -> CompressedUnitSequence:
+) -> tuple[list[int], list[int], list[int], list[int], int]:
     units, durations, silence_mask, sep_hint = compress_token_sequence(
         token_sequence,
         silent_token=silent_token,
@@ -432,6 +432,28 @@ def build_compressed_sequence(
             min_silence_frames=debounce_min_run_frames,
             max_micro_silence_frames=1,
         )
+    return units, durations, silence_mask, sep_hint, open_tail
+
+
+def build_compressed_sequence(
+    token_sequence: Sequence[int],
+    *,
+    silent_token: int | None = None,
+    separator_aware: bool = False,
+    tail_open_units: int = 1,
+    mark_last_open: bool = True,
+    emit_silence_runs: bool = False,
+    debounce_min_run_frames: int = 1,
+) -> CompressedUnitSequence:
+    units, durations, silence_mask, sep_hint, open_tail = _compress_sequence_lists(
+        token_sequence,
+        silent_token=silent_token,
+        separator_aware=separator_aware,
+        tail_open_units=tail_open_units,
+        mark_last_open=mark_last_open,
+        emit_silence_runs=emit_silence_runs,
+        debounce_min_run_frames=debounce_min_run_frames,
+    )
     open_run_mask = [0 for _ in units]
     if mark_last_open and len(open_run_mask) > 0:
         keep_open_from = max(0, len(open_run_mask) - open_tail)
@@ -473,7 +495,7 @@ def build_compressed_sequence_tensor(
     debounce_min_run_frames: int = 1,
     device: torch.device | None = None,
 ) -> CompressedUnitSequenceTensor:
-    compressed = build_compressed_sequence(
+    units, durations, silence_mask, sep_hint, open_tail = _compress_sequence_lists(
         token_sequence,
         silent_token=silent_token,
         separator_aware=separator_aware,
@@ -483,16 +505,40 @@ def build_compressed_sequence_tensor(
         debounce_min_run_frames=debounce_min_run_frames,
     )
     target_device = device if device is not None else torch.device("cpu")
+    units_tensor = torch.tensor(units, dtype=torch.long, device=target_device)
+    durations_tensor = torch.tensor(durations, dtype=torch.long, device=target_device)
+    silence_tensor = torch.tensor(silence_mask, dtype=torch.long, device=target_device)
+    sep_tensor = torch.tensor(sep_hint, dtype=torch.long, device=target_device)
+    open_run_mask = torch.zeros_like(units_tensor, dtype=torch.long, device=target_device)
+    if mark_last_open and int(open_run_mask.numel()) > 0:
+        keep_open_from = max(0, int(open_run_mask.numel()) - open_tail)
+        open_run_mask[keep_open_from:] = 1
+    sealed_mask = (1 - open_run_mask).clamp_min(0)
+    boundary_confidence = _estimate_boundary_confidence_tensor(durations_tensor, sep_tensor, open_run_mask)
+    run_stability = _estimate_run_stability_tensor(
+        durations_tensor,
+        silence_tensor,
+        open_run_mask,
+        sep_hint=sep_tensor,
+        boundary_confidence=boundary_confidence,
+        min_speech_frames=debounce_min_run_frames,
+        min_silence_frames=debounce_min_run_frames,
+    )
+    tail_buffer = (
+        units_tensor[max(0, int(units_tensor.numel()) - open_tail):].clone()
+        if mark_last_open and open_tail > 0
+        else units_tensor.new_zeros((0,), dtype=torch.long)
+    )
     return CompressedUnitSequenceTensor(
-        units=torch.tensor(compressed.units, dtype=torch.long, device=target_device),
-        durations=torch.tensor(compressed.durations, dtype=torch.long, device=target_device),
-        silence_mask=torch.tensor(compressed.silence_mask, dtype=torch.long, device=target_device),
-        sep_hint=torch.tensor(compressed.sep_hint, dtype=torch.long, device=target_device),
-        open_run_mask=torch.tensor(compressed.open_run_mask, dtype=torch.long, device=target_device),
-        sealed_mask=torch.tensor(compressed.sealed_mask, dtype=torch.long, device=target_device),
-        boundary_confidence=torch.tensor(compressed.boundary_confidence, dtype=torch.float32, device=target_device),
-        run_stability=torch.tensor(compressed.run_stability, dtype=torch.float32, device=target_device),
-        tail_buffer=torch.tensor(compressed.tail_buffer, dtype=torch.long, device=target_device),
+        units=units_tensor,
+        durations=durations_tensor,
+        silence_mask=silence_tensor,
+        sep_hint=sep_tensor,
+        open_run_mask=open_run_mask,
+        sealed_mask=sealed_mask,
+        boundary_confidence=boundary_confidence,
+        run_stability=run_stability,
+        tail_buffer=tail_buffer,
     )
 
 
