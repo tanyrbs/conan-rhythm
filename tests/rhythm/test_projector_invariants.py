@@ -140,6 +140,33 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
             torch.tensor([[2.0, 3.0, 6.0]], dtype=torch.float32),
         )
 
+    def test_duration_v3_finalize_execution_can_disable_projector_telemetry_exports(self):
+        projector = StreamingDurationV3Projector(
+            prefix_budget_pos=2,
+            prefix_budget_neg=2,
+            dynamic_budget_ratio=0.0,
+            budget_mode="speech_only",
+            export_projector_telemetry=False,
+        )
+        execution = projector.finalize_execution(
+            unit_logstretch=torch.zeros((1, 3), dtype=torch.float32),
+            unit_duration_exec=torch.tensor([[3.0, 2.0, 4.0]], dtype=torch.float32),
+            basis_activation=torch.zeros((1, 3, 1), dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 1.0, 3.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            sealed_mask=torch.ones((1, 3), dtype=torch.float32),
+            speech_commit_mask=torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+            state=None,
+        )
+
+        assert execution.projector_budget_mode == "speech_only"
+        assert execution.projector_boundary_hit is None
+        assert execution.projector_boundary_decay_applied is None
+        assert execution.projector_since_last_boundary is None
+        assert execution.projected_prefix_cumsum is None
+        assert execution.source_prefix_cumsum is None
+        assert execution.next_state.since_last_boundary is not None
+
 
 class ProjectorInvariantTests(unittest.TestCase):
     @staticmethod

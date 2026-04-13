@@ -27,6 +27,23 @@ from utils.plot.rhythm_v3_viz import (
 )
 
 
+_GATE1_MONOTONICITY_RATE_MIN = 0.95
+_GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
+    "silence_leakage": 0.05,
+    "prefix_discrepancy": 0.05,
+    "budget_hit_rate": 0.05,
+    "cumulative_drift": 0.25,
+}
+
+
+def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
+    if column not in frame.columns or "eval_mode" not in frame.columns:
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    values = pd.to_numeric(frame.loc[mode_mask, column], errors="coerce").to_numpy(dtype=np.float32)
+    return float(np.nanmean(values)) if values.size > 0 and np.isfinite(values).any() else float("nan")
+
+
 def _collect_missing_metadata_issues(frame) -> list[str]:
     if pd is None or frame is None or not hasattr(frame, "columns"):
         return []
@@ -133,6 +150,28 @@ def collect_gate_issues(frame) -> list[str]:
         missing_modes = [mode for mode in ("analytic", "coarse_only", "learned") if mode not in observed_modes]
         if missing_modes:
             quality_issues.append("missing_eval_modes=" + "|".join(missing_modes))
+        analytic_mono = _mean_for_eval_mode(frame, column="tempo_monotonicity_rate", eval_mode="analytic")
+        if "analytic" in observed_modes:
+            if not np.isfinite(analytic_mono):
+                quality_issues.append("analytic_tempo_monotonicity_rate=missing")
+            elif analytic_mono < _GATE1_MONOTONICITY_RATE_MIN:
+                quality_issues.append(
+                    f"analytic_tempo_monotonicity_rate={analytic_mono:.3f}<{_GATE1_MONOTONICITY_RATE_MIN:.3f}"
+                )
+        if {"coarse_only", "learned"}.issubset(observed_modes):
+            for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
+                if column not in frame.columns:
+                    quality_issues.append(f"{column}=missing")
+                    continue
+                coarse_mean = _mean_for_eval_mode(frame, column=column, eval_mode="coarse_only")
+                learned_mean = _mean_for_eval_mode(frame, column=column, eval_mode="learned")
+                if not np.isfinite(coarse_mean) or not np.isfinite(learned_mean):
+                    quality_issues.append(f"{column}_mode_mean=missing")
+                    continue
+                if learned_mean > (coarse_mean + float(tolerance)):
+                    quality_issues.append(
+                        f"learned_{column}_regression={learned_mean:.3f}>{coarse_mean:.3f}+{float(tolerance):.3f}"
+                    )
     if {"src_id", "eval_mode", "ref_bin"}.issubset(frame.columns):
         triplet_frame = frame.copy()
         if "ref_condition" in triplet_frame.columns:
@@ -178,7 +217,11 @@ def build_gate_status(frame) -> dict[str, object]:
             "continuous_alignment_coverage": float("nan"),
             "g_domain_valid_mean": float("nan"),
             "gate0_drop_rate": float("nan"),
+            "analytic_tempo_monotonicity_rate": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
+            "coarse_only_runtime_metrics": {},
+            "learned_runtime_metrics": {},
+            "learned_runtime_regressions": [],
             "warnings": ["summary_rows=empty"],
         }
     issues = collect_gate_issues(frame)
@@ -188,7 +231,11 @@ def build_gate_status(frame) -> dict[str, object]:
     continuous_alignment_coverage = float("nan")
     g_domain_valid_mean = float("nan")
     gate0_drop_rate = float("nan")
+    analytic_tempo_monotonicity_rate = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
+    coarse_only_runtime_metrics: dict[str, float] = {}
+    learned_runtime_metrics: dict[str, float] = {}
+    learned_runtime_regressions: list[str] = []
     domain_column = "g_domain_valid" if "g_domain_valid" in frame.columns else "g_valid"
     if domain_column in frame.columns:
         g_domain_valid_mean = float(
@@ -221,6 +268,19 @@ def build_gate_status(frame) -> dict[str, object]:
         for mode in frame.get("eval_mode", []).dropna().tolist()
         if str(mode).strip() and str(mode).strip().lower() != "nan"
     } if "eval_mode" in frame.columns else set()
+    if "analytic" in observed_modes:
+        analytic_tempo_monotonicity_rate = _mean_for_eval_mode(
+            frame,
+            column="tempo_monotonicity_rate",
+            eval_mode="analytic",
+        )
+    for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
+        coarse_only_runtime_metrics[column] = _mean_for_eval_mode(frame, column=column, eval_mode="coarse_only")
+        learned_runtime_metrics[column] = _mean_for_eval_mode(frame, column=column, eval_mode="learned")
+        coarse_mean = coarse_only_runtime_metrics[column]
+        learned_mean = learned_runtime_metrics[column]
+        if np.isfinite(coarse_mean) and np.isfinite(learned_mean) and learned_mean > (coarse_mean + float(tolerance)):
+            learned_runtime_regressions.append(column)
     gate0_pass = (
         np.isfinite(g_domain_valid_mean)
         and g_domain_valid_mean >= 0.95
@@ -233,11 +293,14 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic" in observed_modes
         and incomplete_triplets == 0
         and "negative_control_reference" not in missing_controls
+        and np.isfinite(analytic_tempo_monotonicity_rate)
+        and analytic_tempo_monotonicity_rate >= _GATE1_MONOTONICITY_RATE_MIN
     )
     gate2_pass = (
         {"coarse_only", "learned"}.issubset(observed_modes)
         and np.isfinite(unmatched_speech_ratio_p95)
         and unmatched_speech_ratio_p95 <= 0.15
+        and not learned_runtime_regressions
     )
     return {
         "gate0_pass": bool(gate0_pass),
@@ -249,7 +312,11 @@ def build_gate_status(frame) -> dict[str, object]:
         "continuous_alignment_coverage": continuous_alignment_coverage,
         "g_domain_valid_mean": g_domain_valid_mean,
         "gate0_drop_rate": gate0_drop_rate,
+        "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
+        "coarse_only_runtime_metrics": coarse_only_runtime_metrics,
+        "learned_runtime_metrics": learned_runtime_metrics,
+        "learned_runtime_regressions": learned_runtime_regressions,
         "warnings": issues,
     }
 
@@ -381,7 +448,6 @@ def main() -> None:
     )
     if pd is not None:
         summary_df = pd.DataFrame(rows)
-        issues = _warn_sparse_review_metadata(summary_df)
         prefix_silence_df = build_prefix_silence_review_table(records)
         if not prefix_silence_df.empty and {"sample_id", "eval_mode"}.issubset(summary_df.columns):
             keep_cols = [
@@ -439,6 +505,7 @@ def main() -> None:
             merge_keys = [key for key in ("src_id", "eval_mode") if key in summary_df.columns]
             if merge_keys == ["src_id", "eval_mode"]:
                 summary_df = summary_df.merge(mono_summary, on=merge_keys, how="left")
+        issues = _warn_sparse_review_metadata(summary_df)
         summary_df.to_csv(output, index=False)
         gate_status = build_gate_status(summary_df)
         gate_status_path = None

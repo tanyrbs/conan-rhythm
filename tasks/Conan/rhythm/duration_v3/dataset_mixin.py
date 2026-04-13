@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import numpy as np
@@ -199,9 +200,11 @@ class DurationV3DatasetMixin:
                 payload[key] = None
                 continue
             arr = np.asarray(value)
+            arr_bytes = np.ascontiguousarray(arr).view(np.uint8)
             payload[key] = {
                 "shape": tuple(int(dim) for dim in arr.shape),
                 "dtype": str(arr.dtype),
+                "digest": hashlib.sha1(arr_bytes.tobytes()).hexdigest(),
             }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -383,6 +386,45 @@ class DurationV3DatasetMixin:
                 "minimal_v1 cached paired-target supervision sidecar signature mismatch: "
                 f"cached={cached_sidecar_signature}, conditioning_sidecar={conditioning_sidecar_signature} ({context})"
             )
+
+    def _validate_live_minimal_continuous_target_exports(
+        self,
+        *,
+        out: dict,
+        context: str,
+    ) -> None:
+        alignment_kind = self._normalize_alignment_kind_export(
+            out.get("unit_alignment_kind_tgt"),
+            mode_id=out.get("unit_alignment_mode_id_tgt"),
+        )
+        if not alignment_kind.startswith("continuous"):
+            return
+        for key in (
+            "unit_alignment_source_tgt",
+            "unit_alignment_version_tgt",
+            "unit_alignment_source_cache_signature_tgt",
+            "unit_alignment_target_cache_signature_tgt",
+            "unit_alignment_sidecar_signature_tgt",
+        ):
+            value = out.get(key)
+            text = (
+                self._normalize_signature_text(value)
+                if key.endswith("_signature_tgt")
+                else str(_extract_object_scalar(value) or "").strip() or "missing"
+            )
+            if text == "missing":
+                raise RuntimeError(
+                    "minimal_v1 canonical paired-target projection requires non-empty "
+                    f"{key} ({context})."
+                )
+        if alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_PRECOMPUTED:
+            source_text = str(_extract_object_scalar(out.get("unit_alignment_source_tgt")) or "").strip()
+            version_text = str(_extract_object_scalar(out.get("unit_alignment_version_tgt")) or "").strip()
+            if not source_text or not version_text:
+                raise RuntimeError(
+                    "minimal_v1 canonical paired-target projection forbids metadata-free continuous_precomputed alignment "
+                    f"({context})."
+                )
 
     def _allow_prompt_weight_shape_repair(self) -> bool:
         return bool(self.hparams.get(_PROMPT_WEIGHT_REPAIR_FLAG, False))
@@ -1512,6 +1554,11 @@ class DurationV3DatasetMixin:
                 paired_target_conditioning=paired_target_conditioning,
             )
         )
+        if self._is_enabled_flag(self.hparams.get("rhythm_v3_minimal_v1_profile", False)):
+            self._validate_live_minimal_continuous_target_exports(
+                out=out,
+                context=item_name,
+            )
         return out
 
     def _merge_duration_v3_rhythm_targets(self, item, source_cache, paired_target_conditioning, sample):

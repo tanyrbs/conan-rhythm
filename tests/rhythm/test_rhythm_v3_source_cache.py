@@ -268,6 +268,31 @@ def test_load_unit_log_prior_bundle_reads_npz_metadata(tmp_path):
     assert np.array_equal(bundle["unit_log_prior_is_default"], np.asarray([True, False, False]))
 
 
+def test_load_unit_log_prior_bundle_reloads_when_path_stat_changes(tmp_path):
+    prior_path = tmp_path / "unit_prior_bundle.npz"
+    np.savez(
+        prior_path,
+        unit_log_prior=np.asarray([0.1], dtype=np.float32),
+        unit_prior_version=np.asarray(["v1"], dtype=object),
+    )
+    first = load_unit_log_prior_bundle(str(prior_path))
+
+    np.savez(
+        prior_path,
+        unit_log_prior=np.asarray([0.9], dtype=np.float32),
+        unit_prior_version=np.asarray(["v2"], dtype=object),
+    )
+    bumped_mtime_ns = int(prior_path.stat().st_mtime_ns) + 1_000_000_000
+    os.utime(prior_path, ns=(bumped_mtime_ns, bumped_mtime_ns))
+    second = load_unit_log_prior_bundle(str(prior_path))
+
+    assert first["unit_prior_version"] == "v1"
+    assert float(first["unit_log_prior"][0]) == pytest.approx(0.1)
+    assert second["unit_prior_version"] == "v2"
+    assert float(second["unit_log_prior"][0]) == pytest.approx(0.9)
+    assert second["unit_prior_path_mtime_ns"] == bumped_mtime_ns
+
+
 def test_load_unit_log_prior_bundle_rejects_default_mask_size_mismatch(tmp_path):
     prior_path = tmp_path / "bad_prior.npz"
     np.savez(
@@ -341,9 +366,14 @@ def test_build_duration_v3_frontend_signature_binds_prior_bundle_metadata(tmp_pa
         unit_prior_source=np.asarray(["demo"], dtype=object),
         unit_prior_version=np.asarray(["v3"], dtype=object),
         unit_prior_frontend_signature=np.asarray([duration_v3_cache_meta_signature(meta)], dtype=object),
+        unit_prior_min_count=np.asarray([7], dtype=np.int64),
+        unit_prior_default_policy=np.asarray(["global_median"], dtype=object),
+        unit_prior_global_backoff=np.asarray(["linear"], dtype=object),
         unit_prior_emit_silence_runs=np.asarray([True], dtype=np.bool_),
         unit_prior_debounce_min_run_frames=np.asarray([2], dtype=np.int64),
         unit_prior_silent_token=np.asarray([57], dtype=np.int64),
+        unit_prior_filter_only_sealed_runs=np.asarray([True], dtype=np.bool_),
+        unit_prior_filter_drop_edge_runs=np.asarray([1], dtype=np.int64),
     )
 
     signature = build_duration_v3_frontend_signature(
@@ -358,6 +388,10 @@ def test_build_duration_v3_frontend_signature_binds_prior_bundle_metadata(tmp_pa
     assert '"unit_prior_bundle"' in signature
     assert '"version":"v3"' in signature
     assert '"frontend_meta_signature"' in signature
+    assert '"min_count":7' in signature
+    assert '"default_policy":"global_median"' in signature
+    assert '"global_backoff":"linear"' in signature
+    assert '"filter_only_sealed_runs":true' in signature
 
 
 def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):

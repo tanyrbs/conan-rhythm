@@ -163,6 +163,12 @@ class ConanDurationAdapter(nn.Module):
                 hparams.get("rhythm_v3_detach_global_term_in_local_head", False)
             ),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
+            export_projector_telemetry=bool(
+                hparams.get(
+                    "rhythm_v3_export_projector_telemetry",
+                    hparams.get("rhythm_v3_debug_export", False),
+                )
+            ),
             allow_hybrid=(
                 None
                 if "rhythm_v3_allow_hybrid" not in hparams

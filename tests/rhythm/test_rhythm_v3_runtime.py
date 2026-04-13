@@ -141,8 +141,10 @@ def test_rhythm_v3_operator_runtime_exports_source_prefix_diagnostics():
     execution = ret["rhythm_execution"]
     assert execution.g_src_utt is not None
     assert execution.g_src_prefix is not None
+    assert execution.source_rate_seq is not None
     assert execution.g_src_prefix_mean is not None
     assert execution.next_state.local_rate_ema is not None
+    assert torch.allclose(execution.source_rate_seq, execution.g_src_prefix)
     assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
     assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
     assert execution.g_src_prefix.shape == ret["speech_duration_exec"].shape

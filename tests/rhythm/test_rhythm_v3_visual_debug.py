@@ -564,6 +564,172 @@ def test_collect_gate_issues_uses_domain_validity_not_only_finite():
     assert "g_domain_valid_mean=0.000<0.950" in status["warnings"]
 
 
+def test_collect_gate_issues_flags_low_analytic_monotonicity_rate():
+    frame = pd.DataFrame(
+        [
+            {
+                "pair_id": "pair_gate",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+                "lexical_mismatch": 1.0,
+                "ref_len_sec": 4.0,
+                "speech_ratio": 0.45,
+                "alignment_kind": "continuous_viterbi_v1",
+                "target_duration_surface": "projection_raw",
+                "g_support_count": 2.0,
+                "g_support_ratio_vs_speech": 1.0,
+                "g_support_ratio_vs_valid": 1.0,
+                "g_valid": 1.0,
+                "g_domain_valid": 1.0,
+                "g_trim_ratio": 0.2,
+                "prompt_global_weight_present": 1.0,
+                "prompt_unit_log_prior_present": 0.0,
+                "alignment_unmatched_speech_ratio": 0.0,
+                "alignment_mean_local_confidence_speech": 0.9,
+                "alignment_mean_coarse_confidence_speech": 0.9,
+                "projector_boundary_hit_rate": 0.0,
+                "projector_boundary_decay_rate": 0.0,
+                "g_compute_status": "ok",
+                "g_src_compute_status": "ok",
+                "gate0_row_dropped": 0.0,
+                "gate0_drop_reason": "ok",
+                "eval_mode": "analytic",
+                "src_id": "src_demo",
+                "ref_bin": "slow",
+                "ref_condition": "real",
+                "tempo_monotonicity_rate": 0.5,
+            },
+            {
+                "pair_id": "pair_gate",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+                "lexical_mismatch": 1.0,
+                "ref_len_sec": 4.0,
+                "speech_ratio": 0.45,
+                "alignment_kind": "continuous_viterbi_v1",
+                "target_duration_surface": "projection_raw",
+                "g_support_count": 2.0,
+                "g_support_ratio_vs_speech": 1.0,
+                "g_support_ratio_vs_valid": 1.0,
+                "g_valid": 1.0,
+                "g_domain_valid": 1.0,
+                "g_trim_ratio": 0.2,
+                "prompt_global_weight_present": 1.0,
+                "prompt_unit_log_prior_present": 0.0,
+                "alignment_unmatched_speech_ratio": 0.0,
+                "alignment_mean_local_confidence_speech": 0.9,
+                "alignment_mean_coarse_confidence_speech": 0.9,
+                "projector_boundary_hit_rate": 0.0,
+                "projector_boundary_decay_rate": 0.0,
+                "g_compute_status": "ok",
+                "g_src_compute_status": "ok",
+                "gate0_row_dropped": 0.0,
+                "gate0_drop_reason": "ok",
+                "eval_mode": "coarse_only",
+                "src_id": "src_demo",
+                "ref_bin": "mid",
+                "ref_condition": "real",
+                "silence_leakage": 0.01,
+                "prefix_discrepancy": 0.01,
+                "budget_hit_rate": 0.01,
+                "cumulative_drift": 0.05,
+            },
+            {
+                "pair_id": "pair_gate",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+                "lexical_mismatch": 1.0,
+                "ref_len_sec": 4.0,
+                "speech_ratio": 0.45,
+                "alignment_kind": "continuous_viterbi_v1",
+                "target_duration_surface": "projection_raw",
+                "g_support_count": 2.0,
+                "g_support_ratio_vs_speech": 1.0,
+                "g_support_ratio_vs_valid": 1.0,
+                "g_valid": 1.0,
+                "g_domain_valid": 1.0,
+                "g_trim_ratio": 0.2,
+                "prompt_global_weight_present": 1.0,
+                "prompt_unit_log_prior_present": 0.0,
+                "alignment_unmatched_speech_ratio": 0.0,
+                "alignment_mean_local_confidence_speech": 0.9,
+                "alignment_mean_coarse_confidence_speech": 0.9,
+                "projector_boundary_hit_rate": 0.0,
+                "projector_boundary_decay_rate": 0.0,
+                "g_compute_status": "ok",
+                "g_src_compute_status": "ok",
+                "gate0_row_dropped": 0.0,
+                "gate0_drop_reason": "ok",
+                "eval_mode": "learned",
+                "src_id": "src_demo",
+                "ref_bin": "fast",
+                "ref_condition": "source_only",
+                "silence_leakage": 0.01,
+                "prefix_discrepancy": 0.01,
+                "budget_hit_rate": 0.01,
+                "cumulative_drift": 0.05,
+            },
+        ]
+    )
+    issues = collect_gate_issues(frame)
+    assert any("analytic_tempo_monotonicity_rate=0.500<0.950" == issue for issue in issues)
+    status = build_gate_status(frame)
+    assert status["gate1_pass"] is False
+
+
+def test_build_gate_status_flags_learned_runtime_regression_vs_coarse_only():
+    rows = []
+    for eval_mode, silence_leak, prefix_disc, budget_hit, drift in (
+        ("analytic", 0.01, 0.01, 0.01, 0.05),
+        ("coarse_only", 0.02, 0.02, 0.02, 0.10),
+        ("learned", 0.20, 0.10, 0.09, 0.50),
+    ):
+        rows.append(
+            {
+                "pair_id": f"pair_{eval_mode}",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+                "lexical_mismatch": 1.0,
+                "ref_len_sec": 4.0,
+                "speech_ratio": 0.45,
+                "alignment_kind": "continuous_viterbi_v1",
+                "target_duration_surface": "projection_raw",
+                "g_support_count": 2.0,
+                "g_support_ratio_vs_speech": 1.0,
+                "g_support_ratio_vs_valid": 1.0,
+                "g_valid": 1.0,
+                "g_domain_valid": 1.0,
+                "g_trim_ratio": 0.2,
+                "prompt_global_weight_present": 1.0,
+                "prompt_unit_log_prior_present": 0.0,
+                "alignment_unmatched_speech_ratio": 0.0,
+                "alignment_mean_local_confidence_speech": 0.9,
+                "alignment_mean_coarse_confidence_speech": 0.9,
+                "projector_boundary_hit_rate": 0.0,
+                "projector_boundary_decay_rate": 0.0,
+                "g_compute_status": "ok",
+                "g_src_compute_status": "ok",
+                "gate0_row_dropped": 0.0,
+                "gate0_drop_reason": "ok",
+                "eval_mode": eval_mode,
+                "src_id": "src_demo",
+                "ref_bin": "slow" if eval_mode == "analytic" else ("mid" if eval_mode == "coarse_only" else "fast"),
+                "ref_condition": "real" if eval_mode != "learned" else "random_ref",
+                "tempo_monotonicity_rate": 1.0 if eval_mode == "analytic" else np.nan,
+                "silence_leakage": silence_leak,
+                "prefix_discrepancy": prefix_disc,
+                "budget_hit_rate": budget_hit,
+                "cumulative_drift": drift,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    issues = collect_gate_issues(frame)
+    assert any(issue.startswith("learned_silence_leakage_regression=") for issue in issues)
+    status = build_gate_status(frame)
+    assert status["gate2_pass"] is False
+    assert "silence_leakage" in status["learned_runtime_regressions"]
+
+
 def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path, monkeypatch):
     record = RhythmV3DebugRecord.from_mapping(
         {

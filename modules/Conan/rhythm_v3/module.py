@@ -521,6 +521,12 @@ class MixedEffectsDurationModule(nn.Module):
         self.debug_export = bool(
             unused_kwargs.pop("debug_export", unused_kwargs.pop("rhythm_v3_debug_export", False))
         )
+        self.export_projector_telemetry = bool(
+            unused_kwargs.pop(
+                "export_projector_telemetry",
+                unused_kwargs.pop("rhythm_v3_export_projector_telemetry", self.debug_export),
+            )
+        )
         self.min_prompt_speech_ratio = float(
             unused_kwargs.pop(
                 "min_prompt_speech_ratio",
@@ -604,6 +610,7 @@ class MixedEffectsDurationModule(nn.Module):
             budget_mode=budget_mode,
             boundary_carry_decay=boundary_carry_decay,
             boundary_reset_thresh=boundary_reset_thresh,
+            export_projector_telemetry=self.export_projector_telemetry,
         )
         if self.use_reference_summary:
             emit_prompt_diagnostics = True
@@ -1385,6 +1392,7 @@ class MixedEffectsDurationModule(nn.Module):
                 local_rate_ema=source_prefix_final.detach(),
             )
         execution.g_ref = ref_memory.global_rate.detach()
+        execution.source_rate_seq = source_prefix_seq
         execution.g_src_prefix = source_prefix_seq
         execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
         execution.g_src_prefix_mean = self._compute_source_prefix_mean(

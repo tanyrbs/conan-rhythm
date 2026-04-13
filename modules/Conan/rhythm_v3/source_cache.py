@@ -94,9 +94,18 @@ def build_duration_v3_frontend_signature(
             "source": bundle.get("unit_prior_source"),
             "version": bundle.get("unit_prior_version"),
             "frontend_meta_signature": bundle.get("unit_prior_frontend_signature"),
+            "min_count": bundle.get("unit_prior_min_count"),
+            "default_policy": bundle.get("unit_prior_default_policy"),
+            "global_backoff": bundle.get("unit_prior_global_backoff"),
             "emit_silence_runs": bundle.get("unit_prior_emit_silence_runs"),
             "debounce_min_run_frames": bundle.get("unit_prior_debounce_min_run_frames"),
             "silent_token": bundle.get("unit_prior_silent_token"),
+            "separator_aware": bundle.get("unit_prior_separator_aware"),
+            "tail_open_units": bundle.get("unit_prior_tail_open_units"),
+            "phrase_boundary_threshold": bundle.get("unit_prior_phrase_boundary_threshold"),
+            "filter_exclude_open_runs": bundle.get("unit_prior_filter_exclude_open_runs"),
+            "filter_only_sealed_runs": bundle.get("unit_prior_filter_only_sealed_runs"),
+            "filter_drop_edge_runs": bundle.get("unit_prior_filter_drop_edge_runs"),
         }
     signature = {
         "cache_meta": normalized,
@@ -430,10 +439,12 @@ def _normalize_unit_prior_bundle(
 
 
 @lru_cache(maxsize=4)
-def load_unit_log_prior_bundle(path: str) -> dict[str, object]:
+def _load_unit_log_prior_bundle_cached(
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> dict[str, object]:
     prior_path = Path(path)
-    if not prior_path.exists():
-        raise FileNotFoundError(f"unit prior path does not exist: {prior_path}")
     suffix = prior_path.suffix.lower()
     payload = None
     if suffix == ".npy":
@@ -449,10 +460,21 @@ def load_unit_log_prior_bundle(path: str) -> dict[str, object]:
         )
     bundle = _normalize_unit_prior_bundle(payload, default_source=str(prior_path))
     bundle["unit_prior_path"] = str(prior_path)
-    stat = prior_path.stat()
-    bundle["unit_prior_path_mtime_ns"] = int(stat.st_mtime_ns)
-    bundle["unit_prior_path_size"] = int(stat.st_size)
+    bundle["unit_prior_path_mtime_ns"] = int(mtime_ns)
+    bundle["unit_prior_path_size"] = int(size)
     return bundle
+
+
+def load_unit_log_prior_bundle(path: str) -> dict[str, object]:
+    prior_path = Path(path)
+    if not prior_path.exists():
+        raise FileNotFoundError(f"unit prior path does not exist: {prior_path}")
+    stat = prior_path.stat()
+    return _load_unit_log_prior_bundle_cached(
+        str(prior_path),
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+    )
 
 
 def attach_unit_log_prior_to_source_cache(
