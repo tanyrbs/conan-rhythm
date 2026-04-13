@@ -39,6 +39,83 @@ from scripts.rhythm_v3_debug_records import (
 from utils.plot.rhythm_v3_viz.review import compute_g, compute_source_global_rate_for_analysis
 
 
+def _make_debug_records_cli_row(
+    *,
+    eval_mode: str = "analytic",
+    ref_bin: str = "mid",
+    ref_condition: str = "real",
+    item_name: str | None = None,
+    src_id: str = "src_demo",
+    sample_id: str = "sample_demo",
+    pair_id: str | None = None,
+    **overrides,
+) -> dict[str, float | str]:
+    row: dict[str, float | str] = {
+        "item_name": item_name or f"demo_case_{eval_mode}_{ref_bin}",
+        "src_id": src_id,
+        "sample_id": sample_id,
+        "pair_id": pair_id or f"pair_{eval_mode}_{ref_bin}",
+        "eval_mode": eval_mode,
+        "ref_bin": ref_bin,
+        "ref_condition": ref_condition,
+        "same_text_reference": 0.0,
+        "same_text_target": 1.0,
+        "lexical_mismatch": 1.0,
+        "ref_len_sec": 4.0,
+        "speech_ratio": 0.8,
+        "alignment_kind": "continuous_viterbi_v1",
+        "target_duration_surface": "projection_raw",
+        "g_support_count": 4.0,
+        "g_support_ratio_vs_speech": 1.0,
+        "g_support_ratio_vs_valid": 1.0,
+        "g_valid": 1.0,
+        "g_trim_ratio": 0.2,
+        "prompt_global_weight_present": 1.0,
+        "prompt_unit_log_prior_present": 0.0,
+        "alignment_unmatched_speech_ratio": 0.0,
+        "alignment_mean_local_confidence_speech": 0.9,
+        "alignment_mean_coarse_confidence_speech": 0.9,
+        "projector_boundary_hit_rate": 0.0,
+        "projector_boundary_decay_rate": 0.0,
+        "gate0_row_dropped": 0.0,
+        "gate0_drop_reason": "ok",
+        "g_compute_status": "ok",
+        "g_src_compute_status": "ok",
+    }
+    if eval_mode == "analytic":
+        row["tempo_monotonicity_rate"] = 1.0
+    if eval_mode in {"coarse_only", "learned"}:
+        row["silence_leakage"] = 0.01
+        row["prefix_discrepancy"] = 0.01
+        row["budget_hit_rate"] = 0.01
+        row["cumulative_drift"] = 0.05
+    row.update(overrides)
+    return row
+
+
+def _patch_debug_records_cli_rows(
+    monkeypatch,
+    cli_module,
+    *,
+    rows: list[dict[str, float | str]],
+    crop_df: pd.DataFrame | None = None,
+    stub_review_exports: bool = False,
+) -> None:
+    summaries = iter(rows)
+    monkeypatch.setattr(cli_module, "load_debug_records", lambda raw: [object() for _ in rows])
+    monkeypatch.setattr(cli_module, "record_summary", lambda record, **kwargs: dict(next(summaries)))
+    monkeypatch.setattr(
+        cli_module,
+        "build_ref_crop_table",
+        lambda records, **kwargs: crop_df.copy() if isinstance(crop_df, pd.DataFrame) else pd.DataFrame(),
+    )
+    monkeypatch.setattr(cli_module, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
+    monkeypatch.setattr(cli_module, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+    if stub_review_exports:
+        monkeypatch.setattr(cli_module, "save_review_figure_bundle", lambda *args, **kwargs: {})
+        monkeypatch.setattr(cli_module, "save_validation_gate_bundle", lambda *args, **kwargs: {})
+
+
 def test_projection_debug_payload_exposes_alignment_trace():
     payload = build_projection_debug_payload(
         source_units=np.asarray([3, 7, 9], dtype=np.int64),
@@ -960,62 +1037,14 @@ def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path,
 def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_path, monkeypatch, capsys):
     import scripts.rhythm_v3_debug_records as cli
 
-    def make_row(*, eval_mode: str, ref_bin: str, ref_condition: str) -> dict[str, float | str]:
-        row: dict[str, float | str] = {
-            "item_name": f"demo_case_{eval_mode}_{ref_bin}",
-            "src_id": "src_demo",
-            "sample_id": "sample_demo",
-            "pair_id": f"pair_{eval_mode}_{ref_bin}",
-            "eval_mode": eval_mode,
-            "ref_bin": ref_bin,
-            "ref_condition": ref_condition,
-            "same_text_reference": 0.0,
-            "same_text_target": 1.0,
-            "lexical_mismatch": 1.0,
-            "ref_len_sec": 4.0,
-            "speech_ratio": 0.8,
-            "alignment_kind": "continuous_viterbi_v1",
-            "target_duration_surface": "projection_raw",
-            "g_support_count": 4.0,
-            "g_support_ratio_vs_speech": 1.0,
-            "g_support_ratio_vs_valid": 1.0,
-            "g_valid": 1.0,
-            "g_trim_ratio": 0.2,
-            "prompt_global_weight_present": 1.0,
-            "prompt_unit_log_prior_present": 0.0,
-            "alignment_unmatched_speech_ratio": 0.0,
-            "alignment_mean_local_confidence_speech": 0.9,
-            "alignment_mean_coarse_confidence_speech": 0.9,
-            "projector_boundary_hit_rate": 0.0,
-            "projector_boundary_decay_rate": 0.0,
-            "gate0_row_dropped": 0.0,
-            "gate0_drop_reason": "ok",
-            "g_compute_status": "ok",
-            "g_src_compute_status": "ok",
-        }
-        if eval_mode == "analytic":
-            row["tempo_monotonicity_rate"] = 1.0
-        if eval_mode in {"coarse_only", "learned"}:
-            row["silence_leakage"] = 0.01
-            row["prefix_discrepancy"] = 0.01
-            row["budget_hit_rate"] = 0.01
-            row["cumulative_drift"] = 0.05
-        return row
-
     rows = [
-        make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real"),
-        make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real"),
-        make_row(eval_mode="analytic", ref_bin="fast", ref_condition="real"),
-        make_row(eval_mode="coarse_only", ref_bin="mid", ref_condition="real"),
-        make_row(eval_mode="learned", ref_bin="fast", ref_condition="source_only"),
+        _make_debug_records_cli_row(eval_mode="analytic", ref_bin="slow", ref_condition="real"),
+        _make_debug_records_cli_row(eval_mode="analytic", ref_bin="mid", ref_condition="real"),
+        _make_debug_records_cli_row(eval_mode="analytic", ref_bin="fast", ref_condition="real"),
+        _make_debug_records_cli_row(eval_mode="coarse_only", ref_bin="mid", ref_condition="real"),
+        _make_debug_records_cli_row(eval_mode="learned", ref_bin="fast", ref_condition="source_only"),
     ]
-    summaries = iter(rows)
-
-    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object() for _ in rows])
-    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(next(summaries)))
-    monkeypatch.setattr(cli, "build_ref_crop_table", lambda records, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+    _patch_debug_records_cli_rows(monkeypatch, cli, rows=rows)
 
     output = tmp_path / "summary.csv"
     gate_status_path = tmp_path / "gate_status.json"
@@ -1051,46 +1080,12 @@ def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_pat
 def test_debug_records_cli_review_export_is_strict_by_default(tmp_path, monkeypatch):
     import scripts.rhythm_v3_debug_records as cli
 
-    row = {
-        "item_name": "demo_case",
-        "src_id": "src_demo",
-        "sample_id": "sample_demo",
-        "pair_id": "pair_demo",
-        "eval_mode": "analytic",
-        "ref_bin": "mid",
-        "ref_condition": "real",
-        "same_text_reference": 0.0,
-        "same_text_target": 1.0,
-        "lexical_mismatch": 1.0,
-        "ref_len_sec": 4.0,
-        "speech_ratio": 0.8,
-        "alignment_kind": "continuous_viterbi_v1",
-        "target_duration_surface": "projection_raw",
-        "g_support_count": 4.0,
-        "g_support_ratio_vs_speech": 1.0,
-        "g_support_ratio_vs_valid": 1.0,
-        "g_valid": 1.0,
-        "g_trim_ratio": 0.2,
-        "prompt_global_weight_present": 1.0,
-        "prompt_unit_log_prior_present": 0.0,
-        "alignment_unmatched_speech_ratio": 0.0,
-        "alignment_mean_local_confidence_speech": 0.9,
-        "alignment_mean_coarse_confidence_speech": 0.9,
-        "projector_boundary_hit_rate": 0.0,
-        "projector_boundary_decay_rate": 0.0,
-        "gate0_row_dropped": 0.0,
-        "gate0_drop_reason": "ok",
-        "g_compute_status": "ok",
-        "g_src_compute_status": "ok",
-    }
-
-    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
-    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
-    monkeypatch.setattr(cli, "build_ref_crop_table", lambda records, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(cli, "save_review_figure_bundle", lambda *args, **kwargs: {})
-    monkeypatch.setattr(cli, "save_validation_gate_bundle", lambda *args, **kwargs: {})
+    _patch_debug_records_cli_rows(
+        monkeypatch,
+        cli,
+        rows=[_make_debug_records_cli_row(eval_mode="analytic", ref_bin="mid", ref_condition="real")],
+        stub_review_exports=True,
+    )
 
     output = tmp_path / "summary.csv"
     review_dir = tmp_path / "review"
@@ -1118,46 +1113,12 @@ def test_debug_records_cli_review_export_is_strict_by_default(tmp_path, monkeypa
 def test_debug_records_cli_allow_partial_gates_opt_out_keeps_review_export_warning_only(tmp_path, monkeypatch):
     import scripts.rhythm_v3_debug_records as cli
 
-    row = {
-        "item_name": "demo_case",
-        "src_id": "src_demo",
-        "sample_id": "sample_demo",
-        "pair_id": "pair_demo",
-        "eval_mode": "analytic",
-        "ref_bin": "mid",
-        "ref_condition": "real",
-        "same_text_reference": 0.0,
-        "same_text_target": 1.0,
-        "lexical_mismatch": 1.0,
-        "ref_len_sec": 4.0,
-        "speech_ratio": 0.8,
-        "alignment_kind": "continuous_viterbi_v1",
-        "target_duration_surface": "projection_raw",
-        "g_support_count": 4.0,
-        "g_support_ratio_vs_speech": 1.0,
-        "g_support_ratio_vs_valid": 1.0,
-        "g_valid": 1.0,
-        "g_trim_ratio": 0.2,
-        "prompt_global_weight_present": 1.0,
-        "prompt_unit_log_prior_present": 0.0,
-        "alignment_unmatched_speech_ratio": 0.0,
-        "alignment_mean_local_confidence_speech": 0.9,
-        "alignment_mean_coarse_confidence_speech": 0.9,
-        "projector_boundary_hit_rate": 0.0,
-        "projector_boundary_decay_rate": 0.0,
-        "gate0_row_dropped": 0.0,
-        "gate0_drop_reason": "ok",
-        "g_compute_status": "ok",
-        "g_src_compute_status": "ok",
-    }
-
-    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
-    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
-    monkeypatch.setattr(cli, "build_ref_crop_table", lambda records, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(cli, "save_review_figure_bundle", lambda *args, **kwargs: {})
-    monkeypatch.setattr(cli, "save_validation_gate_bundle", lambda *args, **kwargs: {})
+    _patch_debug_records_cli_rows(
+        monkeypatch,
+        cli,
+        rows=[_make_debug_records_cli_row(eval_mode="analytic", ref_bin="mid", ref_condition="real")],
+        stub_review_exports=True,
+    )
 
     output = tmp_path / "summary.csv"
     review_dir = tmp_path / "review"
@@ -1185,38 +1146,6 @@ def test_debug_records_cli_allow_partial_gates_opt_out_keeps_review_export_warni
 def test_debug_records_cli_summary_merges_ref_crop_fields(tmp_path, monkeypatch):
     import scripts.rhythm_v3_debug_records as cli
 
-    row = {
-        "item_name": "demo_case",
-        "src_id": "src_demo",
-        "sample_id": "sample_demo",
-        "pair_id": "pair_demo",
-        "eval_mode": "analytic",
-        "ref_bin": "mid",
-        "ref_condition": "real",
-        "same_text_reference": 0.0,
-        "same_text_target": 1.0,
-        "lexical_mismatch": 1.0,
-        "ref_len_sec": 4.0,
-        "speech_ratio": 0.8,
-        "alignment_kind": "continuous_viterbi_v1",
-        "target_duration_surface": "projection_raw",
-        "g_support_count": 4.0,
-        "g_support_ratio_vs_speech": 1.0,
-        "g_support_ratio_vs_valid": 1.0,
-        "g_valid": 1.0,
-        "g_trim_ratio": 0.2,
-        "prompt_global_weight_present": 1.0,
-        "prompt_unit_log_prior_present": 0.0,
-        "alignment_unmatched_speech_ratio": 0.0,
-        "alignment_mean_local_confidence_speech": 0.9,
-        "alignment_mean_coarse_confidence_speech": 0.9,
-        "projector_boundary_hit_rate": 0.0,
-        "projector_boundary_decay_rate": 0.0,
-        "gate0_row_dropped": 0.0,
-        "gate0_drop_reason": "ok",
-        "g_compute_status": "ok",
-        "g_src_compute_status": "ok",
-    }
     crop_df = pd.DataFrame(
         [
             {
@@ -1231,11 +1160,19 @@ def test_debug_records_cli_summary_merges_ref_crop_fields(tmp_path, monkeypatch)
         ]
     )
 
-    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
-    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
-    monkeypatch.setattr(cli, "build_ref_crop_table", lambda records, **kwargs: crop_df)
-    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
-    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+    _patch_debug_records_cli_rows(
+        monkeypatch,
+        cli,
+        rows=[
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="mid",
+                ref_condition="real",
+                pair_id="pair_demo",
+            )
+        ],
+        crop_df=crop_df,
+    )
 
     output = tmp_path / "summary.csv"
     monkeypatch.setattr(

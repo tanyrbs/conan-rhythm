@@ -21,6 +21,14 @@ pip-wheel-metadata/
 
 # Test / type / tool caches
 .pytest_cache/
+.pytest_tmp*/
+.tmp_pytest*/
+.tmp_win/
+codex_pytest_tmp/
+tests/.tmp_pytest_runtime/
+tmphmd6f9_y/
+tmplvp8m9gl/
+tmpv3g8vs5k/
 .mypy_cache/
 .ruff_cache/
 .pyre/

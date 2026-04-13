@@ -351,6 +351,12 @@ So the current status is:
 
 - code status: updated
 - review surface: simplified
+- implementation checkpoints:
+  - detach default: closed
+  - boundary-clean `g` support path: closed
+  - projector pre/post telemetry: closed
+  - CI pytest coverage for rhythm tests: closed
+  - negative-control failure semantics in strict gate export: closed
 - empirical verdict: still open
 
 ## 8. Result table template

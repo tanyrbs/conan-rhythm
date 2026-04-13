@@ -336,6 +336,25 @@ That separation is deliberate. Open tails should not be counted as interface
 instability, and closed-but-not-yet-committed runs should not be counted as a
 commit violation.
 
+### 5.6 Canonical minimal-V1 files are narrower than the legacy wrapper names
+
+For review and maintenance, the maintained minimal-V1 implementation should be
+read through:
+
+- `modules/Conan/rhythm_v3/global_condition.py`
+- `modules/Conan/rhythm_v3/minimal_writer.py`
+- `modules/Conan/rhythm_v3/run_encoder.py`
+
+The following files still exist, but mostly as generic containers or
+compatibility surfaces:
+
+- `modules/Conan/rhythm_v3/summary_memory.py`
+- `modules/Conan/rhythm_v3/minimal_head.py`
+- `modules/Conan/rhythm_v3/role_memory.py`
+
+That distinction is intentional. It keeps the maintained V1 theory surface
+smaller than the total legacy import surface exposed by the package.
+
 ## 6. What the five figures should prove
 
 - Figure A should tell us whether the source lattice behaves like an interface.

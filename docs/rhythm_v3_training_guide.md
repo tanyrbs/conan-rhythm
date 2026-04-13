@@ -153,6 +153,30 @@ support rather than only speech-mask edge drop. The generic summary-pooling
 path still keeps a lenient all-silence zero-summary fallback for diagnostics,
 but maintained V1-G prompt conditioning remains the strict path.
 
+### 2.3 Canonical modules vs compatibility shims
+
+For the maintained minimal-V1 surface, keep these file roles explicit:
+
+- canonical prompt/global cue path:
+  `modules/Conan/rhythm_v3/global_condition.py`
+- canonical minimal writer path:
+  `modules/Conan/rhythm_v3/minimal_writer.py`
+- canonical causal run encoder:
+  `modules/Conan/rhythm_v3/run_encoder.py`
+- canonical runtime assembly / projector wiring:
+  `modules/Conan/rhythm_v3/module.py`,
+  `modules/Conan/rhythm_v3/projector.py`,
+  `modules/Conan/rhythm_v3/runtime_adapter.py`
+- generic / legacy prompt-summary container:
+  `modules/Conan/rhythm_v3/summary_memory.py`
+- compatibility-only shims that should not become the new mainline surface:
+  `modules/Conan/rhythm_v3/minimal_head.py`,
+  `modules/Conan/rhythm_v3/role_memory.py`
+
+That split matters for maintenance. New minimal-V1 logic should land in the
+canonical files above rather than drifting back into the legacy wrapper names
+unless the code is truly shared by both surfaces.
+
 ---
 
 ## 3. What training actually expects
@@ -644,6 +668,32 @@ new projector telemetry as the companion pre/post surface:
   rounded preclamp execution
 - `projector_rounding_regret`: gap between committed discrete execution and the
   continuous proposal
+
+### 9.4 Closure checkpoints before calling the branch stable
+
+Treat these as the practical implementation checkpoints for the maintained
+minimal-V1 line:
+
+1. contract checkpoint:
+   prompt/reference metadata proves speech-dominant 3-8 second reference
+   support, paired-target provenance stays continuous, and same-text /
+   different-text rules are explicit rather than implicit
+2. writer checkpoint:
+   `rhythm_v3_detach_global_term_in_local_head=true` remains the maintained
+   default, while `learned + no_detach` stays an ablation
+3. `g` checkpoint:
+   runtime and audit both read the same speech-only / closed / boundary-clean
+   support semantics instead of separate debug-only heuristics
+4. projector checkpoint:
+   pre/post execution telemetry is exported, so improvements can be attributed
+   to the writer or the projector instead of being conflated
+5. gate checkpoint:
+   Gate 0, Gate 1, and Gate 2 all run on the same maintained bundle, and
+   negative controls must lose rather than merely exist
+6. test harness checkpoint:
+   rhythm tests run under `pytest`, and repo-local temporary paths are used for
+   file-writing tests on Windows-restricted hosts to avoid flaky tmpdir
+   failures
 
 ---
 
