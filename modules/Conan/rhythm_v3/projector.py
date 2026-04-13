@@ -601,6 +601,18 @@ class StreamingDurationProjector(nn.Module):
         committed_unit_values = committed_units.detach().cpu().tolist()
         prev_committed_values = prev_committed_units.detach().cpu().tolist()
         since_last_boundary_values = since_last_boundary[:, 0].detach().cpu().tolist()
+        boundary_hit_cpu = boundary_hit.detach().cpu() if isinstance(boundary_hit, torch.Tensor) else None
+        source_boundary_cue_cpu = (
+            source_boundary_cue.detach().cpu()
+            if isinstance(source_boundary_cue, torch.Tensor)
+            else None
+        )
+        phrase_final_mask_cpu = (
+            phrase_final_mask.detach().cpu()
+            if isinstance(phrase_final_mask, torch.Tensor)
+            else None
+        )
+        boundary_reset_thresh_float = float(boundary_reset_thresh)
         for batch_idx in active_rows:
             counter = int(round(float(since_last_boundary_values[batch_idx])))
             end_unit = int(committed_unit_values[batch_idx])
@@ -609,9 +621,11 @@ class StreamingDurationProjector(nn.Module):
             if span <= 0:
                 since_last_boundary[batch_idx, 0] = float(counter)
                 continue
-            if isinstance(boundary_hit, torch.Tensor):
+            if boundary_hit_cpu is not None:
                 row_hits = (
-                    boundary_hit[batch_idx, start_unit:end_unit].detach().cpu().reshape(-1).tolist()
+                    boundary_hit_cpu[batch_idx, start_unit:end_unit]
+                    .reshape(-1)
+                    .tolist()
                 )
                 if any(float(hit) > 0.5 for hit in row_hits):
                     last_hit = max(
@@ -622,21 +636,17 @@ class StreamingDurationProjector(nn.Module):
                     counter += int(span)
             else:
                 row_boundary_hit = None
-                if isinstance(source_boundary_cue, torch.Tensor):
-                    row_boundary_hit = (
-                        source_boundary_cue[batch_idx, start_unit:end_unit]
-                        .detach()
-                        .cpu()
+                if source_boundary_cue_cpu is not None:
+                    row_boundary_hit = [
+                        float(value) >= boundary_reset_thresh_float
+                        for value in source_boundary_cue_cpu[batch_idx, start_unit:end_unit]
                         .reshape(-1)
                         .tolist()
-                    )
-                    row_boundary_hit = [float(value) >= float(boundary_reset_thresh) for value in row_boundary_hit]
-                if isinstance(phrase_final_mask, torch.Tensor):
+                    ]
+                if phrase_final_mask_cpu is not None:
                     row_phrase_final = [
                         float(value) > 0.5
-                        for value in phrase_final_mask[batch_idx, start_unit:end_unit]
-                        .detach()
-                        .cpu()
+                        for value in phrase_final_mask_cpu[batch_idx, start_unit:end_unit]
                         .reshape(-1)
                         .tolist()
                     ]

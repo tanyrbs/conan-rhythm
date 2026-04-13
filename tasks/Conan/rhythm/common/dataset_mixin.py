@@ -593,7 +593,7 @@ class CommonRhythmDatasetMixin:
         if self._should_export_rhythm_debug_sidecars():
             full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
             adapted.update({
-                "source_boundary_cue": boundary_confidence.copy() if "source_boundary_cue" in full_side else boundary_confidence.copy(),
+                "source_boundary_cue": full_side["source_boundary_cue"].copy() if "source_boundary_cue" in full_side else boundary_confidence.copy(),
                 "phrase_group_index": np.zeros_like(adapted["content_units"], dtype=np.int64),
                 "phrase_group_pos": np.zeros_like(boundary_confidence, dtype=np.float32),
                 "phrase_final_mask": np.zeros_like(boundary_confidence, dtype=np.float32),

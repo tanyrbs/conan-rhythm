@@ -94,8 +94,10 @@ rhythm_v3_max_prefix_budget: 48
 # Maintained default keeps projector budget support on full committed prefix mass.
 # Use `speech_only` or `hybrid` only for explicit falsification/ablation runs.
 rhythm_v3_budget_mode: total  # total | speech_only | hybrid
-rhythm_prompt_dropout: 0.20
-rhythm_prompt_truncation: 0.50
+# Maintained minimal-V1 runs keep prompt augmentation off so the 3-8s
+# reference-domain gate is evaluated on the real prompt span.
+rhythm_prompt_dropout: 0.0
+rhythm_prompt_truncation: 0.0
 rhythm_v3_summary_pool_speech_only: true
 rhythm_v3_debounce_min_run_frames: 2
 rhythm_v3_local_cold_start_runs: 2
@@ -103,8 +105,9 @@ rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
 rhythm_v3_analytic_gap_clip: 0.35
-# Keep the maintained path attached to the shared global term; set true only
-# for identifiability/falsification ablations.
+# The minimal-V1 contract keeps the local head detached from the shared global term
+# and freezes the source-rate initialization; flip either flag only for explicit
+# ablations or falsification experiments.
 rhythm_v3_detach_global_term_in_local_head: true
 rhythm_v3_freeze_src_rate_init: true
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence

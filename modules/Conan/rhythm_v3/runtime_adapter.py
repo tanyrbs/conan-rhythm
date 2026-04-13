@@ -16,7 +16,7 @@ from .contracts import (
 )
 from .bridge import resolve_rhythm_apply_mode
 from .frame_plan import RhythmFramePlan, build_frame_plan_from_execution
-from .g_stats import build_global_rate_support_mask
+from .g_stats import compute_duration_weighted_speech_ratio, summarize_global_rate_support
 from .module import MixedEffectsDurationModule
 from .renderer import RenderedRhythmSequence, render_rhythm_sequence
 from .source_cache import (
@@ -588,8 +588,11 @@ class ConanDurationAdapter(nn.Module):
             key="prompt_speech_ratio_scalar",
         )
         if prompt_speech_ratio_scalar is None:
-            valid_mass = prompt_valid_mask.float().sum(dim=1, keepdim=True).clamp_min(1.0)
-            prompt_speech_ratio_scalar = prompt_speech_mask.float().sum(dim=1, keepdim=True) / valid_mass
+            prompt_speech_ratio_scalar = compute_duration_weighted_speech_ratio(
+                duration_obs=prompt_duration_obs.float(),
+                speech_mask=prompt_speech_mask.float(),
+                valid_mask=prompt_valid_mask.float(),
+            )
         enriched["prompt_speech_ratio_scalar"] = prompt_speech_ratio_scalar
         if isinstance(enriched.get("prompt_unit_prior_vocab_size"), torch.Tensor):
             enriched["prompt_unit_prior_vocab_size"] = enriched["prompt_unit_prior_vocab_size"].to(device=device).long()
@@ -724,12 +727,14 @@ class ConanDurationAdapter(nn.Module):
                 )
             if isinstance(ref_conditioning_meta.get("prompt_unit_prior_vocab_size"), torch.Tensor):
                 ret["rhythm_prompt_unit_prior_vocab_size"] = ref_conditioning_meta["prompt_unit_prior_vocab_size"].detach()
+            if isinstance(ref_conditioning_meta.get("prompt_ref_len_sec"), torch.Tensor):
+                ret["rhythm_prompt_ref_len_sec"] = ref_conditioning_meta["prompt_ref_len_sec"].detach()
         if self.module.debug_export:
             g_debug_stats = {}
+            prompt_ref_len_sec = None
             prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
             prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
             if isinstance(prompt_speech_mask, torch.Tensor):
-                prompt_evidence = getattr(ref_memory, "prompt", None) if ref_memory is not None else None
                 min_prompt_speech_ratio = float(
                     getattr(getattr(self.module, "prompt_memory_encoder", None), "min_speech_ratio", 0.0)
                 )
@@ -739,45 +744,125 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(prompt_valid_mask, torch.Tensor)
                     else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
                 )
-                speech_ratio = speech_count / valid_count.clamp_min(1.0)
+                def _meta_tensor(key: str) -> torch.Tensor | None:
+                    if isinstance(ref_conditioning_meta, Mapping):
+                        value = ref_conditioning_meta.get(key)
+                        if isinstance(value, torch.Tensor):
+                            return value
+                    return None
+                prompt_duration_obs = _meta_tensor("prompt_duration_obs")
+                prompt_evidence = getattr(ref_memory, "prompt", None) if ref_memory is not None else None
+                if not isinstance(prompt_duration_obs, torch.Tensor) and prompt_evidence is not None:
+                    prompt_log_duration = getattr(prompt_evidence, "prompt_log_duration", None)
+                    if isinstance(prompt_log_duration, torch.Tensor):
+                        prompt_duration_obs = torch.exp(prompt_log_duration.float()).clamp_min(0.0)
+                speech_ratio = compute_duration_weighted_speech_ratio(
+                    duration_obs=(
+                        prompt_duration_obs.float()
+                        if isinstance(prompt_duration_obs, torch.Tensor)
+                        else None
+                    ),
+                    speech_mask=prompt_speech_mask.float(),
+                    valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
+                )
+                prompt_closed_mask = _meta_tensor("prompt_closed_mask")
+                prompt_boundary_confidence = _meta_tensor("prompt_boundary_confidence")
+                prompt_global_weight = _meta_tensor("prompt_global_weight")
+                prompt_ref_len_sec = _meta_tensor("prompt_ref_len_sec")
+                prompt_ref_len_valid = None
+                support_stats = summarize_global_rate_support(
+                    speech_mask=prompt_speech_mask.float().clamp(0.0, 1.0),
+                    valid_mask=(
+                        prompt_valid_mask.float().clamp(0.0, 1.0)
+                        if isinstance(prompt_valid_mask, torch.Tensor)
+                        else None
+                    ),
+                    drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
+                    closed_mask=(
+                        prompt_closed_mask.float().clamp(0.0, 1.0)
+                        if isinstance(prompt_closed_mask, torch.Tensor)
+                        else None
+                    ),
+                    boundary_confidence=(
+                        prompt_boundary_confidence.float().clamp(0.0, 1.0)
+                        if isinstance(prompt_boundary_confidence, torch.Tensor)
+                        else None
+                    ),
+                    min_boundary_confidence=getattr(self.module, "min_boundary_confidence_for_g", None),
+                )
                 support_mask = (
-                    prompt_evidence.prompt_g_support_mask.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_mask, torch.Tensor)
-                    else build_global_rate_support_mask(
-                        speech_mask=prompt_speech_mask.float(),
-                        valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
-                        drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
-                    ).float()
+                    ref_memory.prompt_g_support_mask.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_support_mask", None), torch.Tensor)
+                    else support_stats.support_mask.float()
                 )
                 clean_mask = (
-                    prompt_evidence.prompt_g_clean_mask.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_clean_mask, torch.Tensor)
-                    else support_mask
+                    ref_memory.prompt_g_clean_mask.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_clean_mask", None), torch.Tensor)
+                    else (
+                        support_stats.clean_mask.float()
+                        if isinstance(support_stats.clean_mask, torch.Tensor)
+                        else support_mask
+                    )
                 )
                 support_count = (
-                    prompt_evidence.prompt_g_support_count.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_count, torch.Tensor)
-                    else support_mask.sum(dim=1, keepdim=True)
+                    ref_memory.prompt_g_support_count.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_support_count", None), torch.Tensor)
+                    else support_stats.support_count.float()
                 )
                 clean_count = (
-                    prompt_evidence.prompt_g_clean_count.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_clean_count, torch.Tensor)
-                    else clean_mask.sum(dim=1, keepdim=True)
+                    ref_memory.prompt_g_clean_count.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_clean_count", None), torch.Tensor)
+                    else (
+                        support_stats.clean_count.float()
+                        if isinstance(support_stats.clean_count, torch.Tensor)
+                        else support_count
+                    )
                 )
                 support_weight = (
-                    prompt_evidence.prompt_g_support_weight.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_weight, torch.Tensor)
-                    else support_count
-                )
-                g_valid_support = (support_count > 0.5).float()
-                g_domain_valid = (
-                    prompt_evidence.prompt_g_domain_valid.float()
-                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_domain_valid, torch.Tensor)
+                    ref_memory.prompt_g_support_weight.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_support_weight", None), torch.Tensor)
                     else (
-                        (g_valid_support > 0.5)
-                        & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
-                    ).float()
+                        torch.where(
+                            support_mask > 0.5,
+                            prompt_global_weight.float().clamp_min(0.0),
+                            torch.zeros_like(prompt_global_weight.float()),
+                        ).sum(dim=1, keepdim=True)
+                        if isinstance(prompt_global_weight, torch.Tensor)
+                        else support_count
+                    )
                 )
+                if bool(getattr(self.module, "is_minimal_v1", False)):
+                    min_ref_len = float(getattr(self.module, "min_prompt_ref_len_sec", 0.0))
+                    max_ref_len = float(getattr(self.module, "max_prompt_ref_len_sec", float("inf")))
+                    if isinstance(prompt_ref_len_sec, torch.Tensor):
+                        ref_len = prompt_ref_len_sec.float().reshape(int(prompt_speech_mask.size(0)), -1)[:, :1]
+                        prompt_ref_len_valid = (
+                            torch.isfinite(ref_len)
+                            & (ref_len >= min_ref_len)
+                            & (ref_len <= max_ref_len)
+                        )
+                    else:
+                        prompt_ref_len_valid = prompt_speech_mask.new_zeros(
+                            (prompt_speech_mask.size(0), 1),
+                            dtype=torch.bool,
+                        )
+                g_valid_support = ((support_count > 0.5) & (support_weight > 1.0e-6)).float()
+                g_domain_valid = (
+                    ref_memory.prompt_g_domain_valid.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_domain_valid", None), torch.Tensor)
+                    else (
+                        (
+                            (g_valid_support > 0.5)
+                            & (clean_count > 0.5)
+                            & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
+                        ).float()
+                    )
+                )
+                if (
+                    not isinstance(getattr(ref_memory, "prompt_g_domain_valid", None), torch.Tensor)
+                    and prompt_ref_len_valid is not None
+                ):
+                    g_domain_valid = g_domain_valid * prompt_ref_len_valid.float()
                 g_debug_stats = {
                     "g_support_count": support_count.detach(),
                     "g_clean_count": clean_count.detach(),
@@ -797,6 +882,12 @@ class ConanDurationAdapter(nn.Module):
                     "g_drop_edge_runs": support_count.new_full(
                         support_count.shape,
                         float(int(getattr(self.module, "g_drop_edge_runs", 0))),
+                    ),
+                    "g_edge_runs_dropped": support_stats.edge_runs_dropped.detach(),
+                    "g_ref_len_valid": (
+                        prompt_ref_len_valid.float().detach()
+                        if prompt_ref_len_valid is not None
+                        else None
                     ),
                     "g_strict_speech_only": support_count.new_ones(support_count.shape),
                 }
@@ -975,6 +1066,11 @@ class ConanDurationAdapter(nn.Module):
                 "prompt_valid_len": (
                     execution.prompt_valid_len.detach()
                     if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor)
+                    else None
+                ),
+                "prompt_ref_len_sec": (
+                    prompt_ref_len_sec.detach()
+                    if isinstance(prompt_ref_len_sec, torch.Tensor)
                     else None
                 ),
                 "prompt_global_weight_present": (
@@ -1157,6 +1253,8 @@ class ConanDurationAdapter(nn.Module):
                 ret["rhythm_debug_prompt_unit_log_prior_present"] = ret["rhythm_prompt_unit_log_prior_present"]
             if isinstance(ret.get("rhythm_prompt_unit_prior_vocab_size"), torch.Tensor):
                 ret["rhythm_debug_prompt_unit_prior_vocab_size"] = ret["rhythm_prompt_unit_prior_vocab_size"]
+            if isinstance(debug_bundle.get("prompt_ref_len_sec"), torch.Tensor):
+                ret["rhythm_debug_prompt_ref_len_sec"] = debug_bundle["prompt_ref_len_sec"]
             if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
                 debug_bundle["is_speech"] = (
                     source_batch.unit_mask.float() * (1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0))
@@ -1426,11 +1524,29 @@ class ConanDurationAdapter(nn.Module):
             execution=execution,
             rhythm_state_prev=rhythm_state_prev,
         )
+        prompt_domain_valid_tensor = None
+        domain_invalid_mask = None
+        domain_invalid_any = False
+        prompt_domain_valid = getattr(ref_memory, "prompt_g_domain_valid", None)
+        if isinstance(prompt_domain_valid, torch.Tensor):
+            prompt_domain_valid_tensor = prompt_domain_valid.float().reshape(
+                int(prompt_domain_valid.size(0)),
+                -1,
+            )[:, :1]
+            domain_invalid_mask = prompt_domain_valid_tensor <= 0.5
+            domain_invalid_any = bool(domain_invalid_mask.any().item())
+            ret["rhythm_prompt_domain_valid"] = prompt_domain_valid_tensor.detach()
+            ret["rhythm_domain_invalid"] = domain_invalid_mask.float().detach()
+        ret["rhythm_domain_invalid_any"] = float(domain_invalid_any)
         apply_rhythm_render = resolve_rhythm_apply_mode(
             self.hparams,
             infer=infer,
             override=rhythm_apply_override,
         )
+        if bool(apply_rhythm_render) and domain_invalid_any:
+            ret["rhythm_apply_render"] = 0.0
+            ret["rhythm_render_skipped_invalid_prompt"] = 1.0
+            return content_embed, tgt_nonpadding, f0, uv
         has_uncommitted_tail = False
         if isinstance(getattr(execution, "commit_mask", None), torch.Tensor):
             has_uncommitted_tail = bool(

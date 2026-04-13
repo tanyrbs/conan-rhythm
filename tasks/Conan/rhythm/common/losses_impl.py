@@ -222,6 +222,32 @@ def _merge_batch_weight(
     return gate if merged is None else merged * gate
 
 
+def _require_minimal_committed_silence_mask(targets: DurationV3LossTargets, context: str) -> None:
+    if bool(getattr(targets, "minimal_v1_profile", False)) and not isinstance(
+        getattr(targets, "committed_silence_mask", None), torch.Tensor
+    ):
+        raise RuntimeError(
+            "rhythm_v3_minimal_v1_profile requires committed_silence_mask for "
+            f"{context}; falling back to the anchor is not allowed."
+        )
+
+
+def _require_minimal_coarse_silence_surface(targets: DurationV3LossTargets, context: str) -> None:
+    if not bool(getattr(targets, "minimal_v1_profile", False)):
+        return
+    silence_mask = getattr(targets, "committed_silence_mask", None)
+    if not isinstance(silence_mask, torch.Tensor):
+        return
+    if not bool((silence_mask.float() > 0.5).any().item()):
+        return
+    if isinstance(targets.coarse_duration_tgt, torch.Tensor) or isinstance(targets.prefix_duration_tgt, torch.Tensor):
+        return
+    raise RuntimeError(
+        "minimal_v1_profile requires coarse-derived silence target; "
+        f"anchor fallback is forbidden for committed silence in {context}."
+    )
+
+
 def _masked_huber(
     pred: torch.Tensor,
     tgt: torch.Tensor,
@@ -288,6 +314,8 @@ def _masked_abs_mean_scalar(
 
 
 def _resolve_duration_v3_prefix_target_surface(targets: DurationV3LossTargets) -> torch.Tensor:
+    _require_minimal_committed_silence_mask(targets, "prefix target surface")
+    _require_minimal_coarse_silence_surface(targets, "prefix target surface")
     if isinstance(targets.coarse_duration_tgt, torch.Tensor):
         return targets.coarse_duration_tgt.float()
     if isinstance(targets.prefix_duration_tgt, torch.Tensor):
@@ -1670,6 +1698,8 @@ def _build_duration_v3_stream_losses(
     targets: DurationV3LossTargets,
     committed_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _require_minimal_committed_silence_mask(targets, "prefix stream losses")
+    _require_minimal_coarse_silence_surface(targets, "prefix stream losses")
     speech_commit_mask = (
         targets.committed_speech_mask.float()
         if isinstance(targets.committed_speech_mask, torch.Tensor)

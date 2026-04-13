@@ -63,6 +63,11 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
 )
 _LEGACY_PROMPT_SUMMARY_BACKBONES = {"role_memory", "unit_run"}
 _MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global", "v1g_minimal"}
+_UNIT_NORM_G_VARIANTS = {"unit_norm", "unit_normalized"}
+
+
+def _is_unit_norm_variant(value) -> bool:
+    return str(value or "raw_median").strip().lower() in _UNIT_NORM_G_VARIANTS
 
 
 def normalize_duration_v3_backbone_mode(value) -> str:
@@ -331,6 +336,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_min_prompt_ref_len_sec=3.0.")
         if abs(max_prompt_ref_len_sec - 8.0) > 1.0e-6:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_max_prompt_ref_len_sec=8.0.")
+        if float(hparams.get("rhythm_prompt_dropout", 0.0) or 0.0) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_prompt_dropout=0.0.")
+        if float(hparams.get("rhythm_prompt_truncation", 0.0) or 0.0) > 0.0:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_prompt_truncation=0.0.")
         for key in ("rhythm_v3_alignment_allow_source_skip", "rhythm_v3_align_allow_source_skip"):
             if _is_enabled_flag(hparams.get(key, False)):
                 raise ValueError(
@@ -469,7 +478,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         if min_boundary_confidence_for_g < 0.0 or min_boundary_confidence_for_g > 1.0:
             raise ValueError("rhythm_v3_min_boundary_confidence_for_g must be within [0, 1] for rhythm_v3.")
     g_variant = str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower()
-    if g_variant == "unit_norm":
+    if _is_unit_norm_variant(g_variant):
+        if minimal_v1_profile:
+            raise ValueError("rhythm_v3_minimal_v1_profile forbids rhythm_v3_g_variant=unit_norm.")
         if unit_prior_path is None:
             raise ValueError("rhythm_v3_g_variant=unit_norm requires rhythm_v3_unit_prior_path.")
     for key in (

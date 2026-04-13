@@ -26,6 +26,39 @@ class GlobalRateSupportStats:
     clean_count: torch.Tensor | None = None
 
 
+def compute_duration_weighted_speech_ratio(
+    *,
+    duration_obs: torch.Tensor | None,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if speech_mask.ndim not in {1, 2}:
+        raise ValueError(
+            "compute_duration_weighted_speech_ratio expects rank-1 or rank-2 speech_mask, "
+            f"got {tuple(speech_mask.shape)}"
+        )
+    speech = speech_mask.float().clamp(0.0, 1.0)
+    valid = (
+        torch.ones_like(speech, dtype=speech.dtype)
+        if valid_mask is None
+        else valid_mask.float().clamp(0.0, 1.0)
+    )
+    reduce_dim = 0 if speech_mask.ndim == 1 else 1
+    speech = speech * valid
+    count_ratio = speech.sum(dim=reduce_dim, keepdim=True) / valid.sum(dim=reduce_dim, keepdim=True).clamp_min(1.0)
+    if not isinstance(duration_obs, torch.Tensor):
+        return count_ratio
+    if tuple(duration_obs.shape) != tuple(speech_mask.shape):
+        raise ValueError(
+            "compute_duration_weighted_speech_ratio duration_obs/speech_mask shape mismatch: "
+            f"{tuple(duration_obs.shape)} vs {tuple(speech_mask.shape)}"
+        )
+    duration = duration_obs.float().clamp_min(0.0) * valid
+    duration_mass = duration.sum(dim=reduce_dim, keepdim=True)
+    duration_ratio = (duration * speech).sum(dim=reduce_dim, keepdim=True) / duration_mass.clamp_min(EPS)
+    return torch.where(duration_mass > EPS, duration_ratio, count_ratio)
+
+
 def normalize_global_rate_variant(value) -> str:
     normalized = str(value or "raw_median").strip().lower()
     aliases = {

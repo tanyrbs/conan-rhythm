@@ -46,6 +46,7 @@ Operationally, the maintained default means:
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
 - `rhythm_v3_detach_global_term_in_local_head: true`
+- `rhythm_v3_freeze_src_rate_init: true`
 - `rhythm_v3_gate_quality_strict: true`  (intent marker; CLI export controls strict fail/allow-partial behavior)
 - `rhythm_v3_eval_mode: learned`
 - speech-only prompt global-rate estimation, with closed/boundary-clean support when prompt sidecars are available
@@ -79,7 +80,9 @@ small overrides:
 
 Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
 `weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
-shows a real reason.
+shows a real reason. The minimal-V1 contract forbids `rhythm_v3_g_variant=unit_norm`,
+so switch off `rhythm_v3_minimal_v1_profile` before running any `unit_norm` checks
+even when you already have a reproducible prior bundle.
 For `unit_norm`, also wire a reproducible prior bundle through
 `rhythm_v3_unit_prior_path`; the maintained repo now ships
 `scripts/build_unit_log_prior.py` so `unit_norm` is no longer just a consumer
@@ -152,7 +155,11 @@ maintained prompt-domain contract: minimal V1 expects speech-dominant
 support rather than only speech-mask edge drop. In the maintained minimal
 path, missing clean-support sidecars now fail closed instead of silently
 widening support back to `valid_mask`. The generic summary-pooling path still
-keeps a lenient all-silence zero-summary fallback for diagnostics, but that
+keeps a lenient all-silence zero-summary fallback for diagnostics. The
+maintained mainline also keeps `rhythm_prompt_dropout=0.0` and
+`rhythm_prompt_truncation=0.0`; if you want prompt augmentation, treat it as
+an explicit ablation and resample prompts so the 3-8s / speech-dominant gate
+remains satisfied after augmentation.
 behavior is now confined to the non-strict compatibility branch.
 
 ### 2.3 Canonical modules vs compatibility shims

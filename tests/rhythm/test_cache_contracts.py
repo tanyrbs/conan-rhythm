@@ -361,7 +361,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertTrue(
             np.allclose(
                 np.asarray(conditioning["prompt_speech_ratio_scalar"], dtype=np.float32),
-                np.asarray([2.0 / 3.0], dtype=np.float32),
+                np.asarray([7.0 / 9.0], dtype=np.float32),
             )
         )
         self.assertTrue(

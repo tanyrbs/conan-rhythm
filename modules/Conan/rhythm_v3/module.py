@@ -20,6 +20,7 @@ from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
 from .g_stats import (
     build_global_rate_support_mask,
+    compute_duration_weighted_speech_ratio,
     compute_global_rate_batch,
     normalize_falsification_eval_mode,
     normalize_global_rate_variant,
@@ -60,6 +61,25 @@ def _prompt_summary_public_with_aliases(*, minimal_v1_profile: bool) -> str:
     if minimal_v1_profile:
         return f"{_MINIMAL_V1_PUBLIC_BACKBONE} (compat: prompt_summary; legacy: role_memory, unit_run)"
     return "prompt_summary (public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)"
+
+
+def compute_duration_weighted_prompt_speech_ratio(
+    *,
+    prompt_log_duration: torch.Tensor | None,
+    prompt_mask: torch.Tensor | None,
+    prompt_speech_mask: torch.Tensor | None,
+    eps: float = 1.0e-6,
+) -> torch.Tensor | None:
+    if not isinstance(prompt_log_duration, torch.Tensor):
+        return None
+    if not isinstance(prompt_mask, torch.Tensor) or not isinstance(prompt_speech_mask, torch.Tensor):
+        return None
+    mask = prompt_mask.float().clamp(0.0, 1.0)
+    speech_mask = prompt_speech_mask.float().clamp(0.0, 1.0)
+    duration = torch.exp(prompt_log_duration.float()) * mask
+    numerator = (duration * speech_mask).sum(dim=1, keepdim=True)
+    denominator = duration.sum(dim=1, keepdim=True).clamp_min(float(eps))
+    return numerator / denominator
 
 
 def _init_accepts_kwarg(module_cls: type[nn.Module], kwarg_name: str) -> bool:
@@ -197,6 +217,7 @@ def _resolve_duration_runtime_surface(
 def _enforce_minimal_v1_runtime_contract(
     *,
     minimal_v1_profile: bool,
+    g_variant: str,
     rate_mode: str,
     simple_global_stats: bool,
     use_log_base_rate: bool,
@@ -215,6 +236,8 @@ def _enforce_minimal_v1_runtime_contract(
     if not minimal_v1_profile:
         return
     errors: list[str] = []
+    if str(g_variant).strip().lower() == "unit_norm":
+        errors.append("g_variant must not be unit_norm")
     if str(rate_mode).strip().lower() != "simple_global":
         errors.append("rate_mode must be simple_global")
     if not bool(simple_global_stats):
@@ -703,6 +726,7 @@ class MixedEffectsDurationModule(nn.Module):
         )
         _enforce_minimal_v1_runtime_contract(
             minimal_v1_profile=self.minimal_v1_profile,
+            g_variant=self.g_variant,
             rate_mode=self.rate_mode,
             simple_global_stats=self.simple_global_stats,
             use_log_base_rate=self.use_log_base_rate,
@@ -970,9 +994,10 @@ class MixedEffectsDurationModule(nn.Module):
                     prompt_ref_len_sec = prompt_ref_len_sec.float().reshape(int(prompt_duration_obs.size(0)), -1)[:, :1]
                 prompt_speech_ratio_scalar = ref_conditioning.get("prompt_speech_ratio_scalar")
                 if not isinstance(prompt_speech_ratio_scalar, torch.Tensor):
-                    valid_mass = prompt_valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-                    prompt_speech_ratio_scalar = (
-                        prompt_speech_mask.float().sum(dim=1, keepdim=True) / valid_mass
+                    prompt_speech_ratio_scalar = compute_duration_weighted_speech_ratio(
+                        duration_obs=prompt_duration_obs.float(),
+                        speech_mask=prompt_speech_mask.float(),
+                        valid_mask=prompt_valid_mask,
                     )
                 else:
                     prompt_speech_ratio_scalar = prompt_speech_ratio_scalar.float().reshape(
@@ -1020,6 +1045,87 @@ class MixedEffectsDurationModule(nn.Module):
                 unit_duration_exec[batch_idx, :frontier].float().clamp_min(1.0e-6) / denom
             )
         return unit_duration_exec, unit_logstretch
+
+    @staticmethod
+    def _compute_prompt_speech_ratio_from_memory(
+        ref_memory: ReferenceDurationMemory,
+    ) -> torch.Tensor | None:
+        prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None)
+        if not isinstance(prompt_speech_mask, torch.Tensor):
+            return None
+        prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None)
+        prompt_log_duration = getattr(ref_memory, "prompt_log_duration", None)
+        prompt_duration_obs = (
+            torch.exp(prompt_log_duration.float()).clamp_min(0.0)
+            if isinstance(prompt_log_duration, torch.Tensor)
+            else None
+        )
+        return compute_duration_weighted_speech_ratio(
+            duration_obs=prompt_duration_obs,
+            speech_mask=prompt_speech_mask.float(),
+            valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
+        )
+
+    @staticmethod
+    def _zero_invalid_prompt_rows(
+        value: torch.Tensor | None,
+        invalid_rows: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if not isinstance(value, torch.Tensor) or value.dim() <= 0:
+            return value
+        row_mask = invalid_rows.bool().reshape(int(invalid_rows.size(0)), 1)
+        if int(value.size(0)) != int(row_mask.size(0)):
+            return value
+        expand_mask = row_mask
+        while expand_mask.dim() < value.dim():
+            expand_mask = expand_mask.unsqueeze(-1)
+        return torch.where(expand_mask, torch.zeros_like(value), value)
+
+    @classmethod
+    def _neutralize_minimal_prompt_invalid_rows(
+        cls,
+        *,
+        role_plan: dict[str, torch.Tensor | str],
+        invalid_rows: torch.Tensor,
+    ) -> dict[str, torch.Tensor | str]:
+        zero_keys = (
+            "unit_logstretch",
+            "unit_global_shift",
+            "unit_global_shift_analytic",
+            "unit_analytic_gap",
+            "unit_analytic_logstretch",
+            "global_bias_scalar",
+            "unit_coarse_logstretch",
+            "unit_coarse_path_logstretch",
+            "unit_coarse_correction",
+            "unit_coarse_correction_used",
+            "unit_coarse_delta",
+            "unit_coarse_correction_pred",
+            "unit_coarse_correction_predicted",
+            "coarse_scalar_raw",
+            "unit_global_term_before_local",
+            "unit_residual_logstretch",
+            "unit_local_residual_used",
+            "unit_residual_logstretch_pred",
+            "unit_residual_gate",
+            "residual_gate_mean",
+            "unit_residual_cold_gate",
+            "unit_residual_short_gate",
+            "unit_residual_gate_stability",
+            "residual_gate_cold",
+            "residual_gate_short",
+            "residual_gate_stability",
+            "unit_speech_pred",
+            "unit_silence_pred",
+            "local_response",
+            "local_response_pred",
+            "g_ref",
+        )
+        updated = dict(role_plan)
+        for key in zero_keys:
+            if key in updated:
+                updated[key] = cls._zero_invalid_prompt_rows(updated.get(key), invalid_rows)
+        return updated
 
     def _encode_source_basis(
         self,
@@ -1450,6 +1556,17 @@ class MixedEffectsDurationModule(nn.Module):
                     silence_local = residual.float().abs() * source_batch.source_silence_mask.float().clamp(0.0, 1.0)
                     if bool((silence_local > 1.0e-6).any().item()):
                         raise RuntimeError("rhythm_v3_minimal_v1_profile forbids silence local residual.")
+            prompt_domain_valid = getattr(ref_memory, "prompt_g_domain_valid", None)
+            if self.minimal_v1_profile and isinstance(prompt_domain_valid, torch.Tensor):
+                invalid_prompt_rows = prompt_domain_valid.float().reshape(
+                    int(prompt_domain_valid.size(0)),
+                    -1,
+                )[:, :1] <= 0.5
+                if bool(invalid_prompt_rows.any().item()):
+                    role_plan = self._neutralize_minimal_prompt_invalid_rows(
+                        role_plan=role_plan,
+                        invalid_rows=invalid_prompt_rows,
+                    )
             unit_logstretch = role_plan["unit_logstretch"] * commit_mask.float()
             unit_duration_exec = self._predict_unit_duration(
                 prediction_anchor=prediction_anchor,
@@ -1539,11 +1656,9 @@ class MixedEffectsDurationModule(nn.Module):
             if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
                 valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)
                 execution.prompt_valid_len = valid_len
-                if isinstance(ref_memory.prompt_speech_mask, torch.Tensor):
-                    execution.prompt_speech_ratio = (
-                        ref_memory.prompt_speech_mask.float().sum(dim=1, keepdim=True)
-                        / valid_len.clamp_min(1.0)
-                    )
+                prompt_speech_ratio = self._compute_prompt_speech_ratio_from_memory(ref_memory)
+                if isinstance(prompt_speech_ratio, torch.Tensor):
+                    execution.prompt_speech_ratio = prompt_speech_ratio
             return execution
         global_response, structure_response, local_response, source_residual_response = self.backbone(
             module=self,
@@ -1624,11 +1739,9 @@ class MixedEffectsDurationModule(nn.Module):
         if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
             valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)
             execution.prompt_valid_len = valid_len
-            if isinstance(ref_memory.prompt_speech_mask, torch.Tensor):
-                execution.prompt_speech_ratio = (
-                    ref_memory.prompt_speech_mask.float().sum(dim=1, keepdim=True)
-                    / valid_len.clamp_min(1.0)
-                )
+            prompt_speech_ratio = self._compute_prompt_speech_ratio_from_memory(ref_memory)
+            if isinstance(prompt_speech_ratio, torch.Tensor):
+                execution.prompt_speech_ratio = prompt_speech_ratio
         return execution
 
 

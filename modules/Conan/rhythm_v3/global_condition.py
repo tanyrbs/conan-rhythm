@@ -9,7 +9,12 @@ from .contracts import (
     StructuredDurationOperatorMemory,
     validate_reference_duration_memory,
 )
-from .g_stats import compute_global_rate, normalize_global_rate_variant, summarize_global_rate_support
+from .g_stats import (
+    compute_duration_weighted_speech_ratio,
+    compute_global_rate,
+    normalize_global_rate_variant,
+    summarize_global_rate_support,
+)
 
 
 class PromptGlobalConditionEncoderV1G(nn.Module):
@@ -76,9 +81,12 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             else valid_mask
         )
         speech_mask = speech_mask * valid_mask
-        speech_mass = speech_mask.sum(dim=1, keepdim=True)
-        valid_mass = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        speech_ratio = speech_mass / valid_mass
+        speech_count = speech_mask.sum(dim=1, keepdim=True)
+        speech_ratio = compute_duration_weighted_speech_ratio(
+            duration_obs=prompt_duration_obs.float(),
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+        )
         if isinstance(prompt_speech_ratio_scalar, torch.Tensor):
             provided_ratio = prompt_speech_ratio_scalar.float().reshape(-1, 1)
             if int(provided_ratio.size(0)) != int(speech_ratio.size(0)):
@@ -88,7 +96,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                 )
             if bool((torch.abs(provided_ratio - speech_ratio) > 5.0e-3).any().item()):
                 raise ValueError("V1-G prompt conditioning prompt_speech_ratio_scalar mismatch.")
-        no_speech_rows = speech_mass <= 0.0
+        no_speech_rows = speech_count <= 0.0
         low_speech_ratio_rows = (
             speech_ratio < self.min_speech_ratio
             if self.min_speech_ratio > 0.0

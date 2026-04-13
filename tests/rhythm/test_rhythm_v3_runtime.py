@@ -318,7 +318,7 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
             "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
             "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
             "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
-            "prompt_speech_ratio_scalar": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.tensor([[6.0 / 7.0]], dtype=torch.float32),
         },
     )
     execution = ret["rhythm_execution"]
@@ -400,12 +400,16 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_detach_global_term_in_local_head" in ret
     assert "rhythm_debug_speech_pred" in ret
     assert "rhythm_debug_silence_pred" in ret
+    assert "rhythm_debug_prompt_ref_len_sec" in ret
+    assert torch.allclose(ret["rhythm_debug_prompt_ref_len_sec"], torch.tensor([[5.0]], dtype=torch.float32))
+    assert "rhythm_prompt_ref_len_sec" in ret
+    assert torch.allclose(ret["rhythm_prompt_ref_len_sec"], torch.tensor([[5.0]], dtype=torch.float32))
     assert "rhythm_debug_projector_since_last_boundary" in ret
     assert "rhythm_debug_budget_hit_mask" in ret
     assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
     assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
     assert torch.allclose(execution.prompt_valid_len, torch.tensor([[3.0]], dtype=torch.float32))
-    assert torch.allclose(execution.prompt_speech_ratio, torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(execution.prompt_speech_ratio, torch.tensor([[6.0 / 7.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_prompt_valid_len"], execution.prompt_valid_len)
     assert torch.allclose(ret["rhythm_prompt_speech_ratio"], execution.prompt_speech_ratio)
     assert torch.allclose(debug["g_support_count"], torch.tensor([[2.0]], dtype=torch.float32))
@@ -416,8 +420,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["g_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_valid_support"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_edge_runs_dropped"], torch.tensor([[0.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_min_speech_ratio"], torch.tensor([[0.6]], dtype=torch.float32))
-    assert torch.allclose(debug["prompt_speech_ratio"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_speech_ratio"], torch.tensor([[6.0 / 7.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_debug_g_support_count"], debug["g_support_count"])
     assert torch.allclose(ret["rhythm_debug_g_support_ratio_vs_valid"], debug["g_support_ratio_vs_valid"])
     assert debug["eval_mode"] == "learned"
@@ -478,7 +484,7 @@ def test_rhythm_v3_non_debug_runtime_skips_g_debug_support_stats(monkeypatch):
 
     monkeypatch.setattr(
         runtime_adapter_mod,
-        "build_global_rate_support_mask",
+        "summarize_global_rate_support",
         _fail_if_debug_only_support_stats_are_built,
     )
     ret = _run_adapter(
@@ -490,7 +496,7 @@ def test_rhythm_v3_non_debug_runtime_skips_g_debug_support_stats(monkeypatch):
             "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
             "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
             "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
-            "prompt_speech_ratio_scalar": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.tensor([[6.0 / 7.0]], dtype=torch.float32),
         },
     )
     assert "rhythm_v3_debug" not in ret
@@ -521,7 +527,7 @@ def test_rhythm_v3_minimal_prompt_summary_threads_detach_global_term_switch():
             "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
             "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
             "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
-            "prompt_speech_ratio_scalar": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.tensor([[6.0 / 7.0]], dtype=torch.float32),
         },
     )
     debug = ret["rhythm_v3_debug"]
@@ -546,6 +552,74 @@ def test_rhythm_v3_minimal_prompt_summary_rejects_out_of_domain_prompt_ref_len_s
             ref=None,
             ref_conditioning=_build_prompt_conditioning(prompt_units=3, prompt_ref_len_sec=2.5),
         )
+
+
+def test_rhythm_v3_debug_g_support_stats_respect_clean_support_sidecars():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_min_boundary_confidence_for_g"] = 0.8
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        ref=None,
+        ref_conditioning={
+            "prompt_content_units": torch.tensor([[5, 6, 7]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[2.0, 100.0, 4.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_valid_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_speech_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_closed_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+            "prompt_boundary_confidence": torch.tensor([[0.9, 0.1, 0.95]], dtype=torch.float32),
+            "prompt_ref_len_sec": torch.tensor([[5.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
+        },
+    )
+    debug = ret["rhythm_v3_debug"]
+    assert torch.allclose(debug["g_support_count"], torch.tensor([[2.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_clean_count"], torch.tensor([[2.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_support_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+
+
+def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    adapter.eval()
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        ref=None,
+        ref_conditioning={
+            **_build_prompt_conditioning(prompt_units=3, prompt_ref_len_sec=2.5),
+            "prompt_content_units": torch.tensor([[5, 6, 7]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[3.0, 3.0, 3.0]], dtype=torch.float32),
+            "prompt_speech_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
+        },
+    )
+    debug = ret["rhythm_v3_debug"]
+    assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[0.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_domain_valid"], torch.tensor([[0.0]], dtype=torch.float32))
+    assert torch.allclose(ret["rhythm_prompt_domain_valid"], torch.tensor([[0.0]], dtype=torch.float32))
+    assert ret["rhythm_domain_invalid_any"] == 1.0
+    assert ret["rhythm_render_skipped_invalid_prompt"] == 1.0
 
 
 def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
@@ -696,11 +770,12 @@ def test_rhythm_v3_minimal_prompt_summary_uses_global_only_prompt_memory():
         "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
         "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
         "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
-        "prompt_speech_ratio_scalar": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.tensor([[6.0 / 7.0]], dtype=torch.float32),
     }
     prompt_b = {
         **prompt_a,
-        "prompt_duration_obs": torch.tensor([[4.0, 24.0, 8.0]], dtype=torch.float32),
+        "prompt_duration_obs": torch.tensor([[4.0, 8.0, 8.0]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.tensor([[0.6]], dtype=torch.float32),
     }
     memory_a = adapter.module.build_reference_conditioning(ref_conditioning=prompt_a)
     memory_b = adapter.module.build_reference_conditioning(ref_conditioning=prompt_b)
@@ -730,7 +805,7 @@ def test_rhythm_v3_minimal_prompt_summary_ignores_spurious_prompt_log_base():
         "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
         "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
         "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
-        "prompt_speech_ratio_scalar": torch.tensor([[2.0 / 3.0]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.tensor([[6.0 / 7.0]], dtype=torch.float32),
     }
     with_base = {
         **prompt,
@@ -1459,6 +1534,40 @@ def test_rhythm_v3_skips_render_for_empty_chunk_even_when_requested():
     assert ret["speech_duration_exec"].shape == (1, 0)
     assert ret["rhythm_apply_render"] == 0.0
     assert ret["rhythm_render_skipped_empty"] == 1.0
+
+
+def test_rhythm_v3_minimal_v1_invalid_prompt_prefers_skip_and_reports_status():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    adapter.eval()
+    invalid_prompt = {
+        **_build_prompt_conditioning(),
+        "prompt_speech_mask": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.tensor([[1.0 / 6.0]], dtype=torch.float32),
+    }
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 1, 2, 2, 3, 4]]),
+        ref=None,
+        ref_conditioning=invalid_prompt,
+        auto_prompt_from_ref=False,
+    )
+    assert ret["rhythm_domain_invalid_any"] == 1.0
+    assert torch.allclose(ret["rhythm_prompt_domain_valid"], torch.zeros_like(ret["rhythm_prompt_domain_valid"]))
+    assert torch.all(ret["rhythm_domain_invalid"] > 0.5)
+    assert ret["rhythm_apply_render"] == 0.0
+    assert ret["rhythm_render_skipped_invalid_prompt"] == 1.0
+    execution = ret["rhythm_execution"]
+    assert torch.allclose(execution.unit_logstretch, torch.zeros_like(execution.unit_logstretch))
+    assert torch.allclose(execution.coarse_logstretch, torch.zeros_like(execution.coarse_logstretch))
+    assert torch.allclose(execution.local_residual, torch.zeros_like(execution.local_residual))
 
 
 def test_rhythm_v3_rejects_runtime_state_batch_mismatch():

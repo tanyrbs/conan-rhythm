@@ -394,10 +394,34 @@ def test_validate_rhythm_training_hparams_rejects_legacy_backbone_aliases_under_
 
 
 def test_validate_rhythm_training_hparams_rejects_unit_norm_without_prior_path():
-    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams = _minimal_v3_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_g_variant"] = "unit_norm"
     with pytest.raises(ValueError, match="rhythm_v3_unit_prior_path"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_unit_norm():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_g_variant"] = "unit_norm"
+    hparams["rhythm_v3_unit_prior_path"] = str(ROOT / "tests" / "rhythm" / "fixtures" / "dummy_unit_prior.npz")
+    with pytest.raises(ValueError, match="rhythm_v3_minimal_v1_profile forbids rhythm_v3_g_variant=unit_norm"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("rhythm_prompt_dropout", 0.1),
+        ("rhythm_prompt_truncation", 0.5),
+    ),
+)
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_prompt_augmentation(key, value):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams[key] = value
+    with pytest.raises(ValueError, match=key):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1321,6 +1345,8 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_detach_global_term_in_local_head: true" in source
     assert "rhythm_v3_freeze_src_rate_init: true" in source
     assert "rhythm_v3_debug_export: true" in source
+    assert "rhythm_prompt_dropout: 0.0" in source
+    assert "rhythm_prompt_truncation: 0.0" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_v3_disallow_same_text_reference: true" in source
     assert "rhythm_v3_disallow_same_text_paired_target: false" in source

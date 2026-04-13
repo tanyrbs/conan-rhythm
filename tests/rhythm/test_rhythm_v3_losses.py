@@ -19,8 +19,12 @@ from tasks.Conan.rhythm.loss_routing import (
     route_conan_optimizer_losses,
     update_public_loss_aliases,
 )
-from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
-from tasks.Conan.rhythm.losses import DurationV3LossTargets
+from tasks.Conan.rhythm.losses import (
+    DurationV3LossTargets,
+    _build_duration_v3_stream_losses,
+    _resolve_duration_v3_prefix_target_surface,
+    build_rhythm_loss_dict,
+)
 from tasks.Conan.rhythm.targets import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
 from tasks.Conan.rhythm.common.targets_impl import _build_duration_v3_silence_tau
 
@@ -524,7 +528,7 @@ def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empt
         prompt_closed_mask=torch.tensor([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
         prompt_boundary_confidence=torch.tensor([[0.95, 0.90, 0.92, 0.88], [0.10, 0.10, 0.10, 0.10]], dtype=torch.float32),
         prompt_ref_len_sec=torch.tensor([[5.0], [5.0]], dtype=torch.float32),
-        prompt_speech_ratio_scalar=torch.tensor([[1.0], [0.25]], dtype=torch.float32),
+        prompt_speech_ratio_scalar=torch.tensor([[1.0], [2.0 / 17.0]], dtype=torch.float32),
     )
     assert torch.isfinite(memory.global_rate).all()
     assert torch.count_nonzero(memory.prompt_g_support_mask[1]).item() == 0
@@ -1402,6 +1406,102 @@ def test_rhythm_v3_minimal_profile_loss_builder_rejects_prompt_operator_surface(
     )
     with pytest.raises(ValueError, match="forbids prompt summary/operator loss"):
         build_rhythm_loss_dict(execution, targets)
+
+
+def test_rhythm_v3_minimal_profile_prefix_target_surface_requires_committed_silence_mask():
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        minimal_v1_profile=True,
+    )
+    with pytest.raises(RuntimeError, match="prefix target surface"):
+        _resolve_duration_v3_prefix_target_surface(targets)
+
+
+def test_rhythm_v3_minimal_profile_prefix_consistency_requires_committed_silence_mask():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "unit_logstretch_raw": torch.zeros((1, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "local_residual": torch.zeros((1, 2), dtype=torch.float32),
+            "unit_duration_raw": torch.ones((1, 2), dtype=torch.float32),
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_speech_mask=torch.ones((1, 2), dtype=torch.float32),
+        lambda_cons=0.5,
+        consistency_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        consistency_mask=torch.ones((1, 2), dtype=torch.float32),
+        minimal_v1_profile=True,
+    )
+    with pytest.raises(RuntimeError, match="prefix stream losses"):
+        _build_duration_v3_stream_losses(
+            pred_speech=torch.ones((1, 2), dtype=torch.float32),
+            execution=execution,
+            targets=targets,
+            committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        )
+
+
+def test_rhythm_v3_minimal_profile_prefix_target_surface_forbids_anchor_fallback_for_committed_silence():
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        speech_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        committed_speech_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        committed_silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        minimal_v1_profile=True,
+    )
+    with pytest.raises(RuntimeError, match="coarse-derived silence target"):
+        _resolve_duration_v3_prefix_target_surface(targets)
+
+
+def test_rhythm_v3_minimal_profile_prefix_consistency_forbids_anchor_fallback_for_committed_silence():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 2), dtype=torch.float32),
+            "unit_logstretch_raw": torch.zeros((1, 2), dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "local_residual": torch.zeros((1, 2), dtype=torch.float32),
+            "unit_duration_raw": torch.ones((1, 2), dtype=torch.float32),
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.tensor([[2.0, 3.0]], dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        speech_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        committed_speech_mask=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        committed_silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        lambda_cons=0.5,
+        consistency_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        consistency_mask=torch.ones((1, 2), dtype=torch.float32),
+        minimal_v1_profile=True,
+    )
+    with pytest.raises(RuntimeError, match="coarse-derived silence target"):
+        _build_duration_v3_stream_losses(
+            pred_speech=torch.ones((1, 2), dtype=torch.float32),
+            execution=execution,
+            targets=targets,
+            committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        )
 
 
 def test_rhythm_v3_minimal_profile_target_builder_requires_global_rate():

@@ -742,8 +742,9 @@ class StreamingRunLengthUnitizer:
                 durations_cloned = True
             durations[-1] += 1
 
-        for token in token_chunk:
-            token_id = int(token.item())
+        chunk_values = token_chunk.tolist()
+        for token_value in chunk_values:
+            token_id = int(token_value)
             if token_id < 0:
                 continue
             is_silence = self.silent_token is not None and token_id == int(self.silent_token)

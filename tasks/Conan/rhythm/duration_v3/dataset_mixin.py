@@ -844,6 +844,24 @@ class DurationV3DatasetMixin:
                 return total_frames * hop_size / sample_rate
         return None
 
+    @staticmethod
+    def _compute_prompt_speech_ratio_scalar(
+        *,
+        prompt_duration_obs,
+        prompt_valid_mask,
+        prompt_speech_mask,
+    ) -> float:
+        duration = np.asarray(prompt_duration_obs, dtype=np.float32).clip(min=0.0)
+        valid = np.asarray(prompt_valid_mask, dtype=np.float32).clip(min=0.0, max=1.0)
+        speech = np.asarray(prompt_speech_mask, dtype=np.float32).clip(min=0.0, max=1.0) * valid
+        duration_mass = float(np.sum(duration * valid, dtype=np.float64))
+        if duration_mass > 1.0e-6:
+            speech_mass = float(np.sum(duration * speech, dtype=np.float64))
+            return speech_mass / duration_mass
+        valid_mass = float(np.sum(valid, dtype=np.float64))
+        speech_mass = float(np.sum(speech, dtype=np.float64))
+        return speech_mass / max(1.0, valid_mass)
+
     def _strict_prompt_sidecars_required(self) -> bool:
         if not self._use_duration_v3_dataset_contract():
             return False
@@ -930,10 +948,14 @@ class DurationV3DatasetMixin:
             allow_shape_repair=allow_shape_repair,
         )
         conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
-        valid_mass = float(np.asarray(prompt_valid_mask, dtype=np.float32).sum(dtype=np.float64))
-        speech_mass = float(np.asarray(prompt_speech_mask, dtype=np.float32).sum(dtype=np.float64))
         conditioning["prompt_speech_ratio_scalar"] = np.asarray(
-            [speech_mass / max(1.0, valid_mass)],
+            [
+                self._compute_prompt_speech_ratio_scalar(
+                    prompt_duration_obs=prompt_duration_obs,
+                    prompt_valid_mask=prompt_valid_mask,
+                    prompt_speech_mask=prompt_speech_mask,
+                )
+            ],
             dtype=np.float32,
         )
         prompt_ref_len_sec = self._resolve_prompt_ref_len_sec(
@@ -1117,10 +1139,14 @@ class DurationV3DatasetMixin:
         if "prompt_global_weight" in augmented:
             augmented["prompt_global_weight"] = np.asarray(augmented["prompt_global_weight"], dtype=np.float32) * keep_np
         if "prompt_speech_ratio_scalar" in augmented:
-            valid_mass = float(np.asarray(augmented["prompt_valid_mask"], dtype=np.float32).sum(dtype=np.float64))
-            speech_mass = float(np.asarray(augmented["prompt_speech_mask"], dtype=np.float32).sum(dtype=np.float64))
             augmented["prompt_speech_ratio_scalar"] = np.asarray(
-                [speech_mass / max(1.0, valid_mass)],
+                [
+                    self._compute_prompt_speech_ratio_scalar(
+                        prompt_duration_obs=augmented["prompt_duration_obs"],
+                        prompt_valid_mask=augmented["prompt_valid_mask"],
+                        prompt_speech_mask=augmented["prompt_speech_mask"],
+                    )
+                ],
                 dtype=np.float32,
             )
         if "prompt_ref_len_sec" in augmented:
