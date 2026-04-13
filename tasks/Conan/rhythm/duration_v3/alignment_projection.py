@@ -457,6 +457,92 @@ class ContinuousRunAligner:
 
         band_width = self._resolve_band_width(num_source=num_source)
         inf = np.float32(1.0e12)
+        if self.allow_source_skip:
+            dp_prev = np.full((num_source,), inf, dtype=np.float32)
+            dp_curr = np.full((num_source,), inf, dtype=np.float32)
+            back = np.full((num_target, num_source), -1, dtype=np.int32)
+            margin = np.zeros((num_target, num_source), dtype=np.float32)
+
+            center0 = _nearest_progress_index(source_progress, float(target_progress[0]))
+            init_left = max(0, center0 - band_width)
+            init_right = min(num_source - 1, center0 + band_width)
+            if init_left > init_right:
+                init_left, init_right = 0, num_source - 1
+            for src_idx in range(init_left, init_right + 1):
+                cost = local_cost[0, src_idx]
+                if not np.isfinite(cost):
+                    continue
+                dp_prev[src_idx] = cost + (np.float32(self.skip_penalty) * np.float32(max(0, src_idx)))
+                back[0, src_idx] = src_idx
+
+            for tgt_idx in range(1, num_target):
+                dp_curr.fill(inf)
+                center = _nearest_progress_index(source_progress, float(target_progress[tgt_idx]))
+                left = max(0, center - band_width)
+                right = min(num_source - 1, center + band_width)
+                if left > right:
+                    left, right = 0, num_source - 1
+                for src_idx in range(left, right + 1):
+                    cost = local_cost[tgt_idx, src_idx]
+                    if not np.isfinite(cost):
+                        continue
+                    best_prev_cost = inf
+                    best_prev_idx = -1
+                    second_prev_cost = inf
+                    for prev_idx in range(0, src_idx + 1):
+                        prev_cost = dp_prev[prev_idx]
+                        if not np.isfinite(prev_cost):
+                            continue
+                        candidate = prev_cost
+                        if prev_idx < src_idx:
+                            candidate = candidate + (np.float32(self.skip_penalty) * np.float32(src_idx - prev_idx - 1))
+                        if candidate < best_prev_cost:
+                            second_prev_cost = best_prev_cost
+                            best_prev_cost = candidate
+                            best_prev_idx = prev_idx
+                        elif candidate < second_prev_cost:
+                            second_prev_cost = candidate
+                    if best_prev_idx < 0:
+                        continue
+                    dp_curr[src_idx] = cost + best_prev_cost
+                    back[tgt_idx, src_idx] = best_prev_idx
+                    margin[tgt_idx, src_idx] = (
+                        np.float32(abs(second_prev_cost - best_prev_cost))
+                        if np.isfinite(second_prev_cost)
+                        else np.float32(1.0e3)
+                    )
+                dp_prev, dp_curr = dp_curr, dp_prev
+
+            terminal_total = np.full((num_source,), inf, dtype=np.float32)
+            for src_idx in range(num_source):
+                if not np.isfinite(dp_prev[src_idx]):
+                    continue
+                terminal_total[src_idx] = dp_prev[src_idx] + (
+                    np.float32(self.skip_penalty) * np.float32(max(0, (num_source - 1) - src_idx))
+                )
+            terminal_src = int(np.argmin(terminal_total))
+            terminal_cost = terminal_total[terminal_src]
+            if not np.isfinite(terminal_cost):
+                raise RuntimeError("continuous aligner failed to reach a terminal source run under the current band.")
+
+            assigned_run = np.zeros((num_target,), dtype=np.int64)
+            path_margin = np.zeros((num_target,), dtype=np.float32)
+            src_idx = terminal_src
+            for tgt_idx in range(num_target - 1, -1, -1):
+                assigned_run[tgt_idx] = np.int64(src_idx)
+                path_margin[tgt_idx] = margin[tgt_idx, src_idx]
+                if tgt_idx <= 0:
+                    continue
+                prev_idx = int(back[tgt_idx, src_idx])
+                if prev_idx < 0 or prev_idx > src_idx:
+                    raise RuntimeError(
+                        "continuous aligner backtrace encountered an invalid skip predecessor marker "
+                        f"at target={tgt_idx}, source={src_idx}: prev={prev_idx}"
+                    )
+                src_idx = prev_idx
+            assigned_local_cost = local_cost[np.arange(num_target, dtype=np.int64), assigned_run].astype(np.float32)
+            return assigned_run, assigned_local_cost, np.float32(terminal_cost), path_margin
+
         dp_prev = np.full((num_source,), inf, dtype=np.float32)
         dp_curr = np.full((num_source,), inf, dtype=np.float32)
         back = np.full((num_target, num_source), -1, dtype=np.int64)

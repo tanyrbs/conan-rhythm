@@ -464,7 +464,7 @@ def build_debug_record(
                 _maybe_set_meta(
                     meta,
                     "alignment_kind",
-                    "continuous" if alignment_mode_id == 1 else "discrete",
+                    "continuous" if alignment_mode_id in {1, 2} else "discrete",
                 )
         if _extract_mapping_value(sample, "unit_duration_proj_raw_tgt", batch_index) is not None:
             _maybe_set_meta(meta, "target_duration_surface", "projection_raw")
@@ -499,6 +499,10 @@ def build_debug_record(
             ("rhythm_debug_g_support_ratio_vs_speech", "g_support_ratio_vs_speech"),
             ("rhythm_debug_g_support_ratio_vs_valid", "g_support_ratio_vs_valid"),
             ("rhythm_debug_g_valid", "g_valid"),
+            ("rhythm_debug_g_valid_support", "g_valid_support"),
+            ("rhythm_debug_g_domain_valid", "g_domain_valid"),
+            ("rhythm_debug_g_min_speech_ratio", "g_min_speech_ratio"),
+            ("rhythm_debug_prompt_speech_ratio", "prompt_speech_ratio"),
             ("rhythm_debug_g_drop_edge_runs", "g_drop_edge_runs"),
             ("rhythm_debug_g_strict_speech_only", "g_strict_speech_only"),
             ("rhythm_debug_prompt_global_weight_present", "prompt_global_weight_present"),
