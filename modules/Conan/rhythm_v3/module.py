@@ -19,6 +19,7 @@ from .contracts import (
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
 from .g_stats import compute_global_rate_batch, normalize_falsification_eval_mode, normalize_global_rate_variant
+from .math_utils import build_causal_local_rate_seq
 from .minimal_head import MinimalStreamingDurationHeadV1G
 from .summary_memory import (
     PromptDurationMemoryEncoder,
@@ -1018,6 +1019,39 @@ class MixedEffectsDurationModule(nn.Module):
             return None
         return (source_rate_seq.float() * mask).sum(dim=1, keepdim=True) / mass.clamp_min(1.0)
 
+    def _compute_source_prefix_rate_seq(
+        self,
+        *,
+        source_batch: SourceUnitBatch,
+        speech_commit_mask: torch.Tensor,
+        state: DurationRuntimeState | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        valid_mask = source_batch.unit_mask.float()
+        if valid_mask.numel() <= 0:
+            return None, None
+        log_dur = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4)) * valid_mask
+        if self.use_log_base_rate:
+            if isinstance(getattr(source_batch, "unit_rate_log_base", None), torch.Tensor):
+                log_base = source_batch.unit_rate_log_base.float().detach() * valid_mask
+            else:
+                log_base = torch.zeros_like(log_dur)
+            observed_log = (log_dur - log_base) * valid_mask
+        else:
+            observed_log = log_dur
+        init_rate = (
+            state.local_rate_ema.float()
+            if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
+            else None
+        )
+        source_rate_seq, source_rate_final = build_causal_local_rate_seq(
+            observed_log=observed_log,
+            speech_mask=speech_commit_mask.float() * valid_mask,
+            init_rate=init_rate,
+            default_init_rate=0.0,
+            decay=float(getattr(self.duration_head, "local_rate_decay", 0.95)),
+        )
+        return source_rate_seq * valid_mask, source_rate_final
+
     @staticmethod
     def _resolve_runtime_state(
         *,
@@ -1340,10 +1374,23 @@ class MixedEffectsDurationModule(nn.Module):
             unit_logstretch_raw=unit_logstretch_raw,
             unit_duration_raw=unit_duration_raw,
         )
+        source_prefix_seq, source_prefix_final = self._compute_source_prefix_rate_seq(
+            source_batch=source_batch,
+            speech_commit_mask=speech_commit_mask,
+            state=state,
+        )
+        if isinstance(source_prefix_final, torch.Tensor):
+            execution.next_state = replace(
+                execution.next_state,
+                local_rate_ema=source_prefix_final.detach(),
+            )
         execution.g_ref = ref_memory.global_rate.detach()
-        execution.g_src_prefix = None
+        execution.g_src_prefix = source_prefix_seq
         execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
-        execution.g_src_prefix_mean = None
+        execution.g_src_prefix_mean = self._compute_source_prefix_mean(
+            source_rate_seq=source_prefix_seq,
+            speech_commit_mask=speech_commit_mask,
+        )
         execution.eval_mode = self.eval_mode
         if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
             valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)

@@ -350,3 +350,7 @@ This now writes:
 - the row-level falsification summary CSV
 - the retained five-figure review bundle
 - the gate-oriented monotonicity / stability / ladder bundle
+
+When `--review-dir` or `--gate-status-json` is present, the maintained script
+now fails non-zero on gate issues by default. Use `--allow-partial-gates` only
+for an explicitly partial audit export.

@@ -133,6 +133,21 @@ def test_rhythm_v3_adapter_emits_prompt_conditioned_operator_runtime():
     assert "rhythm_render_phase_features" not in ret
 
 
+def test_rhythm_v3_operator_runtime_exports_source_prefix_diagnostics():
+    adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
+    content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]])
+    ref = torch.randn(1, 24, 80)
+    ret = _run_adapter(adapter, content=content, ref=ref)
+    execution = ret["rhythm_execution"]
+    assert execution.g_src_utt is not None
+    assert execution.g_src_prefix is not None
+    assert execution.g_src_prefix_mean is not None
+    assert execution.next_state.local_rate_ema is not None
+    assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
+    assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
+    assert execution.g_src_prefix.shape == ret["speech_duration_exec"].shape
+
+
 def test_rhythm_v3_prompt_summary_runtime_uses_static_prompt_memory_and_source_anchor():
     adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
     content = torch.tensor([[1, 1, 2, 2, 3, 4, 4, 5]], dtype=torch.long)
@@ -577,6 +592,56 @@ def test_rhythm_v3_prompt_summary_runtime_tracks_incremental_frontend_state_with
     assert torch.equal(third["rhythm_state_next"].consumed_content_steps, torch.tensor([[6]], dtype=torch.long))
     assert torch.equal(third["rhythm_unit_batch"].content_units, second["rhythm_unit_batch"].content_units)
     assert torch.allclose(third["rhythm_unit_batch"].source_duration_obs, second["rhythm_unit_batch"].source_duration_obs)
+
+
+def test_rhythm_v3_prompt_summary_runtime_tracks_batched_incremental_frontend_state_without_precomputed_cache():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    first_content = torch.tensor(
+        [
+            [1, 1, 57, 57],
+            [3, 3, 4, 4],
+        ],
+        dtype=torch.long,
+    )
+    prompt_conditioning = {
+        "prompt_content_units": torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long),
+        "prompt_duration_obs": torch.full((2, 3), 3.0, dtype=torch.float32),
+        "prompt_unit_mask": torch.ones((2, 3), dtype=torch.float32),
+        "prompt_valid_mask": torch.ones((2, 3), dtype=torch.float32),
+        "prompt_speech_mask": torch.ones((2, 3), dtype=torch.float32),
+    }
+    first = _run_adapter(
+        adapter,
+        content=first_content,
+        ref=None,
+        ref_conditioning=prompt_conditioning,
+    )
+    first_state = first["rhythm_state_next"]
+    assert torch.equal(first_state.consumed_content_steps, torch.tensor([[4], [4]], dtype=torch.long))
+
+    second_content = torch.tensor(
+        [
+            [1, 1, 57, 57, 2, 2],
+            [3, 3, 4, 4, 5, 5],
+        ],
+        dtype=torch.long,
+    )
+    second = _run_adapter(
+        adapter,
+        content=second_content,
+        ref=None,
+        state=first_state,
+        ref_conditioning=first["rhythm_ref_conditioning"],
+    )
+    second_state = second["rhythm_state_next"]
+    assert torch.equal(second_state.consumed_content_steps, torch.tensor([[6], [6]], dtype=torch.long))
+    offline = adapter.unit_frontend.from_content_tensor(
+        second_content,
+        content_lengths=torch.tensor([6, 6], dtype=torch.long),
+        mark_last_open=True,
+    )
+    assert torch.equal(second["rhythm_unit_batch"].content_units, offline.content_units)
+    assert torch.allclose(second["rhythm_unit_batch"].source_duration_obs, offline.source_duration_obs)
 
 
 def test_rhythm_v3_prompt_summary_runtime_rejects_trimmed_incremental_content_without_source_cache():

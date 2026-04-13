@@ -44,6 +44,16 @@ _ALIGNMENT_PROVENANCE_OBJECT_KEYS = (
     "unit_alignment_target_cache_signature_tgt",
     "unit_alignment_sidecar_signature_tgt",
 )
+_MINIMAL_CONTINUOUS_QUALITY_KEYS = (
+    "unit_alignment_unmatched_speech_ratio_tgt",
+    "unit_alignment_mean_local_confidence_speech_tgt",
+    "unit_alignment_mean_coarse_confidence_speech_tgt",
+)
+_MINIMAL_CONTINUOUS_SIGNATURE_KEYS = (
+    "unit_alignment_source_cache_signature_tgt",
+    "unit_alignment_target_cache_signature_tgt",
+    "unit_alignment_sidecar_signature_tgt",
+)
 _ALIGNMENT_PROVENANCE_VITERBI_DEFAULTS = {
     "unit_alignment_band_ratio_tgt": 0.08,
     "unit_alignment_lambda_emb_tgt": 1.0,
@@ -286,6 +296,12 @@ class DurationV3DatasetMixin:
                 "minimal_v1_profile + continuous alignment requires unit_alignment_version_tgt "
                 f"for cached paired-target supervision ({context})."
             )
+        for key in _MINIMAL_CONTINUOUS_QUALITY_KEYS + _MINIMAL_CONTINUOUS_SIGNATURE_KEYS:
+            if key not in sample:
+                raise RuntimeError(
+                    "minimal_v1_profile + continuous alignment requires "
+                    f"{key} for cached paired-target supervision ({context})."
+                )
         alignment_mode_id = sample.get("unit_alignment_mode_id_tgt")
         alignment_kind = sample.get("unit_alignment_kind_tgt")
         unmatched = self._extract_optional_float_scalar(sample.get("unit_alignment_unmatched_speech_ratio_tgt"))
@@ -298,15 +314,74 @@ class DurationV3DatasetMixin:
             mean_local_confidence_speech=mean_local or 0.0,
             mean_coarse_confidence_speech=mean_coarse or 0.0,
             context=context,
-            require_quality_metrics=(
-                unmatched is not None
-                or mean_local is not None
-                or mean_coarse is not None
-            ),
+            require_quality_metrics=True,
         )
         if not self._is_continuous_alignment_kind(alignment_kind, mode_id=alignment_mode_id):
             raise RuntimeError(
                 f"minimal_v1_profile cached paired-target supervision must carry continuous provenance ({context})."
+            )
+        for key in _MINIMAL_CONTINUOUS_SIGNATURE_KEYS:
+            signature = self._normalize_signature_text(sample.get(key))
+            if signature == "missing":
+                raise RuntimeError(
+                    "minimal_v1_profile cached paired-target supervision must carry non-empty "
+                    f"{key} ({context})."
+                )
+
+    def _validate_cached_minimal_continuous_signatures(
+        self,
+        *,
+        sample: dict,
+        source_cache: dict | None,
+        paired_target_conditioning: dict | None,
+        context: str,
+    ) -> None:
+        cached_source_signature = self._normalize_signature_text(sample.get("unit_alignment_source_cache_signature_tgt"))
+        cached_target_signature = self._normalize_signature_text(sample.get("unit_alignment_target_cache_signature_tgt"))
+        cached_sidecar_signature = self._normalize_signature_text(sample.get("unit_alignment_sidecar_signature_tgt"))
+        current_source_signature = duration_v3_cache_meta_signature(source_cache)
+        if (
+            current_source_signature != "missing"
+            and cached_source_signature != current_source_signature
+        ):
+            raise RuntimeError(
+                "minimal_v1 cached paired-target supervision source signature mismatch: "
+                f"cached={cached_source_signature}, current_source={current_source_signature} ({context})"
+            )
+        if not isinstance(paired_target_conditioning, dict):
+            return
+        conditioning_source_signature = self._normalize_signature_text(
+            paired_target_conditioning.get("source_cache_meta_signature")
+        )
+        if (
+            conditioning_source_signature != "missing"
+            and cached_source_signature != conditioning_source_signature
+        ):
+            raise RuntimeError(
+                "minimal_v1 cached paired-target supervision source provenance mismatch: "
+                f"cached={cached_source_signature}, conditioning_source={conditioning_source_signature} ({context})"
+            )
+        conditioning_target_signature = self._normalize_signature_text(
+            paired_target_conditioning.get("paired_target_cache_meta_signature")
+        )
+        if (
+            conditioning_target_signature != "missing"
+            and cached_target_signature != conditioning_target_signature
+        ):
+            raise RuntimeError(
+                "minimal_v1 cached paired-target supervision target signature mismatch: "
+                f"cached={cached_target_signature}, conditioning_target={conditioning_target_signature} ({context})"
+            )
+        conditioning_sidecar_signature = self._normalize_signature_text(
+            paired_target_conditioning.get("paired_target_alignment_sidecar_signature")
+        )
+        if (
+            conditioning_sidecar_signature != "missing"
+            and cached_sidecar_signature != conditioning_sidecar_signature
+        ):
+            raise RuntimeError(
+                "minimal_v1 cached paired-target supervision sidecar signature mismatch: "
+                f"cached={cached_sidecar_signature}, conditioning_sidecar={conditioning_sidecar_signature} ({context})"
             )
 
     def _allow_prompt_weight_shape_repair(self) -> bool:
@@ -1452,6 +1527,14 @@ class DurationV3DatasetMixin:
                     sample,
                     context="cached unit_duration_tgt",
                 )
+                self._validate_cached_minimal_continuous_signatures(
+                    sample=sample,
+                    source_cache=source_cache if isinstance(source_cache, dict) else None,
+                    paired_target_conditioning=(
+                        paired_target_conditioning if isinstance(paired_target_conditioning, dict) else None
+                    ),
+                    context="cached unit_duration_tgt",
+                )
             out = {
                 "unit_duration_tgt": np.asarray(sample["unit_duration_tgt"], dtype=np.float32),
             }
@@ -1524,15 +1607,31 @@ class DurationV3DatasetMixin:
                 if key in sample:
                     dtype = object if key in _ALIGNMENT_PROVENANCE_OBJECT_KEYS else np.float32
                     out[key] = np.asarray(sample[key], dtype=dtype)
-            out.update(
-                {
-                    key: out.get(key, value)
-                    for key, value in self._build_alignment_provenance_exports(
-                        alignment_kind=alignment_kind,
-                        paired_target_conditioning=sample,
-                    ).items()
-                }
+            synthesized_provenance = self._build_alignment_provenance_exports(
+                alignment_kind=alignment_kind,
+                paired_target_conditioning=sample,
             )
+            if minimal_v1_profile and use_continuous_alignment:
+                missing_required = [
+                    key
+                    for key in _MINIMAL_CONTINUOUS_SIGNATURE_KEYS
+                    if key not in out
+                ]
+                if missing_required:
+                    raise RuntimeError(
+                        "minimal_v1_profile cached paired-target supervision must preserve cached continuous provenance; "
+                        "missing fields: " + ", ".join(missing_required)
+                    )
+                for key, value in synthesized_provenance.items():
+                    if key not in out and key not in _MINIMAL_CONTINUOUS_SIGNATURE_KEYS:
+                        out[key] = value
+            else:
+                out.update(
+                    {
+                        key: out.get(key, value)
+                        for key, value in synthesized_provenance.items()
+                    }
+                )
             out.setdefault("alignment_source", "")
             out.setdefault("alignment_version", "")
             return out

@@ -337,6 +337,11 @@ def _parse_args() -> argparse.Namespace:
         help="Fail non-zero when gate-quality evidence is incomplete or below threshold.",
     )
     parser.add_argument(
+        "--allow-partial-gates",
+        action="store_true",
+        help="Allow warning-only review exports even when --review-dir or --gate-status-json is used.",
+    )
+    parser.add_argument(
         "--gate-status-json",
         default=None,
         help="Optional path for writing gate_status.json style audit output.",
@@ -367,6 +372,13 @@ def main() -> None:
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    strict_gate_mode = bool(
+        args.strict_gates
+        or (
+            (args.review_dir is not None or args.gate_status_json is not None)
+            and not args.allow_partial_gates
+        )
+    )
     if pd is not None:
         summary_df = pd.DataFrame(rows)
         issues = _warn_sparse_review_metadata(summary_df)
@@ -440,7 +452,7 @@ def main() -> None:
                 json.dumps(gate_status, ensure_ascii=True, indent=2),
                 encoding="utf-8",
             )
-        if args.strict_gates and issues:
+        if strict_gate_mode and issues:
             raise SystemExit(
                 "[rhythm_v3_debug_records] strict gate failure: " + ", ".join(issues)
             )

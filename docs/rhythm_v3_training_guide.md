@@ -580,6 +580,9 @@ py -3 scripts\rhythm_v3_debug_records.py ^
   --drop-edge-runs 1
 ```
 
+`--review-dir` now implies strict gate enforcement in the maintained path. Use
+`--allow-partial-gates` only when exporting an explicitly partial audit bundle.
+
 This keeps the current workflow aligned with the falsification-first order:
 
 1. static `g` audit

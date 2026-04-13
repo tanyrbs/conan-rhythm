@@ -17,6 +17,7 @@ from tasks.Conan.rhythm.config_contract_cache_rules import validate_cache_field_
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.duration_v3.dataset_mixin import _align_target_runs_to_source_discrete
+from modules.Conan.rhythm_v3.source_cache import duration_v3_cache_meta_signature
 
 
 class _DummyDataset(RhythmConanDatasetMixin):
@@ -1119,6 +1120,12 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "unit_alignment_mode_id_tgt": np.asarray([1], dtype=np.int64),
                 "alignment_source": np.asarray(["hubert_state_dp_v1"], dtype=object),
                 "alignment_version": np.asarray(["2026-04-12"], dtype=object),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_source_cache_signature_tgt": np.asarray(["source-sig"], dtype=object),
+                "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
             },
         )
         self.assertEqual(int(np.asarray(merged["unit_alignment_mode_id_tgt"]).reshape(-1)[0]), 1)
@@ -1149,6 +1156,12 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
                 "alignment_source": np.asarray(["run_state_viterbi"], dtype=object),
                 "alignment_version": np.asarray(["2026-04-13"], dtype=object),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_source_cache_signature_tgt": np.asarray(["source-sig"], dtype=object),
+                "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
             },
         )
         self.assertEqual(
@@ -1156,6 +1169,186 @@ class RhythmCacheContractTests(unittest.TestCase):
             "continuous_viterbi_v1",
         )
         self.assertAlmostEqual(float(np.asarray(merged["unit_alignment_band_ratio_tgt"]).reshape(-1)[0]), 0.08)
+
+    def test_duration_v3_target_merge_requires_cached_quality_and_signature_fields_for_minimal_continuous_passthrough(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "unit_alignment_mean_local_confidence_speech_tgt|unit_alignment_source_cache_signature_tgt",
+        ):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_cached_missing_quality_signature"},
+                source_cache={},
+                paired_target_conditioning={},
+                sample={
+                    "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_duration_proj_raw_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+                    "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                    "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                    "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                    "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                    "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                    "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
+                },
+            )
+
+    def test_duration_v3_target_merge_rejects_cached_minimal_continuous_targets_below_quality_thresholds(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        source_cache = {
+            "rhythm_v3_cache_meta": {
+                "cache_version": 3,
+                "silent_token": 57,
+                "separator_aware": True,
+                "tail_open_units": 1,
+                "emit_silence_runs": True,
+                "debounce_min_run_frames": 1,
+                "phrase_boundary_threshold": 0.5,
+            }
+        }
+        source_sig = duration_v3_cache_meta_signature(source_cache)
+        with self.assertRaisesRegex(RuntimeError, "mean_local_confidence_speech"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_cached_low_quality"},
+                source_cache=source_cache,
+                paired_target_conditioning={
+                    "source_cache_meta_signature": np.asarray([source_sig], dtype=object),
+                    "paired_target_cache_meta_signature": np.asarray(["target-sig"], dtype=object),
+                    "paired_target_alignment_sidecar_signature": np.asarray(["sidecar-sig"], dtype=object),
+                },
+                sample={
+                    "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_duration_proj_raw_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+                    "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                    "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                    "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                    "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.1], dtype=np.float32),
+                    "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                    "unit_alignment_source_cache_signature_tgt": np.asarray([source_sig], dtype=object),
+                    "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                    "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
+                },
+            )
+
+    def test_duration_v3_target_merge_rejects_cached_minimal_continuous_signature_mismatch(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        source_cache = {
+            "rhythm_v3_cache_meta": {
+                "cache_version": 3,
+                "silent_token": 57,
+                "separator_aware": True,
+                "tail_open_units": 1,
+                "emit_silence_runs": True,
+                "debounce_min_run_frames": 1,
+                "phrase_boundary_threshold": 0.5,
+            }
+        }
+        source_sig = duration_v3_cache_meta_signature(source_cache)
+        with self.assertRaisesRegex(RuntimeError, "target signature mismatch"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "src_cached_sig_mismatch"},
+                source_cache=source_cache,
+                paired_target_conditioning={
+                    "source_cache_meta_signature": np.asarray([source_sig], dtype=object),
+                    "paired_target_cache_meta_signature": np.asarray(["target-sig"], dtype=object),
+                    "paired_target_alignment_sidecar_signature": np.asarray(["sidecar-sig"], dtype=object),
+                },
+                sample={
+                    "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_duration_proj_raw_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+                    "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                    "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                    "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                    "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                    "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                    "unit_alignment_source_cache_signature_tgt": np.asarray([source_sig], dtype=object),
+                    "unit_alignment_target_cache_signature_tgt": np.asarray(["stale-target-sig"], dtype=object),
+                    "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
+                },
+            )
+
+    def test_duration_v3_target_merge_preserves_cached_minimal_continuous_signatures(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        source_cache = {
+            "rhythm_v3_cache_meta": {
+                "cache_version": 3,
+                "silent_token": 57,
+                "separator_aware": True,
+                "tail_open_units": 1,
+                "emit_silence_runs": True,
+                "debounce_min_run_frames": 1,
+                "phrase_boundary_threshold": 0.5,
+            }
+        }
+        source_sig = duration_v3_cache_meta_signature(source_cache)
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_cached_sig_ok"},
+            source_cache=source_cache,
+            paired_target_conditioning={
+                "source_cache_meta_signature": np.asarray([source_sig], dtype=object),
+                "paired_target_cache_meta_signature": np.asarray(["target-sig"], dtype=object),
+                "paired_target_alignment_sidecar_signature": np.asarray(["sidecar-sig"], dtype=object),
+            },
+            sample={
+                "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                "unit_duration_proj_raw_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+                "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_source_cache_signature_tgt": np.asarray([source_sig], dtype=object),
+                "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
+            },
+        )
+        self.assertEqual(
+            str(np.asarray(merged["unit_alignment_source_cache_signature_tgt"], dtype=object).reshape(-1)[0]),
+            source_sig,
+        )
+        self.assertEqual(
+            str(np.asarray(merged["unit_alignment_target_cache_signature_tgt"], dtype=object).reshape(-1)[0]),
+            "target-sig",
+        )
+        self.assertEqual(
+            str(np.asarray(merged["unit_alignment_sidecar_signature_tgt"], dtype=object).reshape(-1)[0]),
+            "sidecar-sig",
+        )
 
     def test_duration_v3_target_build_accepts_rhythm_v3_align_alias_hparams(self) -> None:
         dataset = _DummyDataset(
@@ -1313,6 +1506,12 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
                 "alignment_source": np.asarray(["run_state_viterbi"], dtype=object),
                 "alignment_version": np.asarray(["2026-04-13"], dtype=object),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.9], dtype=np.float32),
+                "unit_alignment_source_cache_signature_tgt": np.asarray(["source-sig"], dtype=object),
+                "unit_alignment_target_cache_signature_tgt": np.asarray(["target-sig"], dtype=object),
+                "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar-sig"], dtype=object),
             },
         )
         self.assertEqual(

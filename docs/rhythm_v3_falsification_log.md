@@ -276,7 +276,9 @@ be re-proposed as new refactors:
 
 The log should also state explicitly whether the current bundle is a full gate
 bundle or only a partial audit. In this workspace, the maintained
-`scripts/rhythm_v3_debug_records.py` path now warns when:
+`scripts/rhythm_v3_debug_records.py` path now fails by default for maintained
+review exports (`--review-dir` / `--gate-status-json`) and warns-only only when
+`--allow-partial-gates` is set. The gate checks cover:
 
 - `g_valid` coverage is weak
 - unmatched speech alignment is high

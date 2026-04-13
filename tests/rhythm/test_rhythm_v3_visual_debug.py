@@ -688,3 +688,135 @@ def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_pat
         or "negative_control_reference" in captured.err
         or "missing_controls" in captured.err
     )
+
+
+def test_debug_records_cli_review_export_is_strict_by_default(tmp_path, monkeypatch):
+    import scripts.rhythm_v3_debug_records as cli
+
+    row = {
+        "item_name": "demo_case",
+        "src_id": "src_demo",
+        "sample_id": "sample_demo",
+        "pair_id": "pair_demo",
+        "eval_mode": "analytic",
+        "ref_bin": "mid",
+        "ref_condition": "real",
+        "same_text_reference": 0.0,
+        "same_text_target": 1.0,
+        "lexical_mismatch": 1.0,
+        "ref_len_sec": 4.0,
+        "speech_ratio": 0.8,
+        "alignment_kind": "continuous_viterbi_v1",
+        "target_duration_surface": "projection_raw",
+        "g_support_count": 4.0,
+        "g_support_ratio_vs_speech": 1.0,
+        "g_support_ratio_vs_valid": 1.0,
+        "g_valid": 1.0,
+        "g_trim_ratio": 0.2,
+        "prompt_global_weight_present": 1.0,
+        "prompt_unit_log_prior_present": 0.0,
+        "alignment_unmatched_speech_ratio": 0.0,
+        "alignment_mean_local_confidence_speech": 0.9,
+        "alignment_mean_coarse_confidence_speech": 0.9,
+        "projector_boundary_hit_rate": 0.0,
+        "projector_boundary_decay_rate": 0.0,
+        "gate0_row_dropped": 0.0,
+        "gate0_drop_reason": "ok",
+        "g_compute_status": "ok",
+        "g_src_compute_status": "ok",
+    }
+
+    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
+    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
+    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
+    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(cli, "save_review_figure_bundle", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "save_validation_gate_bundle", lambda *args, **kwargs: {})
+
+    output = tmp_path / "summary.csv"
+    review_dir = tmp_path / "review"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rhythm_v3_debug_records.py",
+            "--input",
+            "dummy_bundle.npz",
+            "--output",
+            str(output),
+            "--review-dir",
+            str(review_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    assert excinfo.value.code != 0
+    assert (review_dir / "gate_status.json").exists()
+
+
+def test_debug_records_cli_allow_partial_gates_opt_out_keeps_review_export_warning_only(tmp_path, monkeypatch):
+    import scripts.rhythm_v3_debug_records as cli
+
+    row = {
+        "item_name": "demo_case",
+        "src_id": "src_demo",
+        "sample_id": "sample_demo",
+        "pair_id": "pair_demo",
+        "eval_mode": "analytic",
+        "ref_bin": "mid",
+        "ref_condition": "real",
+        "same_text_reference": 0.0,
+        "same_text_target": 1.0,
+        "lexical_mismatch": 1.0,
+        "ref_len_sec": 4.0,
+        "speech_ratio": 0.8,
+        "alignment_kind": "continuous_viterbi_v1",
+        "target_duration_surface": "projection_raw",
+        "g_support_count": 4.0,
+        "g_support_ratio_vs_speech": 1.0,
+        "g_support_ratio_vs_valid": 1.0,
+        "g_valid": 1.0,
+        "g_trim_ratio": 0.2,
+        "prompt_global_weight_present": 1.0,
+        "prompt_unit_log_prior_present": 0.0,
+        "alignment_unmatched_speech_ratio": 0.0,
+        "alignment_mean_local_confidence_speech": 0.9,
+        "alignment_mean_coarse_confidence_speech": 0.9,
+        "projector_boundary_hit_rate": 0.0,
+        "projector_boundary_decay_rate": 0.0,
+        "gate0_row_dropped": 0.0,
+        "gate0_drop_reason": "ok",
+        "g_compute_status": "ok",
+        "g_src_compute_status": "ok",
+    }
+
+    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
+    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
+    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
+    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(cli, "save_review_figure_bundle", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "save_validation_gate_bundle", lambda *args, **kwargs: {})
+
+    output = tmp_path / "summary.csv"
+    review_dir = tmp_path / "review"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rhythm_v3_debug_records.py",
+            "--input",
+            "dummy_bundle.npz",
+            "--output",
+            str(output),
+            "--review-dir",
+            str(review_dir),
+            "--allow-partial-gates",
+        ],
+    )
+
+    cli.main()
+
+    assert output.exists()
+    assert (review_dir / "gate_status.json").exists()

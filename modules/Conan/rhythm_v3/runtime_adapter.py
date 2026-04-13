@@ -303,14 +303,16 @@ class ConanDurationAdapter(nn.Module):
                 consumed_content_steps=total_lengths.clone(),
             )
             return (batch, next_state) if return_state else batch
-        delta = torch.zeros((batch_size, max_delta), dtype=content.dtype, device=content.device)
-        for batch_idx in range(batch_size):
-            new_steps = int(delta_lengths[batch_idx].item())
-            if new_steps <= 0:
-                continue
-            end = int(total_lengths[batch_idx, 0].item())
-            start = end - new_steps
-            delta[batch_idx, :new_steps] = content[batch_idx, start:end]
+        positions = torch.arange(max_delta, device=content.device, dtype=torch.long).reshape(1, max_delta)
+        start_positions = consumed.reshape(batch_size, 1)
+        gather_idx = start_positions + positions
+        delta_mask = positions < delta_lengths.reshape(batch_size, 1)
+        safe_gather_idx = torch.minimum(
+            gather_idx,
+            torch.full_like(gather_idx, int(max(0, total_steps - 1))),
+        )
+        delta = torch.gather(content, 1, safe_gather_idx)
+        delta = delta * delta_mask.to(dtype=content.dtype)
         batch, next_frontend_state = self.unit_frontend.step_content_tensor(
             delta,
             frontend_state,
