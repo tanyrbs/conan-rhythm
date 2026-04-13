@@ -18,7 +18,7 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
-from .g_stats import normalize_falsification_eval_mode, normalize_global_rate_variant
+from .g_stats import compute_global_rate_batch, normalize_falsification_eval_mode, normalize_global_rate_variant
 from .minimal_head import MinimalStreamingDurationHeadV1G
 from .summary_memory import (
     PromptDurationMemoryEncoder,
@@ -474,6 +474,7 @@ class MixedEffectsDurationModule(nn.Module):
         dynamic_budget_ratio = float(unused_kwargs.pop("dynamic_budget_ratio", 0.0))
         min_prefix_budget = int(unused_kwargs.pop("min_prefix_budget", 0))
         max_prefix_budget = int(unused_kwargs.pop("max_prefix_budget", 0))
+        budget_mode = str(unused_kwargs.pop("budget_mode", unused_kwargs.pop("rhythm_v3_budget_mode", "total")))
         boundary_carry_decay = float(unused_kwargs.pop("boundary_carry_decay", 0.25))
         boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
         emit_prompt_diagnostics = bool(
@@ -523,6 +524,12 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop(
                 "min_prompt_speech_ratio",
                 unused_kwargs.pop("rhythm_v3_min_prompt_speech_ratio", 0.6),
+            )
+        )
+        self.detach_global_term_in_local_head = bool(
+            unused_kwargs.pop(
+                "detach_global_term_in_local_head",
+                unused_kwargs.pop("rhythm_v3_detach_global_term_in_local_head", False),
             )
         )
         del unused_kwargs
@@ -593,6 +600,7 @@ class MixedEffectsDurationModule(nn.Module):
             dynamic_budget_ratio=dynamic_budget_ratio,
             min_prefix_budget=min_prefix_budget,
             max_prefix_budget=max_prefix_budget,
+            budget_mode=budget_mode,
             boundary_carry_decay=boundary_carry_decay,
             boundary_reset_thresh=boundary_reset_thresh,
         )
@@ -629,6 +637,7 @@ class MixedEffectsDurationModule(nn.Module):
                     eval_mode=self.eval_mode,
                     disable_local_residual=self.disable_local_residual,
                     disable_coarse_bias=self.disable_coarse_bias,
+                    detach_global_term_in_local_head=self.detach_global_term_in_local_head,
                 )
             else:
                 summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
@@ -956,6 +965,59 @@ class MixedEffectsDurationModule(nn.Module):
         prefix_mean = (prefix_sum / prefix_den).detach()
         return (raw_source_residual - prefix_mean) * speech_commit_mask.float()
 
+    def _compute_source_global_rate(
+        self,
+        *,
+        source_batch: SourceUnitBatch,
+    ) -> torch.Tensor | None:
+        valid_mask = source_batch.unit_mask.float()
+        if valid_mask.numel() <= 0:
+            return None
+        speech_mask = valid_mask
+        if isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
+            speech_mask = speech_mask * (
+                1.0 - source_batch.source_silence_mask.float().clamp(0.0, 1.0)
+            )
+        log_dur = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4)) * valid_mask
+        if self.use_log_base_rate:
+            if isinstance(getattr(source_batch, "unit_rate_log_base", None), torch.Tensor):
+                log_base = source_batch.unit_rate_log_base.float().detach() * valid_mask
+            else:
+                log_base = torch.zeros_like(log_dur)
+            rate_logdur = (log_dur - log_base) * valid_mask
+        else:
+            rate_logdur = log_dur
+        unit_prior = getattr(source_batch, "unit_log_prior", None)
+        if self.g_variant == "unit_norm" and not isinstance(unit_prior, torch.Tensor):
+            return None
+        try:
+            return compute_global_rate_batch(
+                log_dur=rate_logdur,
+                speech_mask=speech_mask,
+                valid_mask=valid_mask,
+                variant=self.g_variant,
+                trim_ratio=self.g_trim_ratio,
+                drop_edge_runs=self.g_drop_edge_runs,
+                unit_ids=source_batch.content_units,
+                unit_prior=unit_prior if isinstance(unit_prior, torch.Tensor) else None,
+            )
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _compute_source_prefix_mean(
+        *,
+        source_rate_seq: torch.Tensor | None,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if not isinstance(source_rate_seq, torch.Tensor):
+            return None
+        mask = speech_commit_mask.float().clamp(0.0, 1.0)
+        mass = mask.sum(dim=1, keepdim=True)
+        if not bool((mass > 0.0).any().item()):
+            return None
+        return (source_rate_seq.float() * mask).sum(dim=1, keepdim=True) / mass.clamp_min(1.0)
+
     @staticmethod
     def _resolve_runtime_state(
         *,
@@ -1197,6 +1259,20 @@ class MixedEffectsDurationModule(nn.Module):
                 if isinstance(role_plan.get("g_src_prefix"), torch.Tensor)
                 else execution.source_rate_seq
             )
+            execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
+            execution.g_src_prefix_mean = self._compute_source_prefix_mean(
+                source_rate_seq=execution.g_src_prefix,
+                speech_commit_mask=speech_commit_mask,
+            )
+            execution.coarse_scalar_raw = role_plan.get("coarse_scalar_raw")
+            execution.global_term_before_local = role_plan.get("unit_global_term_before_local")
+            execution.unit_residual_gate = role_plan.get("unit_residual_gate")
+            execution.unit_residual_cold_gate = role_plan.get("unit_residual_cold_gate")
+            execution.unit_residual_short_gate = role_plan.get("unit_residual_short_gate")
+            execution.unit_residual_gate_stability = role_plan.get("unit_residual_gate_stability")
+            execution.unit_runtime_stability = role_plan.get("unit_runtime_stability")
+            execution.residual_gate_mean = role_plan.get("residual_gate_mean")
+            execution.detach_global_term_in_local_head = role_plan.get("detach_global_term_in_local_head")
             execution.eval_mode = str(role_plan.get("eval_mode", self.eval_mode))
             if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
                 valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)
@@ -1266,6 +1342,8 @@ class MixedEffectsDurationModule(nn.Module):
         )
         execution.g_ref = ref_memory.global_rate.detach()
         execution.g_src_prefix = None
+        execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
+        execution.g_src_prefix_mean = None
         execution.eval_mode = self.eval_mode
         if isinstance(ref_memory.prompt_valid_mask, torch.Tensor):
             valid_len = ref_memory.prompt_valid_mask.float().sum(dim=1, keepdim=True)

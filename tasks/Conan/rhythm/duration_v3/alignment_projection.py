@@ -1619,6 +1619,14 @@ def project_target_runs_onto_source(
             alignment.get("alignment_bad_cost_threshold", np.asarray([np.nan], dtype=np.float32)),
             dtype=np.float32,
         ),
+        "alignment_allow_source_skip": np.asarray(
+            alignment.get("alignment_allow_source_skip", np.asarray([0], dtype=np.int64)),
+            dtype=np.int64,
+        ),
+        "alignment_skip_penalty": np.asarray(
+            alignment.get("alignment_skip_penalty", np.asarray([1.0], dtype=np.float32)),
+            dtype=np.float32,
+        ),
         "alignment_band_width": np.asarray(
             alignment.get("alignment_band_width", np.asarray([-1], dtype=np.int64)),
             dtype=np.int64,

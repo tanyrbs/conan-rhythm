@@ -93,6 +93,9 @@ rhythm_v3_prefix_budget_neg: 24
 rhythm_v3_dynamic_budget_ratio: 0.15
 rhythm_v3_min_prefix_budget: 12
 rhythm_v3_max_prefix_budget: 48
+# Maintained default keeps projector budget support on full committed prefix mass.
+# Use `speech_only` or `hybrid` only for explicit falsification/ablation runs.
+rhythm_v3_budget_mode: total  # total | speech_only | hybrid
 rhythm_prompt_dropout: 0.20
 rhythm_prompt_truncation: 0.50
 rhythm_v3_summary_pool_speech_only: true
@@ -103,6 +106,9 @@ rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
 rhythm_v3_analytic_gap_clip: 0.35
+# Keep the maintained path attached to the shared global term; set true only
+# for identifiability/falsification ablations.
+rhythm_v3_detach_global_term_in_local_head: false
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
 # shaping remain non-minimal-only knobs and are intentionally omitted here.
 rhythm_v3_boundary_carry_decay: 0.25

@@ -208,9 +208,13 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert isinstance(debug, dict)
     assert execution.g_ref is not None
     assert execution.g_src_prefix is not None
+    assert execution.g_src_utt is not None
+    assert execution.g_src_prefix_mean is not None
     assert execution.eval_mode == "learned"
     assert torch.allclose(debug["g_ref"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix"], execution.g_src_prefix)
+    assert torch.allclose(debug["g_src_utt"], execution.g_src_utt)
+    assert torch.allclose(debug["g_src_prefix_mean"], execution.g_src_prefix_mean)
     assert debug["g_variant"] == "raw_median"
     assert torch.allclose(debug["g_ref_scalar"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix_seq"], execution.g_src_prefix)
@@ -220,6 +224,9 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "projector_boundary_decay_applied" in debug
     assert "projector_budget_pos_used" in debug
     assert "projector_budget_neg_used" in debug
+    assert "projected_prefix_cumsum" in debug
+    assert "source_prefix_cumsum" in debug
+    assert debug["projector_budget_mode"] == "total"
     assert "coarse_path_logstretch" in debug
     assert "analytic_logstretch" in debug
     assert "coarse_delta" in debug
@@ -228,18 +235,40 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "residual_logstretch" in debug
     assert "residual_logstretch_used" in debug
     assert "residual_logstretch_pred" in debug
+    assert "coarse_scalar_raw" in debug
+    assert "global_term_before_local" in debug
+    assert "unit_residual_gate" in debug
+    assert "unit_residual_cold_gate" in debug
+    assert "unit_residual_short_gate" in debug
+    assert "unit_residual_gate_stability" in debug
+    assert "unit_runtime_stability" in debug
+    assert "residual_gate_mean" in debug
+    assert "detach_global_term_in_local_head" in debug
     assert "speech_pred" in debug
     assert "silence_pred" in debug
     assert "projector_since_last_boundary" in debug
     assert "rhythm_debug_projector_boundary_hit" in ret
     assert "rhythm_debug_projector_boundary_decay" in ret
+    assert "rhythm_debug_projected_prefix_cumsum" in ret
+    assert "rhythm_debug_source_prefix_cumsum" in ret
     assert "rhythm_debug_analytic_logstretch" in ret
     assert "rhythm_debug_coarse_delta" in ret
     assert "rhythm_debug_coarse_path" in ret
+    assert "rhythm_debug_coarse_scalar_raw" in ret
+    assert "rhythm_debug_global_term_before_local" in ret
     assert "rhythm_debug_residual_logstretch" in ret
+    assert "rhythm_debug_unit_residual_gate" in ret
+    assert "rhythm_debug_unit_residual_cold_gate" in ret
+    assert "rhythm_debug_unit_residual_short_gate" in ret
+    assert "rhythm_debug_unit_residual_gate_stability" in ret
+    assert "rhythm_debug_unit_runtime_stability" in ret
+    assert "rhythm_debug_residual_gate_mean" in ret
+    assert "rhythm_debug_detach_global_term_in_local_head" in ret
     assert "rhythm_debug_speech_pred" in ret
     assert "rhythm_debug_silence_pred" in ret
     assert "rhythm_debug_projector_since_last_boundary" in ret
+    assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
+    assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
     assert torch.allclose(execution.prompt_valid_len, torch.tensor([[3.0]], dtype=torch.float32))
     assert torch.allclose(execution.prompt_speech_ratio, torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_prompt_valid_len"], execution.prompt_valid_len)
@@ -269,8 +298,48 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["residual_logstretch_used"], execution.local_residual)
     assert torch.allclose(debug["residual_logstretch_pred"], execution.local_residual_pred)
     assert torch.allclose(debug["residual_logstretch"], execution.local_residual)
+    assert torch.allclose(debug["coarse_scalar_raw"], execution.coarse_scalar_raw)
+    assert torch.allclose(debug["global_term_before_local"], execution.global_term_before_local)
+    assert torch.allclose(debug["unit_residual_gate"], execution.unit_residual_gate)
+    assert torch.allclose(debug["unit_residual_cold_gate"], execution.unit_residual_cold_gate)
+    assert torch.allclose(debug["unit_residual_short_gate"], execution.unit_residual_short_gate)
+    assert torch.allclose(debug["unit_residual_gate_stability"], execution.unit_residual_gate_stability)
+    assert torch.allclose(debug["unit_runtime_stability"], execution.unit_runtime_stability)
+    assert torch.allclose(debug["residual_gate_mean"], execution.residual_gate_mean)
+    assert torch.allclose(debug["detach_global_term_in_local_head"], torch.zeros((1, 1), dtype=torch.float32))
     assert torch.allclose(ret["rhythm_debug_residual_used"], execution.local_residual)
     assert torch.allclose(ret["rhythm_debug_residual_pred"], execution.local_residual_pred)
+
+
+def test_rhythm_v3_minimal_prompt_summary_threads_detach_global_term_switch():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_detach_global_term_in_local_head"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    assert adapter.module.detach_global_term_in_local_head is True
+    assert adapter.module.duration_head.detach_global_term_in_local_head is True
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 57, 2]], dtype=torch.long),
+        ref=None,
+        ref_conditioning={
+            "prompt_content_units": torch.tensor([[5, 57, 6]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[4.0, 2.0, 8.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            "prompt_speech_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+        },
+    )
+    debug = ret["rhythm_v3_debug"]
+    assert torch.allclose(debug["detach_global_term_in_local_head"], torch.ones((1, 1), dtype=torch.float32))
+    assert ret["rhythm_v3_detach_global_term_in_local_head"] == 1.0
 
 
 def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
@@ -303,6 +372,18 @@ def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
     assert torch.allclose(output["unit_logstretch"], expected)
     assert torch.allclose(output["unit_global_term_before_local"], expected)
     assert torch.allclose(output["unit_residual_gate"], torch.zeros((1, 2), dtype=torch.float32))
+    assert output["coarse_scalar_raw"].shape == (1, 1)
+    assert torch.isfinite(output["coarse_scalar_raw"]).all()
+    assert torch.allclose(output["detach_global_term_in_local_head"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(output["residual_gate_mean"], torch.zeros((1, 1), dtype=torch.float32))
+    assert output["unit_residual_cold_gate"].shape == (1, 2)
+    assert output["unit_residual_short_gate"].shape == (1, 2)
+    assert torch.isfinite(output["unit_residual_cold_gate"]).all()
+    assert torch.isfinite(output["unit_residual_short_gate"]).all()
+    assert torch.allclose(output["unit_runtime_stability"], torch.ones((1, 2), dtype=torch.float32))
+    assert torch.allclose(output["residual_gate_cold"], output["unit_residual_cold_gate"])
+    assert torch.allclose(output["residual_gate_short"], output["unit_residual_short_gate"])
+    assert torch.allclose(output["residual_gate_stability"], output["unit_residual_gate_stability"])
     assert output["unit_silence_tau_surface_kind"] == "constant_clip"
     assert torch.allclose(output["unit_boundary_shaping"], torch.zeros((1, 2), dtype=torch.float32))
     assert torch.allclose(output["unit_leading_gate"], torch.ones((1, 2), dtype=torch.float32))
@@ -1574,30 +1655,36 @@ def test_rhythm_v3_projector_tensor_budget_matches_scalar_budget_resolution():
     committed_len = torch.tensor([2, 3], dtype=torch.long)
     budget_tensor = projector._resolve_prefix_budget_tensor(
         source_duration_obs=source_duration_obs,
+        speech_commit_mask=torch.ones_like(source_duration_obs),
         committed_len=committed_len,
         static_budget=projector.prefix_budget_pos,
         dynamic_budget_ratio=projector.dynamic_budget_ratio,
         min_prefix_budget=projector.min_prefix_budget,
         max_prefix_budget=projector.max_prefix_budget,
+        budget_mode=projector.budget_mode,
     )
     expected = torch.tensor(
         [
-            projector._resolve_prefix_budget(
-                source_duration_obs=source_duration_obs[0],
-                committed_len=2,
-                static_budget=projector.prefix_budget_pos,
-                dynamic_budget_ratio=projector.dynamic_budget_ratio,
-                min_prefix_budget=projector.min_prefix_budget,
-                max_prefix_budget=projector.max_prefix_budget,
-            ),
-            projector._resolve_prefix_budget(
-                source_duration_obs=source_duration_obs[1],
-                committed_len=3,
-                static_budget=projector.prefix_budget_pos,
-                dynamic_budget_ratio=projector.dynamic_budget_ratio,
-                min_prefix_budget=projector.min_prefix_budget,
-                max_prefix_budget=projector.max_prefix_budget,
-            ),
+                projector._resolve_prefix_budget(
+                    source_duration_obs=source_duration_obs[0],
+                    speech_commit_mask=torch.ones_like(source_duration_obs[0]),
+                    committed_len=2,
+                    static_budget=projector.prefix_budget_pos,
+                    dynamic_budget_ratio=projector.dynamic_budget_ratio,
+                    min_prefix_budget=projector.min_prefix_budget,
+                    max_prefix_budget=projector.max_prefix_budget,
+                    budget_mode=projector.budget_mode,
+                ),
+                projector._resolve_prefix_budget(
+                    source_duration_obs=source_duration_obs[1],
+                    speech_commit_mask=torch.ones_like(source_duration_obs[1]),
+                    committed_len=3,
+                    static_budget=projector.prefix_budget_pos,
+                    dynamic_budget_ratio=projector.dynamic_budget_ratio,
+                    min_prefix_budget=projector.min_prefix_budget,
+                    max_prefix_budget=projector.max_prefix_budget,
+                    budget_mode=projector.budget_mode,
+                ),
         ],
         dtype=torch.float32,
     )

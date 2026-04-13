@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import torch
 
@@ -8,6 +10,7 @@ from modules.Conan.rhythm_v3.g_stats import normalize_global_rate_variant
 from modules.Conan.rhythm_v3.source_cache import (
     UNIT_LOG_PRIOR_META_KEY,
     build_source_rhythm_cache_v3 as build_source_rhythm_cache,
+    duration_v3_cache_meta_signature,
     maybe_attach_unit_log_prior_from_path,
 )
 from tasks.Conan.rhythm.duration_v3.alignment_projection import (
@@ -33,6 +36,13 @@ _ALIGNMENT_PROVENANCE_FLOAT_KEYS = (
     "unit_alignment_lambda_band_tgt",
     "unit_alignment_lambda_unit_tgt",
     "unit_alignment_bad_cost_threshold_tgt",
+    "unit_alignment_allow_source_skip_tgt",
+    "unit_alignment_skip_penalty_tgt",
+)
+_ALIGNMENT_PROVENANCE_OBJECT_KEYS = (
+    "unit_alignment_source_cache_signature_tgt",
+    "unit_alignment_target_cache_signature_tgt",
+    "unit_alignment_sidecar_signature_tgt",
 )
 _ALIGNMENT_PROVENANCE_VITERBI_DEFAULTS = {
     "unit_alignment_band_ratio_tgt": 0.08,
@@ -41,6 +51,8 @@ _ALIGNMENT_PROVENANCE_VITERBI_DEFAULTS = {
     "unit_alignment_lambda_band_tgt": 0.2,
     "unit_alignment_lambda_unit_tgt": 0.0,
     "unit_alignment_bad_cost_threshold_tgt": 1.2,
+    "unit_alignment_allow_source_skip_tgt": 0.0,
+    "unit_alignment_skip_penalty_tgt": 1.0,
 }
 
 
@@ -71,6 +83,15 @@ def _extract_object_scalar(value):
 
 
 class DurationV3DatasetMixin:
+    def _resolve_hparam_alias(self, *keys: str, default=None):
+        for key in keys:
+            if not key:
+                continue
+            value = self.hparams.get(key)
+            if value is not None:
+                return value
+        return default
+
     @staticmethod
     def _normalize_alignment_kind_export(value, *, mode_id=None) -> str:
         normalized = str(_extract_object_scalar(value) or "").strip().lower()
@@ -106,10 +127,108 @@ class DurationV3DatasetMixin:
 
     def _alignment_quality_thresholds(self) -> tuple[float, float, float]:
         return (
-            float(self.hparams.get("rhythm_v3_alignment_unmatched_speech_ratio_max", 0.15) or 0.15),
-            float(self.hparams.get("rhythm_v3_alignment_mean_local_confidence_speech_min", 0.55) or 0.55),
-            float(self.hparams.get("rhythm_v3_alignment_mean_coarse_confidence_speech_min", 0.60) or 0.60),
+            float(
+                self._resolve_hparam_alias(
+                    "rhythm_v3_alignment_unmatched_speech_ratio_max",
+                    "rhythm_v3_align_unmatched_speech_ratio_max",
+                    default=0.15,
+                )
+                or 0.15
+            ),
+            float(
+                self._resolve_hparam_alias(
+                    "rhythm_v3_alignment_mean_local_confidence_speech_min",
+                    "rhythm_v3_align_mean_local_confidence_speech_min",
+                    default=0.55,
+                )
+                or 0.55
+            ),
+            float(
+                self._resolve_hparam_alias(
+                    "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+                    "rhythm_v3_align_mean_coarse_confidence_speech_min",
+                    default=0.60,
+                )
+                or 0.60
+            ),
         )
+
+    @staticmethod
+    def _normalize_signature_text(value) -> str:
+        scalar = _extract_object_scalar(value)
+        text = str(scalar or "").strip()
+        return text or "missing"
+
+    @staticmethod
+    def _build_alignment_sidecar_signature(
+        *,
+        source_cache_meta_signature: str,
+        target_cache_meta_signature: str,
+        source_frame_states=None,
+        source_frame_to_run=None,
+        target_frame_states=None,
+        target_frame_speech_prob=None,
+        target_frame_weight=None,
+        target_frame_valid=None,
+        target_frame_unit_hint=None,
+    ) -> str:
+        payload = {
+            "source_cache_meta_signature": str(source_cache_meta_signature or "missing"),
+            "target_cache_meta_signature": str(target_cache_meta_signature or "missing"),
+        }
+        for key, value in (
+            ("source_frame_states", source_frame_states),
+            ("source_frame_to_run", source_frame_to_run),
+            ("target_frame_states", target_frame_states),
+            ("target_frame_speech_prob", target_frame_speech_prob),
+            ("target_frame_weight", target_frame_weight),
+            ("target_frame_valid", target_frame_valid),
+            ("target_frame_unit_hint", target_frame_unit_hint),
+        ):
+            if value is None:
+                payload[key] = None
+                continue
+            arr = np.asarray(value)
+            payload[key] = {
+                "shape": tuple(int(dim) for dim in arr.shape),
+                "dtype": str(arr.dtype),
+            }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _validate_continuous_projection_provenance(
+        self,
+        *,
+        source_cache: dict,
+        paired_target_conditioning: dict,
+        context: str,
+    ) -> None:
+        if not isinstance(paired_target_conditioning, dict):
+            return
+        source_cache_signature = duration_v3_cache_meta_signature(source_cache)
+        paired_source_signature = self._normalize_signature_text(
+            paired_target_conditioning.get("source_cache_meta_signature")
+        )
+        paired_target_signature = self._normalize_signature_text(
+            paired_target_conditioning.get("paired_target_cache_meta_signature")
+        )
+        if (
+            source_cache_signature != "missing"
+            and paired_source_signature != "missing"
+            and paired_source_signature != source_cache_signature
+        ):
+            raise RuntimeError(
+                "continuous paired-target source frontend/cache signature mismatch: "
+                f"source_cache={source_cache_signature}, conditioning_source={paired_source_signature} ({context})"
+            )
+        if (
+            source_cache_signature != "missing"
+            and paired_target_signature != "missing"
+            and paired_target_signature != source_cache_signature
+        ):
+            raise RuntimeError(
+                "continuous paired-target source/target frontend/cache signature mismatch: "
+                f"source_cache={source_cache_signature}, paired_target={paired_target_signature} ({context})"
+            )
 
     def _enforce_minimal_continuous_alignment_gate(
         self,
@@ -651,6 +770,16 @@ class DurationV3DatasetMixin:
                 "paired_target_alignment_bad_cost_threshold",
                 "unit_alignment_bad_cost_threshold_tgt",
             ),
+            "unit_alignment_allow_source_skip_tgt": (
+                "alignment_allow_source_skip",
+                "paired_target_alignment_allow_source_skip",
+                "unit_alignment_allow_source_skip_tgt",
+            ),
+            "unit_alignment_skip_penalty_tgt": (
+                "alignment_skip_penalty",
+                "paired_target_alignment_skip_penalty",
+                "unit_alignment_skip_penalty_tgt",
+            ),
         }
         exports: dict[str, np.ndarray] = {}
         for export_key, aliases in float_aliases.items():
@@ -667,10 +796,35 @@ class DurationV3DatasetMixin:
             if value is None:
                 value = defaults.get(export_key, np.nan)
             exports[export_key] = np.asarray([float(value)], dtype=np.float32)
+        for export_key, aliases in {
+            "unit_alignment_source_cache_signature_tgt": (
+                "source_cache_meta_signature",
+                "paired_target_alignment_source_cache_signature",
+                "unit_alignment_source_cache_signature_tgt",
+            ),
+            "unit_alignment_target_cache_signature_tgt": (
+                "paired_target_cache_meta_signature",
+                "paired_target_alignment_target_cache_signature",
+                "unit_alignment_target_cache_signature_tgt",
+            ),
+            "unit_alignment_sidecar_signature_tgt": (
+                "paired_target_alignment_sidecar_signature",
+                "unit_alignment_sidecar_signature_tgt",
+            ),
+        }.items():
+            resolved = ""
+            for alias in aliases:
+                resolved = str(_extract_object_scalar(projection.get(alias)) or "").strip()
+                if resolved:
+                    break
+                resolved = str(_extract_object_scalar(paired_target_conditioning.get(alias)) or "").strip()
+                if resolved:
+                    break
+            exports[export_key] = np.asarray([resolved], dtype=object)
         return exports
 
     def _alignment_provenance_optional_keys(self) -> tuple[str, ...]:
-        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + (
+        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + _ALIGNMENT_PROVENANCE_OBJECT_KEYS + (
             "unit_alignment_is_continuous_tgt",
             "unit_alignment_coverage_binary_tgt",
             "unit_alignment_coverage_fraction_tgt",
@@ -688,7 +842,20 @@ class DurationV3DatasetMixin:
 
     def _build_optional_collate_spec(self) -> dict[str, tuple[str, float | int | None]]:
         spec = dict(super()._build_optional_collate_spec())
-        for key in self._alignment_provenance_optional_keys():
+        for key in _ALIGNMENT_PROVENANCE_FLOAT_KEYS:
+            spec[key] = ("float", 0.0)
+        for key in _ALIGNMENT_PROVENANCE_OBJECT_KEYS:
+            spec[key] = ("object", None)
+        for key in (
+            "unit_alignment_is_continuous_tgt",
+            "unit_alignment_coverage_binary_tgt",
+            "unit_alignment_coverage_fraction_tgt",
+            "unit_alignment_expected_frame_support_tgt",
+            "unit_alignment_confidence_cost_term_tgt",
+            "unit_alignment_confidence_margin_term_tgt",
+            "unit_alignment_confidence_type_term_tgt",
+            "unit_alignment_confidence_match_term_tgt",
+        ):
             spec[key] = ("float", 0.0)
         return spec
 
@@ -818,6 +985,18 @@ class DurationV3DatasetMixin:
             ("paired_target_alignment_bad_cost_threshold", "paired_target_alignment_bad_cost_threshold"),
             ("alignment_bad_cost_threshold", "paired_target_alignment_bad_cost_threshold"),
             ("unit_alignment_bad_cost_threshold_tgt", "paired_target_alignment_bad_cost_threshold"),
+            ("paired_target_alignment_allow_source_skip", "paired_target_alignment_allow_source_skip"),
+            ("alignment_allow_source_skip", "paired_target_alignment_allow_source_skip"),
+            ("unit_alignment_allow_source_skip_tgt", "paired_target_alignment_allow_source_skip"),
+            ("paired_target_alignment_skip_penalty", "paired_target_alignment_skip_penalty"),
+            ("alignment_skip_penalty", "paired_target_alignment_skip_penalty"),
+            ("unit_alignment_skip_penalty_tgt", "paired_target_alignment_skip_penalty"),
+            ("paired_target_alignment_source_cache_signature", "paired_target_alignment_source_cache_signature"),
+            ("unit_alignment_source_cache_signature_tgt", "paired_target_alignment_source_cache_signature"),
+            ("paired_target_alignment_target_cache_signature", "paired_target_alignment_target_cache_signature"),
+            ("unit_alignment_target_cache_signature_tgt", "paired_target_alignment_target_cache_signature"),
+            ("paired_target_alignment_sidecar_signature", "paired_target_alignment_sidecar_signature"),
+            ("unit_alignment_sidecar_signature_tgt", "paired_target_alignment_sidecar_signature"),
             ("paired_target_alignment_assigned_source", "paired_target_alignment_assigned_source"),
             ("paired_target_assigned_source", "paired_target_alignment_assigned_source"),
             ("unit_alignment_assigned_source_debug", "paired_target_alignment_assigned_source"),
@@ -891,6 +1070,44 @@ class DurationV3DatasetMixin:
             conditioning["paired_target_frame_valid"] = np.asarray(target_frame_valid, dtype=np.float32)
         if target_frame_unit_hint is not None:
             conditioning["paired_target_frame_unit_hint"] = np.asarray(target_frame_unit_hint, dtype=np.int64)
+        source_cache_signature = duration_v3_cache_meta_signature(source_item if isinstance(source_item, dict) else None)
+        paired_target_cache_signature = duration_v3_cache_meta_signature(
+            paired_target_item if isinstance(paired_target_item, dict) else None
+        )
+        if "source_cache_meta_signature" not in conditioning:
+            conditioning["source_cache_meta_signature"] = np.asarray([source_cache_signature], dtype=object)
+        if "paired_target_cache_meta_signature" not in conditioning:
+            conditioning["paired_target_cache_meta_signature"] = np.asarray(
+                [paired_target_cache_signature],
+                dtype=object,
+            )
+        if "paired_target_alignment_source_cache_signature" not in conditioning:
+            conditioning["paired_target_alignment_source_cache_signature"] = np.asarray(
+                [source_cache_signature],
+                dtype=object,
+            )
+        if "paired_target_alignment_target_cache_signature" not in conditioning:
+            conditioning["paired_target_alignment_target_cache_signature"] = np.asarray(
+                [paired_target_cache_signature],
+                dtype=object,
+            )
+        if "paired_target_alignment_sidecar_signature" not in conditioning:
+            conditioning["paired_target_alignment_sidecar_signature"] = np.asarray(
+                [
+                    self._build_alignment_sidecar_signature(
+                        source_cache_meta_signature=source_cache_signature,
+                        target_cache_meta_signature=paired_target_cache_signature,
+                        source_frame_states=source_frame_states,
+                        source_frame_to_run=source_frame_to_run,
+                        target_frame_states=target_frame_states,
+                        target_frame_speech_prob=target_frame_speech_prob,
+                        target_frame_weight=target_frame_weight,
+                        target_frame_valid=target_frame_valid,
+                        target_frame_unit_hint=target_frame_unit_hint,
+                    )
+                ],
+                dtype=object,
+            )
         return conditioning
 
     def _build_paired_duration_v3_targets(self, *, item, source_cache, paired_target_conditioning):
@@ -946,18 +1163,72 @@ class DurationV3DatasetMixin:
             )
         continuous_aligner_kwargs = None
         if use_continuous_alignment and configured_alignment_mode == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1:
-            band_width = self.hparams.get("rhythm_v3_alignment_band_width")
+            self._validate_continuous_projection_provenance(
+                source_cache=source_cache,
+                paired_target_conditioning=paired_target_conditioning,
+                context=item_name,
+            )
+            band_width = self._resolve_hparam_alias(
+                "rhythm_v3_alignment_band_width",
+                "rhythm_v3_align_band_width",
+            )
             continuous_aligner_kwargs = {
-                "lambda_emb": float(self.hparams.get("rhythm_v3_alignment_lambda_emb", 1.0)),
-                "lambda_type": float(self.hparams.get("rhythm_v3_alignment_lambda_type", 0.5)),
-                "lambda_band": float(self.hparams.get("rhythm_v3_alignment_lambda_band", 0.2)),
-                "lambda_unit": float(self.hparams.get("rhythm_v3_alignment_lambda_unit", 0.0)),
-                "band_ratio": float(self.hparams.get("rhythm_v3_alignment_band_ratio", 0.08)),
-                "bad_cost_threshold": float(self.hparams.get("rhythm_v3_alignment_bad_cost_threshold", 1.2)),
-                "allow_source_skip": bool(
-                    self.hparams.get("rhythm_v3_alignment_allow_source_skip", False)
+                "lambda_emb": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_lambda_emb",
+                        "rhythm_v3_align_lambda_emb",
+                        default=1.0,
+                    )
                 ),
-                "skip_penalty": float(self.hparams.get("rhythm_v3_alignment_skip_penalty", 1.0)),
+                "lambda_type": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_lambda_type",
+                        "rhythm_v3_align_lambda_type",
+                        default=0.5,
+                    )
+                ),
+                "lambda_band": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_lambda_band",
+                        "rhythm_v3_align_lambda_band",
+                        default=0.2,
+                    )
+                ),
+                "lambda_unit": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_lambda_unit",
+                        "rhythm_v3_align_lambda_unit",
+                        default=0.0,
+                    )
+                ),
+                "band_ratio": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_band_ratio",
+                        "rhythm_v3_align_band_ratio",
+                        default=0.08,
+                    )
+                ),
+                "bad_cost_threshold": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_bad_cost_threshold",
+                        "rhythm_v3_align_bad_cost_threshold",
+                        default=1.2,
+                    )
+                ),
+                "allow_source_skip": self._is_enabled_flag(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_allow_source_skip",
+                        "rhythm_v3_align_allow_source_skip",
+                        default=False,
+                    )
+                ),
+                "skip_penalty": float(
+                    self._resolve_hparam_alias(
+                        "rhythm_v3_alignment_skip_penalty",
+                        "rhythm_v3_align_skip_penalty",
+                        default=1.0,
+                    )
+                ),
             }
             if band_width is not None:
                 continuous_aligner_kwargs["band_width"] = int(band_width)
@@ -1118,6 +1389,46 @@ class DurationV3DatasetMixin:
                 ],
                 dtype=object,
             ),
+            "unit_alignment_source_cache_signature_tgt": np.asarray(
+                [
+                    (
+                        self._normalize_signature_text(
+                            paired_target_conditioning.get("source_cache_meta_signature")
+                        )
+                        if self._normalize_signature_text(
+                            paired_target_conditioning.get("source_cache_meta_signature")
+                        )
+                        != "missing"
+                        else duration_v3_cache_meta_signature(source_cache)
+                    )
+                    if isinstance(paired_target_conditioning, dict)
+                    else duration_v3_cache_meta_signature(source_cache)
+                ],
+                dtype=object,
+            ),
+            "unit_alignment_target_cache_signature_tgt": np.asarray(
+                [
+                    self._normalize_signature_text(
+                        paired_target_conditioning.get("paired_target_cache_meta_signature")
+                    )
+                    if isinstance(paired_target_conditioning, dict)
+                    else "missing"
+                ],
+                dtype=object,
+            ),
+            "unit_alignment_sidecar_signature_tgt": np.asarray(
+                [
+                    str(
+                        _extract_object_scalar(
+                            paired_target_conditioning.get("paired_target_alignment_sidecar_signature")
+                        )
+                        or ""
+                    )
+                    if isinstance(paired_target_conditioning, dict)
+                    else ""
+                ],
+                dtype=object,
+            ),
         }
         out.update(
             self._build_alignment_provenance_exports(
@@ -1211,7 +1522,8 @@ class DurationV3DatasetMixin:
             )
             for key in self._alignment_provenance_optional_keys():
                 if key in sample:
-                    out[key] = np.asarray(sample[key], dtype=np.float32)
+                    dtype = object if key in _ALIGNMENT_PROVENANCE_OBJECT_KEYS else np.float32
+                    out[key] = np.asarray(sample[key], dtype=dtype)
             out.update(
                 {
                     key: out.get(key, value)

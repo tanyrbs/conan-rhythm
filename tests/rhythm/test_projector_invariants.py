@@ -71,6 +71,75 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
         assert torch.allclose(boundary_hit, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
         assert torch.allclose(boundary_decay, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
 
+    def test_duration_v3_budget_mode_support_mass_changes_dynamic_budget(self):
+        source = torch.tensor([[4.0, 6.0, 5.0]], dtype=torch.float32)
+        speech = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+        committed = torch.tensor([3], dtype=torch.long)
+        total_budget = StreamingDurationV3Projector._resolve_prefix_budget_tensor(
+            source_duration_obs=source,
+            speech_commit_mask=speech,
+            committed_len=committed,
+            static_budget=0,
+            dynamic_budget_ratio=1.0,
+            min_prefix_budget=0,
+            max_prefix_budget=0,
+            budget_mode="total",
+        )
+        speech_budget = StreamingDurationV3Projector._resolve_prefix_budget_tensor(
+            source_duration_obs=source,
+            speech_commit_mask=speech,
+            committed_len=committed,
+            static_budget=0,
+            dynamic_budget_ratio=1.0,
+            min_prefix_budget=0,
+            max_prefix_budget=0,
+            budget_mode="speech_only",
+        )
+        hybrid_budget = StreamingDurationV3Projector._resolve_prefix_budget_tensor(
+            source_duration_obs=source,
+            speech_commit_mask=speech,
+            committed_len=committed,
+            static_budget=0,
+            dynamic_budget_ratio=1.0,
+            min_prefix_budget=0,
+            max_prefix_budget=0,
+            budget_mode="hybrid",
+        )
+
+        assert torch.allclose(total_budget, torch.tensor([15.0], dtype=torch.float32))
+        assert torch.allclose(speech_budget, torch.tensor([9.0], dtype=torch.float32))
+        assert torch.allclose(hybrid_budget, torch.tensor([12.0], dtype=torch.float32))
+
+    def test_duration_v3_finalize_execution_exports_prefix_cumsums(self):
+        projector = StreamingDurationV3Projector(
+            prefix_budget_pos=2,
+            prefix_budget_neg=2,
+            dynamic_budget_ratio=0.0,
+            budget_mode="speech_only",
+        )
+        execution = projector.finalize_execution(
+            unit_logstretch=torch.zeros((1, 3), dtype=torch.float32),
+            unit_duration_exec=torch.tensor([[3.0, 2.0, 4.0]], dtype=torch.float32),
+            basis_activation=torch.zeros((1, 3, 1), dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 1.0, 3.0]], dtype=torch.float32),
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            sealed_mask=torch.ones((1, 3), dtype=torch.float32),
+            speech_commit_mask=torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+            state=None,
+        )
+
+        assert execution.projector_budget_mode == "speech_only"
+        assert execution.projected_prefix_cumsum is not None
+        assert execution.source_prefix_cumsum is not None
+        assert torch.allclose(
+            execution.projected_prefix_cumsum,
+            torch.tensor([[3.0, 4.0, 8.0]], dtype=torch.float32),
+        )
+        assert torch.allclose(
+            execution.source_prefix_cumsum,
+            torch.tensor([[2.0, 3.0, 6.0]], dtype=torch.float32),
+        )
+
 
 class ProjectorInvariantTests(unittest.TestCase):
     @staticmethod

@@ -7,6 +7,7 @@ import pytest
 from modules.Conan.rhythm_v3.g_stats import (
     build_global_rate_support_mask,
     compute_global_rate,
+    summarize_global_rate_support,
     true_median_1d,
     weighted_median_1d,
 )
@@ -209,6 +210,52 @@ def test_compute_global_rate_weighted_median_with_drop_edge_runs_uses_trimmed_su
     assert torch.allclose(g, expected)
 
 
+def test_build_global_rate_support_mask_can_prefer_boundary_clean_closed_support():
+    speech_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    closed_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0]], dtype=torch.float32)
+    boundary_confidence = torch.tensor([[0.2, 0.8, 0.9, 0.3]], dtype=torch.float32)
+
+    support = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=0.7,
+    )
+
+    assert torch.equal(support, torch.tensor([[False, True, True, False]]))
+
+
+def test_build_global_rate_support_mask_falls_back_when_boundary_clean_support_is_empty():
+    speech_mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+    closed_mask = torch.zeros_like(speech_mask)
+    boundary_confidence = torch.zeros_like(speech_mask)
+
+    support = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=0.9,
+    )
+
+    assert torch.equal(support, torch.tensor([[True, False, True]]))
+
+
+def test_summarize_global_rate_support_reports_clean_count():
+    speech_mask = torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32)
+    closed_mask = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+    boundary_confidence = torch.tensor([[0.8, 0.9, 0.0]], dtype=torch.float32)
+
+    summary = summarize_global_rate_support(
+        speech_mask=speech_mask,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=0.7,
+    )
+
+    assert torch.equal(summary.clean_mask, torch.tensor([[True, False, False]]))
+    assert torch.allclose(summary.clean_count, torch.tensor([[1.0]]))
+
+
 def test_compute_global_rate_unit_norm_accepts_default_filled_run_prior():
     log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
     speech_mask = torch.ones_like(log_dur)
@@ -251,6 +298,37 @@ def test_compute_global_rate_unit_norm_uses_default_for_oov_vocab_prior():
             dtype=torch.float32,
         )
     ).reshape(1, 1)
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_unit_norm_applies_count_aware_backoff():
+    log_dur = torch.log(torch.tensor([[8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[2]], dtype=torch.long)
+    unit_prior = torch.log(torch.tensor([1.0, 2.0, 16.0], dtype=torch.float32))
+    unit_count = torch.tensor([10, 10, 1], dtype=torch.long)
+    global_backoff = float(torch.log(torch.tensor(4.0)).item())
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        unit_ids=unit_ids,
+        unit_prior=unit_prior,
+        unit_count=unit_count,
+        unit_prior_min_count=4,
+        unit_prior_global_backoff=global_backoff,
+        unit_prior_default_value=global_backoff,
+        variant="unit_norm",
+    )
+
+    alpha = 1.0 / 4.0
+    resolved_prior = (alpha * float(torch.log(torch.tensor(16.0)).item())) + (
+        (1.0 - alpha) * global_backoff
+    )
+    expected = torch.tensor(
+        [[float(torch.log(torch.tensor(8.0)).item()) - resolved_prior]],
+        dtype=torch.float32,
+    )
     assert torch.allclose(g, expected)
 
 

@@ -122,7 +122,7 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
     assert torch.allclose(targets.prompt_operator_fit_pred, ref_memory.prompt_operator_fit)
     assert torch.allclose(targets.prompt_operator_cv_fit_pred, ref_memory.prompt_operator_cv_fit)
     losses = build_rhythm_loss_dict(ret["rhythm_execution"], targets)
-    expected_keys = {
+    expected_core_keys = {
         "rhythm_exec_speech",
         "rhythm_exec_stretch",
         "rhythm_prefix_state",
@@ -139,8 +139,21 @@ def test_rhythm_v3_loss_builder_returns_compact_losses():
         "rhythm_is_v3_bundle",
         "rhythm_total",
     }
-    assert set(losses.keys()) == expected_keys
-    for key in expected_keys:
+    diagnostic_keys = {
+        "rhythm_v3_committed_exec_prefix_discrepancy",
+        "rhythm_v3_projected_exec_prefix_discrepancy",
+        "rhythm_v3_coarse_explained_ratio",
+        "rhythm_v3_local_residual_abs_mean",
+        "rhythm_v3_local_residual_mean",
+        "rhythm_v3_silence_local_leak_rate",
+        "rhythm_v3_global_bias_tgt_support_mass",
+        "rhythm_v3_global_bias_tgt_support_count",
+        "rhythm_v3_coarse_target_speech_conf_mean",
+        "rhythm_v3_silence_coarse_logstretch_tgt_abs_mean",
+    }
+    assert expected_core_keys.issubset(losses.keys())
+    assert diagnostic_keys.issubset(losses.keys())
+    for key in expected_core_keys | diagnostic_keys:
         assert key in losses
         assert torch.is_tensor(losses[key])
         assert torch.isfinite(losses[key]).all()
@@ -853,6 +866,10 @@ def test_rhythm_v3_silence_runs_use_coarse_only_targets():
     assert torch.allclose(baseline_targets.local_residual_tgt, masked_targets.local_residual_tgt)
     assert torch.allclose(baseline_targets.silence_mask, masked_targets.silence_mask)
     assert masked_targets.silence_coarse_weight == config.silence_coarse_weight
+    assert isinstance(masked_targets.silence_coarse_logstretch_tgt, torch.Tensor)
+    assert isinstance(masked_targets.global_bias_tgt_support_mass, torch.Tensor)
+    assert isinstance(masked_targets.global_bias_tgt_support_count, torch.Tensor)
+    assert isinstance(masked_targets.coarse_target_speech_conf_mean, torch.Tensor)
     row = int(committed[0, 0].item())
     col = int(committed[0, 1].item())
     zeros = masked_targets.local_residual_tgt.new_zeros(1)
@@ -866,6 +883,13 @@ def test_rhythm_v3_silence_runs_use_coarse_only_targets():
     )
     assert torch.allclose(masked_targets.coarse_duration_tgt[row, col], expected_prefix_duration)
     assert torch.allclose(masked_targets.prefix_duration_tgt[row, col], expected_prefix_duration)
+    assert torch.allclose(
+        masked_targets.silence_coarse_logstretch_tgt[row, col],
+        masked_targets.coarse_logstretch_tgt[row, col],
+    )
+    assert float(masked_targets.global_bias_tgt_support_mass.item()) > 0.0
+    assert float(masked_targets.global_bias_tgt_support_count.item()) > 0.0
+    assert float(masked_targets.coarse_target_speech_conf_mean.item()) > 0.0
     assert torch.allclose(masked_losses["rhythm_v3_dur"], baseline_losses["rhythm_v3_dur"])
     assert torch.allclose(masked_losses["rhythm_v3_bias"], baseline_losses["rhythm_v3_bias"])
     assert torch.allclose(masked_losses["rhythm_v3_pref"], baseline_losses["rhythm_v3_pref"])
@@ -944,6 +968,61 @@ def test_rhythm_v3_prefix_uses_sg_baseline_and_consistency_prefers_raw_duration_
     losses = build_rhythm_loss_dict(execution, targets)
     assert torch.allclose(losses["rhythm_v3_pref"], torch.tensor(0.0))
     assert torch.allclose(losses["rhythm_v3_cons"], torch.tensor(0.0))
+
+
+def test_rhythm_v3_loss_builder_exports_exec_prefix_and_role_diagnostics():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.zeros((1, 3), dtype=torch.float32),
+            "unit_duration_raw": torch.tensor([[2.0, 1.5, 1.0]], dtype=torch.float32),
+            "speech_duration_exec": torch.tensor([[2.0, 1.0, 1.0]], dtype=torch.float32),
+            "local_residual": torch.tensor([[0.10, -0.20, 0.05]], dtype=torch.float32),
+            "coarse_correction": torch.tensor([[0.30, 0.30, 0.30]], dtype=torch.float32),
+            "coarse_logstretch": torch.tensor([[0.40, 0.10, 0.30]], dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.tensor([[2.0, 1.0, 4.0]], dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 3), dtype=torch.float32),
+        prediction_anchor=torch.ones((1, 3), dtype=torch.float32),
+        unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        committed_mask=torch.ones((1, 3), dtype=torch.float32),
+        speech_mask=torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32),
+        silence_mask=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
+        committed_speech_mask=torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32),
+        committed_silence_mask=torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32),
+        local_residual_tgt=torch.zeros((1, 3), dtype=torch.float32),
+        coarse_logstretch_tgt=torch.tensor([[0.30, 0.30, 0.20]], dtype=torch.float32),
+        coarse_duration_tgt=torch.tensor([[2.0, 2.0, 1.5]], dtype=torch.float32),
+        silence_coarse_logstretch_tgt=torch.tensor([[0.0, 0.0, 0.20]], dtype=torch.float32),
+        global_bias_tgt=torch.tensor([[0.30]], dtype=torch.float32),
+        global_bias_tgt_support_mass=torch.tensor([[1.5]], dtype=torch.float32),
+        global_bias_tgt_support_count=torch.tensor([[2.0]], dtype=torch.float32),
+        coarse_target_speech_conf_mean=torch.tensor([[0.75]], dtype=torch.float32),
+        unit_confidence_local_tgt=torch.ones((1, 3), dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((1, 3), dtype=torch.float32),
+        lambda_dur=1.0,
+        lambda_op=0.0,
+        lambda_pref=0.20,
+        lambda_bias=1.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    assert losses["rhythm_v3_committed_exec_prefix_discrepancy"] > 0.0
+    assert losses["rhythm_v3_projected_exec_prefix_discrepancy"] > 0.0
+    assert 0.0 < float(losses["rhythm_v3_coarse_explained_ratio"].item()) < 1.0
+    assert torch.allclose(losses["rhythm_v3_local_residual_mean"], torch.tensor(-0.05))
+    assert torch.allclose(losses["rhythm_v3_local_residual_abs_mean"], torch.tensor(0.15))
+    assert torch.allclose(losses["rhythm_v3_silence_local_leak_rate"], torch.tensor(1.0))
+    assert torch.allclose(losses["rhythm_v3_global_bias_tgt_support_mass"], torch.tensor(1.5))
+    assert torch.allclose(losses["rhythm_v3_global_bias_tgt_support_count"], torch.tensor(2.0))
+    assert torch.allclose(losses["rhythm_v3_coarse_target_speech_conf_mean"], torch.tensor(0.75))
+    assert torch.allclose(losses["rhythm_v3_silence_coarse_logstretch_tgt_abs_mean"], torch.tensor(0.20))
 
 
 def test_rhythm_v3_loss_routes_local_and_coarse_confidence_separately():

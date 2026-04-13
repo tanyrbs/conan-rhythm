@@ -33,6 +33,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         eval_mode: str = "learned",
         disable_local_residual: bool = False,
         disable_coarse_bias: bool = False,
+        detach_global_term_in_local_head: bool = False,
         codebook=None,
     ) -> None:
         super().__init__()
@@ -66,6 +67,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.eval_mode = normalize_falsification_eval_mode(eval_mode)
         self.disable_local_residual = bool(disable_local_residual)
         self.disable_coarse_bias = bool(disable_coarse_bias)
+        self.detach_global_term_in_local_head = bool(detach_global_term_in_local_head)
         self.query_dim = int(max(8, dim))
         self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
@@ -203,11 +205,14 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             coarse_correction = torch.zeros_like(predicted_coarse)
         global_term = (global_shift_analytic + coarse_correction) * commit_valid_mask
 
+        residual_global_term = (
+            global_term.detach() if self.detach_global_term_in_local_head else global_term
+        )
         residual_input = torch.cat(
             [
                 query,
                 spk_ctx.unsqueeze(1).expand(-1, query.size(1), -1),
-                global_term.unsqueeze(-1),
+                residual_global_term.unsqueeze(-1),
             ],
             dim=-1,
         )
@@ -309,6 +314,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "source_rate_seq": local_rate_seq * mask,
             "g_ref": g_ref_col.squeeze(-1),
             "g_src_prefix": local_rate_seq * mask,
+            "detach_global_term_in_local_head": mask.new_full(
+                (mask.size(0), 1),
+                1.0 if self.detach_global_term_in_local_head else 0.0,
+            ),
             "eval_mode": self.eval_mode,
             "falsification_eval_mode": mask.new_full((mask.size(0), 1), {"analytic": 0.0, "coarse_only": 1.0, "learned": 2.0}[self.eval_mode]),
         }

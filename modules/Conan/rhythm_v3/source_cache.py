@@ -82,6 +82,22 @@ def build_duration_v3_frontend_signature(
     emit_silence_runs: bool | None = None,
 ) -> str:
     normalized = resolve_duration_v3_cache_meta(cache_meta)
+    unit_prior_meta = None
+    if unit_prior_path:
+        resolved_path = Path(unit_prior_path).resolve()
+        bundle = load_unit_log_prior_bundle(str(resolved_path))
+        stat = resolved_path.stat()
+        unit_prior_meta = {
+            "path": str(resolved_path),
+            "mtime_ns": int(stat.st_mtime_ns),
+            "size": int(stat.st_size),
+            "source": bundle.get("unit_prior_source"),
+            "version": bundle.get("unit_prior_version"),
+            "frontend_meta_signature": bundle.get("unit_prior_frontend_signature"),
+            "emit_silence_runs": bundle.get("unit_prior_emit_silence_runs"),
+            "debounce_min_run_frames": bundle.get("unit_prior_debounce_min_run_frames"),
+            "silent_token": bundle.get("unit_prior_silent_token"),
+        }
     signature = {
         "cache_meta": normalized,
         "g_variant": str(g_variant or "").strip().lower(),
@@ -89,6 +105,7 @@ def build_duration_v3_frontend_signature(
         "unit_prior_path": (
             str(Path(unit_prior_path).resolve()) if unit_prior_path else None
         ),
+        "unit_prior_bundle": unit_prior_meta,
         "summary_pool_speech_only": bool(summary_pool_speech_only),
         "emit_silence_runs": (
             bool(emit_silence_runs)
@@ -217,6 +234,18 @@ def _extract_int_meta(value) -> int | None:
         return None
 
 
+def _extract_bool_meta(value) -> bool | None:
+    scalar = _extract_scalar_meta(value)
+    if scalar is None:
+        return None
+    normalized = str(scalar).strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    return None
+
+
 def _coerce_bool_prior_mask(value, *, expected_size: int) -> np.ndarray | None:
     if value is None:
         return None
@@ -299,6 +328,7 @@ def _normalize_unit_prior_bundle(
         version = _extract_scalar_meta(payload.get("unit_prior_version"))
         min_count = _extract_int_meta(payload.get("unit_prior_min_count"))
         default_policy = _extract_scalar_meta(payload.get("unit_prior_default_policy", "legacy_prior_median"))
+        global_backoff = _extract_scalar_meta(payload.get("unit_prior_global_backoff"))
         default_mask = _resolve_unit_prior_default_mask(
             payload,
             expected_size=int(prior.shape[0]),
@@ -307,14 +337,45 @@ def _normalize_unit_prior_bundle(
             payload.get("unit_count", payload.get("unit_counts", payload.get("unit_prior_count"))),
             expected_size=int(prior.shape[0]),
         )
+        backoff_weight_value = payload.get("unit_prior_backoff_weight")
+        backoff_weight = (
+            None if backoff_weight_value is None else _coerce_unit_prior_array(backoff_weight_value)
+        )
+        if backoff_weight is not None and int(backoff_weight.shape[0]) != int(prior.shape[0]):
+            raise ValueError(
+                "unit_prior_backoff_weight size mismatch: "
+                f"got {int(backoff_weight.shape[0])}, expected {int(prior.shape[0])}"
+            )
+        frontend_signature = _extract_scalar_meta(payload.get("unit_prior_frontend_signature"))
+        silent_token = _extract_scalar_meta(payload.get("unit_prior_silent_token"))
+        separator_aware = _extract_bool_meta(payload.get("unit_prior_separator_aware"))
+        tail_open_units = _extract_int_meta(payload.get("unit_prior_tail_open_units"))
+        emit_silence_runs = _extract_bool_meta(payload.get("unit_prior_emit_silence_runs"))
+        debounce_min_run_frames = _extract_int_meta(payload.get("unit_prior_debounce_min_run_frames"))
+        phrase_boundary_threshold = _extract_float_meta(payload.get("unit_prior_phrase_boundary_threshold"))
+        filter_exclude_open_runs = _extract_bool_meta(payload.get("unit_prior_filter_exclude_open_runs"))
+        filter_only_sealed_runs = _extract_bool_meta(payload.get("unit_prior_filter_only_sealed_runs"))
+        filter_drop_edge_runs = _extract_int_meta(payload.get("unit_prior_filter_drop_edge_runs"))
     else:
         prior = _coerce_unit_prior_array(payload)
         source = _extract_scalar_meta(default_source)
         version = None
         min_count = None
         default_policy = "legacy_prior_median"
+        global_backoff = None
         default_mask = None
         count_array = None
+        backoff_weight = None
+        frontend_signature = None
+        silent_token = None
+        separator_aware = None
+        tail_open_units = None
+        emit_silence_runs = None
+        debounce_min_run_frames = None
+        phrase_boundary_threshold = None
+        filter_exclude_open_runs = None
+        filter_only_sealed_runs = None
+        filter_drop_edge_runs = None
     default_value = _resolve_unit_prior_default_value(
         payload if isinstance(payload, Mapping) else {},
         prior,
@@ -342,17 +403,29 @@ def _normalize_unit_prior_bundle(
     return {
         "unit_log_prior": prior.astype(np.float32, copy=False),
         "unit_count": count_array,
+        "unit_prior_backoff_weight": backoff_weight,
         "unit_prior_source": source,
         "unit_prior_version": version,
         "unit_prior_vocab_size": int(prior.shape[0]),
         "global_speech_log_prior": float(default_value),
         "unit_prior_min_count": min_count,
         "unit_prior_default_policy": default_policy,
+        "unit_prior_global_backoff": global_backoff,
         "unit_prior_default_value": float(default_value),
         "unit_log_prior_is_default": default_mask,
         "unit_prior_default_count": default_count,
         "unit_prior_observed_count": observed_count,
         "unit_prior_low_count_count": low_count_count,
+        "unit_prior_frontend_signature": frontend_signature,
+        "unit_prior_silent_token": silent_token,
+        "unit_prior_separator_aware": separator_aware,
+        "unit_prior_tail_open_units": tail_open_units,
+        "unit_prior_emit_silence_runs": emit_silence_runs,
+        "unit_prior_debounce_min_run_frames": debounce_min_run_frames,
+        "unit_prior_phrase_boundary_threshold": phrase_boundary_threshold,
+        "unit_prior_filter_exclude_open_runs": filter_exclude_open_runs,
+        "unit_prior_filter_only_sealed_runs": filter_only_sealed_runs,
+        "unit_prior_filter_drop_edge_runs": filter_drop_edge_runs,
     }
 
 
@@ -376,6 +449,9 @@ def load_unit_log_prior_bundle(path: str) -> dict[str, object]:
         )
     bundle = _normalize_unit_prior_bundle(payload, default_source=str(prior_path))
     bundle["unit_prior_path"] = str(prior_path)
+    stat = prior_path.stat()
+    bundle["unit_prior_path_mtime_ns"] = int(stat.st_mtime_ns)
+    bundle["unit_prior_path_size"] = int(stat.st_size)
     return bundle
 
 
@@ -413,23 +489,35 @@ def attach_unit_log_prior_to_source_cache(
         bundle.get("unit_count", bundle.get("unit_counts", bundle.get("unit_prior_count"))),
         expected_size=int(prior.shape[0]),
     )
+    cache_signature = duration_v3_cache_meta_signature(cache)
+    prior_signature = _extract_scalar_meta(bundle.get("unit_prior_frontend_signature"))
+    if prior_signature not in {None, "missing", "mixed"} and cache_signature != prior_signature:
+        raise ValueError(
+            "unit prior frontend signature mismatch: "
+            f"bundle={prior_signature!r} cache={cache_signature!r}"
+        )
     content_units = np.asarray(cache["content_units"], dtype=np.int64).reshape(-1)
     if content_units.size <= 0:
         cache["unit_log_prior"] = np.zeros((0,), dtype=np.float32)
         cache["unit_log_prior_is_default"] = np.zeros((0,), dtype=np.int64)
+        cache["unit_log_prior_count"] = np.zeros((0,), dtype=np.int64)
         out_of_vocab_count = 0
     else:
         in_vocab = (content_units >= 0) & (content_units < int(prior.shape[0]))
         mapped = np.full((content_units.shape[0],), float(default_value), dtype=np.float32)
         default_flags = np.ones((content_units.shape[0],), dtype=np.int64)
+        mapped_count = np.zeros((content_units.shape[0],), dtype=np.int64)
         if bool(in_vocab.any()):
             mapped[in_vocab] = prior[content_units[in_vocab]].astype(np.float32, copy=False)
             if default_mask is None:
                 default_flags[in_vocab] = 0
             else:
                 default_flags[in_vocab] = default_mask[content_units[in_vocab]].astype(np.int64, copy=False)
+            if count_array is not None:
+                mapped_count[in_vocab] = count_array[content_units[in_vocab]].astype(np.int64, copy=False)
         cache["unit_log_prior"] = mapped
         cache["unit_log_prior_is_default"] = default_flags
+        cache["unit_log_prior_count"] = mapped_count
         out_of_vocab_count = int((~in_vocab).sum())
     default_count = int(np.asarray(cache["unit_log_prior_is_default"], dtype=np.int64).sum())
     min_count = _extract_int_meta(bundle.get("unit_prior_min_count"))
@@ -448,6 +536,7 @@ def attach_unit_log_prior_to_source_cache(
             ).sum()
         )
     )
+    cache_meta = resolve_duration_v3_cache_meta(cache)
     cache[UNIT_LOG_PRIOR_META_KEY] = {
         "unit_prior_source": _extract_scalar_meta(bundle.get("unit_prior_source")),
         "unit_prior_version": _extract_scalar_meta(bundle.get("unit_prior_version")),
@@ -456,11 +545,35 @@ def attach_unit_log_prior_to_source_cache(
         "unit_prior_min_count": (None if min_count is None else int(min_count)),
         "unit_prior_default_value": float(default_value),
         "unit_prior_default_policy": _extract_scalar_meta(bundle.get("unit_prior_default_policy", "legacy_prior_median")),
+        "unit_prior_global_backoff": _extract_scalar_meta(bundle.get("unit_prior_global_backoff")),
         "unit_prior_default_count": int(default_count),
         "unit_prior_observed_count": observed_count,
         "unit_prior_low_count_count": low_count_count,
         "unit_prior_unseen_count": int(default_count),
         "unit_prior_out_of_vocab_count": int(out_of_vocab_count),
+        "unit_prior_frontend_signature": prior_signature,
+        "unit_prior_silent_token": _extract_scalar_meta(bundle.get("unit_prior_silent_token")),
+        "unit_prior_separator_aware": _extract_bool_meta(bundle.get("unit_prior_separator_aware")),
+        "unit_prior_tail_open_units": _extract_int_meta(bundle.get("unit_prior_tail_open_units")),
+        "unit_prior_emit_silence_runs": _extract_bool_meta(bundle.get("unit_prior_emit_silence_runs")),
+        "unit_prior_debounce_min_run_frames": _extract_int_meta(bundle.get("unit_prior_debounce_min_run_frames")),
+        "unit_prior_phrase_boundary_threshold": _extract_float_meta(bundle.get("unit_prior_phrase_boundary_threshold")),
+        "unit_prior_filter_exclude_open_runs": _extract_bool_meta(bundle.get("unit_prior_filter_exclude_open_runs")),
+        "unit_prior_filter_only_sealed_runs": _extract_bool_meta(bundle.get("unit_prior_filter_only_sealed_runs")),
+        "unit_prior_filter_drop_edge_runs": _extract_int_meta(bundle.get("unit_prior_filter_drop_edge_runs")),
+        "unit_prior_path_mtime_ns": _extract_int_meta(bundle.get("unit_prior_path_mtime_ns")),
+        "unit_prior_path_size": _extract_int_meta(bundle.get("unit_prior_path_size")),
+        "frontend_meta_signature": cache_signature,
+        "silent_token": (None if cache_meta is None else cache_meta.get("silent_token")),
+        "separator_aware": (None if cache_meta is None else bool(cache_meta.get("separator_aware", False))),
+        "tail_open_units": (None if cache_meta is None else int(cache_meta.get("tail_open_units", 0))),
+        "emit_silence_runs": (None if cache_meta is None else bool(cache_meta.get("emit_silence_runs", False))),
+        "debounce_min_run_frames": (
+            None if cache_meta is None else int(cache_meta.get("debounce_min_run_frames", 0))
+        ),
+        "phrase_boundary_threshold": (
+            None if cache_meta is None else float(cache_meta.get("phrase_boundary_threshold", 0.0))
+        ),
     }
     return cache
 

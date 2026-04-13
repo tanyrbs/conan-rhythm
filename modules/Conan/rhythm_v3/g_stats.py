@@ -18,6 +18,8 @@ class GlobalRateSupportStats:
     valid_count: torch.Tensor
     speech_ratio: torch.Tensor
     domain_valid: torch.Tensor
+    clean_mask: torch.Tensor | None = None
+    clean_count: torch.Tensor | None = None
 
 
 def normalize_global_rate_variant(value) -> str:
@@ -109,21 +111,46 @@ def _drop_edge_support_1d(mask: torch.Tensor, *, drop_edge_runs: int) -> torch.T
     return keep
 
 
+def _build_boundary_clean_seed(
+    *,
+    speech_valid: torch.Tensor,
+    closed_mask: torch.Tensor | None,
+    boundary_confidence: torch.Tensor | None,
+    min_boundary_confidence: float | None,
+) -> torch.Tensor:
+    clean = speech_valid.bool().clone()
+    if closed_mask is not None:
+        clean &= closed_mask.bool()
+    if boundary_confidence is not None and min_boundary_confidence is not None:
+        clean &= boundary_confidence.float() >= float(min_boundary_confidence)
+    return clean
+
+
 def _build_single_support_mask(
     *,
     speech_mask: torch.Tensor,
     valid_mask: torch.Tensor | None,
     drop_edge_runs: int,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
 ) -> torch.Tensor:
     speech = speech_mask.bool()
     valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
     speech_valid = speech & valid
     if not bool(speech_valid.any().item()):
         return torch.zeros_like(speech_valid, dtype=torch.bool)
-    support = _drop_edge_support_1d(speech_valid, drop_edge_runs=drop_edge_runs)
+    clean_seed = _build_boundary_clean_seed(
+        speech_valid=speech_valid,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
+    )
+    support_seed = clean_seed if bool(clean_seed.any().item()) else speech_valid
+    support = _drop_edge_support_1d(support_seed, drop_edge_runs=drop_edge_runs)
     if bool(support.any().item()):
         return support
-    return speech_valid
+    return support_seed
 
 
 def build_global_rate_support_mask(
@@ -131,6 +158,9 @@ def build_global_rate_support_mask(
     speech_mask: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
     drop_edge_runs: int = 0,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
 ) -> torch.Tensor:
     drop_edge_runs = _normalize_drop_edge_runs(drop_edge_runs)
     if speech_mask.ndim == 1:
@@ -138,13 +168,21 @@ def build_global_rate_support_mask(
             speech_mask=speech_mask,
             valid_mask=valid_mask,
             drop_edge_runs=drop_edge_runs,
+            closed_mask=closed_mask,
+            boundary_confidence=boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
         )
     if speech_mask.ndim != 2:
         raise ValueError(
             "build_global_rate_support_mask expects rank-1 or rank-2 speech_mask, "
             f"got {tuple(speech_mask.shape)}"
         )
-    if drop_edge_runs <= 0:
+    if (
+        drop_edge_runs <= 0
+        and closed_mask is None
+        and boundary_confidence is None
+        and min_boundary_confidence is None
+    ):
         speech = speech_mask.bool()
         valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
         return speech & valid
@@ -155,6 +193,11 @@ def build_global_rate_support_mask(
             speech_mask=speech_mask[batch_idx],
             valid_mask=None if valid_mask is None else valid_mask[batch_idx],
             drop_edge_runs=drop_edge_runs,
+            closed_mask=None if closed_mask is None else closed_mask[batch_idx],
+            boundary_confidence=(
+                None if boundary_confidence is None else boundary_confidence[batch_idx]
+            ),
+            min_boundary_confidence=min_boundary_confidence,
         )
     return support
 
@@ -166,18 +209,31 @@ def summarize_global_rate_support(
     drop_edge_runs: int = 0,
     min_speech_ratio: float = 0.0,
     min_speech_runs: int = 1,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
 ) -> GlobalRateSupportStats:
+    speech = speech_mask.bool()
+    valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
+    clean_mask = _build_boundary_clean_seed(
+        speech_valid=speech & valid,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
+    )
     support_mask = build_global_rate_support_mask(
         speech_mask=speech_mask,
         valid_mask=valid_mask,
         drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
     )
-    speech = speech_mask.bool()
-    valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
     reduce_dim = 0 if speech_mask.ndim == 1 else 1
     support_count = support_mask.sum(dim=reduce_dim, keepdim=True).float()
     speech_count = (speech & valid).sum(dim=reduce_dim, keepdim=True).float()
     valid_count = valid.sum(dim=reduce_dim, keepdim=True).float()
+    clean_count = clean_mask.sum(dim=reduce_dim, keepdim=True).float()
     speech_ratio = speech_count / valid_count.clamp_min(1.0)
     domain_valid = (
         (support_count >= float(max(1, int(min_speech_runs))))
@@ -190,7 +246,52 @@ def summarize_global_rate_support(
         valid_count=valid_count,
         speech_ratio=speech_ratio,
         domain_valid=domain_valid,
+        clean_mask=clean_mask,
+        clean_count=clean_count,
     )
+
+
+def _resolve_unit_count(
+    *,
+    unit_ids: torch.Tensor | None,
+    unit_count: torch.Tensor | None,
+    mask: torch.Tensor,
+) -> torch.Tensor | None:
+    if unit_count is None:
+        return None
+    if unit_ids is None:
+        if tuple(unit_count.shape) == tuple(mask.shape):
+            return unit_count.to(device=mask.device, dtype=torch.float32) * mask.float()
+        return None
+    if unit_count.dim() == 1:
+        unit_ids_long = unit_ids.long()
+        counts_vocab = unit_count.to(device=unit_ids.device, dtype=torch.float32).reshape(-1)
+        vocab_size = int(counts_vocab.numel())
+        counts = torch.zeros_like(unit_ids_long, dtype=torch.float32)
+        in_vocab = (unit_ids_long >= 0) & (unit_ids_long < vocab_size)
+        if bool(in_vocab.any().item()):
+            counts[in_vocab] = counts_vocab[unit_ids_long[in_vocab]]
+        return counts * mask.float()
+    if unit_count.dim() == 2 and tuple(unit_count.shape) == tuple(unit_ids.shape):
+        return unit_count.to(device=unit_ids.device, dtype=torch.float32) * mask.float()
+    return None
+
+
+def _resolve_unit_prior_backoff_value(
+    *,
+    unit_prior_default_value: float | torch.Tensor | None,
+    unit_prior_global_backoff: float | torch.Tensor | None,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    value = unit_prior_global_backoff
+    if value is None:
+        value = unit_prior_default_value
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value.to(device=device, dtype=torch.float32).reshape(())
+    return torch.tensor(float(value), device=device, dtype=dtype).reshape(())
 
 
 def _resolve_unit_prior(
@@ -199,6 +300,9 @@ def _resolve_unit_prior(
     unit_prior: torch.Tensor | None,
     mask: torch.Tensor,
     unit_prior_default_value: float | torch.Tensor | None = None,
+    unit_count: torch.Tensor | None = None,
+    unit_prior_min_count: int | None = None,
+    unit_prior_global_backoff: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     if unit_prior is None:
         raise ValueError("unit_norm g_variant requires unit_prior.")
@@ -240,6 +344,21 @@ def _resolve_unit_prior(
             "unit_prior must have shape [V] or match unit_ids shape [B, T]. "
             f"Got unit_prior={tuple(unit_prior.shape)}, unit_ids={tuple(unit_ids.shape)}."
         )
+    resolved_count = _resolve_unit_count(
+        unit_ids=unit_ids,
+        unit_count=unit_count,
+        mask=mask,
+    )
+    if resolved_count is not None and unit_prior_min_count is not None and int(unit_prior_min_count) > 0:
+        backoff = _resolve_unit_prior_backoff_value(
+            unit_prior_default_value=unit_prior_default_value,
+            unit_prior_global_backoff=unit_prior_global_backoff,
+            device=prior.device,
+            dtype=prior.dtype,
+        )
+        if backoff is not None:
+            alpha = (resolved_count.float() / float(max(1, int(unit_prior_min_count)))).clamp_(0.0, 1.0)
+            prior = (alpha * prior.float()) + ((1.0 - alpha) * backoff.float())
     return prior * mask.float()
 
 
@@ -253,6 +372,9 @@ def _compute_single_global_rate(
     unit_ids: torch.Tensor | None,
     unit_prior: torch.Tensor | None,
     unit_prior_default_value: float | torch.Tensor | None,
+    unit_count: torch.Tensor | None,
+    unit_prior_min_count: int | None,
+    unit_prior_global_backoff: float | torch.Tensor | None,
 ) -> torch.Tensor:
     valid = mask.bool()
     if not bool(valid.any().item()):
@@ -265,6 +387,9 @@ def _compute_single_global_rate(
             unit_prior=unit_prior,
             mask=mask,
             unit_prior_default_value=unit_prior_default_value,
+            unit_count=unit_count,
+            unit_prior_min_count=unit_prior_min_count,
+            unit_prior_global_backoff=unit_prior_global_backoff,
         )
         prior_values = prior[valid]
         values = values - prior_values.float()
@@ -377,14 +502,23 @@ def compute_global_rate_1d(
     weight: torch.Tensor | None = None,
     trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
     unit_prior_default_value: float | torch.Tensor | None = None,
+    unit_count: torch.Tensor | None = None,
+    unit_prior_min_count: int | None = None,
+    unit_prior_global_backoff: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     support_mask = build_global_rate_support_mask(
         speech_mask=speech_mask,
         valid_mask=valid_mask,
         drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
     )
     return _compute_single_global_rate(
         log_dur=log_dur.float(),
@@ -395,6 +529,9 @@ def compute_global_rate_1d(
         unit_ids=unit_ids,
         unit_prior=unit_prior,
         unit_prior_default_value=unit_prior_default_value,
+        unit_count=unit_count,
+        unit_prior_min_count=unit_prior_min_count,
+        unit_prior_global_backoff=unit_prior_global_backoff,
     )
 
 
@@ -407,9 +544,15 @@ def compute_global_rate_batch(
     weight: torch.Tensor | None = None,
     trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
     unit_prior_default_value: float | torch.Tensor | None = None,
+    unit_count: torch.Tensor | None = None,
+    unit_prior_min_count: int | None = None,
+    unit_prior_global_backoff: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     variant = normalize_global_rate_variant(variant)
     log_dur = log_dur.float()
@@ -422,9 +565,15 @@ def compute_global_rate_batch(
             weight=weight,
             trim_ratio=trim_ratio,
             drop_edge_runs=drop_edge_runs,
+            closed_mask=closed_mask,
+            boundary_confidence=boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
             unit_ids=unit_ids,
             unit_prior=unit_prior,
             unit_prior_default_value=unit_prior_default_value,
+            unit_count=unit_count,
+            unit_prior_min_count=unit_prior_min_count,
+            unit_prior_global_backoff=unit_prior_global_backoff,
         )
     if log_dur.ndim != 2:
         raise ValueError(f"compute_global_rate expects rank-1 or rank-2 log_dur, got {tuple(log_dur.shape)}")
@@ -432,6 +581,9 @@ def compute_global_rate_batch(
         speech_mask=speech_mask,
         valid_mask=valid_mask,
         drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
     )
     resolved_unit_prior = None
     if variant == "unit_norm":
@@ -440,6 +592,9 @@ def compute_global_rate_batch(
             unit_prior=unit_prior,
             mask=support,
             unit_prior_default_value=unit_prior_default_value,
+            unit_count=unit_count,
+            unit_prior_min_count=unit_prior_min_count,
+            unit_prior_global_backoff=unit_prior_global_backoff,
         )
     if variant == "raw_median" and weight is None and unit_prior is None:
         return masked_true_median_batch(log_dur, support)
@@ -487,6 +642,9 @@ def compute_global_rate_batch(
                 else unit_prior_row
             ),
             unit_prior_default_value=unit_prior_default_value,
+            unit_count=None if unit_count is None else unit_count[batch_idx] if unit_count.ndim == 2 and int(unit_count.size(0)) == batch_size else unit_count,
+            unit_prior_min_count=unit_prior_min_count,
+            unit_prior_global_backoff=unit_prior_global_backoff,
         )
     return out
 
@@ -500,9 +658,15 @@ def compute_global_rate(
     weight: torch.Tensor | None = None,
     trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
     unit_prior_default_value: float | torch.Tensor | None = None,
+    unit_count: torch.Tensor | None = None,
+    unit_prior_min_count: int | None = None,
+    unit_prior_global_backoff: float | torch.Tensor | None = None,
 ) -> torch.Tensor:
     return compute_global_rate_batch(
         log_dur=log_dur,
@@ -512,9 +676,15 @@ def compute_global_rate(
         weight=weight,
         trim_ratio=trim_ratio,
         drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
         unit_ids=unit_ids,
         unit_prior=unit_prior,
         unit_prior_default_value=unit_prior_default_value,
+        unit_count=unit_count,
+        unit_prior_min_count=unit_prior_min_count,
+        unit_prior_global_backoff=unit_prior_global_backoff,
     )
 
 

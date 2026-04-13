@@ -9,6 +9,61 @@ from .contracts import DurationExecution, DurationRuntimeState
 from .frame_plan import build_frame_plan_from_execution
 
 
+@torch.jit.script
+def _project_row_recurrence_script(
+    row_exec: torch.Tensor,
+    row_source_rounded: torch.Tensor,
+    row_speech: torch.Tensor,
+    row_coarse: torch.Tensor,
+    row_boundary: torch.Tensor,
+    row_phrase_final: torch.Tensor,
+    carry_init: torch.Tensor,
+    prefix_offset_init: torch.Tensor,
+    row_budget_pos: int,
+    row_budget_neg: int,
+    boundary_carry_decay: float,
+    boundary_reset_thresh: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_units = int(row_exec.numel())
+    projected = torch.zeros_like(row_exec)
+    boundary_hit = torch.zeros_like(row_exec)
+    boundary_decay = torch.zeros_like(row_exec)
+    carry = carry_init.reshape(1)
+    prefix_offset = prefix_offset_init.reshape(1)
+    for offset in range(num_units):
+        is_speech = bool(row_speech[offset] > 0.5)
+        is_coarse_only = bool(row_coarse[offset] > 0.5)
+        anchor = torch.clamp_min(row_source_rounded[offset], 1.0)
+        if (not is_speech) and (not is_coarse_only):
+            projected[offset] = anchor
+            continue
+
+        total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
+        frames = torch.floor(total + 0.5)
+        frames = torch.clamp_min(frames, 1.0)
+        lower = torch.ceil(anchor - (float(row_budget_neg) + prefix_offset[0]))
+        lower = torch.clamp_min(lower, 1.0)
+        upper = torch.floor(anchor + (float(row_budget_pos) - prefix_offset[0]))
+        upper = torch.maximum(upper, lower)
+        frames = torch.minimum(torch.maximum(frames, lower), upper)
+        projected[offset] = frames
+        prefix_offset[0] = prefix_offset[0] + (frames - anchor)
+        carry[0] = total - frames
+
+        boundary_event = bool(row_boundary[offset] >= boundary_reset_thresh) or bool(row_phrase_final[offset] > 0.5)
+        if boundary_event:
+            boundary_hit[offset] = 1.0
+            if boundary_carry_decay < (1.0 - 1.0e-6):
+                carry[0] = carry[0] * boundary_carry_decay
+                prefix_offset[0] = torch.clamp(
+                    prefix_offset[0] * boundary_carry_decay,
+                    min=-float(row_budget_neg),
+                    max=float(row_budget_pos),
+                )
+                boundary_decay[offset] = 1.0
+    return projected, boundary_hit, boundary_decay, carry, prefix_offset
+
+
 class StreamingDurationProjector(nn.Module):
     def __init__(
         self,
@@ -18,6 +73,7 @@ class StreamingDurationProjector(nn.Module):
         dynamic_budget_ratio: float = 0.0,
         min_prefix_budget: int = 0,
         max_prefix_budget: int = 0,
+        budget_mode: str = "total",
         boundary_carry_decay: float = 0.25,
         boundary_reset_thresh: float = 0.5,
     ) -> None:
@@ -27,6 +83,9 @@ class StreamingDurationProjector(nn.Module):
         self.dynamic_budget_ratio = float(max(0.0, dynamic_budget_ratio))
         self.min_prefix_budget = int(max(0, min_prefix_budget))
         self.max_prefix_budget = int(max(0, max_prefix_budget))
+        self.budget_mode = str(budget_mode or "total").strip().lower()
+        if self.budget_mode not in {"total", "speech_only", "hybrid"}:
+            raise ValueError(f"Unsupported rhythm_v3 budget_mode={budget_mode!r}")
         self.boundary_carry_decay = float(max(0.0, min(1.0, boundary_carry_decay)))
         self.boundary_reset_thresh = float(max(0.0, min(1.0, boundary_reset_thresh)))
 
@@ -100,15 +159,28 @@ class StreamingDurationProjector(nn.Module):
     def _resolve_prefix_budget(
         *,
         source_duration_obs: torch.Tensor,
+        speech_commit_mask: torch.Tensor | None,
         committed_len: int,
         static_budget: int,
         dynamic_budget_ratio: float,
         min_prefix_budget: int,
         max_prefix_budget: int,
+        budget_mode: str,
     ) -> int:
         if committed_len <= 0 or float(dynamic_budget_ratio) <= 0.0:
             return int(max(0, static_budget))
-        prefix_source_total = float(source_duration_obs[:committed_len].float().sum().item())
+        prefix_source_total = float(
+            StreamingDurationProjector._resolve_prefix_support_mass_tensor(
+                source_duration_obs=source_duration_obs.reshape(1, -1),
+                speech_commit_mask=(
+                    None
+                    if speech_commit_mask is None
+                    else speech_commit_mask.reshape(1, -1)
+                ),
+                committed_len=torch.as_tensor([committed_len], device=source_duration_obs.device, dtype=torch.long),
+                budget_mode=budget_mode,
+            )[0].item()
+        )
         dynamic_budget = int(round(prefix_source_total * float(dynamic_budget_ratio)))
         dynamic_budget = max(int(max(0, min_prefix_budget)), dynamic_budget)
         if int(max_prefix_budget) > 0:
@@ -116,25 +188,53 @@ class StreamingDurationProjector(nn.Module):
         return int(max(0, dynamic_budget))
 
     @staticmethod
+    def _resolve_prefix_support_mass_tensor(
+        *,
+        source_duration_obs: torch.Tensor,
+        speech_commit_mask: torch.Tensor | None,
+        committed_len: torch.Tensor,
+        budget_mode: str,
+    ) -> torch.Tensor:
+        committed_len = committed_len.long().reshape(-1)
+        source_duration = source_duration_obs.float()
+        source_cumsum = torch.cumsum(source_duration, dim=1)
+        gather_idx = (committed_len.clamp_min(1) - 1).unsqueeze(1)
+        prefix_total = torch.gather(source_cumsum, 1, gather_idx).squeeze(1)
+        prefix_total = torch.where(committed_len > 0, prefix_total, torch.zeros_like(prefix_total))
+        resolved_mode = str(budget_mode or "total").strip().lower()
+        if resolved_mode == "total" or speech_commit_mask is None:
+            return prefix_total
+        speech_duration = source_duration * speech_commit_mask.float()
+        speech_cumsum = torch.cumsum(speech_duration, dim=1)
+        prefix_speech = torch.gather(speech_cumsum, 1, gather_idx).squeeze(1)
+        prefix_speech = torch.where(committed_len > 0, prefix_speech, torch.zeros_like(prefix_speech))
+        if resolved_mode == "speech_only":
+            return prefix_speech
+        if resolved_mode == "hybrid":
+            prefix_silence = torch.clamp(prefix_total - prefix_speech, min=0.0)
+            return prefix_speech + (0.5 * prefix_silence)
+        raise ValueError(f"Unsupported rhythm_v3 budget_mode={budget_mode!r}")
+
+    @staticmethod
     def _resolve_prefix_budget_tensor(
         *,
         source_duration_obs: torch.Tensor,
+        speech_commit_mask: torch.Tensor | None,
         committed_len: torch.Tensor,
         static_budget: int,
         dynamic_budget_ratio: float,
         min_prefix_budget: int,
         max_prefix_budget: int,
+        budget_mode: str,
     ) -> torch.Tensor:
         committed_len = committed_len.long().reshape(-1)
         if float(dynamic_budget_ratio) <= 0.0:
             return source_duration_obs.new_full(committed_len.shape, float(max(0, static_budget)))
-        source_cumsum = torch.cumsum(source_duration_obs.float(), dim=1)
-        gather_idx = (committed_len.clamp_min(1) - 1).unsqueeze(1)
-        prefix_source_total = torch.gather(source_cumsum, 1, gather_idx).squeeze(1)
-        prefix_source_total = torch.where(
-            committed_len > 0,
-            prefix_source_total,
-            torch.zeros_like(prefix_source_total),
+        prefix_source_total = StreamingDurationProjector._resolve_prefix_support_mass_tensor(
+            source_duration_obs=source_duration_obs,
+            speech_commit_mask=speech_commit_mask,
+            committed_len=committed_len,
+            budget_mode=budget_mode,
         )
         dynamic_budget = torch.round(prefix_source_total * float(dynamic_budget_ratio))
         dynamic_budget = torch.clamp(dynamic_budget, min=float(max(0, min_prefix_budget)))
@@ -161,6 +261,7 @@ class StreamingDurationProjector(nn.Module):
         dynamic_budget_ratio: float = 0.0,
         min_prefix_budget: int = 0,
         max_prefix_budget: int = 0,
+        budget_mode: str = "total",
         boundary_carry_decay: float = 0.25,
         boundary_reset_thresh: float = 0.5,
         committed_len: torch.Tensor | None = None,
@@ -181,11 +282,13 @@ class StreamingDurationProjector(nn.Module):
         budget_pos_values = (
             StreamingDurationProjector._resolve_prefix_budget_tensor(
                 source_duration_obs=source_duration_obs,
+                speech_commit_mask=speech_commit_mask,
                 committed_len=committed_len_tensor,
                 static_budget=budget_pos,
                 dynamic_budget_ratio=dynamic_budget_ratio,
                 min_prefix_budget=min_prefix_budget,
                 max_prefix_budget=max_prefix_budget,
+                budget_mode=budget_mode,
             )
             if budget_pos_tensor is None
             else budget_pos_tensor.float().reshape(batch_size)
@@ -193,11 +296,13 @@ class StreamingDurationProjector(nn.Module):
         budget_neg_values = (
             StreamingDurationProjector._resolve_prefix_budget_tensor(
                 source_duration_obs=source_duration_obs,
+                speech_commit_mask=speech_commit_mask,
                 committed_len=committed_len_tensor,
                 static_budget=budget_neg,
                 dynamic_budget_ratio=dynamic_budget_ratio,
                 min_prefix_budget=min_prefix_budget,
                 max_prefix_budget=max_prefix_budget,
+                budget_mode=budget_mode,
             )
             if budget_neg_tensor is None
             else budget_neg_tensor.float().reshape(batch_size)
@@ -248,17 +353,29 @@ class StreamingDurationProjector(nn.Module):
                 row_projected,
                 row_boundary_hit,
                 row_boundary_decay,
-                carry,
-                prefix_offset,
-            ) = StreamingDurationProjector._project_row_python(
+                carry_tensor,
+                prefix_offset_tensor,
+            ) = _project_row_recurrence_script(
                 row_exec=row_exec,
                 row_source_rounded=row_source_rounded,
-                row_speech=row_speech,
-                row_coarse=row_coarse,
-                row_boundary=row_boundary,
-                row_phrase_final=row_phrase_final,
-                carry=carry,
-                prefix_offset=prefix_offset,
+                row_speech=row_speech.float(),
+                row_coarse=(
+                    row_coarse.float()
+                    if isinstance(row_coarse, torch.Tensor)
+                    else torch.zeros_like(row_exec)
+                ),
+                row_boundary=(
+                    row_boundary
+                    if isinstance(row_boundary, torch.Tensor)
+                    else torch.zeros_like(row_exec)
+                ),
+                row_phrase_final=(
+                    row_phrase_final.float()
+                    if isinstance(row_phrase_final, torch.Tensor)
+                    else torch.zeros_like(row_exec)
+                ),
+                carry_init=row_exec.new_tensor([carry]),
+                prefix_offset_init=row_exec.new_tensor([prefix_offset]),
                 row_budget_pos=row_budget_pos,
                 row_budget_neg=row_budget_neg,
                 boundary_carry_decay=boundary_carry_decay,
@@ -276,8 +393,8 @@ class StreamingDurationProjector(nn.Module):
                 device=boundary_decay_applied.device,
                 dtype=boundary_decay_applied.dtype,
             )
-            residual_values[batch_idx] = float(carry)
-            prefix_offset_values[batch_idx] = float(prefix_offset)
+            residual_values[batch_idx] = float(carry_tensor.reshape(-1)[0].item())
+            prefix_offset_values[batch_idx] = float(prefix_offset_tensor.reshape(-1)[0].item())
         residual_next = torch.as_tensor(
             residual_values,
             dtype=residual_prev.dtype,
@@ -297,82 +414,6 @@ class StreamingDurationProjector(nn.Module):
         )
 
     @staticmethod
-    def _project_row_python(
-        *,
-        row_exec: torch.Tensor,
-        row_source_rounded: torch.Tensor,
-        row_speech: torch.Tensor,
-        row_coarse: torch.Tensor | None,
-        row_boundary: torch.Tensor | None,
-        row_phrase_final: torch.Tensor | None,
-        carry: float,
-        prefix_offset: float,
-        row_budget_pos: int,
-        row_budget_neg: int,
-        boundary_carry_decay: float,
-        boundary_reset_thresh: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, float]:
-        exec_values = [float(value) for value in row_exec.tolist()]
-        source_values = [max(0, int(value)) for value in row_source_rounded.tolist()]
-        speech_values = [bool(value) for value in row_speech.tolist()]
-        coarse_values = (
-            [bool(value) for value in row_coarse.tolist()] if isinstance(row_coarse, torch.Tensor) else None
-        )
-        boundary_values = (
-            [float(value) for value in row_boundary.tolist()] if isinstance(row_boundary, torch.Tensor) else None
-        )
-        phrase_final_values = (
-            [bool(value) for value in row_phrase_final.tolist()] if isinstance(row_phrase_final, torch.Tensor) else None
-        )
-
-        projected_values: list[float] = []
-        boundary_hit_values: list[float] = []
-        boundary_decay_values: list[float] = []
-        for offset, exec_value in enumerate(exec_values):
-            source_count = source_values[offset]
-            is_speech = speech_values[offset]
-            is_coarse_only = bool(coarse_values is not None and coarse_values[offset])
-            if (not is_speech) and (not is_coarse_only):
-                projected_values.append(float(source_count))
-                boundary_hit_values.append(0.0)
-                boundary_decay_values.append(0.0)
-                continue
-
-            total = max(0.0, float(exec_value) + carry)
-            frames = float(math.floor(total + 0.5))
-            frames = max(1.0, frames)
-            anchor = max(1, source_count)
-            lower = max(1, int(math.ceil(float(anchor - (row_budget_neg + prefix_offset)))))
-            upper = max(lower, int(math.floor(float(anchor + (row_budget_pos - prefix_offset)))))
-            frames = float(min(max(int(frames), lower), upper))
-            projected_values.append(frames)
-            prefix_offset += float(frames) - float(anchor)
-            carry = total - frames
-
-            boundary_event = False
-            if boundary_values is not None and boundary_values[offset] >= float(boundary_reset_thresh):
-                boundary_event = True
-            if phrase_final_values is not None and phrase_final_values[offset]:
-                boundary_event = True
-            if boundary_event:
-                boundary_hit_values.append(1.0)
-                if float(boundary_carry_decay) < (1.0 - 1.0e-6):
-                    carry = float(carry) * float(boundary_carry_decay)
-                    prefix_offset = float(prefix_offset) * float(boundary_carry_decay)
-                    prefix_offset = max(-float(row_budget_neg), min(float(row_budget_pos), float(prefix_offset)))
-                    boundary_decay_values.append(1.0)
-                else:
-                    boundary_decay_values.append(0.0)
-            else:
-                boundary_hit_values.append(0.0)
-                boundary_decay_values.append(0.0)
-
-        row_projected = torch.as_tensor(projected_values, dtype=row_exec.dtype, device=row_exec.device)
-        row_boundary_hit = torch.as_tensor(boundary_hit_values, dtype=row_exec.dtype, device=row_exec.device)
-        row_boundary_decay = torch.as_tensor(boundary_decay_values, dtype=row_exec.dtype, device=row_exec.device)
-        return row_projected, row_boundary_hit, row_boundary_decay, float(carry), float(prefix_offset)
-
-    @staticmethod
     def _extract_projection_row_torch(
         *,
         batch_idx: int,
@@ -388,7 +429,7 @@ class StreamingDurationProjector(nn.Module):
         row_slice = slice(int(start_unit), int(committed_len))
         row_exec = unit_duration_exec[batch_idx, row_slice].detach().float()
         row_source = source_duration_obs[batch_idx, row_slice].detach().float().clamp_min(0.0)
-        row_source_rounded = torch.round(row_source).to(dtype=torch.long)
+        row_source_rounded = torch.round(row_source)
         row_speech = speech_commit_mask[batch_idx, row_slice].detach().float() > 0.5
         row_coarse = (
             (coarse_only_commit_mask[batch_idx, row_slice].detach().float() > 0.5)
@@ -545,19 +586,23 @@ class StreamingDurationProjector(nn.Module):
         committed_len = commit_mask.float().sum(dim=1).long()
         budget_pos_used = self._resolve_prefix_budget_tensor(
             source_duration_obs=source_duration_obs,
+            speech_commit_mask=speech_commit_mask.float(),
             committed_len=committed_len,
             static_budget=self.prefix_budget_pos,
             dynamic_budget_ratio=self.dynamic_budget_ratio,
             min_prefix_budget=self.min_prefix_budget,
             max_prefix_budget=self.max_prefix_budget,
+            budget_mode=self.budget_mode,
         ).unsqueeze(1)
         budget_neg_used = self._resolve_prefix_budget_tensor(
             source_duration_obs=source_duration_obs,
+            speech_commit_mask=speech_commit_mask.float(),
             committed_len=committed_len,
             static_budget=self.prefix_budget_neg,
             dynamic_budget_ratio=self.dynamic_budget_ratio,
             min_prefix_budget=self.min_prefix_budget,
             max_prefix_budget=self.max_prefix_budget,
+            budget_mode=self.budget_mode,
         ).unsqueeze(1)
         projected_duration_exec, residual_next, prefix_unit_offset_next, boundary_hit, boundary_decay_applied = self._project_duration_prefix(
             unit_duration_exec=unit_duration_exec,
@@ -582,12 +627,15 @@ class StreamingDurationProjector(nn.Module):
             dynamic_budget_ratio=self.dynamic_budget_ratio,
             min_prefix_budget=self.min_prefix_budget,
             max_prefix_budget=self.max_prefix_budget,
+            budget_mode=self.budget_mode,
             boundary_carry_decay=self.boundary_carry_decay,
             boundary_reset_thresh=self.boundary_reset_thresh,
             committed_len=committed_len,
             budget_pos_tensor=budget_pos_used.reshape(batch_size),
             budget_neg_tensor=budget_neg_used.reshape(batch_size),
         )
+        projected_prefix_cumsum = torch.cumsum(projected_duration_exec * commit_mask.float(), dim=1)
+        source_prefix_cumsum = torch.cumsum(source_duration_obs.float() * commit_mask.float(), dim=1)
         materialized_duration_exec = self._materialize_projected_duration(
             unit_duration_exec=unit_duration_exec,
             projected_duration_exec=projected_duration_exec,
@@ -653,4 +701,7 @@ class StreamingDurationProjector(nn.Module):
             projector_boundary_hit=boundary_hit.detach(),
             projector_boundary_decay_applied=boundary_decay_applied.detach(),
             projector_since_last_boundary=next_state.since_last_boundary.detach(),
+            projector_budget_mode=self.budget_mode,
+            projected_prefix_cumsum=projected_prefix_cumsum.detach(),
+            source_prefix_cumsum=source_prefix_cumsum.detach(),
         )

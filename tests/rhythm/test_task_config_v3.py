@@ -384,6 +384,22 @@ def test_validate_rhythm_training_hparams_rejects_out_of_range_min_prompt_speech
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_invalid_budget_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_budget_mode"] = "bad_mode"
+    with pytest.raises(ValueError, match="rhythm_v3_budget_mode"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_negative_short_alignment_aliases():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_align_lambda_emb"] = -0.1
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_lambda_emb"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_self_target_fallback():
     hparams = _minimal_v3_hparams()
     hparams.update(
@@ -401,6 +417,22 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_self_t
         }
     )
     with pytest.raises(ValueError, match="rhythm_v3_allow_source_self_target_fallback=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_alignment_source_skip_enabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_alignment_allow_source_skip"] = True
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_allow_source_skip=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_alignment_source_skip_short_alias_enabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_align_allow_source_skip"] = True
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_allow_source_skip=false"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1118,6 +1150,8 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15" in source
     assert "rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55" in source
     assert "rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60" in source
+    assert "rhythm_v3_budget_mode: total" in source
+    assert "rhythm_v3_detach_global_term_in_local_head: false" in source
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_num_summary_slots: 1" in source

@@ -336,6 +336,8 @@ class DurationExecution:
     source_prefix_summary: Optional[torch.Tensor] = None
     g_ref: Optional[torch.Tensor] = None
     g_src_prefix: Optional[torch.Tensor] = None
+    g_src_utt: Optional[torch.Tensor] = None
+    g_src_prefix_mean: Optional[torch.Tensor] = None
     eval_mode: Optional[str] = None
     prompt_speech_ratio: Optional[torch.Tensor] = None
     prompt_valid_len: Optional[torch.Tensor] = None
@@ -348,6 +350,18 @@ class DurationExecution:
     projector_boundary_hit: Optional[torch.Tensor] = None
     projector_boundary_decay_applied: Optional[torch.Tensor] = None
     projector_since_last_boundary: Optional[torch.Tensor] = None
+    projector_budget_mode: Optional[str] = None
+    projected_prefix_cumsum: Optional[torch.Tensor] = None
+    source_prefix_cumsum: Optional[torch.Tensor] = None
+    coarse_scalar_raw: Optional[torch.Tensor] = None
+    global_term_before_local: Optional[torch.Tensor] = None
+    unit_residual_gate: Optional[torch.Tensor] = None
+    unit_residual_cold_gate: Optional[torch.Tensor] = None
+    unit_residual_short_gate: Optional[torch.Tensor] = None
+    unit_residual_gate_stability: Optional[torch.Tensor] = None
+    unit_runtime_stability: Optional[torch.Tensor] = None
+    residual_gate_mean: Optional[torch.Tensor] = None
+    detach_global_term_in_local_head: Optional[torch.Tensor] = None
 
     @property
     def speech_duration_exec(self) -> torch.Tensor:

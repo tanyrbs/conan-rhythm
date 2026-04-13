@@ -143,6 +143,7 @@ class ConanDurationAdapter(nn.Module):
             dynamic_budget_ratio=float(hparams.get("rhythm_v3_dynamic_budget_ratio", 0.0) or 0.0),
             min_prefix_budget=int(hparams.get("rhythm_v3_min_prefix_budget", 0) or 0),
             max_prefix_budget=int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0),
+            budget_mode=str(hparams.get("rhythm_v3_budget_mode", "total") or "total"),
             boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
             boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
             rate_mode=rate_mode,
@@ -158,6 +159,9 @@ class ConanDurationAdapter(nn.Module):
             drop_edge_runs_for_g=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             disable_local_residual=bool(hparams.get("rhythm_v3_disable_local_residual", False)),
             disable_coarse_bias=bool(hparams.get("rhythm_v3_disable_coarse_bias", False)),
+            detach_global_term_in_local_head=bool(
+                hparams.get("rhythm_v3_detach_global_term_in_local_head", False)
+            ),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
             allow_hybrid=(
                 None
@@ -553,10 +557,17 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
         ret["rhythm_v3_g_variant"] = self.module.g_variant
         ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
+        ret["rhythm_v3_detach_global_term_in_local_head"] = float(
+            bool(getattr(self.module, "detach_global_term_in_local_head", False))
+        )
         if isinstance(getattr(execution, "prompt_speech_ratio", None), torch.Tensor):
             ret["rhythm_prompt_speech_ratio"] = execution.prompt_speech_ratio.detach()
         if isinstance(getattr(execution, "prompt_valid_len", None), torch.Tensor):
             ret["rhythm_prompt_valid_len"] = execution.prompt_valid_len.detach()
+        if isinstance(getattr(execution, "g_src_utt", None), torch.Tensor):
+            ret["rhythm_g_src_utt"] = execution.g_src_utt.detach()
+        if isinstance(getattr(execution, "g_src_prefix_mean", None), torch.Tensor):
+            ret["rhythm_g_src_prefix_mean"] = execution.g_src_prefix_mean.detach()
         if ref_memory is not None and isinstance(getattr(ref_memory, "summary_state", None), torch.Tensor):
             ret["rhythm_v3_summary_state_dim"] = float(ref_memory.summary_state.size(1))
         elif ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
@@ -675,6 +686,16 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "g_src_prefix", None), torch.Tensor)
                     else None
                 ),
+                "g_src_utt": (
+                    execution.g_src_utt.detach()
+                    if isinstance(getattr(execution, "g_src_utt", None), torch.Tensor)
+                    else None
+                ),
+                "g_src_prefix_mean": (
+                    execution.g_src_prefix_mean.detach()
+                    if isinstance(getattr(execution, "g_src_prefix_mean", None), torch.Tensor)
+                    else None
+                ),
                 "global_shift_analytic": (
                     execution.global_shift_analytic.detach()
                     if isinstance(getattr(execution, "global_shift_analytic", None), torch.Tensor)
@@ -727,6 +748,51 @@ class ConanDurationAdapter(nn.Module):
                 "source_rate_seq": (
                     execution.source_rate_seq.detach()
                     if isinstance(getattr(execution, "source_rate_seq", None), torch.Tensor)
+                    else None
+                ),
+                "coarse_scalar_raw": (
+                    execution.coarse_scalar_raw.detach()
+                    if isinstance(getattr(execution, "coarse_scalar_raw", None), torch.Tensor)
+                    else None
+                ),
+                "global_term_before_local": (
+                    execution.global_term_before_local.detach()
+                    if isinstance(getattr(execution, "global_term_before_local", None), torch.Tensor)
+                    else None
+                ),
+                "unit_residual_gate": (
+                    execution.unit_residual_gate.detach()
+                    if isinstance(getattr(execution, "unit_residual_gate", None), torch.Tensor)
+                    else None
+                ),
+                "unit_residual_cold_gate": (
+                    execution.unit_residual_cold_gate.detach()
+                    if isinstance(getattr(execution, "unit_residual_cold_gate", None), torch.Tensor)
+                    else None
+                ),
+                "unit_residual_short_gate": (
+                    execution.unit_residual_short_gate.detach()
+                    if isinstance(getattr(execution, "unit_residual_short_gate", None), torch.Tensor)
+                    else None
+                ),
+                "unit_residual_gate_stability": (
+                    execution.unit_residual_gate_stability.detach()
+                    if isinstance(getattr(execution, "unit_residual_gate_stability", None), torch.Tensor)
+                    else None
+                ),
+                "unit_runtime_stability": (
+                    execution.unit_runtime_stability.detach()
+                    if isinstance(getattr(execution, "unit_runtime_stability", None), torch.Tensor)
+                    else None
+                ),
+                "residual_gate_mean": (
+                    execution.residual_gate_mean.detach()
+                    if isinstance(getattr(execution, "residual_gate_mean", None), torch.Tensor)
+                    else None
+                ),
+                "detach_global_term_in_local_head": (
+                    execution.detach_global_term_in_local_head.detach()
+                    if isinstance(getattr(execution, "detach_global_term_in_local_head", None), torch.Tensor)
                     else None
                 ),
                 "prompt_speech_ratio": (
@@ -798,6 +864,17 @@ class ConanDurationAdapter(nn.Module):
                         else None
                     )
                 ),
+                "projected_prefix_cumsum": (
+                    execution.projected_prefix_cumsum.detach()
+                    if isinstance(getattr(execution, "projected_prefix_cumsum", None), torch.Tensor)
+                    else None
+                ),
+                "source_prefix_cumsum": (
+                    execution.source_prefix_cumsum.detach()
+                    if isinstance(getattr(execution, "source_prefix_cumsum", None), torch.Tensor)
+                    else None
+                ),
+                "projector_budget_mode": getattr(execution, "projector_budget_mode", None),
                 "eval_mode": getattr(execution, "eval_mode", self.module.eval_mode),
             }
             ret["rhythm_v3_debug"] = debug_bundle
@@ -805,6 +882,8 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_g_ref_scalar"] = debug_bundle["g_ref_scalar"]
             ret["rhythm_debug_g_src_prefix"] = debug_bundle["g_src_prefix"]
             ret["rhythm_debug_g_src_prefix_seq"] = debug_bundle["g_src_prefix_seq"]
+            ret["rhythm_debug_g_src_utt"] = debug_bundle["g_src_utt"]
+            ret["rhythm_debug_g_src_prefix_mean"] = debug_bundle["g_src_prefix_mean"]
             ret["rhythm_debug_analytic_gap"] = debug_bundle["global_shift_analytic"]
             ret["rhythm_debug_analytic_logstretch"] = debug_bundle["analytic_logstretch"]
             ret["rhythm_debug_coarse_bias"] = debug_bundle["coarse_correction"]
@@ -812,10 +891,19 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_coarse_pred"] = debug_bundle["coarse_correction_pred"]
             ret["rhythm_debug_coarse_delta"] = debug_bundle["coarse_delta"]
             ret["rhythm_debug_coarse_path"] = debug_bundle["coarse_path_logstretch"]
+            ret["rhythm_debug_coarse_scalar_raw"] = debug_bundle["coarse_scalar_raw"]
+            ret["rhythm_debug_global_term_before_local"] = debug_bundle["global_term_before_local"]
             ret["rhythm_debug_local_residual"] = debug_bundle["local_residual"]
             ret["rhythm_debug_residual_logstretch"] = debug_bundle["residual_logstretch"]
             ret["rhythm_debug_residual_used"] = debug_bundle["residual_logstretch_used"]
             ret["rhythm_debug_residual_pred"] = debug_bundle["residual_logstretch_pred"]
+            ret["rhythm_debug_unit_residual_gate"] = debug_bundle["unit_residual_gate"]
+            ret["rhythm_debug_unit_residual_cold_gate"] = debug_bundle["unit_residual_cold_gate"]
+            ret["rhythm_debug_unit_residual_short_gate"] = debug_bundle["unit_residual_short_gate"]
+            ret["rhythm_debug_unit_residual_gate_stability"] = debug_bundle["unit_residual_gate_stability"]
+            ret["rhythm_debug_unit_runtime_stability"] = debug_bundle["unit_runtime_stability"]
+            ret["rhythm_debug_residual_gate_mean"] = debug_bundle["residual_gate_mean"]
+            ret["rhythm_debug_detach_global_term_in_local_head"] = debug_bundle["detach_global_term_in_local_head"]
             ret["rhythm_debug_speech_pred"] = debug_bundle["speech_pred"]
             ret["rhythm_debug_silence_pred"] = debug_bundle["silence_pred"]
             ret["rhythm_debug_projector_prefix_offset"] = debug_bundle["projector_prefix_offset"]
@@ -825,6 +913,8 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_projector_budget_pos_used"] = debug_bundle["projector_budget_pos_used"]
             ret["rhythm_debug_projector_budget_neg_used"] = debug_bundle["projector_budget_neg_used"]
             ret["rhythm_debug_projector_since_last_boundary"] = debug_bundle["projector_since_last_boundary"]
+            ret["rhythm_debug_projected_prefix_cumsum"] = debug_bundle["projected_prefix_cumsum"]
+            ret["rhythm_debug_source_prefix_cumsum"] = debug_bundle["source_prefix_cumsum"]
             for key, value in g_debug_stats.items():
                 ret[f"rhythm_debug_{key}"] = value
             if isinstance(ret.get("rhythm_prompt_global_weight_present"), torch.Tensor):

@@ -98,6 +98,14 @@ def _is_enabled_flag(value) -> bool:
     return bool(value)
 
 
+def _get_hparam_alias(hparams, primary: str, alias: str, default=None):
+    if primary in hparams:
+        return hparams.get(primary)
+    if alias in hparams:
+        return hparams.get(alias)
+    return default
+
+
 def validate_duration_v3_training_hparams(hparams) -> None:
     for old_key, new_key in _DEPRECATED_V3_HPARAM_RENAMES.items():
         if old_key in hparams:
@@ -243,8 +251,17 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_drop_edge_runs_for_g >= 1.")
         if _is_enabled_flag(hparams.get("rhythm_v3_alignment_soft_repair", False)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_soft_repair=false.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_alignment_allow_source_skip", False)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false.")
+        if _is_enabled_flag(
+            _get_hparam_alias(
+                hparams,
+                "rhythm_v3_alignment_allow_source_skip",
+                "rhythm_v3_align_allow_source_skip",
+                False,
+            )
+        ):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
+            )
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)
     ):
@@ -328,6 +345,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         raise ValueError("rhythm_v3_max_prefix_budget must be >= 0 for rhythm_v3.")
     if max_prefix_budget > 0 and max_prefix_budget < min_prefix_budget:
         raise ValueError("rhythm_v3_max_prefix_budget must be >= rhythm_v3_min_prefix_budget.")
+    budget_mode = str(hparams.get("rhythm_v3_budget_mode", "total") or "total").strip().lower()
+    if budget_mode not in {"total", "speech_only", "hybrid"}:
+        raise ValueError("rhythm_v3_budget_mode must be one of: total, speech_only, hybrid.")
     if float(hparams.get("rhythm_progress_support_tau", 8.0) or 0.0) < 0.0:
         raise ValueError("rhythm_progress_support_tau must be >= 0 for rhythm_v3.")
     if int(hparams.get("rhythm_progress_bins", 4) or 0) <= 0:
@@ -353,18 +373,25 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             value = float(hparams.get(key, 0.0) or 0.0)
             if value < 0.0 or value > 1.0:
                 raise ValueError(f"{key} must be within [0, 1] for rhythm_v3.")
-    for key in (
-        "rhythm_v3_alignment_lambda_emb",
-        "rhythm_v3_alignment_lambda_type",
-        "rhythm_v3_alignment_lambda_band",
-        "rhythm_v3_alignment_lambda_unit",
-        "rhythm_v3_alignment_bad_cost_threshold",
-        "rhythm_v3_alignment_skip_penalty",
+    for key, alias in (
+        ("rhythm_v3_alignment_lambda_emb", "rhythm_v3_align_lambda_emb"),
+        ("rhythm_v3_alignment_lambda_type", "rhythm_v3_align_lambda_type"),
+        ("rhythm_v3_alignment_lambda_band", "rhythm_v3_align_lambda_band"),
+        ("rhythm_v3_alignment_lambda_unit", "rhythm_v3_align_lambda_unit"),
+        ("rhythm_v3_alignment_bad_cost_threshold", "rhythm_v3_align_bad_cost_threshold"),
+        ("rhythm_v3_alignment_skip_penalty", "rhythm_v3_align_skip_penalty"),
     ):
-        if key in hparams and float(hparams.get(key, 0.0) or 0.0) < 0.0:
+        value = _get_hparam_alias(hparams, key, alias, None)
+        if value is not None and float(value or 0.0) < 0.0:
             raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
-    if "rhythm_v3_alignment_band_ratio" in hparams:
-        band_ratio = float(hparams.get("rhythm_v3_alignment_band_ratio", 0.0) or 0.0)
+    band_ratio_value = _get_hparam_alias(
+        hparams,
+        "rhythm_v3_alignment_band_ratio",
+        "rhythm_v3_align_band_ratio",
+        None,
+    )
+    if band_ratio_value is not None:
+        band_ratio = float(band_ratio_value or 0.0)
         if band_ratio < 0.0:
             raise ValueError("rhythm_v3_alignment_band_ratio must be >= 0 for rhythm_v3.")
     if baseline_train_mode == "pretrain" and float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) <= 0.0:

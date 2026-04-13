@@ -260,6 +260,157 @@ def _weighted_masked_huber(
     return _reduce_batch_loss(masked_loss / masked_denom, batch_weight)
 
 
+def _masked_mean_scalar(
+    value: Optional[torch.Tensor],
+    mask: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    if not isinstance(value, torch.Tensor) or not isinstance(mask, torch.Tensor):
+        return None
+    value = value.float()
+    eff_mask = mask.float()
+    while eff_mask.dim() < value.dim():
+        eff_mask = eff_mask.unsqueeze(-1)
+    reduce_dims = tuple(range(1, value.dim()))
+    numer = (value * eff_mask).sum(dim=reduce_dims)
+    denom = eff_mask.sum(dim=reduce_dims).clamp_min(1.0)
+    return (numer / denom).mean()
+
+
+def _masked_abs_mean_scalar(
+    value: Optional[torch.Tensor],
+    mask: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    if not isinstance(value, torch.Tensor):
+        return None
+    return _masked_mean_scalar(value.abs(), mask)
+
+
+def _resolve_duration_v3_prefix_target_surface(targets: DurationV3LossTargets) -> torch.Tensor:
+    if isinstance(targets.coarse_duration_tgt, torch.Tensor):
+        return targets.coarse_duration_tgt.float()
+    if isinstance(targets.prefix_duration_tgt, torch.Tensor):
+        return targets.prefix_duration_tgt.float()
+    if isinstance(targets.prediction_anchor, torch.Tensor):
+        anchor = targets.prediction_anchor.float()
+    else:
+        anchor = targets.unit_anchor_base.float()
+    speech_mask = (
+        targets.committed_speech_mask.float()
+        if isinstance(targets.committed_speech_mask, torch.Tensor)
+        else targets.committed_mask.float()
+    )
+    silence_mask = (
+        targets.committed_silence_mask.float()
+        if isinstance(targets.committed_silence_mask, torch.Tensor)
+        else anchor.new_zeros(anchor.shape)
+    )
+    return (targets.unit_duration_tgt.float() * speech_mask) + (anchor * silence_mask)
+
+
+def _build_duration_v3_diagnostic_metrics(
+    *,
+    execution,
+    targets: DurationV3LossTargets,
+    committed_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    ref = execution.speech_duration_exec.float()
+    zero = ref.new_tensor(0.0)
+    diagnostics: dict[str, torch.Tensor] = {}
+    speech_commit_mask = (
+        targets.committed_speech_mask.float()
+        if isinstance(targets.committed_speech_mask, torch.Tensor)
+        else committed_mask.float()
+    )
+    silence_commit_mask = (
+        targets.committed_silence_mask.float()
+        if isinstance(targets.committed_silence_mask, torch.Tensor)
+        else committed_mask.new_zeros(committed_mask.shape)
+    )
+    target_surface = _resolve_duration_v3_prefix_target_surface(targets)
+    committed_prefix_pred = torch.cumsum(ref * committed_mask.float(), dim=1)
+    committed_prefix_tgt = torch.cumsum(target_surface * committed_mask.float(), dim=1)
+    committed_prefix_discrepancy = _masked_abs_mean_scalar(
+        committed_prefix_pred - committed_prefix_tgt,
+        committed_mask,
+    )
+    diagnostics["rhythm_v3_committed_exec_prefix_discrepancy"] = (
+        committed_prefix_discrepancy.detach()
+        if isinstance(committed_prefix_discrepancy, torch.Tensor)
+        else zero
+    )
+    silence_scale = float(max(0.0, targets.silence_coarse_weight))
+    prefix_weight = speech_commit_mask + (silence_scale * silence_commit_mask)
+    projected_prefix_pred = torch.cumsum(ref * prefix_weight, dim=1)
+    projected_prefix_tgt = torch.cumsum(target_surface * prefix_weight, dim=1)
+    projected_prefix_discrepancy = _masked_abs_mean_scalar(
+        projected_prefix_pred - projected_prefix_tgt,
+        committed_mask,
+    )
+    diagnostics["rhythm_v3_projected_exec_prefix_discrepancy"] = (
+        projected_prefix_discrepancy.detach()
+        if isinstance(projected_prefix_discrepancy, torch.Tensor)
+        else zero
+    )
+
+    local_residual = getattr(execution, "local_residual", getattr(execution, "local_response", None))
+    coarse_correction = getattr(execution, "coarse_correction", None)
+    local_abs_mean = _masked_abs_mean_scalar(local_residual, speech_commit_mask)
+    local_mean = _masked_mean_scalar(local_residual, speech_commit_mask)
+    coarse_abs_mean = _masked_abs_mean_scalar(coarse_correction, speech_commit_mask)
+    diagnostics["rhythm_v3_local_residual_abs_mean"] = (
+        local_abs_mean.detach() if isinstance(local_abs_mean, torch.Tensor) else zero
+    )
+    diagnostics["rhythm_v3_local_residual_mean"] = (
+        local_mean.detach() if isinstance(local_mean, torch.Tensor) else zero
+    )
+    if isinstance(coarse_abs_mean, torch.Tensor) and isinstance(local_abs_mean, torch.Tensor):
+        diagnostics["rhythm_v3_coarse_explained_ratio"] = (
+            coarse_abs_mean / (coarse_abs_mean + local_abs_mean + 1.0e-6)
+        ).detach()
+    else:
+        diagnostics["rhythm_v3_coarse_explained_ratio"] = zero
+    if isinstance(local_residual, torch.Tensor):
+        silence_local_leak = _masked_mean_scalar(
+            (local_residual.float().abs() > 1.0e-6).float(),
+            silence_commit_mask,
+        )
+        diagnostics["rhythm_v3_silence_local_leak_rate"] = (
+            silence_local_leak.detach()
+            if isinstance(silence_local_leak, torch.Tensor)
+            else zero
+        )
+    else:
+        diagnostics["rhythm_v3_silence_local_leak_rate"] = zero
+    support_mass = getattr(targets, "global_bias_tgt_support_mass", None)
+    if isinstance(support_mass, torch.Tensor):
+        diagnostics["rhythm_v3_global_bias_tgt_support_mass"] = support_mass.float().mean().detach()
+    else:
+        diagnostics["rhythm_v3_global_bias_tgt_support_mass"] = zero
+    support_count = getattr(targets, "global_bias_tgt_support_count", None)
+    if isinstance(support_count, torch.Tensor):
+        diagnostics["rhythm_v3_global_bias_tgt_support_count"] = support_count.float().mean().detach()
+    else:
+        diagnostics["rhythm_v3_global_bias_tgt_support_count"] = zero
+    coarse_conf = getattr(targets, "coarse_target_speech_conf_mean", None)
+    if isinstance(coarse_conf, torch.Tensor):
+        diagnostics["rhythm_v3_coarse_target_speech_conf_mean"] = coarse_conf.float().mean().detach()
+    else:
+        diagnostics["rhythm_v3_coarse_target_speech_conf_mean"] = zero
+    if isinstance(getattr(targets, "silence_coarse_logstretch_tgt", None), torch.Tensor):
+        silence_coarse_abs_mean = _masked_abs_mean_scalar(
+            targets.silence_coarse_logstretch_tgt.float(),
+            silence_commit_mask,
+        )
+        diagnostics["rhythm_v3_silence_coarse_logstretch_tgt_abs_mean"] = (
+            silence_coarse_abs_mean.detach()
+            if isinstance(silence_coarse_abs_mean, torch.Tensor)
+            else zero
+        )
+    else:
+        diagnostics["rhythm_v3_silence_coarse_logstretch_tgt_abs_mean"] = zero
+    return diagnostics
+
+
 def _masked_log_huber(
     pred: torch.Tensor,
     tgt: torch.Tensor,
@@ -1728,6 +1879,11 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
     )
     scaled_base = l_base * float(targets.lambda_base)
     total = scaled_dur + scaled_op + scaled_bias + scaled_zero + scaled_ortho + scaled_stream + scaled_base
+    diagnostics = _build_duration_v3_diagnostic_metrics(
+        execution=execution,
+        targets=targets,
+        committed_mask=committed_mask,
+    )
     loss_dict = {
         "rhythm_exec_speech": scaled_dur,
         "rhythm_exec_stretch": scaled_op + scaled_bias + scaled_zero + scaled_ortho,
@@ -1744,6 +1900,7 @@ def _build_duration_v3_loss_dict(execution, targets: DurationV3LossTargets) -> d
         "rhythm_v3_stream": l_stream.detach(),
         "rhythm_is_v3_bundle": pred_speech.new_tensor(1.0),
         "rhythm_total": total,
+        **diagnostics,
     }
     if (
         (
