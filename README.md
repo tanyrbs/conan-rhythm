@@ -24,6 +24,9 @@ Use:
 - `rhythm_v3_simple_global_stats: true`
 - `rhythm_v3_g_variant: raw_median`
 - `rhythm_v3_unit_prior_path: null`  (`unit_norm` only; build with `scripts/build_unit_log_prior.py`)
+- `rhythm_v3_use_continuous_alignment: true`
+- `rhythm_v3_alignment_mode: continuous_viterbi_v1`
+- `rhythm_v3_gate_quality_strict: true`
 - `rhythm_v3_eval_mode: learned`
 
 In that default path, the writer is:
@@ -48,7 +51,7 @@ The maintained explanation is:
 
 - **source-anchored duration writing**
 - **global-stat prompt conditioning by default**
-- **prefix-level coarse correction over the analytic source/ref rate gap**
+- **utterance-level scalar coarse correction over the analytic source/ref rate gap, broadcast over the visible prefix**
 - **strict-causal prefix-rate correction**
 - **carry+budget integer projection core with exported boundary-side smoothing telemetry**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
@@ -178,9 +181,10 @@ escape hatch.
 For review/export, `unit_duration_proj_raw_tgt` is the explicit raw-projection
 alias and should be preferred when present. When `unit_duration_tgt` is cached
 for the maintained continuous path, keep `unit_duration_proj_raw_tgt`,
-`unit_alignment_mode_id_tgt`, and `unit_alignment_kind_tgt` alongside it so the
-target surface remains provenance-clean. Training still consumes decomposed
-surfaces such as `global_shift_tgt`, `coarse_logstretch_tgt`,
+`unit_alignment_mode_id_tgt`, `unit_alignment_kind_tgt`,
+`unit_alignment_source_tgt`, and `unit_alignment_version_tgt` alongside it so
+the target surface remains provenance-clean. Training still consumes
+decomposed surfaces such as `global_shift_tgt`, `coarse_logstretch_tgt`,
 `local_residual_tgt`, and the clipped coarse-derived silence target rather than
 treating the raw projection surface as the final supervision object.
 
@@ -206,10 +210,23 @@ rather than the maintained default. If neither explicit continuous provenance
 nor the required frame-state sidecars are available, the maintained path fails
 fast instead of silently falling back to discrete projection.
 
+In the maintained canonical YAML, continuous paired-target supervision is
+explicitly enabled and pinned to `continuous_viterbi_v1`; switching back to a
+discrete paired-target path is now a deliberate ablation rather than an
+implicit default.
+
 `continuous_viterbi_v1` is a hard-path aligner: it exports Viterbi/source-run
 occupancy plus heuristic confidence/provenance, not posterior expected
 occupancy. Treat posterior expected-duration surfaces as unavailable until
 `continuous_fwdbwd_v1` exists.
+
+The maintained config also carries explicit alignment-quality thresholds
+(`rhythm_v3_alignment_unmatched_speech_ratio_max`,
+`rhythm_v3_alignment_mean_local_confidence_speech_min`,
+`rhythm_v3_alignment_mean_coarse_confidence_speech_min`) and a
+`rhythm_v3_gate_quality_strict: true` intent marker so the canonical recipe is
+documented as fail-hard on bad supervision / incomplete falsification evidence,
+not just warning-driven.
 
 The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
 compatibility alias that inherits the maintained `rhythm_v3` contract; it is no

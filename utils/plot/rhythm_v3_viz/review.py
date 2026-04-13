@@ -26,6 +26,7 @@ from .core import RhythmV3DebugRecord, derive_record, load_debug_records, weight
 DEFAULT_REVIEW_SILENCE_TAU = 0.35
 DEFAULT_REVIEW_BOUNDARY_THRESHOLD = 0.55
 DEFAULT_REVIEW_UNIT_STEP_MS = 20.0
+DEFAULT_GATE_MIN_SPEECH_RATIO = 0.6
 _REAL_REF_CONDITIONS = {"", "nan", "real", "real_reference"}
 _NEGATIVE_CONTROL_REF_CONDITIONS = {"source_only", "random_ref", "shuffled_ref"}
 
@@ -219,6 +220,70 @@ def _maybe_with_status(
     return float(value)
 
 
+def _status_is_ok(status: Any) -> bool:
+    normalized = _as_str(status, default="").strip().lower()
+    return normalized == "ok"
+
+
+def _resolve_prompt_domain_stats(
+    *,
+    prompt_duration: np.ndarray | None,
+    prompt_speech: np.ndarray | None,
+    speech_ratio_hint: Any = None,
+    support_count_hint: Any = None,
+    valid_count_hint: Any = None,
+    g_valid_hint: Any = None,
+    g_domain_valid_hint: Any = None,
+    min_speech_ratio_hint: Any = None,
+    default_min_speech_ratio: float = DEFAULT_GATE_MIN_SPEECH_RATIO,
+) -> dict[str, float]:
+    support_count = _as_float(support_count_hint, default=float("nan"))
+    valid_count = _as_float(valid_count_hint, default=float("nan"))
+    speech_ratio = _as_float(speech_ratio_hint, default=float("nan"))
+    min_speech_ratio = _as_float(min_speech_ratio_hint, default=float("nan"))
+    if not np.isfinite(min_speech_ratio):
+        min_speech_ratio = float(default_min_speech_ratio)
+
+    if prompt_duration is not None:
+        duration = np.asarray(prompt_duration, dtype=np.float32).reshape(-1)
+        if not np.isfinite(valid_count):
+            valid_count = float(duration.shape[0])
+        if prompt_speech is not None:
+            speech = np.asarray(prompt_speech, dtype=np.float32).reshape(-1)
+            width = min(int(duration.shape[0]), int(speech.shape[0]))
+            duration = duration[:width]
+            speech = speech[:width]
+            if not np.isfinite(speech_ratio):
+                speech_ratio = float(
+                    np.sum(duration * speech) / max(float(np.sum(duration)), 1.0e-6)
+                )
+            if not np.isfinite(support_count):
+                support_count = float(np.sum((speech > 0.5).astype(np.float32)))
+
+    g_valid_support = _as_float(g_valid_hint, default=float("nan"))
+    if not np.isfinite(g_valid_support):
+        g_valid_support = (
+            1.0 if np.isfinite(support_count) and float(support_count) >= 1.0 else 0.0
+        )
+    g_domain_valid = _as_float(g_domain_valid_hint, default=float("nan"))
+    if not np.isfinite(g_domain_valid):
+        g_domain_valid = (
+            1.0
+            if bool(g_valid_support > 0.5)
+            and np.isfinite(speech_ratio)
+            and float(speech_ratio) >= (float(min_speech_ratio) - 1.0e-6)
+            else 0.0
+        )
+    return {
+        "g_valid_support": float(g_valid_support),
+        "g_domain_valid": float(g_domain_valid),
+        "prompt_speech_ratio": float(speech_ratio),
+        "g_min_speech_ratio": float(min_speech_ratio),
+        "g_support_count": float(support_count),
+        "g_valid_count": float(valid_count),
+    }
+
+
 def compute_g(
     duration_obs: Any,
     *,
@@ -288,6 +353,7 @@ def compute_source_global_rate_for_analysis(
     source_unit_prior: Any | None = None,
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    require_explicit_speech_mask: bool = False,
     return_status: bool = False,
 ) -> float | tuple[float, str]:
     log_dur = _safe_array(source_log_dur, dtype=np.float32)
@@ -417,13 +483,28 @@ def _resolve_gate0_drop_reason(
     c_star: float,
     g_compute_status: str,
     g_src_compute_status: str,
+    g_domain_valid: float,
+    speech_ratio: float,
+    min_speech_ratio: float,
+    has_explicit_prompt_speech_mask: bool = True,
+    require_explicit_prompt_speech_mask: bool = False,
 ) -> str:
+    if bool(require_explicit_prompt_speech_mask) and not bool(has_explicit_prompt_speech_mask):
+        return "g_ref:missing:source_speech_mask"
+    if not _status_is_ok(g_compute_status):
+        return f"g_ref:{g_compute_status}"
+    if not _status_is_ok(g_src_compute_status):
+        return f"g_src:{g_src_compute_status}"
     if not np.isfinite(c_star):
         return "missing:c_star"
     if not np.isfinite(g_ref):
-        return f"g_ref:{g_compute_status}"
+        return "g_ref:nonfinite"
     if not np.isfinite(g_src):
-        return f"g_src:{g_src_compute_status}"
+        return "g_src:nonfinite"
+    if not np.isfinite(g_domain_valid) or float(g_domain_valid) <= 0.5:
+        return "g_domain:invalid"
+    if not np.isfinite(speech_ratio) or float(speech_ratio) < float(min_speech_ratio):
+        return "ref:speech_ratio"
     delta_g = float(g_ref - g_src)
     if not np.isfinite(delta_g):
         return "delta_g:nonfinite"
@@ -557,6 +638,8 @@ def build_ref_crop_table(
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
     unit_step_ms: float = DEFAULT_REVIEW_UNIT_STEP_MS,
+    require_explicit_speech_mask: bool = False,
+    min_speech_ratio: float = DEFAULT_GATE_MIN_SPEECH_RATIO,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
     rows: list[dict[str, Any]] = []
@@ -565,13 +648,19 @@ def build_ref_crop_table(
         derived = derive_record(record)
         prompt_duration = _safe_array(record.prompt_duration_obs, dtype=np.float32)
         prompt_valid = _safe_array(record.prompt_valid_mask, dtype=np.float32)
-        prompt_speech = _safe_array(record.prompt_speech_mask, dtype=np.float32)
+        prompt_speech_explicit = _safe_array(record.prompt_speech_mask, dtype=np.float32)
+        prompt_speech = prompt_speech_explicit
         source_duration = _safe_array(record.source_duration_obs, dtype=np.float32)
         source_silence = _safe_array(record.source_silence_mask, dtype=np.float32)
         source_valid = _safe_array(record.unit_mask, dtype=np.float32)
         source_units = _safe_array(record.source_content_units, dtype=np.int64)
         prompt_units = _safe_array(record.prompt_content_units, dtype=np.int64)
-        if prompt_speech is None and prompt_duration is not None and derived.prompt_speech_mask is not None:
+        if (
+            not bool(require_explicit_speech_mask)
+            and prompt_speech is None
+            and prompt_duration is not None
+            and derived.prompt_speech_mask is not None
+        ):
             prompt_speech = derived.prompt_speech_mask.astype(np.float32, copy=False)
         if record.global_rate is not None:
             g_ref = float(record.global_rate)
@@ -579,14 +668,13 @@ def build_ref_crop_table(
         else:
             g_ref, g_compute_status = compute_source_global_rate_for_analysis(
                 source_duration_obs=prompt_duration,
-                source_speech_mask=np.ones_like(prompt_duration, dtype=np.float32)
-                if prompt_speech is None and prompt_duration is not None
-                else prompt_speech,
+                source_speech_mask=prompt_speech,
                 source_valid_mask=prompt_valid,
                 g_variant=g_variant,
                 g_trim_ratio=g_trim_ratio,
                 drop_edge_runs=drop_edge_runs,
                 source_unit_ids=prompt_units,
+                require_explicit_speech_mask=require_explicit_speech_mask,
                 return_status=True,
             )
         source_speech = (
@@ -617,13 +705,20 @@ def build_ref_crop_table(
                 else float(prompt_duration.sum()) * float(unit_step_ms) / 1000.0
             ),
         )
+        domain_stats = _resolve_prompt_domain_stats(
+            prompt_duration=prompt_duration,
+            prompt_speech=prompt_speech_explicit if bool(require_explicit_speech_mask) else prompt_speech,
+            speech_ratio_hint=_meta(record, "prompt_speech_ratio", "speech_ratio", default=None),
+            support_count_hint=_meta(record, "g_support_count", default=None),
+            valid_count_hint=_meta(record, "g_valid_count", default=None),
+            g_valid_hint=_meta(record, "g_valid_support", "g_valid", default=None),
+            g_domain_valid_hint=_meta(record, "g_domain_valid", default=None),
+            min_speech_ratio_hint=_meta(record, "g_min_speech_ratio", default=None),
+            default_min_speech_ratio=float(min_speech_ratio),
+        )
         speech_ratio = _as_float(
             _meta(record, "speech_ratio", default=None),
-            default=(
-                float("nan")
-                if prompt_duration is None or prompt_speech is None
-                else float((prompt_duration * prompt_speech).sum() / max(float(prompt_duration.sum()), 1.0e-6))
-            ),
+            default=domain_stats["prompt_speech_ratio"],
         )
         src_prompt_id = _as_str(_meta(record, "src_prompt_id", "prompt_id", default=ids["item_name"]))
         ref_prompt_id = _as_str(_meta(record, "ref_prompt_id", "reference_prompt_id", "ref_item_name", default=""))
@@ -676,6 +771,11 @@ def build_ref_crop_table(
             c_star=c_star,
             g_compute_status=g_compute_status,
             g_src_compute_status=g_src_compute_status,
+            g_domain_valid=domain_stats["g_domain_valid"],
+            speech_ratio=speech_ratio,
+            min_speech_ratio=domain_stats["g_min_speech_ratio"],
+            has_explicit_prompt_speech_mask=prompt_speech_explicit is not None,
+            require_explicit_prompt_speech_mask=require_explicit_speech_mask,
         )
         rows.append(
             {
@@ -707,6 +807,11 @@ def build_ref_crop_table(
                 "delta_g": float(g_ref - g_src) if np.isfinite(g_ref) and np.isfinite(g_src) else float("nan"),
                 "c_star": c_star,
                 "zbar_sp_star": speech_target_stat,
+                "g_valid_support": domain_stats["g_valid_support"],
+                "g_domain_valid": domain_stats["g_domain_valid"],
+                "prompt_speech_ratio": domain_stats["prompt_speech_ratio"],
+                "g_min_speech_ratio": domain_stats["g_min_speech_ratio"],
+                "prompt_speech_mask_explicit": 1.0 if prompt_speech_explicit is not None else 0.0,
                 "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
                 "gate0_drop_reason": gate0_drop_reason,
             }
@@ -1064,6 +1169,7 @@ def build_monotonicity_table(
     g_variant: str = "raw_median",
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
+    require_explicit_speech_mask: bool = False,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
     grouped: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
@@ -1098,7 +1204,11 @@ def build_monotonicity_table(
         )
         tempo_ref = compute_speech_tempo_for_analysis(
             source_duration_obs=record.prompt_duration_obs,
-            source_speech_mask=record.prompt_speech_mask if record.prompt_speech_mask is not None else derived.prompt_speech_mask,
+            source_speech_mask=(
+                record.prompt_speech_mask
+                if record.prompt_speech_mask is not None
+                else (None if bool(require_explicit_speech_mask) else derived.prompt_speech_mask)
+            ),
             source_valid_mask=record.prompt_valid_mask,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
@@ -1131,6 +1241,7 @@ def build_monotonicity_table(
                     meta.get("same_speaker", float("nan")),
                 )
             ),
+            "prompt_speech_mask_explicit": 1.0 if record.prompt_speech_mask is not None else 0.0,
         }
     rows: list[dict[str, Any]] = []
     for (src_id, eval_mode, ref_condition, pair_id), bins in grouped.items():
@@ -1172,6 +1283,7 @@ def build_monotonicity_table(
                     "same_speaker_reference": payload["same_speaker_reference"],
                     "mono_triplet_ok": mono,
                     "item_name": payload["item_name"],
+                    "prompt_speech_mask_explicit": payload["prompt_speech_mask_explicit"],
                 }
             )
     return pd.DataFrame(rows)
@@ -1652,8 +1764,20 @@ def save_validation_gate_bundle(
     records = ensure_debug_records(items)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ref_crop_df = build_ref_crop_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
-    monotonicity_df = build_monotonicity_table(records, g_variant=g_variant, g_trim_ratio=g_trim_ratio, drop_edge_runs=drop_edge_runs)
+    ref_crop_df = build_ref_crop_table(
+        records,
+        g_variant=g_variant,
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=drop_edge_runs,
+        require_explicit_speech_mask=True,
+    )
+    monotonicity_df = build_monotonicity_table(
+        records,
+        g_variant=g_variant,
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=drop_edge_runs,
+        require_explicit_speech_mask=True,
+    )
     prefix_silence_df = build_prefix_silence_review_table(records)
     ladder_df = summarize_falsification_ladder(ref_crop_df, monotonicity_df, prefix_silence_df)
     paths = {

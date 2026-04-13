@@ -223,7 +223,11 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "coarse_path_logstretch" in debug
     assert "analytic_logstretch" in debug
     assert "coarse_delta" in debug
+    assert "coarse_correction_used" in debug
+    assert "coarse_correction_pred" in debug
     assert "residual_logstretch" in debug
+    assert "residual_logstretch_used" in debug
+    assert "residual_logstretch_pred" in debug
     assert "speech_pred" in debug
     assert "silence_pred" in debug
     assert "projector_since_last_boundary" in debug
@@ -246,16 +250,27 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["g_support_ratio_vs_speech"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_support_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_valid_support"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["g_min_speech_ratio"], torch.tensor([[0.6]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_speech_ratio"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_debug_g_support_count"], debug["g_support_count"])
     assert torch.allclose(ret["rhythm_debug_g_support_ratio_vs_valid"], debug["g_support_ratio_vs_valid"])
     assert debug["eval_mode"] == "learned"
     assert execution.coarse_path_logstretch is not None
+    assert execution.coarse_correction_pred is not None
+    assert execution.local_residual_pred is not None
     assert torch.allclose(execution.coarse_path_logstretch, execution.coarse_logstretch)
     assert torch.allclose(debug["analytic_logstretch"], execution.global_shift_analytic)
-    assert torch.allclose(debug["coarse_correction_pred"], execution.coarse_correction)
+    assert torch.allclose(debug["coarse_correction_used"], execution.coarse_correction)
+    assert torch.allclose(debug["coarse_correction_pred"], execution.coarse_correction_pred)
     assert torch.allclose(debug["coarse_delta"], execution.coarse_correction)
     assert torch.allclose(debug["coarse_path_logstretch"], execution.coarse_path_logstretch)
+    assert torch.allclose(debug["residual_logstretch_used"], execution.local_residual)
+    assert torch.allclose(debug["residual_logstretch_pred"], execution.local_residual_pred)
     assert torch.allclose(debug["residual_logstretch"], execution.local_residual)
+    assert torch.allclose(ret["rhythm_debug_residual_used"], execution.local_residual)
+    assert torch.allclose(ret["rhythm_debug_residual_pred"], execution.local_residual_pred)
 
 
 def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():

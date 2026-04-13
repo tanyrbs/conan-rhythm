@@ -104,10 +104,14 @@ class DurationV3LossTargets:
     global_rate: Optional[torch.Tensor] = None
     global_shift_tgt: Optional[torch.Tensor] = None
     coarse_logstretch_tgt: Optional[torch.Tensor] = None
+    silence_coarse_logstretch_tgt: Optional[torch.Tensor] = None
     coarse_correction_tgt: Optional[torch.Tensor] = None
     coarse_duration_tgt: Optional[torch.Tensor] = None
     residual_logstretch_tgt: Optional[torch.Tensor] = None
     global_bias_tgt: Optional[torch.Tensor] = None
+    global_bias_tgt_support_mass: Optional[torch.Tensor] = None
+    global_bias_tgt_support_count: Optional[torch.Tensor] = None
+    coarse_target_speech_conf_mean: Optional[torch.Tensor] = None
     local_residual_tgt: Optional[torch.Tensor] = None
     prefix_duration_tgt: Optional[torch.Tensor] = None
     prompt_basis_activation: Optional[torch.Tensor] = None

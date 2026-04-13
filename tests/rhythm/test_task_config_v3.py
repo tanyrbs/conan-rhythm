@@ -30,6 +30,34 @@ def _minimal_v3_hparams():
     }
 
 
+def _minimal_prompt_summary_v1_hparams():
+    hparams = _minimal_v3_hparams()
+    hparams.update(
+        {
+            "rhythm_v3_minimal_v1_profile": True,
+            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_anchor_mode": "source_observed",
+            "lambda_rhythm_op": 0.0,
+            "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_simple_global_stats": True,
+            "rhythm_v3_rate_mode": "simple_global",
+            "rhythm_v3_use_log_base_rate": False,
+            "rhythm_v3_use_reference_summary": False,
+            "rhythm_v3_use_learned_residual_gate": False,
+            "rhythm_v3_disable_learned_gate": True,
+            "rhythm_v3_drop_edge_runs_for_g": 1,
+            "rhythm_v3_summary_pool_speech_only": True,
+            "rhythm_v3_disallow_same_text_reference": True,
+            "rhythm_v3_disallow_same_text_paired_target": False,
+            "rhythm_v3_require_same_text_paired_target": True,
+            "rhythm_v3_allow_source_self_target_fallback": False,
+        }
+    )
+    return hparams
+
+
 def test_validate_rhythm_training_hparams_rejects_v2_v3_mutual_exclusion():
     with pytest.raises(ValueError, match="Enable only one rhythm backend"):
         validate_rhythm_training_hparams(
@@ -186,6 +214,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_sim
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": False,
         }
     )
@@ -204,6 +233,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_when_same_t
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_disallow_same_text_paired_target": True,
         }
@@ -223,6 +253,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_sam
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_require_same_text_paired_target": False,
         }
@@ -242,6 +273,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_refere
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_use_reference_summary": True,
         }
@@ -261,6 +293,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_log_ba
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_use_log_base_rate": True,
         }
@@ -280,6 +313,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_si
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_rate_mode": "log_base",
         }
@@ -299,6 +333,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_spe
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_summary_pool_speech_only": False,
         }
@@ -318,11 +353,34 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_cro
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_disallow_same_text_reference": False,
         }
     )
     with pytest.raises(ValueError, match="rhythm_v3_disallow_same_text_reference=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_continuous_alignment():
+    with pytest.raises(ValueError, match="rhythm_v3_use_continuous_alignment=true"):
+        validate_rhythm_training_hparams(_minimal_prompt_summary_v1_hparams())
+
+
+def test_validate_rhythm_training_hparams_rejects_unit_norm_without_prior_path():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_g_variant"] = "unit_norm"
+    with pytest.raises(ValueError, match="rhythm_v3_unit_prior_path"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("bad_ratio", [-0.1, 1.1])
+def test_validate_rhythm_training_hparams_rejects_out_of_range_min_prompt_speech_ratio(bad_ratio):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_min_prompt_speech_ratio"] = bad_ratio
+    with pytest.raises(ValueError, match="rhythm_v3_min_prompt_speech_ratio"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -337,6 +395,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_self_t
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_allow_source_self_target_fallback": True,
         }
@@ -361,6 +420,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silenc
             "rhythm_v3_disallow_same_text_paired_target": False,
             "rhythm_v3_require_same_text_paired_target": True,
             "rhythm_v3_allow_source_self_target_fallback": False,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_v3_rate_mode": "simple_global",
             "rhythm_v3_use_log_base_rate": False,
@@ -385,6 +445,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_st
             "rhythm_v3_anchor_mode": "source_observed",
             "lambda_rhythm_op": 0.0,
             "lambda_rhythm_zero": 0.0,
+            "rhythm_v3_use_continuous_alignment": True,
             "rhythm_v3_simple_global_stats": True,
             "rhythm_streaming_mode": "lookahead",
         }
@@ -1048,6 +1109,15 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_eval_mode: learned" in source
     assert "rhythm_v3_g_variant: raw_median" in source
     assert "rhythm_v3_drop_edge_runs_for_g: 1" in source
+    assert "rhythm_v3_use_continuous_alignment: true" in source
+    assert "rhythm_v3_alignment_mode: continuous_viterbi_v1" in source
+    assert "rhythm_v3_alignment_lambda_emb: 1.0" in source
+    assert "rhythm_v3_alignment_lambda_type: 0.5" in source
+    assert "rhythm_v3_alignment_lambda_band: 0.2" in source
+    assert "rhythm_v3_alignment_band_ratio: 0.08" in source
+    assert "rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15" in source
+    assert "rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55" in source
+    assert "rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60" in source
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
     assert "rhythm_num_summary_slots: 1" in source

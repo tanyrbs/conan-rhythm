@@ -40,6 +40,9 @@ Operationally, the maintained default means:
 - `rhythm_v3_drop_edge_runs_for_g: 1`
 - `rhythm_v3_require_same_text_paired_target: true`
 - `rhythm_v3_g_variant: raw_median`
+- `rhythm_v3_use_continuous_alignment: true`
+- `rhythm_v3_alignment_mode: continuous_viterbi_v1`
+- `rhythm_v3_gate_quality_strict: true`
 - `rhythm_v3_eval_mode: learned`
 - speech-only prompt global-rate estimation
 - speech = coarse + local
@@ -208,8 +211,9 @@ clipped coarse-derived silence target instead of treating the raw projection
 surface as the final supervision object.
 
 If you cache `unit_duration_tgt` for the maintained continuous path, also cache
-`unit_duration_proj_raw_tgt`, `unit_alignment_mode_id_tgt`, and
-`unit_alignment_kind_tgt` so later review/export can distinguish
+`unit_duration_proj_raw_tgt`, `unit_alignment_mode_id_tgt`,
+`unit_alignment_kind_tgt`, `unit_alignment_source_tgt`, and
+`unit_alignment_version_tgt` so later review/export can distinguish
 `continuous_precomputed` from `continuous_viterbi_v1` instead of treating the
 sample as opaque legacy supervision.
 

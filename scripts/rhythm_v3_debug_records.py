@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 import sys
 
@@ -26,12 +27,12 @@ from utils.plot.rhythm_v3_viz import (
 )
 
 
-def _warn_sparse_review_metadata(frame) -> None:
+def _collect_missing_metadata_issues(frame) -> list[str]:
     if pd is None or frame is None or not hasattr(frame, "columns"):
-        return
+        return []
     total = int(frame.shape[0])
     if total <= 0:
-        return
+        return []
     required = (
         "pair_id",
         "same_text_reference",
@@ -62,25 +63,27 @@ def _warn_sparse_review_metadata(frame) -> None:
         observed = int(frame[column].notna().sum())
         if observed <= 0:
             issues.append(f"{column}=0/{total}")
-    if issues:
-        joined = ", ".join(issues)
-        print(
-            "[rhythm_v3_debug_records] warning: review metadata is incomplete "
-            f"({joined}). Summary export will still succeed, but Gate-0/Panel-C "
-            "style slices or boundary/provenance review may be partially degenerate.",
-            file=sys.stderr,
-        )
-    quality_issues = []
-    if "g_valid" in frame.columns:
-        g_valid = pd.to_numeric(frame["g_valid"], errors="coerce")
+    return issues
+
+
+def collect_gate_issues(frame) -> list[str]:
+    if pd is None or frame is None or not hasattr(frame, "columns"):
+        return []
+    total = int(frame.shape[0])
+    if total <= 0:
+        return ["summary_rows=empty"]
+    quality_issues: list[str] = []
+    domain_column = "g_domain_valid" if "g_domain_valid" in frame.columns else "g_valid"
+    if domain_column in frame.columns:
+        g_valid = pd.to_numeric(frame[domain_column], errors="coerce")
         g_valid_rate = float(np.nanmean(g_valid.to_numpy(dtype=np.float32)))
         if np.isfinite(g_valid_rate) and g_valid_rate < 0.95:
-            quality_issues.append(f"g_valid_mean={g_valid_rate:.3f}<0.950")
+            quality_issues.append(f"{domain_column}_mean={g_valid_rate:.3f}<0.950")
     if "gate0_row_dropped" in frame.columns:
         gate0_drop = pd.to_numeric(frame["gate0_row_dropped"], errors="coerce").to_numpy(dtype=np.float32)
-        gate0_nan_rate = float(np.nanmean(gate0_drop)) if gate0_drop.size > 0 else float("nan")
-        if np.isfinite(gate0_nan_rate) and gate0_nan_rate > 0.05:
-            quality_issues.append(f"gate0_nan_rate={gate0_nan_rate:.3f}>0.050")
+        gate0_drop_rate = float(np.nanmean(gate0_drop)) if gate0_drop.size > 0 else float("nan")
+        if np.isfinite(gate0_drop_rate) and gate0_drop_rate > 0.05:
+            quality_issues.append(f"gate0_drop_rate={gate0_drop_rate:.3f}>0.050")
         if "gate0_drop_reason" in frame.columns:
             drop_reason = frame.loc[pd.to_numeric(frame["gate0_row_dropped"], errors="coerce") > 0.5, "gate0_drop_reason"]
             if not drop_reason.empty:
@@ -156,6 +159,112 @@ def _warn_sparse_review_metadata(frame) -> None:
         }
         if not ref_conditions.intersection({"source_only", "random_ref", "shuffled_ref"}):
             quality_issues.append("negative_control_reference=missing")
+    return quality_issues
+
+
+def collect_review_issues(frame) -> list[str]:
+    return _collect_missing_metadata_issues(frame) + collect_gate_issues(frame)
+
+
+def build_gate_status(frame) -> dict[str, object]:
+    if pd is None or frame is None or not hasattr(frame, "columns") or int(frame.shape[0]) <= 0:
+        return {
+            "gate0_pass": False,
+            "gate1_pass": False,
+            "gate2_pass": False,
+            "missing_controls": ["negative_control_reference"],
+            "missing_eval_modes": ["analytic", "coarse_only", "learned"],
+            "incomplete_triplets": 0,
+            "continuous_alignment_coverage": float("nan"),
+            "g_domain_valid_mean": float("nan"),
+            "gate0_drop_rate": float("nan"),
+            "unmatched_speech_ratio_p95": float("nan"),
+            "warnings": ["summary_rows=empty"],
+        }
+    issues = collect_gate_issues(frame)
+    missing_controls: list[str] = []
+    missing_eval_modes: list[str] = []
+    incomplete_triplets = 0
+    continuous_alignment_coverage = float("nan")
+    g_domain_valid_mean = float("nan")
+    gate0_drop_rate = float("nan")
+    unmatched_speech_ratio_p95 = float("nan")
+    domain_column = "g_domain_valid" if "g_domain_valid" in frame.columns else "g_valid"
+    if domain_column in frame.columns:
+        g_domain_valid_mean = float(
+            np.nanmean(pd.to_numeric(frame[domain_column], errors="coerce").to_numpy(dtype=np.float32))
+        )
+    if "gate0_row_dropped" in frame.columns:
+        gate0_drop_rate = float(
+            np.nanmean(pd.to_numeric(frame["gate0_row_dropped"], errors="coerce").to_numpy(dtype=np.float32))
+        )
+    if "alignment_unmatched_speech_ratio" in frame.columns:
+        unmatched = pd.to_numeric(frame["alignment_unmatched_speech_ratio"], errors="coerce").to_numpy(dtype=np.float32)
+        unmatched_speech_ratio_p95 = float(np.nanpercentile(unmatched, 95)) if np.isfinite(unmatched).any() else float("nan")
+    if "alignment_kind" in frame.columns:
+        alignment_kind = frame["alignment_kind"].astype(str).str.strip().str.lower()
+        observed = alignment_kind[(alignment_kind != "") & (alignment_kind != "nan")]
+        if not observed.empty:
+            continuous_alignment_coverage = float(observed.str.startswith("continuous").mean())
+    for issue in issues:
+        if issue.startswith("missing_eval_modes="):
+            missing_eval_modes = [part for part in issue.split("=", 1)[1].split("|") if part]
+        elif issue.startswith("negative_control_reference="):
+            missing_controls.append("negative_control_reference")
+        elif issue.startswith("incomplete_real_triplets="):
+            try:
+                incomplete_triplets = int(issue.split("=", 1)[1])
+            except Exception:
+                incomplete_triplets = 0
+    observed_modes = {
+        str(mode).strip()
+        for mode in frame.get("eval_mode", []).dropna().tolist()
+        if str(mode).strip() and str(mode).strip().lower() != "nan"
+    } if "eval_mode" in frame.columns else set()
+    gate0_pass = (
+        np.isfinite(g_domain_valid_mean)
+        and g_domain_valid_mean >= 0.95
+        and np.isfinite(gate0_drop_rate)
+        and gate0_drop_rate <= 0.05
+        and np.isfinite(continuous_alignment_coverage)
+        and continuous_alignment_coverage >= 1.0 - 1.0e-6
+    )
+    gate1_pass = (
+        "analytic" in observed_modes
+        and incomplete_triplets == 0
+        and "negative_control_reference" not in missing_controls
+    )
+    gate2_pass = (
+        {"coarse_only", "learned"}.issubset(observed_modes)
+        and np.isfinite(unmatched_speech_ratio_p95)
+        and unmatched_speech_ratio_p95 <= 0.15
+    )
+    return {
+        "gate0_pass": bool(gate0_pass),
+        "gate1_pass": bool(gate1_pass),
+        "gate2_pass": bool(gate2_pass),
+        "missing_controls": missing_controls,
+        "missing_eval_modes": missing_eval_modes,
+        "incomplete_triplets": int(incomplete_triplets),
+        "continuous_alignment_coverage": continuous_alignment_coverage,
+        "g_domain_valid_mean": g_domain_valid_mean,
+        "gate0_drop_rate": gate0_drop_rate,
+        "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
+        "warnings": issues,
+    }
+
+
+def _warn_sparse_review_metadata(frame) -> list[str]:
+    missing_issues = _collect_missing_metadata_issues(frame)
+    if missing_issues:
+        joined = ", ".join(missing_issues)
+        print(
+            "[rhythm_v3_debug_records] warning: review metadata is incomplete "
+            f"({joined}). Summary export will still succeed, but Gate-0/Panel-C "
+            "style slices or boundary/provenance review may be partially degenerate.",
+            file=sys.stderr,
+        )
+    quality_issues = collect_gate_issues(frame)
     if quality_issues:
         print(
             "[rhythm_v3_debug_records] warning: gate quality checks found potential evidence gaps "
@@ -163,6 +272,7 @@ def _warn_sparse_review_metadata(frame) -> None:
             "not be read as a full gate pass.",
             file=sys.stderr,
         )
+    return missing_issues + quality_issues
 
 
 def _parse_args() -> argparse.Namespace:
@@ -221,6 +331,16 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory for exporting the retained five-figure review bundle and gate-oriented review bundle.",
     )
+    parser.add_argument(
+        "--strict-gates",
+        action="store_true",
+        help="Fail non-zero when gate-quality evidence is incomplete or below threshold.",
+    )
+    parser.add_argument(
+        "--gate-status-json",
+        default=None,
+        help="Optional path for writing gate_status.json style audit output.",
+    )
     return parser.parse_args()
 
 
@@ -249,7 +369,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if pd is not None:
         summary_df = pd.DataFrame(rows)
-        _warn_sparse_review_metadata(summary_df)
+        issues = _warn_sparse_review_metadata(summary_df)
         prefix_silence_df = build_prefix_silence_review_table(records)
         if not prefix_silence_df.empty and {"sample_id", "eval_mode"}.issubset(summary_df.columns):
             keep_cols = [
@@ -308,6 +428,22 @@ def main() -> None:
             if merge_keys == ["src_id", "eval_mode"]:
                 summary_df = summary_df.merge(mono_summary, on=merge_keys, how="left")
         summary_df.to_csv(output, index=False)
+        gate_status = build_gate_status(summary_df)
+        gate_status_path = None
+        if args.gate_status_json:
+            gate_status_path = Path(args.gate_status_json)
+        elif args.review_dir:
+            gate_status_path = Path(args.review_dir) / "gate_status.json"
+        if gate_status_path is not None:
+            gate_status_path.parent.mkdir(parents=True, exist_ok=True)
+            gate_status_path.write_text(
+                json.dumps(gate_status, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+        if args.strict_gates and issues:
+            raise SystemExit(
+                "[rhythm_v3_debug_records] strict gate failure: " + ", ".join(issues)
+            )
     else:  # pragma: no cover
         fieldnames = sorted({key for row in rows for key in row.keys()})
         with output.open("w", encoding="utf-8", newline="") as handle:

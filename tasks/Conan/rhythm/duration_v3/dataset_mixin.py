@@ -98,6 +98,98 @@ class DurationV3DatasetMixin:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_continuous_alignment_kind(value, *, mode_id=None) -> bool:
+        return DurationV3DatasetMixin._normalize_alignment_kind_export(value, mode_id=mode_id).startswith(
+            "continuous"
+        )
+
+    def _alignment_quality_thresholds(self) -> tuple[float, float, float]:
+        return (
+            float(self.hparams.get("rhythm_v3_alignment_unmatched_speech_ratio_max", 0.15) or 0.15),
+            float(self.hparams.get("rhythm_v3_alignment_mean_local_confidence_speech_min", 0.55) or 0.55),
+            float(self.hparams.get("rhythm_v3_alignment_mean_coarse_confidence_speech_min", 0.60) or 0.60),
+        )
+
+    def _enforce_minimal_continuous_alignment_gate(
+        self,
+        *,
+        alignment_kind,
+        alignment_mode_id=None,
+        unmatched_speech_ratio,
+        mean_local_confidence_speech,
+        mean_coarse_confidence_speech,
+        context: str,
+        require_quality_metrics: bool = True,
+    ) -> None:
+        normalized_kind = self._normalize_alignment_kind_export(alignment_kind, mode_id=alignment_mode_id)
+        if not normalized_kind.startswith("continuous"):
+            raise RuntimeError(
+                f"minimal_v1 canonical path requires continuous paired-target alignment; got {normalized_kind!r} in {context}."
+            )
+        if not bool(require_quality_metrics):
+            return
+        unmatched_max, local_min, coarse_min = self._alignment_quality_thresholds()
+        unmatched = float(unmatched_speech_ratio)
+        mean_local = float(mean_local_confidence_speech)
+        mean_coarse = float(mean_coarse_confidence_speech)
+        if unmatched > unmatched_max:
+            raise RuntimeError(
+                f"minimal_v1 paired target rejected in {context}: unmatched_speech_ratio={unmatched:.3f} > {unmatched_max:.3f}"
+            )
+        if mean_local < local_min:
+            raise RuntimeError(
+                f"minimal_v1 paired target rejected in {context}: mean_local_confidence_speech={mean_local:.3f} < {local_min:.3f}"
+            )
+        if mean_coarse < coarse_min:
+            raise RuntimeError(
+                f"minimal_v1 paired target rejected in {context}: mean_coarse_confidence_speech={mean_coarse:.3f} < {coarse_min:.3f}"
+            )
+
+    def _validate_cached_minimal_continuous_target(self, sample: dict, *, context: str) -> None:
+        if "unit_duration_proj_raw_tgt" not in sample:
+            raise RuntimeError(
+                "minimal_v1_profile + continuous alignment requires explicit unit_duration_proj_raw_tgt "
+                f"when loading cached unit_duration_tgt ({context})."
+            )
+        if "unit_alignment_mode_id_tgt" not in sample:
+            raise RuntimeError(
+                "minimal_v1_profile + continuous alignment requires unit_alignment_mode_id_tgt "
+                f"for cached paired-target supervision ({context})."
+            )
+        if "unit_alignment_source_tgt" not in sample and "alignment_source" not in sample:
+            raise RuntimeError(
+                "minimal_v1_profile + continuous alignment requires unit_alignment_source_tgt "
+                f"for cached paired-target supervision ({context})."
+            )
+        if "unit_alignment_version_tgt" not in sample and "alignment_version" not in sample:
+            raise RuntimeError(
+                "minimal_v1_profile + continuous alignment requires unit_alignment_version_tgt "
+                f"for cached paired-target supervision ({context})."
+            )
+        alignment_mode_id = sample.get("unit_alignment_mode_id_tgt")
+        alignment_kind = sample.get("unit_alignment_kind_tgt")
+        unmatched = self._extract_optional_float_scalar(sample.get("unit_alignment_unmatched_speech_ratio_tgt"))
+        mean_local = self._extract_optional_float_scalar(sample.get("unit_alignment_mean_local_confidence_speech_tgt"))
+        mean_coarse = self._extract_optional_float_scalar(sample.get("unit_alignment_mean_coarse_confidence_speech_tgt"))
+        self._enforce_minimal_continuous_alignment_gate(
+            alignment_kind=alignment_kind,
+            alignment_mode_id=alignment_mode_id,
+            unmatched_speech_ratio=unmatched or 0.0,
+            mean_local_confidence_speech=mean_local or 0.0,
+            mean_coarse_confidence_speech=mean_coarse or 0.0,
+            context=context,
+            require_quality_metrics=(
+                unmatched is not None
+                or mean_local is not None
+                or mean_coarse is not None
+            ),
+        )
+        if not self._is_continuous_alignment_kind(alignment_kind, mode_id=alignment_mode_id):
+            raise RuntimeError(
+                f"minimal_v1_profile cached paired-target supervision must carry continuous provenance ({context})."
+            )
+
     def _allow_prompt_weight_shape_repair(self) -> bool:
         return bool(self.hparams.get(_PROMPT_WEIGHT_REPAIR_FLAG, False))
 
@@ -578,7 +670,7 @@ class DurationV3DatasetMixin:
         return exports
 
     def _alignment_provenance_optional_keys(self) -> tuple[str, ...]:
-        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS
+        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + ("unit_alignment_is_continuous_tgt",)
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
         keys = list(super()._resolve_optional_sample_keys())
@@ -817,6 +909,9 @@ class DurationV3DatasetMixin:
         use_continuous_alignment = bool(
             self.hparams.get("rhythm_v3_use_continuous_alignment", False)
         )
+        alignment_soft_repair = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_alignment_soft_repair", False)
+        )
         configured_alignment_mode_raw = self.hparams.get("rhythm_v3_alignment_mode", None)
         configured_alignment_mode = (
             str(_extract_object_scalar(configured_alignment_mode_raw) or "").strip().lower()
@@ -850,9 +945,16 @@ class DurationV3DatasetMixin:
                 "lambda_unit": float(self.hparams.get("rhythm_v3_alignment_lambda_unit", 0.0)),
                 "band_ratio": float(self.hparams.get("rhythm_v3_alignment_band_ratio", 0.08)),
                 "bad_cost_threshold": float(self.hparams.get("rhythm_v3_alignment_bad_cost_threshold", 1.2)),
+                "allow_source_skip": bool(
+                    self.hparams.get("rhythm_v3_alignment_allow_source_skip", False)
+                ),
+                "skip_penalty": float(self.hparams.get("rhythm_v3_alignment_skip_penalty", 1.0)),
             }
             if band_width is not None:
                 continuous_aligner_kwargs["band_width"] = int(band_width)
+        allow_source_self_target_fallback = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False)
+        )
         try:
             projection = _project_target_runs_onto_source(
                 source_units=source_units,
@@ -873,6 +975,8 @@ class DurationV3DatasetMixin:
                 continuous_alignment_mode=configured_alignment_mode,
                 continuous_aligner_kwargs=continuous_aligner_kwargs,
                 precomputed_alignment=precomputed_alignment,
+                allow_source_self_target_fallback=allow_source_self_target_fallback,
+                alignment_soft_repair=alignment_soft_repair,
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to build paired duration_v3 targets for {item_name}: {exc}") from exc
@@ -880,8 +984,36 @@ class DurationV3DatasetMixin:
         confidence_local = np.asarray(projection["confidence_local"], dtype=np.float32)
         confidence_coarse = np.asarray(projection["confidence_coarse"], dtype=np.float32)
         coverage = np.asarray(projection["coverage"], dtype=np.float32)
+        coverage_binary = np.asarray(
+            projection.get("coverage_binary", coverage),
+            dtype=np.float32,
+        )
+        coverage_fraction = np.asarray(
+            projection.get("coverage_fraction", coverage),
+            dtype=np.float32,
+        )
+        expected_frame_support = np.asarray(
+            projection.get("expected_frame_support", np.zeros_like(coverage, dtype=np.float32)),
+            dtype=np.float32,
+        )
         match_rate = np.asarray(projection["match_rate"], dtype=np.float32)
         mean_cost = np.asarray(projection["mean_cost"], dtype=np.float32)
+        confidence_cost_term = np.asarray(
+            projection.get("confidence_cost_term", np.zeros_like(confidence_local, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_margin_term = np.asarray(
+            projection.get("confidence_margin_term", np.zeros_like(confidence_local, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_type_term = np.asarray(
+            projection.get("confidence_type_term", np.zeros_like(confidence_local, dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_match_term = np.asarray(
+            projection.get("confidence_match_term", np.zeros_like(confidence_local, dtype=np.float32)),
+            dtype=np.float32,
+        )
         if (
             projected.shape[0] != source_duration.shape[0]
             or confidence_local.shape[0] != source_duration.shape[0]
@@ -898,15 +1030,34 @@ class DurationV3DatasetMixin:
             alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_PRECOMPUTED
         elif alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1:
             alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_VITERBI_V1
+        if self._is_enabled_flag(self.hparams.get("rhythm_v3_minimal_v1_profile", False)):
+            self._enforce_minimal_continuous_alignment_gate(
+                alignment_kind=alignment_kind,
+                unmatched_speech_ratio=projection.get("unmatched_speech_ratio", 0.0),
+                mean_local_confidence_speech=projection.get("mean_local_confidence_speech", 0.0),
+                mean_coarse_confidence_speech=projection.get("mean_coarse_confidence_speech", 0.0),
+                context=item_name,
+            )
         out = {
             "unit_duration_tgt": projected.astype(np.float32),
             "unit_duration_proj_raw_tgt": projected.astype(np.float32),
+            "unit_logstretch_proj_raw_tgt": (
+                np.log(np.clip(projected.astype(np.float32), 1.0e-6, None))
+                - np.log(np.clip(source_duration.astype(np.float32), 1.0e-6, None))
+            ).astype(np.float32),
             "unit_confidence_local_tgt": confidence_local.astype(np.float32),
             "unit_confidence_coarse_tgt": confidence_coarse.astype(np.float32),
             "unit_confidence_tgt": confidence_coarse.astype(np.float32),
             "unit_alignment_coverage_tgt": coverage.astype(np.float32),
+            "unit_alignment_coverage_binary_tgt": coverage_binary.astype(np.float32),
+            "unit_alignment_coverage_fraction_tgt": coverage_fraction.astype(np.float32),
+            "unit_alignment_expected_frame_support_tgt": expected_frame_support.astype(np.float32),
             "unit_alignment_match_tgt": match_rate.astype(np.float32),
             "unit_alignment_cost_tgt": mean_cost.astype(np.float32),
+            "unit_alignment_confidence_cost_term_tgt": confidence_cost_term.astype(np.float32),
+            "unit_alignment_confidence_margin_term_tgt": confidence_margin_term.astype(np.float32),
+            "unit_alignment_confidence_type_term_tgt": confidence_type_term.astype(np.float32),
+            "unit_alignment_confidence_match_term_tgt": confidence_match_term.astype(np.float32),
             "unit_alignment_unmatched_speech_ratio_tgt": np.asarray(
                 [float(projection.get("unmatched_speech_ratio", 0.0))],
                 dtype=np.float32,
@@ -926,6 +1077,10 @@ class DurationV3DatasetMixin:
             "unit_alignment_kind_tgt": np.asarray(
                 [alignment_kind],
                 dtype=object,
+            ),
+            "unit_alignment_is_continuous_tgt": np.asarray(
+                [1.0 if alignment_kind.startswith("continuous") else 0.0],
+                dtype=np.float32,
             ),
             "alignment_source": str(
                 projection.get("alignment_source", (precomputed_alignment or {}).get("alignment_source", "")) or ""
@@ -973,21 +1128,17 @@ class DurationV3DatasetMixin:
         )
         if isinstance(sample, dict) and "unit_duration_tgt" in sample:
             if minimal_v1_profile and use_continuous_alignment:
-                if "unit_duration_proj_raw_tgt" not in sample:
-                    raise RuntimeError(
-                        "minimal_v1_profile + continuous alignment requires explicit unit_duration_proj_raw_tgt "
-                        "when loading cached unit_duration_tgt."
-                    )
-                if "unit_alignment_mode_id_tgt" not in sample:
-                    raise RuntimeError(
-                        "minimal_v1_profile + continuous alignment requires unit_alignment_mode_id_tgt "
-                        "for cached paired-target supervision."
-                    )
+                self._validate_cached_minimal_continuous_target(
+                    sample,
+                    context="cached unit_duration_tgt",
+                )
             out = {
                 "unit_duration_tgt": np.asarray(sample["unit_duration_tgt"], dtype=np.float32),
             }
             if "unit_duration_proj_raw_tgt" in sample:
                 out["unit_duration_proj_raw_tgt"] = np.asarray(sample["unit_duration_proj_raw_tgt"], dtype=np.float32)
+            if "unit_logstretch_proj_raw_tgt" in sample:
+                out["unit_logstretch_proj_raw_tgt"] = np.asarray(sample["unit_logstretch_proj_raw_tgt"], dtype=np.float32)
             if "unit_confidence_local_tgt" in sample:
                 out["unit_confidence_local_tgt"] = np.asarray(sample["unit_confidence_local_tgt"], dtype=np.float32)
             if "unit_confidence_coarse_tgt" in sample:
@@ -1002,12 +1153,20 @@ class DurationV3DatasetMixin:
                 out.setdefault("unit_confidence_local_tgt", out["unit_confidence_coarse_tgt"])
             for key in (
                 "unit_alignment_coverage_tgt",
+                "unit_alignment_coverage_binary_tgt",
+                "unit_alignment_coverage_fraction_tgt",
+                "unit_alignment_expected_frame_support_tgt",
                 "unit_alignment_match_tgt",
                 "unit_alignment_cost_tgt",
+                "unit_alignment_confidence_cost_term_tgt",
+                "unit_alignment_confidence_margin_term_tgt",
+                "unit_alignment_confidence_type_term_tgt",
+                "unit_alignment_confidence_match_term_tgt",
                 "unit_alignment_unmatched_speech_ratio_tgt",
                 "unit_alignment_mean_local_confidence_speech_tgt",
                 "unit_alignment_mean_coarse_confidence_speech_tgt",
                 "unit_alignment_mode_id_tgt",
+                "unit_alignment_is_continuous_tgt",
             ):
                 if key in sample:
                     dtype = np.int64 if key.endswith("_mode_id_tgt") else np.float32
@@ -1037,6 +1196,10 @@ class DurationV3DatasetMixin:
             out["unit_alignment_source_tgt"] = np.asarray([out["alignment_source"]], dtype=object)
             out["unit_alignment_version_tgt"] = np.asarray([out["alignment_version"]], dtype=object)
             alignment_kind = str(np.asarray(out["unit_alignment_kind_tgt"], dtype=object).reshape(-1)[0])
+            out["unit_alignment_is_continuous_tgt"] = np.asarray(
+                [1.0 if alignment_kind.startswith("continuous") else 0.0],
+                dtype=np.float32,
+            )
             for key in self._alignment_provenance_optional_keys():
                 if key in sample:
                     out[key] = np.asarray(sample[key], dtype=np.float32)
@@ -1104,6 +1267,23 @@ class DurationV3DatasetMixin:
             paired_target_conditioning=paired_target_conditioning,
         )
         if paired is not None:
+            if minimal_v1_profile:
+                self._enforce_minimal_continuous_alignment_gate(
+                    alignment_kind=paired.get("unit_alignment_kind_tgt", paired.get("alignment_kind", "")),
+                    unmatched_speech_ratio=_extract_object_scalar(
+                        paired.get("unit_alignment_unmatched_speech_ratio_tgt")
+                    )
+                    or 0.0,
+                    mean_local_confidence_speech=_extract_object_scalar(
+                        paired.get("unit_alignment_mean_local_confidence_speech_tgt")
+                    )
+                    or 0.0,
+                    mean_coarse_confidence_speech=_extract_object_scalar(
+                        paired.get("unit_alignment_mean_coarse_confidence_speech_tgt")
+                    )
+                    or 0.0,
+                    context=source_item_name,
+                )
             return paired
 
         if allow_source_self_target_fallback:
@@ -1120,6 +1300,7 @@ class DurationV3DatasetMixin:
                 "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
                 "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([1.0], dtype=np.float32),
                 "unit_alignment_kind_tgt": np.asarray(["discrete"], dtype=object),
+                "unit_alignment_is_continuous_tgt": np.asarray([0.0], dtype=np.float32),
                 "unit_alignment_source_tgt": np.asarray([""], dtype=object),
                 "unit_alignment_version_tgt": np.asarray([""], dtype=object),
                 "alignment_source": "",

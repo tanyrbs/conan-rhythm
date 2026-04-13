@@ -15,6 +15,25 @@ def apply_analytic_gap_clip(
     return analytic_gap.clamp(min=-clip, max=clip)
 
 
+@torch.jit.script
+def _build_causal_local_rate_seq_script(
+    observed_log: torch.Tensor,
+    speech_mask: torch.Tensor,
+    prev: torch.Tensor,
+    decay: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size = int(observed_log.size(0))
+    num_units = int(observed_log.size(1))
+    seq = observed_log.new_zeros((batch_size, num_units))
+    state = prev
+    for unit_idx in range(num_units):
+        seq[:, unit_idx : unit_idx + 1] = state
+        use_t = speech_mask[:, unit_idx : unit_idx + 1] > 0.5
+        cur_t = observed_log[:, unit_idx : unit_idx + 1]
+        state = torch.where(use_t, decay * state + (1.0 - decay) * cur_t, state)
+    return seq, state
+
+
 def build_causal_local_rate_seq(
     *,
     observed_log: torch.Tensor,
@@ -51,18 +70,14 @@ def build_causal_local_rate_seq(
         prev = init_rate.float().reshape(batch_size, 1)
     decay = float(max(0.0, min(0.999, decay)))
 
-    seq: list[torch.Tensor] = []
-    for unit_idx in range(num_units):
-        seq.append(prev)
-        use_t = speech_mask[:, unit_idx : unit_idx + 1] > 0.5
-        cur_t = observed_log[:, unit_idx : unit_idx + 1]
-        prev = torch.where(use_t, decay * prev + (1.0 - decay) * cur_t, prev)
-
-    if seq:
-        local_rate_seq = torch.cat(seq, dim=1)
-    else:
-        local_rate_seq = observed_log.new_zeros((batch_size, 0))
-    return local_rate_seq, prev
+    if num_units <= 0:
+        return observed_log.new_zeros((batch_size, 0)), prev
+    return _build_causal_local_rate_seq_script(
+        observed_log.float(),
+        speech_mask.float(),
+        prev.float(),
+        float(decay),
+    )
 
 
 __all__ = ["apply_analytic_gap_clip", "build_causal_local_rate_seq"]

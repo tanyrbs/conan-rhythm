@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from modules.Conan.rhythm.policy import (
     normalize_distill_surface,
     normalize_primary_target_surface,
@@ -51,6 +53,15 @@ def _normalize_optional_path(value, *, key: str) -> str | None:
     return normalized
 
 
+def _validate_optional_existing_path(value, *, key: str) -> str | None:
+    normalized = _normalize_optional_path(value, key=key)
+    if normalized is None:
+        return None
+    if not Path(normalized).exists():
+        raise ValueError(f"{key} must point to an existing path for rhythm_v3: {normalized}")
+    return normalized
+
+
 def resolve_task_pause_boundary_weight(hparams) -> float:
     return resolve_pause_boundary_weight(hparams)
 
@@ -77,6 +88,7 @@ def resolve_task_retimed_target_mode(hparams) -> str:
 
 __all__ = [
     "_normalize_optional_path",
+    "_validate_optional_existing_path",
     "_normalize_public_surface",
     "_validate_required_public_surface",
     "parse_task_optional_bool",

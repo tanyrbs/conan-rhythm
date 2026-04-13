@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 
 EPS = 1.0e-6
 _VALID_G_VARIANTS = {"raw_median", "weighted_median", "trimmed_mean", "unit_norm"}
 _VALID_EVAL_MODES = {"analytic", "coarse_only", "learned"}
+
+
+@dataclass(frozen=True)
+class GlobalRateSupportStats:
+    support_mask: torch.Tensor
+    support_count: torch.Tensor
+    speech_count: torch.Tensor
+    valid_count: torch.Tensor
+    speech_ratio: torch.Tensor
+    domain_valid: torch.Tensor
 
 
 def normalize_global_rate_variant(value) -> str:
@@ -147,6 +159,40 @@ def build_global_rate_support_mask(
     return support
 
 
+def summarize_global_rate_support(
+    *,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    drop_edge_runs: int = 0,
+    min_speech_ratio: float = 0.0,
+    min_speech_runs: int = 1,
+) -> GlobalRateSupportStats:
+    support_mask = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+    )
+    speech = speech_mask.bool()
+    valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
+    reduce_dim = 0 if speech_mask.ndim == 1 else 1
+    support_count = support_mask.sum(dim=reduce_dim, keepdim=True).float()
+    speech_count = (speech & valid).sum(dim=reduce_dim, keepdim=True).float()
+    valid_count = valid.sum(dim=reduce_dim, keepdim=True).float()
+    speech_ratio = speech_count / valid_count.clamp_min(1.0)
+    domain_valid = (
+        (support_count >= float(max(1, int(min_speech_runs))))
+        & (speech_ratio >= float(max(0.0, min(1.0, min_speech_ratio))) - 1.0e-6)
+    ).float()
+    return GlobalRateSupportStats(
+        support_mask=support_mask,
+        support_count=support_count,
+        speech_count=speech_count,
+        valid_count=valid_count,
+        speech_ratio=speech_ratio,
+        domain_valid=domain_valid,
+    )
+
+
 def _resolve_unit_prior(
     *,
     unit_ids: torch.Tensor | None,
@@ -240,6 +286,88 @@ def _compute_single_global_rate(
     raise ValueError(f"Unsupported g_variant={variant!r}")
 
 
+def masked_true_median_batch(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    values = values.float()
+    mask = mask.bool()
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+        mask = mask.unsqueeze(0)
+    if values.ndim != 2 or mask.ndim != 2:
+        raise ValueError("masked_true_median_batch expects rank-1 or rank-2 values and mask.")
+    if tuple(values.shape) != tuple(mask.shape):
+        raise ValueError(
+            f"masked_true_median_batch shape mismatch: values={tuple(values.shape)} mask={tuple(mask.shape)}"
+        )
+    support_count = mask.sum(dim=1, keepdim=True)
+    if bool((support_count <= 0).any().item()):
+        raise ValueError("masked_true_median_batch requires at least one valid item per batch row.")
+    invalid_fill = torch.finfo(values.dtype).max
+    sorted_values = torch.sort(values.masked_fill(~mask, invalid_fill), dim=1).values
+    counts = support_count.squeeze(1).long()
+    lower_idx = ((counts - 1) // 2).clamp_min(0)
+    upper_idx = (counts // 2).clamp_min(0)
+    row_idx = torch.arange(values.size(0), device=values.device)
+    median = 0.5 * (sorted_values[row_idx, lower_idx] + sorted_values[row_idx, upper_idx])
+    return median.unsqueeze(1)
+
+
+def masked_weighted_median_batch(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    values = values.float()
+    mask = mask.bool()
+    weights = weights.float().clamp_min(0.0)
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+        mask = mask.unsqueeze(0)
+        weights = weights.unsqueeze(0)
+    if values.ndim != 2 or mask.ndim != 2 or weights.ndim != 2:
+        raise ValueError("masked_weighted_median_batch expects rank-1 or rank-2 values/mask/weights.")
+    if tuple(values.shape) != tuple(mask.shape) or tuple(values.shape) != tuple(weights.shape):
+        raise ValueError(
+            "masked_weighted_median_batch shape mismatch: "
+            f"values={tuple(values.shape)} mask={tuple(mask.shape)} weights={tuple(weights.shape)}"
+        )
+    support_count = mask.sum(dim=1, keepdim=True)
+    if bool((support_count <= 0).any().item()):
+        raise ValueError("masked_weighted_median_batch requires at least one valid item per batch row.")
+    safe_weights = torch.where(mask, weights, torch.zeros_like(weights))
+    total = safe_weights.sum(dim=1, keepdim=True)
+    no_mass = total <= 0.0
+    order = torch.argsort(values.masked_fill(~mask, torch.finfo(values.dtype).max), dim=1)
+    sorted_values = torch.gather(values, 1, order)
+    sorted_mask = torch.gather(mask.long(), 1, order).bool()
+    sorted_weights = torch.gather(safe_weights, 1, order)
+    sorted_weights = torch.where(sorted_mask, sorted_weights, torch.zeros_like(sorted_weights))
+    cdf = torch.cumsum(sorted_weights, dim=1)
+    cutoff = 0.5 * total
+    idx = torch.searchsorted(cdf.contiguous(), cutoff.contiguous(), right=False)
+    idx = idx.clamp(max=values.size(1) - 1)
+    row_idx = torch.arange(values.size(0), device=values.device).unsqueeze(1)
+    median = sorted_values[row_idx, idx].reshape(values.size(0), 1)
+    next_idx = (idx + 1).clamp(max=values.size(1) - 1)
+    at_cutoff = torch.isclose(
+        cdf[row_idx, idx].reshape(values.size(0), 1),
+        cutoff,
+        atol=1.0e-6,
+        rtol=1.0e-4,
+    ) & (next_idx > idx)
+    median = torch.where(
+        at_cutoff,
+        0.5 * (
+            sorted_values[row_idx, idx].reshape(values.size(0), 1)
+            + sorted_values[row_idx, next_idx].reshape(values.size(0), 1)
+        ),
+        median,
+    )
+    if bool(no_mass.any().item()):
+        raw = masked_true_median_batch(values, mask)
+        median = torch.where(no_mass, raw, median)
+    return median
+
+
 def compute_global_rate_1d(
     *,
     log_dur: torch.Tensor,
@@ -314,17 +442,14 @@ def compute_global_rate_batch(
             unit_prior_default_value=unit_prior_default_value,
         )
     if variant == "raw_median" and weight is None and unit_prior is None:
-        support_count = support.sum(dim=1, keepdim=True)
-        if bool((support_count <= 0).any().item()):
-            raise ValueError("No valid speech duration for global rate.")
-        invalid_fill = torch.finfo(log_dur.dtype).max
-        sorted_values = torch.sort(log_dur.masked_fill(~support, invalid_fill), dim=1).values
-        counts = support_count.squeeze(1).long()
-        lower_idx = ((counts - 1) // 2).clamp_min(0)
-        upper_idx = (counts // 2).clamp_min(0)
-        row_idx = torch.arange(log_dur.size(0), device=log_dur.device)
-        median = 0.5 * (sorted_values[row_idx, lower_idx] + sorted_values[row_idx, upper_idx])
-        return median.unsqueeze(1)
+        return masked_true_median_batch(log_dur, support)
+    if variant == "weighted_median":
+        resolved_weight = torch.ones_like(log_dur) if weight is None else weight.float()
+        return masked_weighted_median_batch(log_dur, support, resolved_weight)
+    if variant == "unit_norm":
+        normalized = log_dur - resolved_unit_prior.float()
+        resolved_weight = torch.ones_like(normalized) if weight is None else weight.float()
+        return masked_weighted_median_batch(normalized, support, resolved_weight)
     if variant == "trimmed_mean" and _normalize_drop_edge_runs(drop_edge_runs) <= 0:
         support_count = support.sum(dim=1, keepdim=True)
         if bool((support_count <= 0).any().item()):
@@ -395,12 +520,16 @@ def compute_global_rate(
 
 __all__ = [
     "EPS",
+    "GlobalRateSupportStats",
     "build_global_rate_support_mask",
     "compute_global_rate",
     "compute_global_rate_1d",
     "compute_global_rate_batch",
+    "masked_true_median_batch",
+    "masked_weighted_median_batch",
     "normalize_falsification_eval_mode",
     "normalize_global_rate_variant",
+    "summarize_global_rate_support",
     "true_median_1d",
     "weighted_median_1d",
 ]

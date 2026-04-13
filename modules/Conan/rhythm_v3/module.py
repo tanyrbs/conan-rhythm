@@ -519,6 +519,12 @@ class MixedEffectsDurationModule(nn.Module):
         self.debug_export = bool(
             unused_kwargs.pop("debug_export", unused_kwargs.pop("rhythm_v3_debug_export", False))
         )
+        self.min_prompt_speech_ratio = float(
+            unused_kwargs.pop(
+                "min_prompt_speech_ratio",
+                unused_kwargs.pop("rhythm_v3_min_prompt_speech_ratio", 0.6),
+            )
+        )
         del unused_kwargs
         self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
@@ -600,6 +606,7 @@ class MixedEffectsDurationModule(nn.Module):
             if self.minimal_v1_profile:
                 self.prompt_memory_encoder = PromptGlobalConditionEncoderV1G(
                     operator_rank=basis_rank,
+                    min_speech_ratio=self.min_prompt_speech_ratio,
                     use_log_base_rate=self.use_log_base_rate,
                     g_variant=self.g_variant,
                     g_trim_ratio=self.g_trim_ratio,
@@ -652,6 +659,8 @@ class MixedEffectsDurationModule(nn.Module):
             self.prompt_memory_encoder.g_variant = self.g_variant
             self.prompt_memory_encoder.g_trim_ratio = self.g_trim_ratio
             self.prompt_memory_encoder.g_drop_edge_runs = self.g_drop_edge_runs
+            if hasattr(self.prompt_memory_encoder, "min_speech_ratio"):
+                self.prompt_memory_encoder.min_speech_ratio = self.min_prompt_speech_ratio
 
             if not self.minimal_v1_profile:
                 duration_head_kwargs = dict(
@@ -1160,7 +1169,15 @@ class MixedEffectsDurationModule(nn.Module):
                 coarse_logstretch=role_plan.get("unit_coarse_path_logstretch", role_plan.get("unit_coarse_logstretch")),
                 coarse_path_logstretch=role_plan.get("unit_coarse_path_logstretch", role_plan.get("unit_coarse_logstretch")),
                 coarse_correction=role_plan.get("unit_coarse_delta", role_plan.get("unit_coarse_correction")),
+                coarse_correction_pred=role_plan.get(
+                    "unit_coarse_correction_pred",
+                    role_plan.get("unit_coarse_correction_predicted"),
+                ),
                 local_residual=role_plan.get("unit_local_residual_used", role_plan.get("unit_residual_logstretch")),
+                local_residual_pred=role_plan.get(
+                    "unit_residual_logstretch_pred",
+                    role_plan.get("local_response_pred"),
+                ),
                 speech_pred=role_plan.get("unit_speech_pred"),
                 silence_pred=role_plan.get("unit_silence_pred"),
                 source_rate_seq=role_plan.get("source_rate_seq"),

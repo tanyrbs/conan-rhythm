@@ -823,6 +823,8 @@ def record_summary(
     drop_edge_runs: int = 0,
 ) -> dict[str, Any]:
     from .review import (
+        DEFAULT_GATE_MIN_SPEECH_RATIO,
+        _resolve_prompt_domain_stats,
         compute_source_global_rate_for_analysis,
         compute_speech_tempo_for_analysis,
         _resolve_gate0_drop_reason,
@@ -863,11 +865,7 @@ def record_summary(
         else derived.analytic_shift[speech_valid]
     )
     if derived.global_rate is None:
-        prompt_speech_for_g = (
-            record.prompt_speech_mask
-            if record.prompt_speech_mask is not None
-            else derived.prompt_speech_mask
-        )
+        prompt_speech_for_g = record.prompt_speech_mask
         g_ref, g_compute_status = compute_source_global_rate_for_analysis(
             source_duration_obs=record.prompt_duration_obs,
             source_speech_mask=prompt_speech_for_g,
@@ -876,6 +874,7 @@ def record_summary(
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
             source_unit_ids=record.prompt_content_units,
+            require_explicit_speech_mask=True,
             return_status=True,
         )
     else:
@@ -889,6 +888,7 @@ def record_summary(
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
         source_unit_ids=record.source_content_units,
+        require_explicit_speech_mask=False,
         return_status=True,
     )
     g_src_prefix_mean = float("nan")
@@ -994,12 +994,33 @@ def record_summary(
         if record.prefix_unit_offset is None or record.prefix_unit_offset.size <= 0
         else float(record.prefix_unit_offset.reshape(-1)[-1])
     )
+    prompt_speech_explicit = _as_optional_vector(record.prompt_speech_mask, dtype=np.float32)
+    min_prompt_speech_ratio = _as_float(
+        meta.get("g_min_speech_ratio", meta.get("min_prompt_speech_ratio", DEFAULT_GATE_MIN_SPEECH_RATIO)),
+        default=DEFAULT_GATE_MIN_SPEECH_RATIO,
+    )
+    prompt_domain_stats = _resolve_prompt_domain_stats(
+        prompt_duration=_as_optional_vector(record.prompt_duration_obs, dtype=np.float32),
+        prompt_speech=prompt_speech_explicit,
+        speech_ratio_hint=meta.get("prompt_speech_ratio", meta.get("speech_ratio")),
+        support_count_hint=meta.get("g_support_count"),
+        valid_count_hint=meta.get("g_valid_count"),
+        g_valid_hint=meta.get("g_valid_support", meta.get("g_valid")),
+        g_domain_valid_hint=meta.get("g_domain_valid"),
+        min_speech_ratio_hint=meta.get("g_min_speech_ratio", meta.get("min_prompt_speech_ratio")),
+        default_min_speech_ratio=min_prompt_speech_ratio,
+    )
     gate0_drop_reason = _resolve_gate0_drop_reason(
         g_ref=g_ref,
         g_src=g_src_utt,
         c_star=c_star,
         g_compute_status=g_compute_status,
         g_src_compute_status=g_src_compute_status,
+        g_domain_valid=prompt_domain_stats["g_domain_valid"],
+        speech_ratio=prompt_domain_stats["prompt_speech_ratio"],
+        min_speech_ratio=prompt_domain_stats["g_min_speech_ratio"],
+        has_explicit_prompt_speech_mask=prompt_speech_explicit is not None,
+        require_explicit_prompt_speech_mask=True,
     )
     summary = {
         "sample_id": sample_id,
@@ -1023,15 +1044,20 @@ def record_summary(
         "delta_g": delta_g,
         "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
         "gate0_drop_reason": gate0_drop_reason,
-        "g_support_count": _as_float(meta.get("g_support_count"), default=np.nan),
+        "g_support_count": _as_float(meta.get("g_support_count"), default=prompt_domain_stats["g_support_count"]),
         "g_speech_count": _as_float(meta.get("g_speech_count"), default=np.nan),
-        "g_valid_count": _as_float(meta.get("g_valid_count"), default=np.nan),
+        "g_valid_count": _as_float(meta.get("g_valid_count"), default=prompt_domain_stats["g_valid_count"]),
         "g_support_ratio_vs_speech": _as_float(meta.get("g_support_ratio_vs_speech"), default=np.nan),
         "g_support_ratio_vs_valid": _as_float(meta.get("g_support_ratio_vs_valid"), default=np.nan),
         "g_valid": _as_float(meta.get("g_valid"), default=np.nan),
+        "g_valid_support": prompt_domain_stats["g_valid_support"],
+        "g_domain_valid": prompt_domain_stats["g_domain_valid"],
         "g_drop_edge_runs": _as_float(meta.get("g_drop_edge_runs"), default=np.nan),
         "g_strict_speech_only": _as_float(meta.get("g_strict_speech_only"), default=np.nan),
         "g_trim_ratio": _as_float(meta.get("g_trim_ratio"), default=np.nan),
+        "g_min_speech_ratio": prompt_domain_stats["g_min_speech_ratio"],
+        "prompt_speech_ratio": prompt_domain_stats["prompt_speech_ratio"],
+        "prompt_speech_mask_explicit": 1.0 if prompt_speech_explicit is not None else 0.0,
         "prompt_global_weight_present": _as_float(meta.get("prompt_global_weight_present"), default=np.nan),
         "prompt_unit_log_prior_present": _as_float(meta.get("prompt_unit_log_prior_present"), default=np.nan),
         "prompt_unit_prior_vocab_size": _as_float(meta.get("prompt_unit_prior_vocab_size"), default=np.nan),
@@ -1045,7 +1071,7 @@ def record_summary(
             else float("nan")
         ),
         "ref_len_sec": float(prompt_total * float(unit_step_ms) / 1000.0),
-        "speech_ratio": float(prompt_speech / max(prompt_total, 1.0e-6)),
+        "speech_ratio": prompt_domain_stats["prompt_speech_ratio"],
         "same_text": np.nan if same_text_reference is None else float(same_text_reference),
         "same_text_reference": np.nan if same_text_reference is None else float(same_text_reference),
         "same_text_target": np.nan if same_text_target is None else float(same_text_target),
@@ -1080,7 +1106,7 @@ def record_summary(
         "item_name": record.item_name or "",
         "split": record.split or "",
         "reference_seconds": float(prompt_total * float(unit_step_ms) / 1000.0),
-        "reference_speech_ratio": float(prompt_speech / max(prompt_total, 1.0e-6)),
+        "reference_speech_ratio": prompt_domain_stats["prompt_speech_ratio"],
         "source_total_units": float(source_total),
         "target_total_units": float(target_total),
         "exec_total_units": float(exec_total),

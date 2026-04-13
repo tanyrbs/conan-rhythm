@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import sys
 import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 
 from modules.Conan.rhythm_v3.contracts import (
@@ -24,9 +26,15 @@ from utils.plot.rhythm_v3_viz import (
     build_projection_debug_payload,
     build_ref_crop_table,
     record_summary,
+    save_debug_records,
     summarize_falsification_ladder,
 )
-from scripts.rhythm_v3_debug_records import _warn_sparse_review_metadata
+from scripts.rhythm_v3_debug_records import (
+    _warn_sparse_review_metadata,
+    build_gate_status,
+    collect_gate_issues,
+    main as debug_records_main,
+)
 from utils.plot.rhythm_v3_viz.review import compute_g, compute_source_global_rate_for_analysis
 
 
@@ -418,6 +426,17 @@ def test_compute_g_and_source_global_rate_report_failure_status_without_silent_d
     assert g_src_status == "missing:source_speech_mask"
 
 
+def test_compute_source_global_rate_for_analysis_strict_mode_requires_explicit_speech_mask():
+    g_src, g_src_status = compute_source_global_rate_for_analysis(
+        source_duration_obs=np.asarray([2.0, 3.0], dtype=np.float32),
+        source_speech_mask=None,
+        return_status=True,
+        require_explicit_speech_mask=True,
+    )
+    assert np.isnan(g_src)
+    assert g_src_status == "missing:source_speech_mask"
+
+
 def test_warn_sparse_review_metadata_accepts_continuous_viterbi_alignment_kind(capsys):
     rows = []
     for eval_mode in ("analytic", "coarse_only", "learned"):
@@ -467,3 +486,205 @@ def test_warn_sparse_review_metadata_accepts_continuous_viterbi_alignment_kind(c
     captured = capsys.readouterr()
     assert "continuous_precomputed_coverage" not in captured.err
     assert "continuous_alignment_coverage" not in captured.err
+
+
+def test_build_ref_crop_table_strict_gate_requires_explicit_prompt_speech_mask():
+    record = RhythmV3DebugRecord.from_mapping(
+        {
+            "item_name": "src_strict_gate",
+            "metadata": {
+                "src_id": "src_strict_gate",
+                "pair_id": "pair_strict_gate",
+                "sample_id": "sample_strict_gate",
+                "eval_mode": "analytic",
+                "ref_bin": "mid",
+                "ref_condition": "real",
+            },
+            "source_content_units": np.asarray([5, 6, 8], dtype=np.int64),
+            "source_duration_obs": np.asarray([2.0, 4.0, 1.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            "unit_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prompt_content_units": np.asarray([9, 9, 8], dtype=np.int64),
+            "prompt_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "prompt_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "unit_duration_tgt": np.asarray([2.4, 3.5, 1.0], dtype=np.float32),
+            "unit_confidence_tgt": np.asarray([1.0, 0.7, 0.2], dtype=np.float32),
+            "unit_logstretch": np.asarray([0.15, 0.01, 0.0], dtype=np.float32),
+            "unit_duration_exec": np.asarray([2.8, 4.6, 1.0], dtype=np.float32),
+            "source_rate_seq": np.asarray([0.08, 0.18, 0.18], dtype=np.float32),
+        }
+    )
+    frame = build_ref_crop_table([record], require_explicit_speech_mask=True)
+    assert frame.shape[0] == 1
+    assert float(frame.iloc[0]["prompt_speech_mask_explicit"]) == 0.0
+    assert frame.iloc[0]["gate0_drop_reason"] == "g_ref:missing:source_speech_mask"
+    assert float(frame.iloc[0]["gate0_row_dropped"]) == 1.0
+
+
+def test_collect_gate_issues_uses_domain_validity_not_only_finite():
+    frame = pd.DataFrame(
+        [
+            {
+                "pair_id": "pair_gate",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+                "lexical_mismatch": 1.0,
+                "ref_len_sec": 4.0,
+                "speech_ratio": 0.45,
+                "alignment_kind": "continuous_viterbi_v1",
+                "target_duration_surface": "projection_raw",
+                "g_support_count": 2.0,
+                "g_support_ratio_vs_speech": 1.0,
+                "g_support_ratio_vs_valid": 1.0,
+                "g_valid": 1.0,
+                "g_domain_valid": 0.0,
+                "g_trim_ratio": 0.2,
+                "prompt_global_weight_present": 1.0,
+                "prompt_unit_log_prior_present": 0.0,
+                "alignment_unmatched_speech_ratio": 0.0,
+                "alignment_mean_local_confidence_speech": 0.9,
+                "alignment_mean_coarse_confidence_speech": 0.9,
+                "projector_boundary_hit_rate": 0.0,
+                "projector_boundary_decay_rate": 0.0,
+                "g_compute_status": "ok",
+                "g_src_compute_status": "ok",
+                "gate0_row_dropped": 1.0,
+                "gate0_drop_reason": "g_domain:invalid",
+                "eval_mode": "analytic",
+                "src_id": "src_demo",
+                "ref_bin": "mid",
+                "ref_condition": "real",
+            }
+        ]
+    )
+    issues = collect_gate_issues(frame)
+    assert any("g_domain_valid_mean=0.000<0.950" == issue for issue in issues)
+    status = build_gate_status(frame)
+    assert status["gate0_pass"] is False
+    assert "g_domain_valid_mean=0.000<0.950" in status["warnings"]
+
+
+def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path, monkeypatch):
+    record = RhythmV3DebugRecord.from_mapping(
+        {
+            "item_name": "src_cli_gate",
+            "metadata": {
+                "src_id": "src_cli_gate",
+                "pair_id": "pair_cli_gate",
+                "sample_id": "sample_cli_gate",
+                "eval_mode": "analytic",
+                "ref_bin": "mid",
+                "ref_condition": "real",
+                "same_text_reference": 0.0,
+                "same_text_target": 1.0,
+            },
+            "source_content_units": np.asarray([5, 6, 8], dtype=np.int64),
+            "source_duration_obs": np.asarray([2.0, 4.0, 1.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            "unit_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prompt_content_units": np.asarray([9, 9, 8], dtype=np.int64),
+            "prompt_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "prompt_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "unit_duration_tgt": np.asarray([2.4, 3.5, 1.0], dtype=np.float32),
+            "unit_confidence_tgt": np.asarray([1.0, 0.7, 0.2], dtype=np.float32),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.0], dtype=np.float32),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.85], dtype=np.float32),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.85], dtype=np.float32),
+            "unit_logstretch": np.asarray([0.15, 0.01, 0.0], dtype=np.float32),
+            "unit_duration_exec": np.asarray([2.8, 4.6, 1.0], dtype=np.float32),
+            "source_rate_seq": np.asarray([0.08, 0.18, 0.18], dtype=np.float32),
+            "prefix_unit_offset": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        }
+    )
+    bundle_path = tmp_path / "debug_bundle.pt"
+    save_debug_records([record], bundle_path)
+    output_path = tmp_path / "summary.csv"
+    gate_status_path = tmp_path / "gate_status.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rhythm_v3_debug_records.py",
+            "--input",
+            str(bundle_path),
+            "--output",
+            str(output_path),
+            "--gate-status-json",
+            str(gate_status_path),
+            "--strict-gates",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        debug_records_main()
+    assert exc_info.value.code != 0
+    assert gate_status_path.exists()
+    payload = gate_status_path.read_text(encoding="utf-8")
+    assert "gate0_pass" in payload
+
+
+def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_path, monkeypatch, capsys):
+    import scripts.rhythm_v3_debug_records as cli
+
+    row = {
+        "item_name": "demo_case",
+        "src_id": "src_demo",
+        "sample_id": "sample_demo",
+        "pair_id": "pair_demo",
+        "eval_mode": "analytic",
+        "ref_bin": "mid",
+        "ref_condition": "real",
+        "same_text_reference": 0.0,
+        "same_text_target": 1.0,
+        "lexical_mismatch": 1.0,
+        "ref_len_sec": 4.0,
+        "speech_ratio": 0.8,
+        "alignment_kind": "continuous_viterbi_v1",
+        "target_duration_surface": "projection_raw",
+        "g_support_count": 4.0,
+        "g_support_ratio_vs_speech": 1.0,
+        "g_support_ratio_vs_valid": 1.0,
+        "g_valid": 1.0,
+        "g_trim_ratio": 0.2,
+        "prompt_global_weight_present": 1.0,
+        "prompt_unit_log_prior_present": 0.0,
+        "alignment_unmatched_speech_ratio": 0.0,
+        "alignment_mean_local_confidence_speech": 0.9,
+        "alignment_mean_coarse_confidence_speech": 0.9,
+        "projector_boundary_hit_rate": 0.0,
+        "projector_boundary_decay_rate": 0.0,
+        "gate0_row_dropped": 0.0,
+        "gate0_drop_reason": "ok",
+        "g_compute_status": "ok",
+        "g_src_compute_status": "ok",
+    }
+
+    monkeypatch.setattr(cli, "load_debug_records", lambda raw: [object()])
+    monkeypatch.setattr(cli, "record_summary", lambda record, **kwargs: dict(row))
+    monkeypatch.setattr(cli, "build_prefix_silence_review_table", lambda records: pd.DataFrame())
+    monkeypatch.setattr(cli, "build_monotonicity_table", lambda records, **kwargs: pd.DataFrame())
+
+    output = tmp_path / "summary.csv"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rhythm_v3_debug_records.py",
+            "--input",
+            "dummy_bundle.npz",
+            "--output",
+            str(output),
+            "--strict-gates",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code != 0
+    assert "unrecognized arguments" not in captured.err
+    assert (
+        "strict gate failure" in captured.err.lower()
+        or "negative_control_reference" in captured.err
+        or "missing_controls" in captured.err
+    )

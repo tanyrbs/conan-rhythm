@@ -206,6 +206,8 @@ class ContinuousRunAligner:
         band_width: int | None = None,
         band_ratio: float = 0.08,
         bad_cost_threshold: float = 1.2,
+        allow_source_skip: bool = False,
+        skip_penalty: float = 1.0,
     ) -> None:
         self.lambda_emb = float(lambda_emb)
         self.lambda_type = float(lambda_type)
@@ -214,6 +216,8 @@ class ContinuousRunAligner:
         self.band_width = None if band_width is None else int(max(1, band_width))
         self.band_ratio = float(max(0.0, band_ratio))
         self.bad_cost_threshold = float(max(0.0, bad_cost_threshold))
+        self.allow_source_skip = bool(allow_source_skip)
+        self.skip_penalty = float(max(0.0, skip_penalty))
 
     def _resolve_band_width(self, *, num_source: int) -> int:
         if self.band_width is not None:
@@ -432,7 +436,7 @@ class ContinuousRunAligner:
         num_target, num_source = local_cost.shape
         if num_target <= 0 or num_source <= 0:
             raise RuntimeError("continuous aligner requires non-empty target observations and source runs.")
-        if num_target < num_source:
+        if num_target < num_source and not self.allow_source_skip:
             raise RuntimeError(
                 "continuous aligner requires at least one target frame per source run under strict monotonicity: "
                 f"target_frames={num_target}, source_runs={num_source}"
@@ -455,47 +459,69 @@ class ContinuousRunAligner:
         inf = np.float32(1.0e12)
         dp_prev = np.full((num_source,), inf, dtype=np.float32)
         dp_curr = np.full((num_source,), inf, dtype=np.float32)
-        back = np.full((num_target, num_source), 255, dtype=np.uint8)
+        back = np.full((num_target, num_source), -1, dtype=np.int64)
         margin = np.zeros((num_target, num_source), dtype=np.float32)
-
-        if not np.isfinite(local_cost[0, 0]):
-            raise RuntimeError("continuous aligner local_cost[0, 0] is not finite.")
-        dp_prev[0] = local_cost[0, 0]
-        back[0, 0] = 0
+        center = _nearest_progress_index(source_progress, float(target_progress[0]))
+        left = max(0, center - band_width)
+        right = min(num_source - 1, center + band_width)
+        if left > right:
+            left, right = 0, min(num_source - 1, max(0, center))
+        for src_idx in range(left, right + 1):
+            if not self.allow_source_skip and src_idx != 0:
+                continue
+            cost = local_cost[0, src_idx]
+            if not np.isfinite(cost):
+                continue
+            skip_cost = np.float32(self.skip_penalty * float(src_idx)) if self.allow_source_skip else np.float32(0.0)
+            dp_prev[src_idx] = cost + skip_cost
+            back[0, src_idx] = -1
+        if not np.isfinite(dp_prev).any():
+            raise RuntimeError("continuous aligner could not initialize any first-frame state.")
 
         for tgt_idx in range(1, num_target):
             dp_curr.fill(inf)
-            hard_left = max(0, num_source - num_target + tgt_idx)
-            hard_right = min(num_source - 1, tgt_idx)
+            hard_left = 0 if self.allow_source_skip else max(0, num_source - num_target + tgt_idx)
+            hard_right = num_source - 1 if self.allow_source_skip else min(num_source - 1, tgt_idx)
             center = _nearest_progress_index(source_progress, float(target_progress[tgt_idx]))
             left = max(hard_left, center - band_width)
             right = min(hard_right, center + band_width)
             if left > right:
                 left, right = hard_left, hard_right
             for src_idx in range(left, right + 1):
-                stay = dp_prev[src_idx]
-                advance = dp_prev[src_idx - 1] if src_idx > 0 else inf
-                if src_idx <= 0:
-                    best_prev = stay
-                    alt_prev = inf
-                    move = 0
-                elif advance <= stay:
-                    best_prev = advance
-                    alt_prev = stay
-                    move = 1
+                if self.allow_source_skip:
+                    prev_idx = np.arange(src_idx + 1, dtype=np.int64)
+                    prev_cost = dp_prev[: src_idx + 1]
+                    if prev_cost.size <= 0:
+                        continue
+                    cand = prev_cost + (self.skip_penalty * (src_idx - prev_idx).astype(np.float32))
+                    best_rank = np.argsort(cand, kind="stable")
+                    best_prev_idx = int(prev_idx[best_rank[0]])
+                    best_prev = cand[best_rank[0]]
+                    alt_prev = cand[best_rank[1]] if cand.size > 1 else inf
                 else:
-                    best_prev = stay
-                    alt_prev = advance
-                    move = 0
+                    stay = dp_prev[src_idx]
+                    advance = dp_prev[src_idx - 1] if src_idx > 0 else inf
+                    if src_idx <= 0:
+                        best_prev = stay
+                        alt_prev = inf
+                        best_prev_idx = src_idx
+                    elif advance <= stay:
+                        best_prev = advance
+                        alt_prev = stay
+                        best_prev_idx = src_idx - 1
+                    else:
+                        best_prev = stay
+                        alt_prev = advance
+                        best_prev_idx = src_idx
                 if not np.isfinite(best_prev):
                     continue
                 cost = local_cost[tgt_idx, src_idx]
                 if not np.isfinite(cost):
                     continue
                 dp_curr[src_idx] = cost + best_prev
-                back[tgt_idx, src_idx] = move
+                back[tgt_idx, src_idx] = best_prev_idx
                 margin[tgt_idx, src_idx] = (
-                    np.float32(abs(stay - advance))
+                    np.float32(abs(float(best_prev) - float(alt_prev)))
                     if np.isfinite(alt_prev)
                     else np.float32(1.0e3)
                 )
@@ -513,15 +539,14 @@ class ContinuousRunAligner:
             path_margin[tgt_idx] = margin[tgt_idx, src_idx]
             if tgt_idx <= 0:
                 continue
-            move = int(back[tgt_idx, src_idx])
-            if move == 1:
-                src_idx -= 1
-            elif move != 0:
+            prev_src_idx = int(back[tgt_idx, src_idx])
+            if prev_src_idx < 0:
                 raise RuntimeError(
                     "continuous aligner backtrace encountered an invalid predecessor marker "
-                    f"at target={tgt_idx}, source={src_idx}: move={move}"
+                    f"at target={tgt_idx}, source={src_idx}: move={prev_src_idx}"
                 )
-        if src_idx != 0:
+            src_idx = prev_src_idx
+        if not self.allow_source_skip and src_idx != 0:
             raise RuntimeError(
                 "continuous aligner backtrace did not return to the first source run: "
                 f"final_state={src_idx}"
@@ -634,6 +659,14 @@ class ContinuousRunAligner:
                 run_margin[src_idx] = np.float32(np.median(finite))
 
         margin_term = np.tanh(np.clip(run_margin, 0.0, 5.0))
+        cost_term_local = _sigmoid(-1.6 * run_mean_cost)
+        cost_term_coarse = _sigmoid(-1.1 * run_mean_cost)
+        margin_term_local = _sigmoid(0.9 * margin_term)
+        margin_term_coarse = _sigmoid(0.5 * margin_term)
+        type_term_local = _sigmoid(1.2 * (run_type_agree - 0.5))
+        type_term_coarse = _sigmoid(0.8 * (run_type_agree - 0.5))
+        match_term_local = np.clip(run_match_rate, 0.0, 1.0).astype(np.float32)
+        match_term_coarse = np.sqrt(np.clip(run_match_rate, 0.0, 1.0)).astype(np.float32)
         confidence_local = _sigmoid(
             (-1.6 * run_mean_cost) + (0.9 * margin_term) + (1.2 * (run_type_agree - 0.5))
         ).astype(np.float32)
@@ -672,6 +705,16 @@ class ContinuousRunAligner:
             "run_mean_cost": run_mean_cost.astype(np.float32),
             "run_type_agree": run_type_agree.astype(np.float32),
             "run_match_rate": run_match_rate.astype(np.float32),
+            "run_confidence_cost_term": cost_term_local.astype(np.float32),
+            "run_confidence_margin_term": margin_term_local.astype(np.float32),
+            "run_confidence_type_term": type_term_local.astype(np.float32),
+            "run_confidence_match_term": match_term_local.astype(np.float32),
+            "run_confidence_local_final": confidence_local.astype(np.float32),
+            "run_confidence_coarse_cost_term": cost_term_coarse.astype(np.float32),
+            "run_confidence_coarse_margin_term": margin_term_coarse.astype(np.float32),
+            "run_confidence_coarse_type_term": type_term_coarse.astype(np.float32),
+            "run_confidence_coarse_match_term": match_term_coarse.astype(np.float32),
+            "run_confidence_coarse_final": confidence_coarse.astype(np.float32),
             "run_confidence_local": confidence_local.astype(np.float32),
             "run_confidence_coarse": confidence_coarse.astype(np.float32),
             "unmatched_speech_ratio": unmatched_speech_ratio,
@@ -829,6 +872,8 @@ class ContinuousRunAligner:
                     [-1 if self.band_width is None else int(self.band_width)],
                     dtype=np.int64,
                 ),
+                "alignment_allow_source_skip": np.asarray([1 if self.allow_source_skip else 0], dtype=np.int64),
+                "alignment_skip_penalty": np.asarray([self.skip_penalty], dtype=np.float32),
                 "run_occ_hard": summary["run_occ_viterbi"],
                 "run_occ_expected": summary["run_occ_viterbi"],
                 "run_occ_expected_is_hard_proxy": np.asarray([1], dtype=np.int64),
@@ -1100,6 +1145,8 @@ def project_target_runs_onto_source(
     continuous_alignment_mode: str | None = None,
     continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
+    allow_source_self_target_fallback: bool = False,
+    alignment_soft_repair: bool = False,
 ) -> dict[str, np.ndarray | np.float32 | str]:
     source_silence_mask = resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
     target_silence_mask = ((target_valid_mask > 0.5) & ~(target_speech_mask > 0.5)).astype(np.float32)
@@ -1175,8 +1222,15 @@ def project_target_runs_onto_source(
     confidence_local = np.zeros((num_source_runs,), dtype=np.float32)
     confidence_coarse = np.zeros((num_source_runs,), dtype=np.float32)
     coverage = np.zeros((num_source_runs,), dtype=np.float32)
+    coverage_binary = np.zeros((num_source_runs,), dtype=np.float32)
+    coverage_fraction = np.zeros((num_source_runs,), dtype=np.float32)
+    expected_frame_support = np.zeros((num_source_runs,), dtype=np.float32)
     match_rate = np.zeros((num_source_runs,), dtype=np.float32)
     mean_cost = np.zeros((num_source_runs,), dtype=np.float32)
+    confidence_cost_term = np.zeros((num_source_runs,), dtype=np.float32)
+    confidence_margin_term = np.zeros((num_source_runs,), dtype=np.float32)
+    confidence_type_term = np.zeros((num_source_runs,), dtype=np.float32)
+    confidence_match_term = np.zeros((num_source_runs,), dtype=np.float32)
 
     if "run_occ_viterbi" in alignment:
         projected[src_run_index] = np.asarray(alignment["run_occ_viterbi"], dtype=np.float32)
@@ -1185,10 +1239,33 @@ def project_target_runs_onto_source(
         coverage[src_run_index] = (
             np.asarray(alignment["run_occ_viterbi"], dtype=np.float32) > 0.0
         ).astype(np.float32, copy=False)
+        coverage_binary[src_run_index] = coverage[src_run_index]
+        expected_frame_support[src_run_index] = np.clip(src_durations_valid.astype(np.float32), 1.0, None)
+        coverage_fraction[src_run_index] = np.maximum(
+            np.asarray(alignment["run_occ_viterbi"], dtype=np.float32)
+            / np.clip(expected_frame_support[src_run_index], 1.0, None),
+            0.0,
+        ).astype(np.float32, copy=False)
         match_rate[src_run_index] = np.asarray(alignment["run_match_rate"], dtype=np.float32)
         mean_cost[src_run_index] = np.asarray(alignment["run_mean_cost"], dtype=np.float32)
         confidence_local[src_run_index] = np.asarray(alignment["run_confidence_local"], dtype=np.float32)
         confidence_coarse[src_run_index] = np.asarray(alignment["run_confidence_coarse"], dtype=np.float32)
+        confidence_cost_term[src_run_index] = np.asarray(
+            alignment.get("run_confidence_cost_term", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_margin_term[src_run_index] = np.asarray(
+            alignment.get("run_confidence_margin_term", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_type_term[src_run_index] = np.asarray(
+            alignment.get("run_confidence_type_term", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        confidence_match_term[src_run_index] = np.asarray(
+            alignment.get("run_confidence_match_term", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
         unmatched_speech_ratio = float(alignment.get("unmatched_speech_ratio", 0.0))
         mean_local_confidence_speech = float(alignment.get("mean_local_confidence_speech", 0.0))
         mean_coarse_confidence_speech = float(alignment.get("mean_coarse_confidence_speech", 0.0))
@@ -1229,6 +1306,12 @@ def project_target_runs_onto_source(
             where=source_support > 0.0,
         )
         coverage = np.clip(coverage, 0.0, 1.0).astype(np.float32)
+        coverage_binary = (aligned_target > 0.0).astype(np.float32, copy=False)
+        expected_frame_support = np.clip(source_durations.astype(np.float32), 1.0, None)
+        coverage_fraction = np.maximum(
+            aligned_target / expected_frame_support,
+            0.0,
+        ).astype(np.float32, copy=False)
         match_rate = np.divide(
             exact_match,
             np.clip(aligned_target, 1.0, None),
@@ -1257,6 +1340,10 @@ def project_target_runs_onto_source(
             0.0,
             1.0,
         ).astype(np.float32)
+        confidence_cost_term = np.exp(-mean_cost).astype(np.float32, copy=False)
+        confidence_margin_term = coverage_fraction.astype(np.float32, copy=False)
+        confidence_type_term = mass_agree.astype(np.float32, copy=False)
+        confidence_match_term = match_rate.astype(np.float32, copy=False)
 
         source_is_silence = source_silence_mask > 0.5
         projected[source_is_silence] = np.maximum(projected[source_is_silence], 1.0).astype(np.float32)
@@ -1274,8 +1361,9 @@ def project_target_runs_onto_source(
         ).astype(np.float32)
 
         speech_zero = (~source_is_silence) & (projected <= 0.0)
-        projected[speech_zero] = source_durations[speech_zero].astype(np.float32)
-        projected_weighted[speech_zero] = source_durations[speech_zero].astype(np.float32)
+        if bool(alignment_soft_repair or allow_source_self_target_fallback):
+            projected[speech_zero] = source_durations[speech_zero].astype(np.float32)
+            projected_weighted[speech_zero] = source_durations[speech_zero].astype(np.float32)
         confidence_local[speech_zero] = 0.0
         confidence_coarse[speech_zero] = 0.0
         speech_run_count = int(np.count_nonzero(~source_is_silence))
@@ -1313,6 +1401,13 @@ def project_target_runs_onto_source(
         "projected_weighted": projected_weighted.astype(np.float32),
         "confidence_local": confidence_local.astype(np.float32),
         "confidence_coarse": confidence_coarse.astype(np.float32),
+        "coverage_binary": coverage_binary.astype(np.float32),
+        "coverage_fraction": coverage_fraction.astype(np.float32),
+        "expected_frame_support": expected_frame_support.astype(np.float32),
+        "confidence_cost_term": confidence_cost_term.astype(np.float32),
+        "confidence_margin_term": confidence_margin_term.astype(np.float32),
+        "confidence_type_term": confidence_type_term.astype(np.float32),
+        "confidence_match_term": confidence_match_term.astype(np.float32),
         "coverage": coverage.astype(np.float32),
         "match_rate": match_rate.astype(np.float32),
         "mean_cost": mean_cost.astype(np.float32),

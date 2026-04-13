@@ -253,6 +253,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         global_term_before_local = global_term * mask
         residual_used = residual * mask
         residual_pred = predicted_residual * mask
+        residual_gate_mean = (
+            (residual_gate * speech_mask).sum(dim=1, keepdim=True)
+            / speech_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        )
         leading_gate = torch.ones_like(mask) * commit_valid_mask
 
         return {
@@ -269,11 +273,19 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "unit_coarse_delta": coarse_delta,
             "unit_coarse_correction_pred": coarse_delta_pred,
             "unit_coarse_correction_predicted": coarse_delta_pred,
+            "coarse_scalar_raw": coarse_scalar.reshape(-1, 1),
             "unit_global_term_before_local": global_term_before_local,
             "unit_residual_logstretch": residual_used,
             "unit_local_residual_used": residual_used,
             "unit_residual_logstretch_pred": residual_pred,
             "unit_residual_gate": residual_gate * mask,
+            "residual_gate_mean": residual_gate_mean,
+            "unit_residual_cold_gate": cold_gate * speech_mask,
+            "unit_residual_short_gate": short_gate * speech_mask,
+            "unit_residual_gate_stability": runtime_stability * speech_mask,
+            "residual_gate_cold": cold_gate * speech_mask,
+            "residual_gate_short": short_gate * speech_mask,
+            "residual_gate_stability": runtime_stability * speech_mask,
             "unit_runtime_stability": runtime_stability * mask,
             "unit_silence_tau": silence_tau,
             "unit_silence_tau_surface_kind": silence_surface["silence_surface_kind"],

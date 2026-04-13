@@ -6,6 +6,7 @@ from typing import Callable, Optional
 
 import torch
 
+from modules.Conan.rhythm_v3.g_stats import masked_true_median_batch, masked_weighted_median_batch
 from modules.Conan.rhythm_v3.math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
 from modules.Conan.rhythm_v3.silence_surface import build_silence_tau_surface
 from .losses_impl import DurationV3LossTargets, RhythmLossTargets
@@ -1022,10 +1023,14 @@ def build_duration_v3_loss_targets(
     unit_confidence_tgt = unit_confidence_coarse_tgt
     global_shift_tgt = None
     coarse_logstretch_tgt = None
+    silence_coarse_logstretch_tgt = None
     coarse_correction_tgt = None
     coarse_duration_tgt = None
     residual_logstretch_tgt = None
     global_bias_tgt = None
+    global_bias_tgt_support_mass = None
+    global_bias_tgt_support_count = None
+    coarse_target_speech_conf_mean = None
     local_residual_tgt = None
     prefix_duration_tgt = None
     consistency_local_residual_tgt = None
@@ -1078,6 +1083,21 @@ def build_duration_v3_loss_targets(
             committed_speech_mask.float(),
             weight=unit_confidence_coarse_tgt,
         ).detach()
+        if isinstance(unit_confidence_coarse_tgt, torch.Tensor):
+            coarse_conf = unit_confidence_coarse_tgt.float() * committed_speech_mask.float()
+            global_bias_tgt_support_mass = coarse_conf.sum(dim=1, keepdim=True).detach()
+            global_bias_tgt_support_count = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
+            coarse_target_speech_conf_mean = (
+                global_bias_tgt_support_mass / global_bias_tgt_support_count.clamp_min(1.0)
+            ).detach()
+        else:
+            global_bias_tgt_support_mass = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
+            global_bias_tgt_support_count = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
+            coarse_target_speech_conf_mean = torch.where(
+                global_bias_tgt_support_count > 0.0,
+                torch.ones_like(global_bias_tgt_support_count),
+                torch.zeros_like(global_bias_tgt_support_count),
+            ).detach()
         coarse_bias_seq = global_bias_tgt.float()
         while coarse_bias_seq.dim() < residual_logstretch_tgt.dim():
             coarse_bias_seq = coarse_bias_seq.unsqueeze(-1)
@@ -1101,14 +1121,19 @@ def build_duration_v3_loss_targets(
             minimal_v1_profile=bool(getattr(config, "minimal_v1_profile", False)),
         )
         if bool((committed_silence_mask > 0.5).any().item()):
-            silence_coarse_tgt = torch.clamp(
+            silence_coarse_logstretch_tgt = torch.clamp(
                 coarse_logstretch_tgt,
                 min=-silence_tau_tgt,
                 max=silence_tau_tgt,
             ) * committed_silence_mask.float()
             coarse_logstretch_tgt = (
                 coarse_logstretch_tgt * committed_speech_mask.float()
-                + silence_coarse_tgt
+                + silence_coarse_logstretch_tgt
+            )
+        elif bool(getattr(config, "minimal_v1_profile", False)) and not isinstance(coarse_logstretch_tgt, torch.Tensor):
+            raise RuntimeError(
+                "minimal_v1_profile requires coarse-derived silence target; missing coarse_logstretch_tgt "
+                "is not allowed when committed silence exists."
             )
         coarse_duration_tgt = (
             prediction_anchor.float()
@@ -1117,6 +1142,15 @@ def build_duration_v3_loss_targets(
         )
         prefix_duration_tgt = coarse_duration_tgt.detach()
         local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
+    if (
+        bool(getattr(config, "minimal_v1_profile", False))
+        and bool((committed_silence_mask > 0.5).any().item())
+        and not isinstance(coarse_logstretch_tgt, torch.Tensor)
+    ):
+        raise RuntimeError(
+            "minimal_v1_profile requires coarse-derived silence target; "
+            "missing coarse_logstretch_tgt is not allowed when committed silence exists."
+        )
     if prefix_duration_tgt is None:
         prefix_duration_tgt = (
             unit_duration_tgt.float() * committed_speech_mask.float()
@@ -1204,10 +1238,14 @@ def build_duration_v3_loss_targets(
         global_rate=prompt_targets["global_rate"],
         global_shift_tgt=global_shift_tgt,
         coarse_logstretch_tgt=coarse_logstretch_tgt,
+        silence_coarse_logstretch_tgt=silence_coarse_logstretch_tgt,
         coarse_correction_tgt=coarse_correction_tgt,
         coarse_duration_tgt=coarse_duration_tgt,
         residual_logstretch_tgt=residual_logstretch_tgt,
         global_bias_tgt=global_bias_tgt,
+        global_bias_tgt_support_mass=global_bias_tgt_support_mass,
+        global_bias_tgt_support_count=global_bias_tgt_support_count,
+        coarse_target_speech_conf_mean=coarse_target_speech_conf_mean,
         local_residual_tgt=local_residual_tgt,
         prefix_duration_tgt=prefix_duration_tgt,
         prompt_basis_activation=prompt_targets["prompt_basis_activation"],
@@ -1245,26 +1283,10 @@ def _masked_duration_v3_median(
     mask: torch.Tensor,
     weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    batch_size = values.size(0)
-    median = values.new_zeros((batch_size, 1))
+    mask_bool = mask > 0.5
     if isinstance(weight, torch.Tensor):
-        weight = weight.float()
-    for batch_idx in range(batch_size):
-        valid = mask[batch_idx] > 0.5
-        if bool(valid.any().item()):
-            selected = values[batch_idx][valid]
-            if not isinstance(weight, torch.Tensor):
-                median[batch_idx, 0] = selected.median()
-                continue
-            selected_weight = weight[batch_idx][valid].float().clamp_min(1.0e-4)
-            order = torch.argsort(selected)
-            sorted_values = selected[order]
-            sorted_weight = selected_weight[order]
-            cumsum = torch.cumsum(sorted_weight, dim=0)
-            cutoff = 0.5 * sorted_weight.sum()
-            median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
-            median[batch_idx, 0] = sorted_values[median_idx]
-    return median
+        return masked_weighted_median_batch(values.float(), mask_bool, weight.float())
+    return masked_true_median_batch(values.float(), mask_bool)
 
 
 def _build_duration_v3_prefix_median_seq(
@@ -1289,16 +1311,17 @@ def _build_duration_v3_prefix_median_seq(
                 continue
             prefix_values = torch.cat(running_values, dim=0)
             if weight_f is None:
-                seq[batch_idx, unit_idx] = prefix_values.median()
+                seq[batch_idx, unit_idx] = masked_true_median_batch(
+                    prefix_values.reshape(1, -1),
+                    torch.ones_like(prefix_values.reshape(1, -1), dtype=torch.bool),
+                ).reshape(())
                 continue
             prefix_weight = torch.cat(running_weights, dim=0)
-            order = torch.argsort(prefix_values)
-            sorted_values = prefix_values[order]
-            sorted_weight = prefix_weight[order]
-            cumsum = torch.cumsum(sorted_weight, dim=0)
-            cutoff = 0.5 * sorted_weight.sum()
-            median_idx = int(torch.searchsorted(cumsum, cutoff, right=False).clamp_max(sorted_values.numel() - 1).item())
-            seq[batch_idx, unit_idx] = sorted_values[median_idx]
+            seq[batch_idx, unit_idx] = masked_weighted_median_batch(
+                prefix_values.reshape(1, -1),
+                torch.ones_like(prefix_values.reshape(1, -1), dtype=torch.bool),
+                prefix_weight.reshape(1, -1),
+            ).reshape(())
     return seq * output_mask.float()
 
 

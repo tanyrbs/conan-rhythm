@@ -171,8 +171,8 @@ class StreamingDurationProjector(nn.Module):
         projected = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_hit = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_decay_applied = unit_duration_exec.new_zeros(unit_duration_exec.shape)
-        residual_next = residual_prev.float().reshape(batch_size).clone()
-        prefix_offset_next = prefix_unit_offset_prev.float().reshape(batch_size).clone()
+        residual_values = residual_prev.float().reshape(batch_size).detach().cpu().tolist()
+        prefix_offset_values = prefix_unit_offset_prev.float().reshape(batch_size).detach().cpu().tolist()
         committed_len_tensor = (
             commit_mask.float().sum(dim=1).long()
             if committed_len is None
@@ -206,26 +206,30 @@ class StreamingDurationProjector(nn.Module):
             committed_units_prev = committed_units_prev.long().reshape(batch_size)
         else:
             committed_units_prev = torch.zeros((batch_size,), dtype=torch.long, device=unit_duration_exec.device)
+        committed_len_values = committed_len_tensor.detach().cpu().tolist()
+        budget_pos_values_list = budget_pos_values.detach().cpu().tolist()
+        budget_neg_values_list = budget_neg_values.detach().cpu().tolist()
+        committed_units_prev_values = committed_units_prev.detach().cpu().tolist()
         cached_prev = None
         if isinstance(cached_duration_exec_prev, torch.Tensor):
             cached_prev = cached_duration_exec_prev.to(device=unit_duration_exec.device, dtype=unit_duration_exec.dtype)
-        for batch_idx in range(batch_size):
-            row_committed_len = int(committed_len_tensor[batch_idx].item())
+        for batch_idx, row_committed_len_value in enumerate(committed_len_values):
+            row_committed_len = int(row_committed_len_value)
             if row_committed_len <= 0:
                 continue
-            row_budget_pos = int(budget_pos_values[batch_idx].item())
-            row_budget_neg = int(budget_neg_values[batch_idx].item())
+            row_budget_pos = int(budget_pos_values_list[batch_idx])
+            row_budget_neg = int(budget_neg_values_list[batch_idx])
             start_unit = 0
             if cached_prev is not None and cached_prev.size(0) > batch_idx:
-                prefix = min(int(committed_units_prev[batch_idx].item()), int(cached_prev.size(1)), row_committed_len)
+                prefix = min(int(committed_units_prev_values[batch_idx]), int(cached_prev.size(1)), row_committed_len)
                 if prefix > 0:
                     projected[batch_idx, :prefix] = cached_prev[batch_idx, :prefix]
                     start_unit = prefix
-            carry = float(residual_next[batch_idx].item())
-            prefix_offset = float(prefix_offset_next[batch_idx].item())
+            carry = float(residual_values[batch_idx])
+            prefix_offset = float(prefix_offset_values[batch_idx])
             if start_unit >= row_committed_len:
-                residual_next[batch_idx] = carry
-                prefix_offset_next[batch_idx] = float(prefix_offset)
+                residual_values[batch_idx] = float(carry)
+                prefix_offset_values[batch_idx] = float(prefix_offset)
                 continue
             row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final = (
                 StreamingDurationProjector._extract_projection_row_torch(
@@ -272,8 +276,18 @@ class StreamingDurationProjector(nn.Module):
                 device=boundary_decay_applied.device,
                 dtype=boundary_decay_applied.dtype,
             )
-            residual_next[batch_idx] = carry
-            prefix_offset_next[batch_idx] = float(prefix_offset)
+            residual_values[batch_idx] = float(carry)
+            prefix_offset_values[batch_idx] = float(prefix_offset)
+        residual_next = torch.as_tensor(
+            residual_values,
+            dtype=residual_prev.dtype,
+            device=unit_duration_exec.device,
+        )
+        prefix_offset_next = torch.as_tensor(
+            prefix_offset_values,
+            dtype=prefix_unit_offset_prev.dtype,
+            device=unit_duration_exec.device,
+        )
         return (
             projected,
             residual_next.reshape(batch_size, 1),
@@ -426,22 +440,47 @@ class StreamingDurationProjector(nn.Module):
             else torch.zeros((commit_mask.size(0),), dtype=torch.long, device=commit_mask.device)
         )
         committed_units = commit_mask.sum(dim=1).long()
-        for batch_idx in range(commit_mask.size(0)):
-            counter = int(round(float(since_last_boundary[batch_idx, 0].item())))
-            start_unit = int(min(prev_committed_units[batch_idx].item(), committed_units[batch_idx].item()))
-            end_unit = int(committed_units[batch_idx].item())
+        since_last_boundary_values = since_last_boundary.reshape(-1).detach().cpu().tolist()
+        prev_committed_values = prev_committed_units.detach().cpu().tolist()
+        committed_values = committed_units.detach().cpu().tolist()
+        for batch_idx, end_unit_value in enumerate(committed_values):
+            counter = int(round(float(since_last_boundary_values[batch_idx])))
+            start_unit = int(min(prev_committed_values[batch_idx], end_unit_value))
+            end_unit = int(end_unit_value)
+            span = max(0, end_unit - start_unit)
+            if span <= 0:
+                since_last_boundary[batch_idx, 0] = float(counter)
+                continue
             if isinstance(boundary_hit, torch.Tensor):
                 row_hits = boundary_hit[batch_idx, start_unit:end_unit].detach().float() > 0.5
-                for hit in row_hits:
-                    counter = 0 if bool(hit.item()) else (counter + 1)
+                row_hits_idx = torch.nonzero(row_hits, as_tuple=False)
+                if int(row_hits_idx.numel()) > 0:
+                    last_hit = int(row_hits_idx[-1, 0].item())
+                    counter = int(span - 1 - last_hit)
+                else:
+                    counter += int(span)
             else:
-                for unit_idx in range(start_unit, end_unit):
-                    row_boundary_hit = False
-                    if isinstance(source_boundary_cue, torch.Tensor) and float(source_boundary_cue[batch_idx, unit_idx].item()) >= float(boundary_reset_thresh):
-                        row_boundary_hit = True
-                    if isinstance(phrase_final_mask, torch.Tensor) and float(phrase_final_mask[batch_idx, unit_idx].item()) > 0.5:
-                        row_boundary_hit = True
-                    counter = 0 if row_boundary_hit else (counter + 1)
+                row_boundary_hit = None
+                if isinstance(source_boundary_cue, torch.Tensor):
+                    row_boundary_hit = source_boundary_cue[batch_idx, start_unit:end_unit].detach().float() >= float(
+                        boundary_reset_thresh
+                    )
+                if isinstance(phrase_final_mask, torch.Tensor):
+                    row_phrase_final = phrase_final_mask[batch_idx, start_unit:end_unit].detach().float() > 0.5
+                    row_boundary_hit = (
+                        row_phrase_final
+                        if row_boundary_hit is None
+                        else (row_boundary_hit | row_phrase_final)
+                    )
+                if isinstance(row_boundary_hit, torch.Tensor):
+                    row_hits_idx = torch.nonzero(row_boundary_hit, as_tuple=False)
+                    if int(row_hits_idx.numel()) > 0:
+                        last_hit = int(row_hits_idx[-1, 0].item())
+                        counter = int(span - 1 - last_hit)
+                    else:
+                        counter += int(span)
+                else:
+                    counter += int(span)
             since_last_boundary[batch_idx, 0] = float(counter)
         return DurationRuntimeState(
             committed_units=committed_units,

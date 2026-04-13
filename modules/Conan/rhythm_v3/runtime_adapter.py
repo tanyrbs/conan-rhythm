@@ -572,6 +572,9 @@ class ConanDurationAdapter(nn.Module):
         prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
         prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
         if isinstance(prompt_speech_mask, torch.Tensor):
+            min_prompt_speech_ratio = float(
+                getattr(getattr(self.module, "prompt_memory_encoder", None), "min_speech_ratio", 0.0)
+            )
             support_mask = build_global_rate_support_mask(
                 speech_mask=prompt_speech_mask.float(),
                 valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
@@ -584,13 +587,25 @@ class ConanDurationAdapter(nn.Module):
                 else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
             )
             support_count = support_mask.float().sum(dim=1, keepdim=True)
+            speech_ratio = speech_count / valid_count.clamp_min(1.0)
+            g_valid_support = (support_count > 0.5).float()
+            g_domain_valid = (
+                g_valid_support > 0.5
+            ) & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
             g_debug_stats = {
                 "g_support_count": support_count.detach(),
                 "g_speech_count": speech_count.detach(),
                 "g_valid_count": valid_count.detach(),
+                "g_valid_support": g_valid_support.detach(),
+                "g_domain_valid": g_domain_valid.float().detach(),
+                "g_min_speech_ratio": support_count.new_full(
+                    support_count.shape,
+                    float(min_prompt_speech_ratio),
+                ),
+                "prompt_speech_ratio": speech_ratio.detach(),
                 "g_support_ratio_vs_speech": (support_count / speech_count.clamp_min(1.0)).detach(),
                 "g_support_ratio_vs_valid": (support_count / valid_count.clamp_min(1.0)).detach(),
-                "g_valid": (support_count > 0.5).float().detach(),
+                "g_valid": g_domain_valid.float().detach(),
                 "g_drop_edge_runs": support_count.new_full(
                     support_count.shape,
                     float(int(getattr(self.module, "g_drop_edge_runs", 0))),
@@ -617,6 +632,26 @@ class ConanDurationAdapter(nn.Module):
             if isinstance(ref_conditioning_meta.get("prompt_unit_prior_vocab_size"), torch.Tensor):
                 ret["rhythm_prompt_unit_prior_vocab_size"] = ref_conditioning_meta["prompt_unit_prior_vocab_size"].detach()
         if self.module.debug_export:
+            coarse_correction_used = (
+                execution.coarse_correction.detach()
+                if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
+                else None
+            )
+            coarse_correction_pred = (
+                execution.coarse_correction_pred.detach()
+                if isinstance(getattr(execution, "coarse_correction_pred", None), torch.Tensor)
+                else coarse_correction_used
+            )
+            residual_logstretch_used = (
+                execution.local_residual.detach()
+                if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
+                else None
+            )
+            residual_logstretch_pred = (
+                execution.local_residual_pred.detach()
+                if isinstance(getattr(execution, "local_residual_pred", None), torch.Tensor)
+                else residual_logstretch_used
+            )
             debug_bundle = {
                 "g_variant": self.module.g_variant,
                 "g_trim_ratio": float(getattr(self.module, "g_trim_ratio", 0.2)),
@@ -651,24 +686,16 @@ class ConanDurationAdapter(nn.Module):
                     else None
                 ),
                 "coarse_correction": (
-                    execution.coarse_correction.detach()
-                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
-                    else None
+                    coarse_correction_used
                 ),
                 "coarse_correction_used": (
-                    execution.coarse_correction.detach()
-                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
-                    else None
+                    coarse_correction_used
                 ),
                 "coarse_correction_pred": (
-                    execution.coarse_correction.detach()
-                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
-                    else None
+                    coarse_correction_pred
                 ),
                 "coarse_delta": (
-                    execution.coarse_correction.detach()
-                    if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
-                    else None
+                    coarse_correction_used
                 ),
                 "coarse_path_logstretch": (
                     execution.coarse_path_logstretch.detach()
@@ -676,14 +703,16 @@ class ConanDurationAdapter(nn.Module):
                     else None
                 ),
                 "local_residual": (
-                    execution.local_residual.detach()
-                    if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
-                    else None
+                    residual_logstretch_used
                 ),
                 "residual_logstretch": (
-                    execution.local_residual.detach()
-                    if isinstance(getattr(execution, "local_residual", None), torch.Tensor)
-                    else None
+                    residual_logstretch_used
+                ),
+                "residual_logstretch_used": (
+                    residual_logstretch_used
+                ),
+                "residual_logstretch_pred": (
+                    residual_logstretch_pred
                 ),
                 "speech_pred": (
                     execution.speech_pred.detach()
@@ -785,6 +814,8 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_coarse_path"] = debug_bundle["coarse_path_logstretch"]
             ret["rhythm_debug_local_residual"] = debug_bundle["local_residual"]
             ret["rhythm_debug_residual_logstretch"] = debug_bundle["residual_logstretch"]
+            ret["rhythm_debug_residual_used"] = debug_bundle["residual_logstretch_used"]
+            ret["rhythm_debug_residual_pred"] = debug_bundle["residual_logstretch_pred"]
             ret["rhythm_debug_speech_pred"] = debug_bundle["speech_pred"]
             ret["rhythm_debug_silence_pred"] = debug_bundle["silence_pred"]
             ret["rhythm_debug_projector_prefix_offset"] = debug_bundle["projector_prefix_offset"]

@@ -65,7 +65,7 @@ def test_compute_global_rate_raises_when_no_speech_support_exists():
     valid_mask = torch.ones_like(speech_mask)
     log_dur = torch.log(torch.tensor([[4.0, 1.0, 8.0]], dtype=torch.float32))
 
-    with pytest.raises(ValueError, match="No valid speech duration"):
+    with pytest.raises(ValueError, match="No valid speech duration|at least one valid item per batch row"):
         compute_global_rate(
             log_dur=log_dur,
             speech_mask=speech_mask,
@@ -152,6 +152,51 @@ def test_compute_global_rate_raw_median_batch_fast_path_supports_edge_drop():
         speech_mask=speech_mask,
         valid_mask=valid_mask,
         variant="raw_median",
+        drop_edge_runs=1,
+    )
+
+    expected = torch.stack(
+        [
+            0.5 * (torch.log(torch.tensor(4.0)) + torch.log(torch.tensor(8.0))),
+            0.5 * (torch.log(torch.tensor(5.0)) + torch.log(torch.tensor(7.0))),
+        ]
+    ).reshape(2, 1)
+    assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_weighted_median_prefers_high_confidence_support():
+    log_dur = torch.log(torch.tensor([[2.0, 10.0, 30.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.tensor([[8.0, 1.0, 1.0]], dtype=torch.float32)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="weighted_median",
+    )
+
+    assert torch.allclose(g, torch.log(torch.tensor([[2.0]], dtype=torch.float32)))
+
+
+def test_compute_global_rate_weighted_median_with_drop_edge_runs_uses_trimmed_support():
+    log_dur = torch.log(
+        torch.tensor(
+            [
+                [2.0, 4.0, 8.0, 16.0],
+                [3.0, 5.0, 7.0, 11.0],
+            ],
+            dtype=torch.float32,
+        )
+    )
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.ones_like(log_dur)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="weighted_median",
         drop_edge_runs=1,
     )
 
