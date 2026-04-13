@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -221,8 +220,8 @@ def _merge_short_jitter_runs(
 
 def _cpu_int64_list(values: torch.Tensor | Sequence[int] | Sequence[float]) -> list[int]:
     if isinstance(values, torch.Tensor):
-        return values.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy().tolist()
-    return np.asarray(values, dtype=np.int64).reshape(-1).tolist()
+        return values.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist()
+    return [int(value) for value in values]
 
 
 def _debounce_tail_tensors(
@@ -788,7 +787,7 @@ class StreamingRunLengthUnitizer:
                 durations_cloned = True
             durations[-1] += 1
 
-        chunk_values = token_chunk.tolist()
+        chunk_values = _cpu_int64_list(token_chunk)
         for token_value in chunk_values:
             token_id = int(token_value)
             if token_id < 0:
