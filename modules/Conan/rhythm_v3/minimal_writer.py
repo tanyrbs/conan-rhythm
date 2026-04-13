@@ -120,10 +120,11 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.coarse_delta_scale = float(max(0.0, coarse_delta_scale))
         self.local_residual_scale = float(max(0.0, local_residual_scale))
         self.src_rate_init_mode = normalized_src_rate_init_mode
-        self.src_rate_init = nn.Parameter(
-            torch.full((1,), float(src_rate_init_value)),
-            requires_grad=not bool(freeze_src_rate_init),
-        )
+        init_tensor = torch.full((1,), float(src_rate_init_value))
+        if freeze_src_rate_init:
+            self.register_buffer("src_rate_init", init_tensor)
+        else:
+            self.src_rate_init = nn.Parameter(init_tensor)
         self.freeze_src_rate_init = bool(freeze_src_rate_init)
 
     @staticmethod

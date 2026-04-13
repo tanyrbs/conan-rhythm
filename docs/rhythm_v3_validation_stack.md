@@ -178,6 +178,13 @@ Important convenience fields now emitted by the single export path:
 - ladder table: `tempo_transfer_slope`
 - gate status: `analytic_negative_control_gap`, `analytic_same_text_gap`
 
+Gate-1 interpretation is now stricter than an earlier "record-only" phase:
+
+- `analytic_negative_control_gap <= 0` is a hard gate failure
+- large positive `analytic_same_text_gap` is a hard gate failure
+- the same threshold is used in both the issue list and `gate1_pass`, so the
+  audit summary and the pass/fail verdict no longer diverge
+
 ## 4. Review util entry points
 
 Typical usage:
@@ -283,6 +290,12 @@ idealized future dataset.
 So Figure D should be read as a **boundary-aware audit proxy**, not as a
 linguistic gold boundary annotation.
 
+That proxy is only as good as the cached sidecars. In the maintained dataset
+path, adapted-source debug export now preserves cached `source_boundary_cue`,
+`phrase_group_index`, `phrase_group_pos`, and `phrase_final_mask` when their
+shapes still match the visible prefix, instead of zero-filling them
+unconditionally.
+
 ### 5.2 Crop stability requires actual crop groups
 
 Figure B Panel A only becomes meaningful when the debug records contain
@@ -304,6 +317,9 @@ still reports the core speech-support counters as the stable cross-run audit
 surface. Missing strict sidecars now fail closed in dataset/runtime contracts,
 and runtime debug reads the exported `prompt_g_*` evidence instead of
 recomputing a looser speech-only support mask.
+For minimal-V1 training data, this check is now pushed forward into the dataset
+layer as well: missing prompt speech / closed / length sidecars are treated as
+contract violations before the batch reaches model forward.
 
 ### 5.4 Projector debug now distinguishes carry from boundary-side smoothing
 

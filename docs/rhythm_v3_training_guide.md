@@ -47,7 +47,8 @@ Operationally, the maintained default means:
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
 - `rhythm_v3_detach_global_term_in_local_head: true`
 - `rhythm_v3_freeze_src_rate_init: true`
-- `rhythm_v3_gate_quality_strict: true`  (intent marker; CLI export controls strict fail/allow-partial behavior)
+- `rhythm_v3_gate_quality_strict: true`
+- `rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json`
 - `rhythm_v3_eval_mode: learned`
 - speech-only prompt global-rate estimation, with closed/boundary-clean support when prompt sidecars are available
 - speech = coarse + local
@@ -80,9 +81,11 @@ small overrides:
 
 Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
 `weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
-shows a real reason. The minimal-V1 contract forbids `rhythm_v3_g_variant=unit_norm`,
-so switch off `rhythm_v3_minimal_v1_profile` before running any `unit_norm` checks
-even when you already have a reproducible prior bundle.
+shows a real reason. The maintained strict-claim contract forbids
+`rhythm_v3_g_variant=unit_norm`, so keep
+`rhythm_v3_minimal_v1_profile=true` but set
+`rhythm_v3_strict_minimal_claim_profile=false` before running any `unit_norm`
+overlay checks, even when you already have a reproducible prior bundle.
 For `unit_norm`, also wire a reproducible prior bundle through
 `rhythm_v3_unit_prior_path`; the maintained repo now ships
 `scripts/build_unit_log_prior.py` so `unit_norm` is no longer just a consumer
@@ -348,6 +351,9 @@ Likewise, treat gate completeness as a contract rather than a plotting detail:
 - a bundle only counts as a control result when real-reference rows beat the
   negative controls on monotonicity / transfer metrics; mere presence is not
   enough
+- large positive `analytic_same_text_gap` is now a Gate 1 failure, not just a
+  review note, because it means same-text is outperforming cross-text by an
+  unsafe margin
 
 ---
 
@@ -634,6 +640,10 @@ py -3 scripts\rhythm_v3_debug_records.py ^
 
 `--review-dir` now implies strict gate enforcement in the maintained path. Use
 `--allow-partial-gates` only when exporting an explicitly partial audit bundle.
+The maintained training config also treats strict gate as a startup contract:
+`rhythm_v3_gate_quality_strict=true` now requires
+`rhythm_v3_required_gate_status_json` and refuses training when the recorded
+gate bundle does not pass.
 
 This keeps the current workflow aligned with the falsification-first order:
 
@@ -690,7 +700,8 @@ minimal-V1 line:
 2. writer checkpoint:
    `rhythm_v3_detach_global_term_in_local_head=true` remains the maintained
    default, `rhythm_v3_freeze_src_rate_init=true` remains the maintained
-   default, and `learned + no_detach` stays an ablation
+   default, frozen `src_rate_init` is stored as module state rather than a
+   trainable parameter, and `learned + no_detach` stays an ablation
 3. `g` checkpoint:
    runtime and audit both read the same speech-only / closed / boundary-clean
    support semantics instead of separate debug-only heuristics

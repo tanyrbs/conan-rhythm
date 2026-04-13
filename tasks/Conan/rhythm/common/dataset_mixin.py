@@ -21,6 +21,20 @@ from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
 
 
 class CommonRhythmDatasetMixin:
+    @staticmethod
+    def _restore_debug_sidecar(
+        full_side: dict[str, np.ndarray],
+        key: str,
+        fallback: np.ndarray,
+    ) -> np.ndarray:
+        value = full_side.get(key)
+        if value is None:
+            return fallback.copy()
+        restored = np.asarray(value, dtype=fallback.dtype).reshape(-1)
+        if restored.shape != fallback.shape:
+            return fallback.copy()
+        return restored.copy()
+
     def _sample_prefilter_retry_index(self, current_index: int) -> int:
         dataset_len = int(len(self))
         if dataset_len <= 1:
@@ -89,6 +103,34 @@ class CommonRhythmDatasetMixin:
         if callable(resolver):
             return bool(resolver())
         return False
+
+    def _require_minimal_v1_prompt_sidecars(self, item, *, item_name: str) -> None:
+        if not self._is_enabled_flag(self.hparams.get("rhythm_v3_minimal_v1_profile", False)):
+            return
+        if not isinstance(item, dict):
+            raise RuntimeError(f"{item_name}: prompt/reference item must be a dict under minimal_v1_profile")
+        missing: list[str] = []
+        if item.get("prompt_speech_mask") is None and item.get("source_silence_mask") is None:
+            missing.append("prompt_speech_mask/source_silence_mask")
+        if item.get("prompt_closed_mask") is None and item.get("sealed_mask") is None:
+            missing.append("prompt_closed_mask/sealed_mask")
+        has_ref_len = any(item.get(key) is not None for key in ("prompt_ref_len_sec", "ref_len_sec", "dur_sec"))
+        can_derive_ref_len = (
+            item.get("prompt_duration_obs") is not None or item.get("dur_anchor_src") is not None
+        ) and float(self.hparams.get("hop_size", 0.0) or 0.0) > 0.0 and float(
+            self.hparams.get("audio_sample_rate", 0.0) or 0.0
+        ) > 0.0
+        if not has_ref_len and not can_derive_ref_len:
+            missing.append("prompt_ref_len_sec/ref_len_sec/dur_sec")
+        min_bc = self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
+        if (
+            min_bc is not None
+            and item.get("prompt_boundary_confidence") is None
+            and item.get("boundary_confidence") is None
+        ):
+            missing.append("prompt_boundary_confidence/boundary_confidence")
+        if missing:
+            raise RuntimeError(f"{item_name}: missing minimal_v1 prompt sidecars {missing}")
 
     def _rhythm_policy(self):
         policy = getattr(self, "_cached_rhythm_policy", None)
@@ -592,11 +634,30 @@ class CommonRhythmDatasetMixin:
             adapted["source_silence_mask"] = np.asarray(out_silence, dtype=np.float32)
         if self._should_export_rhythm_debug_sidecars():
             full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
+            default_phrase_group_index = np.zeros_like(adapted["content_units"], dtype=np.int64)
+            default_phrase_group_pos = np.zeros_like(boundary_confidence, dtype=np.float32)
+            default_phrase_final_mask = np.zeros_like(boundary_confidence, dtype=np.float32)
             adapted.update({
-                "source_boundary_cue": full_side["source_boundary_cue"].copy() if "source_boundary_cue" in full_side else boundary_confidence.copy(),
-                "phrase_group_index": np.zeros_like(adapted["content_units"], dtype=np.int64),
-                "phrase_group_pos": np.zeros_like(boundary_confidence, dtype=np.float32),
-                "phrase_final_mask": np.zeros_like(boundary_confidence, dtype=np.float32),
+                "source_boundary_cue": self._restore_debug_sidecar(
+                    full_side,
+                    "source_boundary_cue",
+                    boundary_confidence.astype(np.float32, copy=False),
+                ),
+                "phrase_group_index": self._restore_debug_sidecar(
+                    full_side,
+                    "phrase_group_index",
+                    default_phrase_group_index,
+                ),
+                "phrase_group_pos": self._restore_debug_sidecar(
+                    full_side,
+                    "phrase_group_pos",
+                    default_phrase_group_pos,
+                ),
+                "phrase_final_mask": self._restore_debug_sidecar(
+                    full_side,
+                    "phrase_final_mask",
+                    default_phrase_final_mask,
+                ),
             })
         return adapted
 
@@ -772,8 +833,18 @@ class CommonRhythmDatasetMixin:
                     "rhythm_v3 reference conditioning forbids same-text reference items by default. "
                     "Provide a different-text reference or set rhythm_v3_disallow_same_text_reference=false."
                 )
+        prompt_source = ref_item if ref_item is not None else item
+        if self._use_duration_v3_dataset_contract():
+            self._require_minimal_v1_prompt_sidecars(
+                prompt_source,
+                item_name=(
+                    str(prompt_source.get("item_name", "<unknown-prompt-item>"))
+                    if isinstance(prompt_source, dict)
+                    else "<unknown-prompt-item>"
+                ),
+            )
         prompt_conditioning = self._build_reference_prompt_unit_conditioning(
-            ref_item if ref_item is not None else item,
+            prompt_source,
             target_mode=target_mode,
         )
         if self._use_duration_v3_dataset_contract() and prompt_conditioning:

@@ -113,7 +113,7 @@ rhythm_v3_use_src_gap_in_coarse_head: false
 # and freezes the source-rate initialization; flip either flag only for explicit
 # ablations or falsification experiments.
 rhythm_v3_detach_global_term_in_local_head: true
-rhythm_v3_freeze_src_rate_init: true
+rhythm_v3_freeze_src_rate_init: true  # frozen mode stores src_rate_init as module state, not an optimizer parameter
 rhythm_v3_src_rate_init_mode: first_speech
 rhythm_v3_src_rate_init_value: 0.0
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence

@@ -32,6 +32,7 @@ _GATE1_MONOTONICITY_RATE_MIN = 0.95
 _REQUIRED_NEGATIVE_CONTROLS = ("source_only", "random_ref", "shuffled_ref")
 _GATE0_EXPLAINABILITY_SLOPE_MIN = 0.0
 _GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
+_GATE1_SAME_TEXT_GAP_MAX = 0.10
 _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN = 0.02
 _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
     "silence_leakage": 0.05,
@@ -178,6 +179,11 @@ def collect_gate_issues(frame) -> list[str]:
             elif analytic_neg_gap <= _GATE1_NEGATIVE_CONTROL_GAP_MIN:
                 quality_issues.append(
                     f"analytic_negative_control_gap={analytic_neg_gap:.3f}<={_GATE1_NEGATIVE_CONTROL_GAP_MIN:.3f}"
+                )
+            analytic_same_text_gap = _mean_for_eval_mode(frame, column="same_text_gap", eval_mode="analytic")
+            if np.isfinite(analytic_same_text_gap) and analytic_same_text_gap > _GATE1_SAME_TEXT_GAP_MAX:
+                quality_issues.append(
+                    f"analytic_same_text_gap={analytic_same_text_gap:.3f}>{_GATE1_SAME_TEXT_GAP_MAX:.3f}"
                 )
             analytic_margin = _mean_for_eval_mode(
                 frame, column="alignment_local_margin_p10", eval_mode="analytic"
@@ -394,6 +400,10 @@ def build_gate_status(frame) -> dict[str, object]:
         and analytic_tempo_monotonicity_rate >= _GATE1_MONOTONICITY_RATE_MIN
         and np.isfinite(analytic_negative_control_gap)
         and analytic_negative_control_gap > _GATE1_NEGATIVE_CONTROL_GAP_MIN
+        and (
+            (not np.isfinite(analytic_same_text_gap))
+            or analytic_same_text_gap <= _GATE1_SAME_TEXT_GAP_MAX
+        )
     )
     gate1_pass = gate0_pass and gate1_criteria_pass
     gate2_criteria_pass = (
