@@ -87,19 +87,25 @@ The runtime still exports the key audit signals:
 - `rhythm_debug_analytic_gap`
 - `rhythm_debug_coarse_bias`
 - `rhythm_debug_local_residual`
+- `rhythm_debug_detach_global_term_in_local_head`
 - `rhythm_debug_is_speech`
 - `rhythm_debug_budget_hit_pos`
 - `rhythm_debug_budget_hit_neg`
 - `rhythm_debug_projector_boundary_hit`
 - `rhythm_debug_projector_boundary_decay`
 - `rhythm_debug_projector_since_last_boundary`
+- `projector_preclamp_exec`
+- `projector_clamp_mass`
+- `projector_rounding_regret`
 - `unit_duration_exec`
 
 So the review surface got smaller, but the underlying observability was not
 reduced.
 `rhythm_debug_projector_boundary_hit` marks boundary events;
 `rhythm_debug_projector_boundary_decay` marks only the subset where decay was
-actually applied.
+actually applied. `projector_preclamp_exec`, `projector_clamp_mass`, and
+`projector_rounding_regret` expose how much of the final execution came from
+the writer versus projector correction.
 
 ### 2.4 `g` is now locked to one support path
 
@@ -108,7 +114,13 @@ on the same `g` semantics:
 
 - speech-only support first
 - optional `rhythm_v3_drop_edge_runs_for_g` cleanup
-- edge-drop fallback only back to raw speech support, never to non-speech valid/full support
+- prompt-side closed / boundary-confidence filtering when the clean-support
+  sidecars are available
+- the maintained minimal-V1 domain also expects speech-dominant 3-8 second
+  references when `prompt_ref_len_sec` is provided
+- edge-drop fallback only back to raw speech support for generic summary
+  diagnostics, never to non-speech valid/full support in the maintained
+  minimal-V1 prompt path
 - `prompt_speech_mask` carried through as an explicit contract field
 - runtime/debug export now also carries `g_support_count`,
   `g_support_ratio_vs_speech`, `g_support_ratio_vs_valid`, `g_valid`,
@@ -229,7 +241,7 @@ theoretical burden:
 
 They belong in appendix, dataset QA, or internal debugging.
 
-## 5. Falsification gates remain the same
+## 5. Falsification gates remain the same in shape, but stricter in evidence
 
 ### Gate 0: static `g` audit
 
@@ -238,6 +250,8 @@ Stop early if:
 - crop stability is weak
 - `delta_g` barely explains `c*`
 - different-text collapses while same-text looks fine
+- the analytic explainability slope is missing or non-positive on the
+  maintained gate export
 
 ### Gate 1: pure analytic control
 
@@ -246,11 +260,16 @@ Run `analytic` mode and stop early if:
 - slow / mid / fast references do not induce monotone speech tempo movement
 - no negative-control reference (`source_only`, `random_ref`, `shuffled_ref`)
   is exported alongside the real-reference triplets
+- the exported negative-control gap fails to stay positive
 
 ### Gate 2: coarse-only before local
 
 Only keep strong local residual if it improves control without obviously
-damaging silence leakage or prefix stability.
+damaging silence leakage or prefix stability. In the maintained minimal-V1
+contract, `detach_global_term_in_local_head=true` is the default here; compare
+`learned + no_detach` only as an explicit ablation, not as the maintained
+baseline. Gate 2 should also reject a learned writer that regresses
+monotonicity or transfer slope relative to `coarse_only`.
 
 ### Outdated suggestions
 
@@ -260,8 +279,8 @@ be re-proposed as new refactors:
 - shared `g` computation already lives in `modules/Conan/rhythm_v3/g_stats.py`
 - `analytic / coarse_only / learned` already run inside the same maintained runtime
 - projector budget/drift observability is already exported; the remaining work
-  is interpretation, especially `boundary_hit` vs `boundary_decay_applied`, not
-  projector replacement
+  is interpretation, especially `boundary_hit` vs `boundary_decay_applied` and
+  the new pre-vs-post correction telemetry, not projector replacement
 
 ## 6. Recommended util-first workflow
 
@@ -281,11 +300,13 @@ review exports (`--review-dir` / `--gate-status-json`) and warns-only only when
 `--allow-partial-gates` is set. The gate checks cover:
 
 - `g_valid` coverage is weak
+- analytic explainability slope is missing or non-positive
 - unmatched speech alignment is high
 - continuous coverage is incomplete for the current `alignment_kind` split
 - `analytic / coarse_only / learned` modes are missing
 - real-reference triplets are incomplete
 - negative controls are absent
+- negative controls fail to lose on the maintained analytic gap metric
 
 Typical entry points:
 
@@ -342,13 +363,14 @@ So the current status is:
 
 ### Gate 1 summary
 
-| date | split | eval_mode | monotonicity_rate | notes |
-| --- | --- | --- | ---: | --- |
-| pending | pending | analytic | pending | no experiment run yet |
+| date | split | eval_mode | monotonicity_rate | negative_control_gap | same_text_gap | notes |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| pending | pending | analytic | pending | pending | pending | no experiment run yet |
 
 ### Gate 2 summary
 
-| date | split | eval_mode | monotonicity_rate | silence_leakage | prefix_discrepancy | budget_hit_rate | projector_boundary_hit_rate | projector_boundary_decay_rate | notes |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| pending | pending | coarse_only | pending | pending | pending | pending | pending | pending | no experiment run yet |
-| pending | pending | learned | pending | pending | pending | pending | pending | pending | no experiment run yet |
+| date | split | eval_mode | monotonicity_rate | tempo_transfer_slope | silence_leakage | prefix_discrepancy | budget_hit_rate | projector_boundary_hit_rate | projector_boundary_decay_rate | clamp_mass | rounding_regret | notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pending | pending | coarse_only | pending | pending | pending | pending | pending | pending | pending | pending | pending | no experiment run yet |
+| pending | pending | learned_detach | pending | pending | pending | pending | pending | pending | pending | pending | pending | no experiment run yet |
+| pending | pending | learned_no_detach | pending | pending | pending | pending | pending | pending | pending | pending | pending | ablation only |

@@ -1264,6 +1264,7 @@ def project_target_runs_onto_source(
     precomputed_alignment=None,
     allow_source_self_target_fallback: bool = False,
     alignment_soft_repair: bool = False,
+    disable_silence_aux: bool = False,
 ) -> dict[str, np.ndarray | np.float32 | str]:
     source_silence_mask = resolve_run_silence_mask(size=len(source_units), silence_mask=source_silence_mask)
     target_silence_mask = ((target_valid_mask > 0.5) & ~(target_speech_mask > 0.5)).astype(np.float32)
@@ -1349,6 +1350,7 @@ def project_target_runs_onto_source(
     confidence_type_term = np.zeros((num_source_runs,), dtype=np.float32)
     confidence_match_term = np.zeros((num_source_runs,), dtype=np.float32)
     run_skip_flag = np.zeros((num_source_runs,), dtype=np.float32)
+    run_margin = np.full((num_source_runs,), np.nan, dtype=np.float32)
 
     if "run_occ_viterbi" in alignment:
         projected[src_run_index] = np.asarray(alignment["run_occ_viterbi"], dtype=np.float32)
@@ -1386,6 +1388,10 @@ def project_target_runs_onto_source(
         )
         confidence_match_term[src_run_index] = np.asarray(
             alignment.get("run_confidence_match_term", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
+        run_margin[src_run_index] = np.asarray(
+            alignment.get("run_margin", np.full((src_run_index.size,), np.nan, dtype=np.float32)),
             dtype=np.float32,
         )
         unmatched_speech_ratio = float(alignment.get("unmatched_speech_ratio", 0.0))
@@ -1508,16 +1514,78 @@ def project_target_runs_onto_source(
 
     source_is_silence = source_silence_mask > 0.5
     confidence_local[source_is_silence] = 0.0
-    sil_floor = np.float32(0.15)
-    sil_shape = np.clip(source_durations.astype(np.float32) / 3.0, 0.0, 1.0)
-    confidence_coarse[source_is_silence] = np.clip(
-        np.maximum(
+    if bool(disable_silence_aux):
+        confidence_coarse[source_is_silence] = 0.0
+    else:
+        sil_floor = np.float32(0.15)
+        sil_shape = np.clip(source_durations.astype(np.float32) / 3.0, 0.0, 1.0)
+        confidence_coarse[source_is_silence] = np.clip(
+            np.maximum(
+                sil_floor,
+                0.5 * confidence_coarse[source_is_silence] * sil_shape[source_is_silence],
+            ),
             sil_floor,
-            0.5 * confidence_coarse[source_is_silence] * sil_shape[source_is_silence],
-        ),
-        sil_floor,
-        np.float32(0.35),
-    ).astype(np.float32)
+            np.float32(0.35),
+        ).astype(np.float32)
+
+    global_path_cost_array = np.asarray(
+        alignment.get("global_path_cost", np.asarray([np.nan], dtype=np.float32)),
+        dtype=np.float32,
+    )
+    global_path_cost_scalar = (
+        float(global_path_cost_array.reshape(-1)[0])
+        if global_path_cost_array.size > 0
+        else float("nan")
+    )
+    bad_cost_threshold_array = np.asarray(
+        alignment.get("alignment_bad_cost_threshold", np.asarray([np.nan], dtype=np.float32)),
+        dtype=np.float32,
+    )
+    bad_cost_threshold_scalar = (
+        float(bad_cost_threshold_array.reshape(-1)[0])
+        if bad_cost_threshold_array.size > 0
+        else float("nan")
+    )
+    assigned_count = int(np.asarray(assigned_source, dtype=np.int64).reshape(-1).shape[0])
+    global_path_mean_cost_scalar = (
+        global_path_cost_scalar / float(max(1, assigned_count))
+        if np.isfinite(global_path_cost_scalar)
+        else float("nan")
+    )
+    speech_margin = run_margin[(~source_is_silence) & np.isfinite(run_margin)]
+    alignment_local_margin_p10 = (
+        float(np.percentile(speech_margin.astype(np.float32, copy=False), 10))
+        if speech_margin.size > 0
+        else float("nan")
+    )
+    projection_fallback_ratio = np.float32(unmatched_speech_ratio)
+    projection_reasons = []
+    if float(unmatched_speech_ratio) > 0.15:
+        projection_reasons.append(
+            f"unmatched_speech_ratio={float(unmatched_speech_ratio):.3f} > 0.150"
+        )
+    if float(mean_local_confidence_speech) < 0.40:
+        projection_reasons.append(
+            f"mean_local_confidence_speech={float(mean_local_confidence_speech):.3f} < 0.400"
+        )
+    if (
+        np.isfinite(global_path_mean_cost_scalar)
+        and np.isfinite(bad_cost_threshold_scalar)
+        and (global_path_mean_cost_scalar > bad_cost_threshold_scalar)
+    ):
+        projection_reasons.append(
+            f"alignment_global_path_mean_cost={float(global_path_mean_cost_scalar):.3f} > "
+            f"{float(bad_cost_threshold_scalar):.3f}"
+        )
+    projection_hard_bad = np.float32(
+        bool(projection_reasons)
+    )
+    projection_health_bucket = (
+        "hard_bad"
+        if float(projection_hard_bad) > 0.5
+        else ("degraded" if float(projection_fallback_ratio) > 0.0 else "clean")
+    )
+    projection_gate_reason = "; ".join(projection_reasons)
 
     return {
         "projected": projected.astype(np.float32),
@@ -1542,8 +1610,17 @@ def project_target_runs_onto_source(
             alignment.get("skipped_source_speech_ratio", unmatched_speech_ratio)
         ),
         "unmatched_speech_ratio": np.float32(unmatched_speech_ratio),
+        "projection_fallback_ratio": projection_fallback_ratio,
         "mean_local_confidence_speech": np.float32(mean_local_confidence_speech),
         "mean_coarse_confidence_speech": np.float32(mean_coarse_confidence_speech),
+        "mean_local_conf_speech": np.float32(mean_local_confidence_speech),
+        "mean_coarse_conf_speech": np.float32(mean_coarse_confidence_speech),
+        "run_margin": run_margin.astype(np.float32),
+        "alignment_local_margin_p10": np.float32(alignment_local_margin_p10),
+        "projection_hard_bad": projection_hard_bad,
+        "projection_violation_count": np.float32(len(projection_reasons)),
+        "projection_gate_reason": projection_gate_reason,
+        "projection_health_bucket": projection_health_bucket,
         "alignment_kind": alignment_kind,
         "alignment_mode": str(
             alignment.get("alignment_mode", alignment_kind or _ALIGNMENT_MODE_DISCRETE)
@@ -1702,6 +1779,8 @@ def project_target_runs_onto_source(
             alignment.get("alignment_band_width", np.asarray([-1], dtype=np.int64)),
             dtype=np.int64,
         ),
+        "alignment_global_path_cost": np.float32(global_path_cost_scalar),
+        "alignment_global_path_mean_cost": np.float32(global_path_mean_cost_scalar),
         "global_path_cost": np.asarray(
             alignment.get("global_path_cost", np.asarray([0.0], dtype=np.float32)),
             dtype=np.float32,

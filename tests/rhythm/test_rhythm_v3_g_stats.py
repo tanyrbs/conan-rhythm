@@ -7,6 +7,7 @@ import pytest
 from modules.Conan.rhythm_v3.g_stats import (
     build_global_rate_support_mask,
     compute_global_rate,
+    masked_weighted_median_batch,
     summarize_global_rate_support,
     true_median_1d,
     weighted_median_1d,
@@ -115,6 +116,40 @@ def test_weighted_median_with_unit_weights_matches_raw_true_median():
     assert torch.allclose(weighted, raw)
 
 
+def test_weighted_median_raises_when_total_weight_is_nonpositive_by_default():
+    values = torch.log(torch.tensor([2.0, 4.0, 8.0], dtype=torch.float32))
+    weights = torch.zeros_like(values)
+
+    with pytest.raises(ValueError, match="positive finite total weight"):
+        weighted_median_1d(values, weights)
+
+
+def test_weighted_median_can_return_nan_for_invalid_total_weight():
+    values = torch.log(torch.tensor([2.0, 4.0, 8.0], dtype=torch.float32))
+    weights = torch.zeros_like(values)
+
+    median = weighted_median_1d(
+        values,
+        weights,
+        invalid_weight_behavior="nan",
+    )
+
+    assert torch.isnan(median)
+
+
+def test_weighted_median_can_explicitly_use_legacy_fallback_for_invalid_total_weight():
+    values = torch.log(torch.tensor([2.0, 4.0, 8.0, 16.0], dtype=torch.float32))
+    weights = torch.zeros_like(values)
+
+    median = weighted_median_1d(
+        values,
+        weights,
+        invalid_weight_behavior="fallback",
+    )
+
+    assert torch.allclose(median, true_median_1d(values))
+
+
 def test_compute_global_rate_trimmed_mean_batch_fast_path_ignores_trimmed_extrema():
     log_dur = torch.log(torch.tensor([[1.0, 2.0, 100.0, 200.0]], dtype=torch.float32))
     speech_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
@@ -178,6 +213,53 @@ def test_compute_global_rate_weighted_median_prefers_high_confidence_support():
     )
 
     assert torch.allclose(g, torch.log(torch.tensor([[2.0]], dtype=torch.float32)))
+
+
+def test_compute_global_rate_weighted_median_raises_for_zero_weight_support_by_default():
+    log_dur = torch.log(torch.tensor([[2.0, 10.0, 30.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.zeros_like(log_dur)
+
+    with pytest.raises(ValueError, match="positive finite total weight"):
+        compute_global_rate(
+            log_dur=log_dur,
+            speech_mask=speech_mask,
+            weight=weight,
+            variant="weighted_median",
+        )
+
+
+def test_compute_global_rate_weighted_median_can_return_nan_for_zero_weight_support():
+    log_dur = torch.log(torch.tensor([[2.0, 10.0, 30.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.zeros_like(log_dur)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="weighted_median",
+        invalid_weight_behavior="nan",
+    )
+
+    assert bool(torch.isnan(g).all().item())
+
+
+def test_compute_global_rate_weighted_median_can_explicitly_use_legacy_fallback():
+    log_dur = torch.log(torch.tensor([[2.0, 4.0, 8.0, 16.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.zeros_like(log_dur)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="weighted_median",
+        invalid_weight_behavior="fallback",
+    )
+
+    expected = true_median_1d(log_dur.reshape(-1)).reshape(1, 1)
+    assert torch.allclose(g, expected)
 
 
 def test_compute_global_rate_weighted_median_with_drop_edge_runs_uses_trimmed_support():
@@ -294,6 +376,22 @@ def test_compute_global_rate_accepts_reused_support_mask_for_weighted_median():
     assert torch.allclose(g, torch.log(torch.tensor([[4.0]], dtype=torch.float32)))
 
 
+def test_masked_weighted_median_batch_nan_policy_flags_only_invalid_rows():
+    values = torch.log(torch.tensor([[2.0, 4.0], [8.0, 16.0]], dtype=torch.float32))
+    mask = torch.ones_like(values, dtype=torch.bool)
+    weights = torch.tensor([[0.0, 0.0], [1.0, 2.0]], dtype=torch.float32)
+
+    median = masked_weighted_median_batch(
+        values,
+        mask,
+        weights,
+        invalid_weight_behavior="nan",
+    )
+
+    assert torch.isnan(median[0, 0])
+    assert torch.allclose(median[1], torch.log(torch.tensor([16.0], dtype=torch.float32)))
+
+
 def test_compute_global_rate_accepts_support_stats_for_unit_norm():
     log_dur = torch.log(torch.tensor([[4.0, 8.0, 16.0]], dtype=torch.float32))
     speech_mask = torch.ones_like(log_dur)
@@ -404,6 +502,24 @@ def test_compute_global_rate_unit_norm_applies_count_aware_backoff():
         dtype=torch.float32,
     )
     assert torch.allclose(g, expected)
+
+
+def test_compute_global_rate_unit_norm_weighted_raises_for_zero_weight_support_by_default():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[0, 1]], dtype=torch.long)
+    unit_prior = torch.log(torch.tensor([2.0, 4.0], dtype=torch.float32))
+    weight = torch.zeros_like(log_dur)
+
+    with pytest.raises(ValueError, match="positive finite total weight"):
+        compute_global_rate(
+            log_dur=log_dur,
+            speech_mask=speech_mask,
+            unit_ids=unit_ids,
+            unit_prior=unit_prior,
+            weight=weight,
+            variant="unit_norm",
+        )
 
 
 def test_compute_global_rate_unit_norm_rejects_oov_vocab_prior_without_default():

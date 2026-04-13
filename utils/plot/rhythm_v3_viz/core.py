@@ -310,9 +310,11 @@ class RhythmV3DebugRecord:
     unit_duration_exec: Optional[np.ndarray] = None
     unit_duration_raw: Optional[np.ndarray] = None
     prefix_unit_offset: Optional[np.ndarray] = None
+    projector_prefix_drift: Optional[np.ndarray] = None
     projector_rounding_residual: Optional[np.ndarray] = None
     projector_budget_hit_pos: Optional[np.ndarray] = None
     projector_budget_hit_neg: Optional[np.ndarray] = None
+    projector_budget_hit_mask: Optional[np.ndarray] = None
     projector_boundary_hit: Optional[np.ndarray] = None
     projector_boundary_decay_applied: Optional[np.ndarray] = None
 
@@ -676,6 +678,11 @@ def build_debug_record(
         unit_duration_exec=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_exec", batch_index)),
         unit_duration_raw=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_raw", batch_index)),
         prefix_unit_offset=_as_optional_vector(_extract_attr_or_key(execution, "prefix_unit_offset", batch_index)),
+        projector_prefix_drift=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_prefix_drift", batch_index)
+            if _extract_attr_or_key(execution, "projector_prefix_drift", batch_index) is not None
+            else _extract_attr_or_key(execution, "prefix_unit_offset", batch_index)
+        ),
         projector_rounding_residual=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_rounding_residual", batch_index)
             if _extract_attr_or_key(execution, "projector_rounding_residual", batch_index) is not None
@@ -683,6 +690,21 @@ def build_debug_record(
         ),
         projector_budget_hit_pos=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index)),
         projector_budget_hit_neg=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index)),
+        projector_budget_hit_mask=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_budget_hit_mask", batch_index)
+            if _extract_attr_or_key(execution, "projector_budget_hit_mask", batch_index) is not None
+            else (
+                np.logical_or(
+                    _as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index), dtype=np.float32)
+                    > 0.5,
+                    _as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index), dtype=np.float32)
+                    > 0.5,
+                ).astype(np.float32)
+                if _extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index) is not None
+                and _extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index) is not None
+                else None
+            )
+        ),
         projector_boundary_hit=_as_optional_vector(_extract_attr_or_key(execution, "projector_boundary_hit", batch_index)),
         projector_boundary_decay_applied=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_boundary_decay_applied", batch_index)

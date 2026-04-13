@@ -35,7 +35,7 @@ def _minimal_prompt_summary_v1_hparams():
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -135,6 +135,7 @@ def test_validate_rhythm_training_hparams_accepts_positive_silence_settings():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
+            "rhythm_v3_allow_silence_aux": True,
             "rhythm_v3_silence_coarse_weight": 0.5,
             "rhythm_v3_silence_max_logstretch": 0.45,
         }
@@ -208,7 +209,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_sim
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -227,7 +228,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_when_same_t
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -267,7 +268,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_refere
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -287,7 +288,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_log_ba
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "unit_run",
+            "rhythm_v3_backbone": "prompt_summary",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -367,10 +368,35 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_con
         validate_rhythm_training_hparams(_minimal_prompt_summary_v1_hparams())
 
 
+def test_validate_rhythm_training_hparams_accepts_minimal_v1_global_backbone_surface():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+
+    validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("backbone", ["role_memory", "unit_run"])
+def test_validate_rhythm_training_hparams_rejects_legacy_backbone_aliases_under_minimal_v1(backbone):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_backbone"] = backbone
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+
+    with pytest.raises(ValueError, match="forbids legacy rhythm_v3_backbone aliases"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_unit_norm_without_prior_path():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_g_variant"] = "unit_norm"
+    with pytest.raises(ValueError, match="rhythm_v3_unit_prior_path"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_nonexistent_unit_prior_path():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_unit_prior_path"] = str(ROOT / "tests" / "rhythm" / "fixtures" / "missing_unit_prior.npz")
     with pytest.raises(ValueError, match="rhythm_v3_unit_prior_path"):
         validate_rhythm_training_hparams(hparams)
 
@@ -460,6 +486,31 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_noncan
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_noncanonical_prompt_min_ref_len():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_min_prompt_ref_len_sec"] = 2.0
+    with pytest.raises(ValueError, match="rhythm_v3_min_prompt_ref_len_sec=3.0"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_noncanonical_prompt_max_ref_len():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_max_prompt_ref_len_sec"] = 10.0
+    with pytest.raises(ValueError, match="rhythm_v3_max_prompt_ref_len_sec=8.0"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_invalid_prompt_ref_len_order():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_min_prompt_ref_len_sec"] = 8.0
+    hparams["rhythm_v3_max_prompt_ref_len_sec"] = 3.0
+    with pytest.raises(ValueError, match="prompt_ref_len_sec"):
+        validate_rhythm_training_hparams(hparams)
+
+
 @pytest.mark.parametrize("key", ["rhythm_v3_alignment_min_dp_weight", "rhythm_v3_align_min_dp_weight"])
 def test_validate_rhythm_training_hparams_rejects_negative_alignment_min_dp_weight(key):
     hparams = _minimal_prompt_summary_v1_hparams()
@@ -467,6 +518,65 @@ def test_validate_rhythm_training_hparams_rejects_negative_alignment_min_dp_weig
     hparams[key] = -0.1
     with pytest.raises(ValueError, match="rhythm_v3_alignment_min_dp_weight"):
         validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("key", ["rhythm_v3_alignment_local_margin_p10_min", "rhythm_v3_align_local_margin_p10_min"])
+def test_validate_rhythm_training_hparams_rejects_negative_alignment_local_margin_threshold(key):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams[key] = -0.01
+    with pytest.raises(ValueError, match="local_margin_p10_min"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize(
+    "key,bad_value,match",
+    [
+        ("rhythm_v3_coarse_delta_scale", -0.01, "rhythm_v3_coarse_delta_scale"),
+        ("rhythm_v3_local_residual_scale", -0.01, "rhythm_v3_local_residual_scale"),
+    ],
+)
+def test_validate_rhythm_training_hparams_rejects_negative_minimal_v1_scale_knobs(key, bad_value, match):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams[key] = bad_value
+    with pytest.raises(ValueError, match=match):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, 1.1])
+def test_validate_rhythm_training_hparams_rejects_out_of_range_boundary_offset_decay(bad_value):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_boundary_offset_decay"] = bad_value
+    with pytest.raises(ValueError, match="rhythm_v3_boundary_offset_decay"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, 1.1])
+def test_validate_rhythm_training_hparams_rejects_out_of_range_min_boundary_confidence_for_g(bad_value):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_min_boundary_confidence_for_g"] = bad_value
+    with pytest.raises(ValueError, match="rhythm_v3_min_boundary_confidence_for_g"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_silence_aux_lambda_without_enable_flag():
+    hparams = _minimal_v3_hparams()
+    hparams["lambda_rhythm_silence_aux"] = 0.01
+    with pytest.raises(ValueError, match="lambda_rhythm_silence_aux > 0 requires rhythm_v3_allow_silence_aux=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_accepts_silence_aux_lambda_when_enable_flag_is_set():
+    validate_rhythm_training_hparams(
+        {
+            **_minimal_v3_hparams(),
+            "rhythm_v3_allow_silence_aux": True,
+            "lambda_rhythm_silence_aux": 0.01,
+        }
+    )
 
 
 def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silence_aux_weight():
@@ -496,6 +606,22 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silenc
         }
     )
     with pytest.raises(ValueError, match="rhythm_v3_silence_coarse_weight=0"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silence_aux_enabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_allow_silence_aux"] = True
+    with pytest.raises(ValueError, match="rhythm_v3_allow_silence_aux=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_invalid_src_rate_init_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_src_rate_init_mode"] = "bad_mode"
+    with pytest.raises(ValueError, match="rhythm_v3_src_rate_init_mode"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1164,16 +1290,15 @@ def test_validate_rhythm_training_hparams_rejects_non_positive_progress_bins():
 def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     source = (ROOT / "egs" / "conan_emformer_rhythm_v3.yaml").read_text(encoding="utf-8")
     assert "rhythm_v3_minimal_v1_profile: true" in source
-    assert "rhythm_v3_backbone: prompt_summary" in source
+    assert "rhythm_v3_backbone: minimal_v1_global" in source
     assert "rhythm_v3_rate_mode: simple_global" in source
     assert "rhythm_v3_simple_global_stats: true" in source
     assert "rhythm_v3_use_log_base_rate: false" in source
-    assert "rhythm_v3_use_reference_summary: false" in source
-    assert "rhythm_v3_use_learned_residual_gate: false" in source
     assert "rhythm_v3_disable_learned_gate: true" in source
     assert "rhythm_v3_eval_mode: learned" in source
     assert "rhythm_v3_g_variant: raw_median" in source
     assert "rhythm_v3_drop_edge_runs_for_g: 1" in source
+    assert "rhythm_v3_min_boundary_confidence_for_g: 0.5" in source
     assert "rhythm_v3_use_continuous_alignment: true" in source
     assert "rhythm_v3_alignment_mode: continuous_viterbi_v1" in source
     assert "rhythm_v3_alignment_lambda_emb: 1.0" in source
@@ -1183,12 +1308,12 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15" in source
     assert "rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55" in source
     assert "rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60" in source
+    assert "rhythm_v3_alignment_local_margin_p10_min: 0.02" in source
     assert "rhythm_v3_budget_mode: total" in source
-    assert "rhythm_v3_detach_global_term_in_local_head: false" in source
+    assert "rhythm_v3_detach_global_term_in_local_head: true" in source
+    assert "rhythm_v3_freeze_src_rate_init: true" in source
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source
-    assert "rhythm_num_summary_slots: 1" in source
-    assert "rhythm_v3_summary_use_unit_embedding: false" in source
     assert "rhythm_v3_disallow_same_text_reference: true" in source
     assert "rhythm_v3_disallow_same_text_paired_target: false" in source
     assert "rhythm_v3_require_same_text_paired_target: true" in source
@@ -1200,4 +1325,5 @@ def test_deprecated_v2_minimal_v1_yaml_now_aliases_v3_contract():
     assert "base_config: egs/conan_emformer_rhythm_v3.yaml" in source
     assert "rhythm_enable_v2: false" in source
     assert "rhythm_enable_v3: true" in source
+    assert "rhythm_v3_backbone: minimal_v1_global" in source
     assert "rhythm_v3_rate_mode: simple_global" in source

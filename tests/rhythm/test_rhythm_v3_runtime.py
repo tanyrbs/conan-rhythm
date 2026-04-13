@@ -84,7 +84,7 @@ def _run_adapter(adapter, *, content, ref, state=None, ref_conditioning=None, re
     return ret
 
 
-def _build_prompt_conditioning(*, prompt_units: int = 6):
+def _build_prompt_conditioning(*, prompt_units: int = 6, prompt_ref_len_sec: float = 5.0):
     content = torch.arange(1, prompt_units + 1, dtype=torch.long).unsqueeze(0)
     duration = torch.full((1, prompt_units), 3.0, dtype=torch.float32)
     mask = torch.ones((1, prompt_units), dtype=torch.float32)
@@ -94,6 +94,10 @@ def _build_prompt_conditioning(*, prompt_units: int = 6):
         "prompt_unit_mask": mask,
         "prompt_valid_mask": mask,
         "prompt_speech_mask": mask,
+        "prompt_closed_mask": mask,
+        "prompt_boundary_confidence": torch.ones((1, prompt_units), dtype=torch.float32),
+        "prompt_ref_len_sec": torch.tensor([[prompt_ref_len_sec]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
     }
 
 
@@ -203,6 +207,12 @@ def test_rhythm_v3_prompt_summary_runtime_uses_static_prompt_memory_and_source_a
     assert torch.isfinite(ret["speech_duration_exec"]).all()
 
 
+def test_rhythm_v3_nonminimal_prompt_summary_keeps_shared_duration_head_path():
+    adapter = ConanDurationAdapter(_build_prompt_summary_hparams(), hidden_size=32, vocab_size=128)
+    assert isinstance(adapter.module.duration_head, StreamingDurationHead)
+    assert not isinstance(adapter.module.duration_head, MinimalStreamingDurationHeadV1G)
+
+
 def test_rhythm_v3_prompt_summary_threads_minimal_v1_global_stat_switches():
     hparams = _build_prompt_summary_hparams()
     hparams["rhythm_v3_minimal_v1_profile"] = True
@@ -212,6 +222,11 @@ def test_rhythm_v3_prompt_summary_threads_minimal_v1_global_stat_switches():
     hparams["rhythm_v3_use_reference_summary"] = False
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_coarse_delta_scale"] = 0.30
+    hparams["rhythm_v3_local_residual_scale"] = 0.15
+    hparams["rhythm_v3_src_rate_init_mode"] = "learned"
+    hparams["rhythm_v3_src_rate_init_value"] = 0.75
+    hparams["rhythm_v3_freeze_src_rate_init"] = True
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
     assert adapter.unit_frontend.rate_mode == "simple_global"
     assert adapter.unit_frontend.simple_global_stats is True
@@ -227,6 +242,43 @@ def test_rhythm_v3_prompt_summary_threads_minimal_v1_global_stat_switches():
     assert adapter.module.duration_head.simple_global_stats is True
     assert adapter.module.duration_head.use_log_base_rate is False
     assert adapter.module.duration_head.use_learned_residual_gate is False
+    assert adapter.module.duration_head.src_rate_init_mode == "learned"
+    assert adapter.module.duration_head.coarse_delta_scale == pytest.approx(0.30)
+    assert adapter.module.duration_head.local_residual_scale == pytest.approx(0.15)
+    assert adapter.module.duration_head.freeze_src_rate_init is True
+    assert adapter.module.duration_head.src_rate_init.requires_grad is False
+    assert float(adapter.module.duration_head.src_rate_init.detach().item()) == pytest.approx(0.75)
+
+
+def test_rhythm_v3_minimal_prompt_summary_uses_closed_boundary_clean_global_support():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_min_boundary_confidence_for_g"] = 0.8
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ref_memory = adapter.module.build_reference_conditioning(
+        ref_conditioning={
+            "prompt_content_units": torch.tensor([[5, 6, 7]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[2.0, 100.0, 4.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_valid_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_speech_mask": torch.ones((1, 3), dtype=torch.float32),
+            "prompt_closed_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+            "prompt_boundary_confidence": torch.tensor([[0.9, 0.1, 0.95]], dtype=torch.float32),
+            "prompt_ref_len_sec": torch.tensor([[5.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
+        }
+    )
+    expected = 0.5 * (
+        torch.log(torch.tensor(2.0, dtype=torch.float32))
+        + torch.log(torch.tensor(4.0, dtype=torch.float32))
+    )
+    assert torch.allclose(ref_memory.global_rate, expected.reshape(1, 1))
 
 
 def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract():
@@ -269,11 +321,16 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["g_ref_scalar"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix_seq"], execution.g_src_prefix)
     assert debug["projector_prefix_offset"] is not None
+    assert debug["projector_prefix_drift"] is not None
     assert debug["projector_rounding_residual"] is not None
     assert "projector_boundary_hit" in debug
     assert "projector_boundary_decay_applied" in debug
     assert "projector_budget_pos_used" in debug
     assert "projector_budget_neg_used" in debug
+    assert "projector_budget_hit_mask" in debug
+    assert "commit_closed_prefix_ok" in debug
+    assert "open_tail_commit_violation" in debug
+    assert "open_tail_commit_violation_count" in debug
     assert "projected_prefix_cumsum" in debug
     assert "source_prefix_cumsum" in debug
     assert debug["projector_budget_mode"] == "total"
@@ -302,8 +359,13 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "projector_since_last_boundary" in debug
     assert "rhythm_debug_projector_boundary_hit" in ret
     assert "rhythm_debug_projector_boundary_decay" in ret
+    assert "rhythm_debug_projector_budget_hit_mask" in ret
+    assert "rhythm_debug_projector_prefix_drift" in ret
     assert "rhythm_debug_projected_prefix_cumsum" in ret
     assert "rhythm_debug_source_prefix_cumsum" in ret
+    assert "rhythm_debug_commit_closed_prefix_ok" in ret
+    assert "rhythm_debug_open_tail_commit_violation" in ret
+    assert "rhythm_debug_open_tail_commit_violation_count" in ret
     assert "rhythm_debug_analytic_logstretch" in ret
     assert "rhythm_debug_coarse_delta" in ret
     assert "rhythm_debug_coarse_path" in ret
@@ -323,6 +385,7 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_speech_pred" in ret
     assert "rhythm_debug_silence_pred" in ret
     assert "rhythm_debug_projector_since_last_boundary" in ret
+    assert "rhythm_debug_budget_hit_mask" in ret
     assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
     assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
     assert torch.allclose(execution.prompt_valid_len, torch.tensor([[3.0]], dtype=torch.float32))
@@ -368,9 +431,18 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(ret["rhythm_debug_residual_gate_stability"], execution.unit_residual_gate_stability)
     assert torch.allclose(debug["unit_runtime_stability"], execution.unit_runtime_stability)
     assert torch.allclose(debug["residual_gate_mean"], execution.residual_gate_mean)
-    assert torch.allclose(debug["detach_global_term_in_local_head"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["detach_global_term_in_local_head"], torch.ones((1, 1), dtype=torch.float32))
     assert torch.allclose(ret["rhythm_debug_residual_used"], execution.local_residual)
     assert torch.allclose(ret["rhythm_debug_residual_pred"], execution.local_residual_pred)
+    assert torch.allclose(debug["commit_closed_prefix_ok"], torch.ones((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["open_tail_commit_violation"], torch.zeros_like(execution.commit_mask))
+    assert torch.allclose(debug["open_tail_commit_violation_count"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(ret["rhythm_v3_commit_closed_prefix_ok"], debug["commit_closed_prefix_ok"])
+    assert torch.allclose(ret["rhythm_v3_open_tail_commit_violation"], debug["open_tail_commit_violation"])
+    assert torch.allclose(
+        ret["rhythm_v3_open_tail_commit_violation_count"],
+        debug["open_tail_commit_violation_count"],
+    )
 
 
 def test_rhythm_v3_non_debug_runtime_skips_g_debug_support_stats(monkeypatch):
@@ -441,6 +513,25 @@ def test_rhythm_v3_minimal_prompt_summary_threads_detach_global_term_switch():
     assert ret["rhythm_v3_detach_global_term_in_local_head"] == 1.0
 
 
+def test_rhythm_v3_minimal_prompt_summary_rejects_out_of_domain_prompt_ref_len_sec():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    with pytest.raises(ValueError, match="3-8s reference duration"):
+        _run_adapter(
+            adapter,
+            content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ref=None,
+            ref_conditioning=_build_prompt_conditioning(prompt_units=3, prompt_ref_len_sec=2.5),
+        )
+
+
 def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
     head = MinimalStreamingDurationHeadV1G(
         vocab_size=32,
@@ -486,6 +577,33 @@ def test_rhythm_v3_minimal_head_applies_explicit_analytic_gap_clip():
     assert output["unit_silence_tau_surface_kind"] == "constant_clip"
     assert torch.allclose(output["unit_boundary_shaping"], torch.zeros((1, 2), dtype=torch.float32))
     assert torch.allclose(output["unit_leading_gate"], torch.ones((1, 2), dtype=torch.float32))
+
+
+def test_rhythm_v3_minimal_head_first_speech_init_uses_first_speech_anchor():
+    head = MinimalStreamingDurationHeadV1G(
+        vocab_size=32,
+        dim=16,
+        num_slots=1,
+        simple_global_stats=True,
+        use_log_base_rate=False,
+        use_learned_residual_gate=False,
+        src_rate_init_mode="first_speech",
+        disable_coarse_bias=True,
+        disable_local_residual=True,
+    )
+    output = head(
+        content_units=torch.tensor([[1, 31, 2]], dtype=torch.long),
+        log_anchor=torch.tensor([[0.2, 1.5, 0.7]], dtype=torch.float32),
+        unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        sealed_mask=torch.ones((1, 3), dtype=torch.float32),
+        sep_hint=torch.zeros((1, 3), dtype=torch.float32),
+        edge_cue=torch.zeros((1, 3), dtype=torch.float32),
+        global_rate=torch.zeros((1, 1), dtype=torch.float32),
+        local_rate_ema=None,
+        silence_mask=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+    )
+    expected = torch.tensor([[1.5, 1.5, 1.5]], dtype=torch.float32)
+    assert torch.allclose(output["local_rate_seq"], expected)
 
 
 def test_rhythm_v3_minimal_head_rejects_log_base_inputs():
@@ -918,7 +1036,7 @@ def test_rhythm_v3_minimal_module_contract_rejects_non_simple_global_runtime():
     hparams["rhythm_v3_simple_global_stats"] = False
     hparams["rhythm_v3_use_log_base_rate"] = True
     hparams["rhythm_v3_use_reference_summary"] = True
-    with pytest.raises(ValueError, match="runtime contract violation"):
+    with pytest.raises(ValueError, match="must be false|runtime contract violation"):
         ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
 
 
@@ -1792,6 +1910,33 @@ def test_rhythm_v3_projector_rejects_noncontiguous_visible_prefix_commit_mask():
         )
 
 
+def test_rhythm_v3_projector_rejects_committing_open_tail_units():
+    with pytest.raises(ValueError, match="open-tail"):
+        StreamingDurationProjector._validate_prefix_commit_mask(
+            unit_mask=torch.ones((1, 3), dtype=torch.float32),
+            commit_mask=torch.ones((1, 3), dtype=torch.float32),
+            sealed_mask=torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32),
+        )
+
+
+def test_rhythm_v3_projector_exports_closed_prefix_commit_telemetry():
+    projector = StreamingDurationProjector(prefix_budget_pos=24, prefix_budget_neg=24)
+    execution = projector.finalize_execution(
+        unit_logstretch=torch.zeros((1, 3), dtype=torch.float32),
+        unit_duration_exec=torch.ones((1, 3), dtype=torch.float32),
+        basis_activation=torch.zeros((1, 3, 1), dtype=torch.float32),
+        source_duration_obs=torch.ones((1, 3), dtype=torch.float32),
+        unit_mask=torch.ones((1, 3), dtype=torch.float32),
+        sealed_mask=torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32),
+        speech_commit_mask=torch.ones((1, 3), dtype=torch.float32),
+        state=None,
+    )
+    assert torch.allclose(execution.commit_mask, torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32))
+    assert torch.allclose(execution.commit_closed_prefix_ok, torch.ones((1, 1), dtype=torch.float32))
+    assert torch.allclose(execution.open_tail_commit_violation, torch.zeros((1, 3), dtype=torch.float32))
+    assert torch.allclose(execution.open_tail_commit_violation_count, torch.zeros((1, 1), dtype=torch.float32))
+
+
 def test_rhythm_v3_projector_resets_carry_across_phrase_boundary():
     projector_no_reset = StreamingDurationProjector(
         prefix_budget_pos=24,
@@ -2031,3 +2176,7 @@ def test_rhythm_v3_render_keeps_raw_open_tail_after_committed_prefix():
     assert rendered.shape[1] >= 4
     assert torch.equal(rendered[0, -4:], torch.tensor([3, 3, 3, 3], dtype=torch.long))
     assert int(ret["rhythm_render_unit_index"][0, -1].item()) == 3
+    assert ret["rhythm_v3_has_uncommitted_tail"] == 1.0
+    assert ret["rhythm_v3_render_frame_plan_contains_uncommitted_tail"] == 1.0
+    assert ret["rhythm_v3_render_open_tail_frame_count"] >= 4.0
+    assert torch.allclose(ret["rhythm_v3_open_tail_commit_violation_count"], torch.zeros((1, 1)))

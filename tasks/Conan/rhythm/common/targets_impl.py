@@ -91,6 +91,7 @@ class DurationV3TargetBuildConfig:
     lambda_cons: float = 0.0
     lambda_zero: float = 0.0
     lambda_ortho: float = 0.0
+    lambda_silence_aux: float = 0.0
     strict_target_alignment: bool = True
     anchor_mode: str = "baseline"
     baseline_target_mode: str = "deglobalized"
@@ -1078,26 +1079,36 @@ def build_duration_v3_loss_targets(
             - torch.log(prediction_anchor.float().clamp_min(1.0e-6))
         ) * committed_mask.float()
         residual_logstretch_tgt = (full_logstretch_tgt - global_shift_tgt).detach()
-        global_bias_tgt = _masked_duration_v3_median(
-            residual_logstretch_tgt,
-            committed_speech_mask.float(),
-            weight=unit_confidence_coarse_tgt,
-        ).detach()
+        speech_support = committed_speech_mask.float().sum(dim=1, keepdim=True)
+        global_bias_tgt = residual_logstretch_tgt.new_zeros((residual_logstretch_tgt.size(0), 1))
+        global_bias_tgt_support_count = speech_support.detach()
         if isinstance(unit_confidence_coarse_tgt, torch.Tensor):
             coarse_conf = unit_confidence_coarse_tgt.float() * committed_speech_mask.float()
             global_bias_tgt_support_mass = coarse_conf.sum(dim=1, keepdim=True).detach()
-            global_bias_tgt_support_count = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
             coarse_target_speech_conf_mean = (
                 global_bias_tgt_support_mass / global_bias_tgt_support_count.clamp_min(1.0)
             ).detach()
+            valid_rows = global_bias_tgt_support_mass.squeeze(1) > 1.0e-6
         else:
-            global_bias_tgt_support_mass = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
-            global_bias_tgt_support_count = committed_speech_mask.float().sum(dim=1, keepdim=True).detach()
+            global_bias_tgt_support_mass = speech_support.detach()
             coarse_target_speech_conf_mean = torch.where(
                 global_bias_tgt_support_count > 0.0,
                 torch.ones_like(global_bias_tgt_support_count),
                 torch.zeros_like(global_bias_tgt_support_count),
             ).detach()
+            valid_rows = global_bias_tgt_support_count.squeeze(1) > 0.0
+        if bool(valid_rows.any().item()):
+            valid_weight = (
+                unit_confidence_coarse_tgt[valid_rows]
+                if isinstance(unit_confidence_coarse_tgt, torch.Tensor)
+                else None
+            )
+            global_bias_tgt_valid = _masked_duration_v3_median(
+                residual_logstretch_tgt[valid_rows],
+                committed_speech_mask.float()[valid_rows],
+                weight=valid_weight,
+            ).detach()
+            global_bias_tgt[valid_rows] = global_bias_tgt_valid
         coarse_bias_seq = global_bias_tgt.float()
         while coarse_bias_seq.dim() < residual_logstretch_tgt.dim():
             coarse_bias_seq = coarse_bias_seq.unsqueeze(-1)
@@ -1273,6 +1284,7 @@ def build_duration_v3_loss_targets(
         lambda_cons=float(config.lambda_cons),
         lambda_zero=float(config.lambda_zero),
         lambda_ortho=float(config.lambda_ortho),
+        lambda_silence_aux=float(config.lambda_silence_aux),
         baseline_pretrain_only=baseline_pretrain_only,
         minimal_v1_profile=bool(getattr(config, "minimal_v1_profile", False)),
     )

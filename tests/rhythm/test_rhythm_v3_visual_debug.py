@@ -1038,7 +1038,7 @@ def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_pat
         cli.main()
 
     captured = capsys.readouterr()
-    assert excinfo.value.code != 0
+    assert excinfo.value.code == 2
     status = json.loads(gate_status_path.read_text(encoding="utf-8"))
     assert status["missing_controls"] == ["random_ref", "shuffled_ref"]
     assert "unrecognized arguments" not in captured.err

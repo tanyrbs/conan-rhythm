@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from modules.Conan.rhythm.policy import is_duration_operator_mode
 
 from ..common.task_config import (
@@ -59,11 +61,13 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
     "L_stream_state",
     "rhythm_v3_break",
 )
+_LEGACY_PROMPT_SUMMARY_BACKBONES = {"role_memory", "unit_run"}
+_MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global", "v1g_minimal"}
 
 
 def normalize_duration_v3_backbone_mode(value) -> str:
     normalized = str(value or "global_only").strip().lower()
-    if normalized in {"role_memory", "unit_run"}:
+    if normalized in _LEGACY_PROMPT_SUMMARY_BACKBONES | _MINIMAL_V1_GLOBAL_BACKBONES:
         return "prompt_summary"
     return normalized
 
@@ -156,7 +160,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     if backbone_mode not in {"global_only", "operator", "prompt_summary"}:
         raise ValueError(
             "rhythm_v3_backbone must be one of: global_only, operator, prompt_summary "
-            "(legacy aliases: role_memory, unit_run)"
+            "(public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)"
         )
     if warp_mode not in {"none", "progress", "detector"}:
         raise ValueError("rhythm_v3_warp_mode must be one of: none, progress, detector")
@@ -165,15 +169,15 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     if backbone_mode == "prompt_summary":
         if warp_mode != "none":
             raise ValueError(
-                "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'."
+                "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'."
             )
         if allow_hybrid:
             raise ValueError(
-                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run')."
+                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run')."
             )
         if not bool(hparams.get("rhythm_v3_emit_silence_runs", True)):
             raise ValueError(
-                "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') "
+                "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') "
                 "requires rhythm_v3_emit_silence_runs=true."
             )
     if backbone_mode == "operator" and warp_mode == "progress" and not allow_hybrid:
@@ -194,26 +198,44 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         raise ValueError("rhythm_v3_rate_mode must be one of: simple_global, log_base")
     if backbone_mode == "prompt_summary" and anchor_mode != "source_observed":
         raise ValueError(
-            "rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
+            "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
         )
     minimal_v1_profile = _is_enabled_flag(hparams.get("rhythm_v3_minimal_v1_profile", False))
     if minimal_v1_profile:
-        backbone_value = hparams.get("rhythm_v3_backbone", "unit_run")
-        if not is_duration_v3_prompt_summary_backbone(backbone_value):
+        if "rhythm_v3_detach_global_term_in_local_head" not in hparams:
+            hparams["rhythm_v3_detach_global_term_in_local_head"] = True
+        backbone_value = hparams.get("rhythm_v3_backbone")
+        backbone_text = str(backbone_value or "").strip().lower()
+        normalized_backbone_value = normalize_duration_v3_backbone_mode(backbone_value)
+        if backbone_value is None:
             raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_backbone to be 'unit_run' "
-                "or normalized 'prompt_summary'."
+                "rhythm_v3_minimal_v1_profile requires explicit rhythm_v3_backbone='minimal_v1_global'."
             )
-        if int(hparams.get("rhythm_num_summary_slots", 1) or 1) != 1:
+        if backbone_text in _LEGACY_PROMPT_SUMMARY_BACKBONES:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile forbids legacy rhythm_v3_backbone aliases "
+                "'role_memory' and 'unit_run'; use 'minimal_v1_global' instead."
+            )
+        if normalized_backbone_value != "prompt_summary":
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_backbone='minimal_v1_global' "
+                "(or 'prompt_summary' only for compatibility)."
+            )
+        for key in ("rhythm_num_summary_slots", "rhythm_num_role_slots", "num_summary_slots", "num_role_slots"):
+            if key in hparams and int(hparams.get(key, 1) or 1) != 1:
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_num_summary_slots=1.")
+        if int(hparams.get("rhythm_num_summary_slots", hparams.get("rhythm_num_role_slots", 1)) or 1) != 1:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_num_summary_slots=1.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_summary_use_unit_embedding", False)):
-            raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_use_unit_embedding=false."
-            )
-        if not _is_enabled_flag(hparams.get("rhythm_v3_summary_pool_speech_only", True)):
-            raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_pool_speech_only=true."
-            )
+        for key in ("rhythm_v3_summary_use_unit_embedding", "summary_use_unit_embedding"):
+            if _is_enabled_flag(hparams.get(key, False)):
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_use_unit_embedding=false."
+                )
+        for key in ("rhythm_v3_summary_pool_speech_only", "summary_pool_speech_only"):
+            if key in hparams and not _is_enabled_flag(hparams.get(key, True)):
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires rhythm_v3_summary_pool_speech_only=true."
+                )
         if not _is_enabled_flag(hparams.get("rhythm_v3_disallow_same_text_reference", True)):
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_disallow_same_text_reference=true."
@@ -243,18 +265,30 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_mode to be "
                 "continuous_precomputed or continuous_viterbi_v1."
             )
-        if not _is_enabled_flag(hparams.get("rhythm_v3_simple_global_stats", True)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_simple_global_stats=true.")
+        for key in ("rhythm_v3_simple_global_stats", "simple_global_stats"):
+            if key in hparams and not _is_enabled_flag(hparams.get(key, True)):
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_simple_global_stats=true.")
         if rate_mode != "simple_global":
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_rate_mode=simple_global.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_use_log_base_rate", False)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_log_base_rate=false.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_use_reference_summary", False)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_reference_summary=false.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_use_learned_residual_gate", False)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_learned_residual_gate=false.")
-        if not _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", True)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_disable_learned_gate=true.")
+        for key in ("rhythm_v3_rate_mode", "rate_mode"):
+            if key in hparams and normalize_duration_v3_rate_mode(hparams.get(key, "")) != "simple_global":
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_rate_mode=simple_global.")
+        for key in ("rhythm_v3_use_log_base_rate", "use_log_base_rate"):
+            if _is_enabled_flag(hparams.get(key, False)):
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_log_base_rate=false.")
+        for key in ("rhythm_v3_use_reference_summary", "use_reference_summary"):
+            if _is_enabled_flag(hparams.get(key, False)):
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_reference_summary=false.")
+        for key in ("rhythm_v3_use_learned_residual_gate", "use_learned_residual_gate"):
+            if _is_enabled_flag(hparams.get(key, False)):
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_learned_residual_gate=false.")
+        for key in ("rhythm_v3_disable_learned_gate", "disable_learned_gate"):
+            if key in hparams and not _is_enabled_flag(hparams.get(key, True)):
+                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_disable_learned_gate=true.")
+        if not _is_enabled_flag(hparams.get("rhythm_v3_detach_global_term_in_local_head", True)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_detach_global_term_in_local_head=true."
+            )
         if str(hparams.get("rhythm_streaming_mode", "strict") or "strict").strip().lower() != "strict":
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_streaming_mode='strict'.")
         if int(hparams.get("rhythm_response_window_right", 0) or 0) != 0:
@@ -262,35 +296,40 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         micro_lookahead = hparams.get("rhythm_micro_lookahead_units")
         if micro_lookahead is not None and int(micro_lookahead or 0) != 0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_micro_lookahead_units=0 or unset.")
-        if float(hparams.get("lambda_rhythm_summary", hparams.get("lambda_rhythm_mem", 0.0)) or 0.0) > 0.0:
-            raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_summary=0.")
+        for key in ("lambda_rhythm_summary", "lambda_rhythm_mem"):
+            if float(hparams.get(key, 0.0) or 0.0) > 0.0:
+                raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_summary=0.")
         if float(hparams.get("lambda_rhythm_base", 0.0) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_base=0.")
         if float(hparams.get("rhythm_v3_silence_coarse_weight", 0.0) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_silence_coarse_weight=0.")
-        if abs(float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35) or 0.35) - 0.35) > 1.0e-6:
-            raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_short_gap_silence_scale=0.35."
-            )
-        if abs(float(hparams.get("rhythm_v3_leading_silence_scale", 0.0) or 0.0) - 0.0) > 1.0e-6:
-            raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_leading_silence_scale=0.0."
-            )
+        for key in ("rhythm_v3_short_gap_silence_scale", "short_gap_silence_scale"):
+            if abs(float(hparams.get(key, 0.35) or 0.35) - 0.35) > 1.0e-6:
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires rhythm_v3_short_gap_silence_scale=0.35."
+                )
+        for key in ("rhythm_v3_leading_silence_scale", "leading_silence_scale"):
+            if abs(float(hparams.get(key, 0.0) or 0.0) - 0.0) > 1.0e-6:
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires rhythm_v3_leading_silence_scale=0.0."
+                )
         if int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0) < 1:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_drop_edge_runs_for_g >= 1.")
         if _is_enabled_flag(hparams.get("rhythm_v3_alignment_soft_repair", False)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_soft_repair=false.")
-        if _is_enabled_flag(
-            _get_hparam_alias(
-                hparams,
-                "rhythm_v3_alignment_allow_source_skip",
-                "rhythm_v3_align_allow_source_skip",
-                False,
-            )
-        ):
-            raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
-            )
+        if _is_enabled_flag(hparams.get("rhythm_v3_allow_silence_aux", False)):
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_allow_silence_aux=false.")
+        min_prompt_ref_len_sec = float(hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
+        max_prompt_ref_len_sec = float(hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
+        if abs(min_prompt_ref_len_sec - 3.0) > 1.0e-6:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_min_prompt_ref_len_sec=3.0.")
+        if abs(max_prompt_ref_len_sec - 8.0) > 1.0e-6:
+            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_max_prompt_ref_len_sec=8.0.")
+        for key in ("rhythm_v3_alignment_allow_source_skip", "rhythm_v3_align_allow_source_skip"):
+            if _is_enabled_flag(hparams.get(key, False)):
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
+                )
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)
     ):
@@ -389,6 +428,40 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     min_prompt_speech_ratio = float(hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.0)
     if min_prompt_speech_ratio < 0.0 or min_prompt_speech_ratio > 1.0:
         raise ValueError("rhythm_v3_min_prompt_speech_ratio must be within [0, 1] for rhythm_v3.")
+    min_prompt_ref_len_sec = float(hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
+    max_prompt_ref_len_sec = float(hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
+    if min_prompt_ref_len_sec <= 0.0:
+        raise ValueError("rhythm_v3_min_prompt_ref_len_sec must be > 0 for rhythm_v3.")
+    if max_prompt_ref_len_sec <= 0.0:
+        raise ValueError("rhythm_v3_max_prompt_ref_len_sec must be > 0 for rhythm_v3.")
+    if max_prompt_ref_len_sec < min_prompt_ref_len_sec:
+        raise ValueError(
+            "rhythm_v3_max_prompt_ref_len_sec must be >= rhythm_v3_min_prompt_ref_len_sec for rhythm_v3."
+        )
+    src_rate_init_mode = str(hparams.get("rhythm_v3_src_rate_init_mode", "auto") or "auto").strip().lower()
+    if src_rate_init_mode not in {"auto", "learned", "zero", "first_speech"}:
+        raise ValueError(
+            "rhythm_v3_src_rate_init_mode must be one of: auto, learned, zero, first_speech."
+        )
+    coarse_delta_scale = float(hparams.get("rhythm_v3_coarse_delta_scale", 0.20) or 0.0)
+    if coarse_delta_scale < 0.0:
+        raise ValueError("rhythm_v3_coarse_delta_scale must be >= 0 for rhythm_v3.")
+    local_residual_scale = float(hparams.get("rhythm_v3_local_residual_scale", 0.35) or 0.0)
+    if local_residual_scale < 0.0:
+        raise ValueError("rhythm_v3_local_residual_scale must be >= 0 for rhythm_v3.")
+    boundary_offset_decay = hparams.get("rhythm_v3_boundary_offset_decay", None)
+    if boundary_offset_decay is not None:
+        boundary_offset_decay = float(boundary_offset_decay)
+        if boundary_offset_decay < 0.0 or boundary_offset_decay > 1.0:
+            raise ValueError("rhythm_v3_boundary_offset_decay must be within [0, 1] for rhythm_v3.")
+    src_rate_init_value = float(hparams.get("rhythm_v3_src_rate_init_value", 0.0) or 0.0)
+    if not math.isfinite(src_rate_init_value):
+        raise ValueError("rhythm_v3_src_rate_init_value must be finite for rhythm_v3.")
+    min_boundary_confidence_for_g = hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
+    if min_boundary_confidence_for_g is not None:
+        min_boundary_confidence_for_g = float(min_boundary_confidence_for_g)
+        if min_boundary_confidence_for_g < 0.0 or min_boundary_confidence_for_g > 1.0:
+            raise ValueError("rhythm_v3_min_boundary_confidence_for_g must be within [0, 1] for rhythm_v3.")
     g_variant = str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower()
     if g_variant == "unit_norm":
         if unit_prior_path is None:
@@ -402,6 +475,12 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             value = float(hparams.get(key, 0.0) or 0.0)
             if value < 0.0 or value > 1.0:
                 raise ValueError(f"{key} must be within [0, 1] for rhythm_v3.")
+    for key in (
+        "rhythm_v3_alignment_local_margin_p10_min",
+        "rhythm_v3_align_local_margin_p10_min",
+    ):
+        if key in hparams and float(hparams.get(key, 0.0) or 0.0) < 0.0:
+            raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
     for key, alias in (
         ("rhythm_v3_alignment_lambda_emb", "rhythm_v3_align_lambda_emb"),
         ("rhythm_v3_alignment_lambda_type", "rhythm_v3_align_lambda_type"),
@@ -455,6 +534,11 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         )
     elif runtime_mode != "operator_srcres" and source_residual_gain > 0.0:
         raise ValueError("rhythm_v3_source_residual_gain is only valid when rhythm_v3 runtime mode is 'operator_srcres'.")
+    allow_silence_aux = _is_enabled_flag(hparams.get("rhythm_v3_allow_silence_aux", False))
+    if not allow_silence_aux and float(hparams.get("rhythm_v3_silence_coarse_weight", 0.0) or 0.0) > 0.0:
+        raise ValueError("rhythm_v3_silence_coarse_weight > 0 requires rhythm_v3_allow_silence_aux=true.")
+    if not allow_silence_aux and float(hparams.get("lambda_rhythm_silence_aux", 0.0) or 0.0) > 0.0:
+        raise ValueError("lambda_rhythm_silence_aux > 0 requires rhythm_v3_allow_silence_aux=true.")
     public_inputs = _normalize_public_surface(hparams.get("rhythm_public_inputs"), key="rhythm_public_inputs")
     public_outputs = _normalize_public_surface(hparams.get("rhythm_public_outputs"), key="rhythm_public_outputs")
     public_losses = _normalize_public_surface(hparams.get("rhythm_public_losses"), key="rhythm_public_losses")

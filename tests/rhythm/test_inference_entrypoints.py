@@ -80,6 +80,8 @@ def test_streaming_inference_reports_content_history_windowing_metadata():
     assert '"content_history_left_context_tokens"' in source
     assert '"rhythm_prefix_budget_abs_p95"' in source
     assert '"rhythm_boundary_decay_applied_rate"' in source
+    assert '"rhythm_open_tail_commit_violation_count"' in source
+    assert '"rhythm_committed_closed_prefix_ok"' in source
     assert '"prompt_global_weight_present"' in source
     assert '"prompt_unit_log_prior_present"' in source
     assert '"rhythm_v3_g_variant"' in source
@@ -153,6 +155,24 @@ def test_streaming_inference_rewrite_guard_allows_open_tail_updates():
     )
 
 
+def test_streaming_inference_rejects_open_tail_commit_violation():
+    execution = SimpleNamespace(
+        open_tail_commit_violation=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        commit_closed_prefix_ok=torch.ones((1, 1), dtype=torch.float32),
+    )
+    with pytest.raises(RuntimeError, match="Open-tail"):
+        StreamingVoiceConversion._assert_runtime_commit_invariants(execution)
+
+
+def test_streaming_inference_rejects_non_closed_prefix_commit_surface():
+    execution = SimpleNamespace(
+        open_tail_commit_violation=torch.zeros((1, 2), dtype=torch.float32),
+        commit_closed_prefix_ok=torch.zeros((1, 1), dtype=torch.float32),
+    )
+    with pytest.raises(RuntimeError, match="contiguous closed prefix"):
+        StreamingVoiceConversion._assert_runtime_commit_invariants(execution)
+
+
 def test_streaming_inference_eos_tail_policy_returns_tail_when_fallback_enabled():
     mel = torch.randn(5, 80)
     tail, unresolved = StreamingVoiceConversion._resolve_uncommitted_eos_tail(
@@ -176,11 +196,23 @@ def test_streaming_inference_eos_tail_policy_rejects_tail_when_strict():
 
 def test_streaming_inference_runtime_summary_helpers_report_prefix_budget_and_boundary_decay():
     prefix_offset = torch.tensor([[0.0, -0.2, 0.4, 0.1]], dtype=torch.float32)
+    rounding_residual = torch.tensor([[0.0, -0.03, 0.02, 0.01]], dtype=torch.float32)
+    budget_hit_mask = torch.tensor([[0.0, 1.0, 0.0, 1.0]], dtype=torch.float32)
     boundary_decay = torch.tensor([[0.0, 1.0, 0.0, 1.0]], dtype=torch.float32)
     p95 = StreamingVoiceConversion._summarize_prefix_budget_abs_p95(prefix_offset)
+    residual_p95 = StreamingVoiceConversion._summarize_rounding_residual_abs_p95(rounding_residual)
+    budget_hit_rate = StreamingVoiceConversion._summarize_budget_hit_rate(budget_hit_mask)
     decay_rate = StreamingVoiceConversion._summarize_boundary_decay_applied_rate(boundary_decay)
+    open_tail_violation_count = StreamingVoiceConversion._summarize_mask_sum(
+        torch.tensor([[0.0, 1.0, 1.0, 0.0]], dtype=torch.float32)
+    )
     assert p95 == pytest.approx(float(torch.quantile(prefix_offset.abs().reshape(-1), 0.95).item()))
+    assert residual_p95 == pytest.approx(
+        float(torch.quantile(rounding_residual.abs().reshape(-1), 0.95).item())
+    )
+    assert budget_hit_rate == pytest.approx(0.5)
     assert decay_rate == pytest.approx(0.5)
+    assert open_tail_violation_count == pytest.approx(2.0)
 
 
 def test_streaming_inference_prompt_global_weight_rejects_shape_mismatch_by_default():
@@ -198,6 +230,16 @@ def test_streaming_inference_prompt_global_weight_can_repair_shape_when_enabled(
         allow_shape_repair=True,
     )
     assert torch.allclose(weight, torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32))
+
+
+def test_streaming_inference_prompt_global_weight_masks_open_runs_and_trims_edge_support():
+    weight = StreamingVoiceConversion._build_prompt_global_weight(
+        prompt_speech_mask=torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0]], dtype=torch.float32),
+        prompt_run_stability=torch.ones((1, 5), dtype=torch.float32),
+        prompt_open_run_mask=torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0]], dtype=torch.float32),
+        drop_edge_runs=1,
+    )
+    assert torch.allclose(weight, torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
 
 
 def test_streaming_inference_frontend_signature_includes_global_stat_knobs(monkeypatch):
@@ -378,3 +420,6 @@ def test_streaming_inference_infer_once_reports_prompt_sidecars_and_eos_severity
     assert metadata["rhythm_v3_g_variant"] == "weighted_median"
     assert metadata["rhythm_uncommitted_eos_tail_frames"] == 3
     assert metadata["rhythm_eos_tail_flush_severity"] == "warning"
+    assert "rhythm_prefix_drift_abs_p95" in metadata
+    assert "rhythm_rounding_residual_abs_p95" in metadata
+    assert "rhythm_budget_hit_rate" in metadata

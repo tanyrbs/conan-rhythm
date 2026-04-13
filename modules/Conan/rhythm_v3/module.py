@@ -18,25 +18,48 @@ from .contracts import (
 )
 from .projector import StreamingDurationProjector
 from .reference_memory import PromptConditionedOperatorEstimator
-from .g_stats import compute_global_rate_batch, normalize_falsification_eval_mode, normalize_global_rate_variant
+from .g_stats import (
+    build_global_rate_support_mask,
+    compute_global_rate_batch,
+    normalize_falsification_eval_mode,
+    normalize_global_rate_variant,
+)
 from .math_utils import build_causal_local_rate_seq
-from .minimal_head import MinimalStreamingDurationHeadV1G
+from .global_condition import PromptGlobalConditionEncoderV1G
+from .minimal_writer import MinimalStreamingDurationHeadV1G, MinimalStreamingDurationWriterV1G
 from .summary_memory import (
     PromptDurationMemoryEncoder,
-    PromptGlobalConditionEncoderV1G,
     SharedSummaryCodebook,
     StreamingDurationHead,
 )
 
+_MINIMAL_V1_PUBLIC_BACKBONE = "minimal_v1_global"
 
-_PROMPT_SUMMARY_BACKBONE_ALIASES = {"prompt_summary", "role_memory", "unit_run"}
+
+_PROMPT_SUMMARY_BACKBONE_ALIASES = {
+    "prompt_summary",
+    "role_memory",
+    "unit_run",
+    "minimal_v1_global",
+    "v1g_minimal",
+}
 
 
 def _normalize_prompt_summary_backbone(backbone_mode: str | None) -> str:
     normalized = str(backbone_mode or "global_only").strip().lower()
-    if normalized in {"role_memory", "unit_run"}:
+    if normalized in _PROMPT_SUMMARY_BACKBONE_ALIASES - {"prompt_summary"}:
         return "prompt_summary"
     return normalized
+
+
+def _prompt_summary_public_label(*, minimal_v1_profile: bool) -> str:
+    return _MINIMAL_V1_PUBLIC_BACKBONE if minimal_v1_profile else "prompt_summary"
+
+
+def _prompt_summary_public_with_aliases(*, minimal_v1_profile: bool) -> str:
+    if minimal_v1_profile:
+        return f"{_MINIMAL_V1_PUBLIC_BACKBONE} (compat: prompt_summary; legacy: role_memory, unit_run)"
+    return "prompt_summary (public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)"
 
 
 def _init_accepts_kwarg(module_cls: type[nn.Module], kwarg_name: str) -> bool:
@@ -44,6 +67,20 @@ def _init_accepts_kwarg(module_cls: type[nn.Module], kwarg_name: str) -> bool:
 
 
 _MISSING = object()
+
+
+def _resolve_reference_summary_usage(
+    *,
+    minimal_v1_profile: bool,
+    requested_use_reference_summary,
+) -> bool:
+    use_reference_summary = False if requested_use_reference_summary is _MISSING else bool(requested_use_reference_summary)
+    if minimal_v1_profile and use_reference_summary:
+        raise ValueError(
+            "rhythm_v3_minimal_v1_profile selects the minimal_v1_global path directly; "
+            "use_reference_summary only enables optional non-minimal reference-summary tensors and must be false."
+        )
+    return use_reference_summary
 
 
 class SharedCausalBasisEncoder(nn.Module):
@@ -118,17 +155,17 @@ def _resolve_duration_runtime_surface(
         raise ValueError(
             "Unsupported rhythm_v3 backbone mode: "
             f"{backbone_mode!r}. Supported values are global_only, operator, prompt_summary "
-            "(legacy aliases: role_memory, unit_run)."
+            "(public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)."
         )
     if resolved_warp not in {"none", "progress", "detector"}:
         raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
     if resolved_backbone == "prompt_summary":
         if resolved_warp != "none":
-            raise ValueError("rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'.")
+            raise ValueError("rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'.")
         if resolved_allow_hybrid:
-            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run').")
+            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run').")
         if float(source_residual_gain) > 0.0:
-            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (legacy aliases: 'role_memory', 'unit_run').")
+            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run').")
         return resolved_backbone, resolved_warp, False, "prompt_summary"
     if resolved_backbone == "global_only":
         if resolved_allow_hybrid:
@@ -189,7 +226,7 @@ def _enforce_minimal_v1_runtime_contract(
     if str(streaming_mode).strip().lower() != "strict":
         errors.append("streaming_mode must be strict")
     if str(backbone_mode).strip().lower() != "prompt_summary":
-        errors.append("backbone_mode must resolve to prompt_summary")
+        errors.append(f"backbone_mode must resolve to {_MINIMAL_V1_PUBLIC_BACKBONE}")
     if str(warp_mode).strip().lower() != "none":
         errors.append("warp_mode must resolve to none")
     if bool(allow_hybrid):
@@ -422,7 +459,16 @@ class MixedEffectsDurationModule(nn.Module):
     ) -> None:
         super().__init__()
         summary_dim = int(unused_kwargs.pop("summary_dim", unused_kwargs.pop("role_dim", hidden_size)))
-        summary_slots = int(unused_kwargs.pop("num_summary_slots", unused_kwargs.pop("num_role_slots", max(4, basis_rank))))
+        minimal_profile_requested = bool(
+            unused_kwargs.get("minimal_v1_profile", unused_kwargs.get("rhythm_v3_minimal_v1_profile", False))
+        )
+        summary_slots_default = 1 if minimal_profile_requested else max(4, basis_rank)
+        summary_slots = int(
+            unused_kwargs.pop(
+                "num_summary_slots",
+                unused_kwargs.pop("num_role_slots", summary_slots_default),
+            )
+        )
         summary_cov_floor = float(unused_kwargs.pop("summary_cov_floor", unused_kwargs.pop("role_cov_floor", 0.05)))
         summary_pool_speech_only = bool(unused_kwargs.pop("summary_pool_speech_only", True))
         summary_use_unit_embedding = bool(unused_kwargs.pop("summary_use_unit_embedding", False))
@@ -474,10 +520,11 @@ class MixedEffectsDurationModule(nn.Module):
             "disable_learned_gate",
             unused_kwargs.pop("rhythm_v3_disable_learned_gate", _MISSING),
         )
+        use_learned_residual_gate_default = False if self.minimal_v1_profile else True
         self.use_learned_residual_gate = bool(
             unused_kwargs.pop(
                 "use_learned_residual_gate",
-                unused_kwargs.pop("rhythm_v3_use_learned_residual_gate", True),
+                unused_kwargs.pop("rhythm_v3_use_learned_residual_gate", use_learned_residual_gate_default),
             )
         )
         if disable_learned_gate is not _MISSING and bool(disable_learned_gate):
@@ -486,9 +533,10 @@ class MixedEffectsDurationModule(nn.Module):
             "use_reference_summary",
             unused_kwargs.pop("rhythm_v3_use_reference_summary", _MISSING),
         )
-        if use_reference_summary is _MISSING:
-            use_reference_summary = False if self.minimal_v1_profile else False
-        self.use_reference_summary = bool(use_reference_summary)
+        self.use_reference_summary = _resolve_reference_summary_usage(
+            minimal_v1_profile=self.minimal_v1_profile,
+            requested_use_reference_summary=use_reference_summary,
+        )
         global_shrink_tau = float(unused_kwargs.pop("global_shrink_tau", 8.0))
         progress_support_tau = float(unused_kwargs.pop("progress_support_tau", 8.0))
         progress_bins = int(unused_kwargs.pop("progress_bins", 4))
@@ -501,6 +549,10 @@ class MixedEffectsDurationModule(nn.Module):
         max_prefix_budget = int(unused_kwargs.pop("max_prefix_budget", 0))
         budget_mode = str(unused_kwargs.pop("budget_mode", unused_kwargs.pop("rhythm_v3_budget_mode", "total")))
         boundary_carry_decay = float(unused_kwargs.pop("boundary_carry_decay", 0.25))
+        boundary_offset_decay = unused_kwargs.pop(
+            "boundary_offset_decay",
+            unused_kwargs.pop("rhythm_v3_boundary_offset_decay", None),
+        )
         boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
         emit_prompt_diagnostics = bool(
             unused_kwargs.pop("emit_prompt_diagnostics", unused_kwargs.pop("rhythm_v3_emit_prompt_diagnostics", True))
@@ -557,10 +609,62 @@ class MixedEffectsDurationModule(nn.Module):
                 unused_kwargs.pop("rhythm_v3_min_prompt_speech_ratio", 0.6),
             )
         )
+        self.min_prompt_ref_len_sec = float(
+            unused_kwargs.pop(
+                "min_prompt_ref_len_sec",
+                unused_kwargs.pop("rhythm_v3_min_prompt_ref_len_sec", 3.0),
+            )
+        )
+        self.max_prompt_ref_len_sec = float(
+            unused_kwargs.pop(
+                "max_prompt_ref_len_sec",
+                unused_kwargs.pop("rhythm_v3_max_prompt_ref_len_sec", 8.0),
+            )
+        )
+        min_boundary_confidence_for_g = unused_kwargs.pop(
+            "min_boundary_confidence_for_g",
+            unused_kwargs.pop("rhythm_v3_min_boundary_confidence_for_g", None),
+        )
+        self.min_boundary_confidence_for_g = (
+            None if min_boundary_confidence_for_g is None else float(min_boundary_confidence_for_g)
+        )
+        self.coarse_delta_scale = float(
+            unused_kwargs.pop(
+                "coarse_delta_scale",
+                unused_kwargs.pop("rhythm_v3_coarse_delta_scale", 0.20),
+            )
+        )
+        self.local_residual_scale = float(
+            unused_kwargs.pop(
+                "local_residual_scale",
+                unused_kwargs.pop("rhythm_v3_local_residual_scale", 0.35),
+            )
+        )
+        source_rate_init_mode_default = "first_speech" if self.minimal_v1_profile else "learned"
+        self.src_rate_init_mode = str(
+            unused_kwargs.pop(
+                "src_rate_init_mode",
+                unused_kwargs.pop("rhythm_v3_src_rate_init_mode", source_rate_init_mode_default),
+            )
+            or source_rate_init_mode_default
+        ).strip().lower()
+        self.src_rate_init_value = float(
+            unused_kwargs.pop(
+                "src_rate_init_value",
+                unused_kwargs.pop("rhythm_v3_src_rate_init_value", 0.0),
+            )
+        )
+        self.freeze_src_rate_init = bool(
+            unused_kwargs.pop(
+                "freeze_src_rate_init",
+                unused_kwargs.pop("rhythm_v3_freeze_src_rate_init", False),
+            )
+        )
+        detach_global_term_default = bool(self.minimal_v1_profile)
         self.detach_global_term_in_local_head = bool(
             unused_kwargs.pop(
                 "detach_global_term_in_local_head",
-                unused_kwargs.pop("rhythm_v3_detach_global_term_in_local_head", False),
+                unused_kwargs.pop("rhythm_v3_detach_global_term_in_local_head", detach_global_term_default),
             )
         )
         del unused_kwargs
@@ -579,6 +683,17 @@ class MixedEffectsDurationModule(nn.Module):
             warp_mode=warp_mode,
             allow_hybrid=allow_hybrid,
             source_residual_gain=self.source_residual_gain,
+        )
+        self.is_minimal_v1 = bool(self.minimal_v1_profile and self.backbone_mode == "prompt_summary")
+        self.public_backbone_mode = (
+            _prompt_summary_public_label(minimal_v1_profile=True)
+            if self.is_minimal_v1
+            else self.backbone_mode
+        )
+        self.public_runtime_mode = (
+            _prompt_summary_public_label(minimal_v1_profile=True)
+            if self.is_minimal_v1
+            else self.runtime_mode
         )
         _enforce_minimal_v1_runtime_contract(
             minimal_v1_profile=self.minimal_v1_profile,
@@ -633,6 +748,7 @@ class MixedEffectsDurationModule(nn.Module):
             max_prefix_budget=max_prefix_budget,
             budget_mode=budget_mode,
             boundary_carry_decay=boundary_carry_decay,
+            boundary_offset_decay=boundary_offset_decay,
             boundary_reset_thresh=boundary_reset_thresh,
             export_projector_telemetry=self.export_projector_telemetry,
         )
@@ -643,16 +759,19 @@ class MixedEffectsDurationModule(nn.Module):
         self.prompt_memory_encoder = None
         self.duration_head = None
         if self.backbone_mode == "prompt_summary":
-            if self.minimal_v1_profile:
+            if self.is_minimal_v1:
                 self.prompt_memory_encoder = PromptGlobalConditionEncoderV1G(
                     operator_rank=basis_rank,
                     min_speech_ratio=self.min_prompt_speech_ratio,
+                    min_ref_len_sec=self.min_prompt_ref_len_sec,
+                    max_ref_len_sec=self.max_prompt_ref_len_sec,
                     use_log_base_rate=self.use_log_base_rate,
                     g_variant=self.g_variant,
                     g_trim_ratio=self.g_trim_ratio,
                     drop_edge_runs_for_g=self.g_drop_edge_runs,
+                    min_boundary_confidence=self.min_boundary_confidence_for_g,
                 )
-                self.duration_head = MinimalStreamingDurationHeadV1G(
+                self.duration_head = MinimalStreamingDurationWriterV1G(
                     vocab_size=vocab_size,
                     dim=summary_dim,
                     num_slots=1,
@@ -670,6 +789,11 @@ class MixedEffectsDurationModule(nn.Module):
                     disable_local_residual=self.disable_local_residual,
                     disable_coarse_bias=self.disable_coarse_bias,
                     detach_global_term_in_local_head=self.detach_global_term_in_local_head,
+                    coarse_delta_scale=self.coarse_delta_scale,
+                    local_residual_scale=self.local_residual_scale,
+                    src_rate_init_mode=self.src_rate_init_mode,
+                    src_rate_init_value=self.src_rate_init_value,
+                    freeze_src_rate_init=self.freeze_src_rate_init,
                 )
             else:
                 summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
@@ -687,6 +811,7 @@ class MixedEffectsDurationModule(nn.Module):
                     g_variant=self.g_variant,
                     g_trim_ratio=self.g_trim_ratio,
                     drop_edge_runs_for_g=self.g_drop_edge_runs,
+                    min_boundary_confidence=self.min_boundary_confidence_for_g,
                     codebook=self.summary_codebook,
                 )
                 if _init_accepts_kwarg(PromptDurationMemoryEncoder, "simple_global_stats"):
@@ -702,8 +827,14 @@ class MixedEffectsDurationModule(nn.Module):
             self.prompt_memory_encoder.g_drop_edge_runs = self.g_drop_edge_runs
             if hasattr(self.prompt_memory_encoder, "min_speech_ratio"):
                 self.prompt_memory_encoder.min_speech_ratio = self.min_prompt_speech_ratio
+            if hasattr(self.prompt_memory_encoder, "min_ref_len_sec"):
+                self.prompt_memory_encoder.min_ref_len_sec = self.min_prompt_ref_len_sec
+            if hasattr(self.prompt_memory_encoder, "max_ref_len_sec"):
+                self.prompt_memory_encoder.max_ref_len_sec = self.max_prompt_ref_len_sec
+            if hasattr(self.prompt_memory_encoder, "min_boundary_confidence"):
+                self.prompt_memory_encoder.min_boundary_confidence = self.min_boundary_confidence_for_g
 
-            if not self.minimal_v1_profile:
+            if not self.is_minimal_v1:
                 duration_head_kwargs = dict(
                     vocab_size=vocab_size,
                     dim=summary_dim,
@@ -775,7 +906,9 @@ class MixedEffectsDurationModule(nn.Module):
                 )
                 return ref_conditioning
             if not isinstance(ref_conditioning, dict):
-                raise ValueError("rhythm_v3 prompt_summary/unit_run backbone requires explicit prompt-unit conditioning.")
+                raise ValueError(
+                    f"rhythm_v3 {_prompt_summary_public_with_aliases(minimal_v1_profile=self.is_minimal_v1)} requires explicit prompt-unit conditioning."
+                )
             prompt_content_units = ref_conditioning.get("prompt_content_units")
             prompt_duration_obs = ref_conditioning.get("prompt_duration_obs")
             prompt_mask = ref_conditioning.get("prompt_unit_mask")
@@ -785,12 +918,12 @@ class MixedEffectsDurationModule(nn.Module):
                 and isinstance(prompt_mask, torch.Tensor)
             ):
                 raise ValueError(
-                    "rhythm_v3 prompt_summary/unit_run backbone requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
+                    f"rhythm_v3 {_prompt_summary_public_with_aliases(minimal_v1_profile=self.is_minimal_v1)} requires prompt_content_units / prompt_duration_obs / prompt_unit_mask."
                 )
             prompt_speech_mask = ref_conditioning.get("prompt_speech_mask")
             if not isinstance(prompt_speech_mask, torch.Tensor):
                 raise ValueError(
-                    "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask "
+                    f"rhythm_v3 {_prompt_summary_public_with_aliases(minimal_v1_profile=self.is_minimal_v1)} requires prompt_speech_mask "
                     "to preserve speech-only global rate semantics."
                 )
             prompt_unit_anchor_base = (
@@ -803,7 +936,7 @@ class MixedEffectsDurationModule(nn.Module):
                 if self.use_log_base_rate
                 else None
             )
-            return self.prompt_memory_encoder(
+            prompt_memory_kwargs = dict(
                 prompt_content_units=prompt_content_units,
                 prompt_duration_obs=prompt_duration_obs,
                 prompt_mask=prompt_mask,
@@ -814,9 +947,34 @@ class MixedEffectsDurationModule(nn.Module):
                 prompt_spk_embed=ref_conditioning.get("prompt_spk_embed"),
                 prompt_edge_cue=ref_conditioning.get("prompt_source_boundary_cue"),
                 prompt_phrase_final_mask=ref_conditioning.get("prompt_phrase_final_mask"),
+                prompt_closed_mask=ref_conditioning.get("prompt_closed_mask"),
+                prompt_boundary_confidence=ref_conditioning.get("prompt_boundary_confidence"),
                 prompt_global_weight=ref_conditioning.get("prompt_global_weight"),
                 prompt_unit_log_prior=ref_conditioning.get("prompt_unit_log_prior"),
             )
+            if self.minimal_v1_profile:
+                prompt_valid_mask = prompt_memory_kwargs["prompt_valid_mask"]
+                if not isinstance(prompt_valid_mask, torch.Tensor):
+                    prompt_valid_mask = prompt_mask.float()
+                prompt_valid_mask = prompt_valid_mask.float().clamp(0.0, 1.0)
+                prompt_ref_len_sec = ref_conditioning.get("prompt_ref_len_sec")
+                if isinstance(prompt_ref_len_sec, torch.Tensor):
+                    prompt_ref_len_sec = prompt_ref_len_sec.float().reshape(int(prompt_duration_obs.size(0)), -1)[:, :1]
+                prompt_speech_ratio_scalar = ref_conditioning.get("prompt_speech_ratio_scalar")
+                if not isinstance(prompt_speech_ratio_scalar, torch.Tensor):
+                    valid_mass = prompt_valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                    prompt_speech_ratio_scalar = (
+                        prompt_speech_mask.float().sum(dim=1, keepdim=True) / valid_mass
+                    )
+                else:
+                    prompt_speech_ratio_scalar = prompt_speech_ratio_scalar.float().reshape(
+                        int(prompt_duration_obs.size(0)),
+                        -1,
+                    )[:, :1]
+                if isinstance(prompt_ref_len_sec, torch.Tensor):
+                    prompt_memory_kwargs["prompt_ref_len_sec"] = prompt_ref_len_sec
+                prompt_memory_kwargs["prompt_speech_ratio_scalar"] = prompt_speech_ratio_scalar
+            return self.prompt_memory_encoder(**prompt_memory_kwargs)
         need_progress = self._use_progress_response()
         need_detector = self._use_detector_bank()
         need_operator = self._use_local_operator()
@@ -1027,6 +1185,22 @@ class MixedEffectsDurationModule(nn.Module):
         unit_prior = getattr(source_batch, "unit_log_prior", None)
         if self.g_variant == "unit_norm" and not isinstance(unit_prior, torch.Tensor):
             return None
+        support_mask = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=self.g_drop_edge_runs,
+            closed_mask=(
+                source_batch.sealed_mask.float()
+                if isinstance(getattr(source_batch, "sealed_mask", None), torch.Tensor)
+                else None
+            ),
+            boundary_confidence=(
+                source_batch.source_boundary_cue.float()
+                if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+                else None
+            ),
+            min_boundary_confidence=self.min_boundary_confidence_for_g,
+        )
         try:
             return compute_global_rate_batch(
                 log_dur=rate_logdur,
@@ -1035,6 +1209,7 @@ class MixedEffectsDurationModule(nn.Module):
                 variant=self.g_variant,
                 trim_ratio=self.g_trim_ratio,
                 drop_edge_runs=self.g_drop_edge_runs,
+                support_mask=support_mask,
                 unit_ids=source_batch.content_units,
                 unit_prior=unit_prior if isinstance(unit_prior, torch.Tensor) else None,
             )
@@ -1218,7 +1393,9 @@ class MixedEffectsDurationModule(nn.Module):
         )
         if self.backbone_mode == "prompt_summary":
             if self.duration_head is None:
-                raise RuntimeError("prompt_summary/unit_run backbone is missing StreamingDurationHead.")
+                raise RuntimeError(
+                    f"{_prompt_summary_public_with_aliases(minimal_v1_profile=self.is_minimal_v1)} is missing StreamingDurationHead."
+                )
             local_rate_ema = (
                 state.local_rate_ema.float()
                 if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
@@ -1230,6 +1407,8 @@ class MixedEffectsDurationModule(nn.Module):
                     log_base = source_batch.unit_rate_log_base.float()
                 else:
                     log_base = torch.log(source_batch.unit_anchor_base.float().clamp_min(1.0e-4))
+            # Minimal v1 uses the prompt_summary backbone too, but it never consumes the
+            # optional reference-summary tensors gated by use_reference_summary.
             summary_state = ref_memory.summary_state if self.use_reference_summary else None
             role_value = ref_memory.role_value if self.use_reference_summary else None
             role_var = ref_memory.role_var if self.use_reference_summary else None

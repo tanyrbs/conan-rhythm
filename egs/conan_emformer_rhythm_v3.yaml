@@ -33,8 +33,6 @@ rhythm_baseline_table_prior_path: null
 rhythm_v3_baseline_target_mode: deglobalized
 rhythm_v3_rate_mode: simple_global
 rhythm_v3_use_log_base_rate: false
-rhythm_v3_use_reference_summary: false
-rhythm_v3_use_learned_residual_gate: false
 rhythm_v3_disable_learned_gate: true
 # Maintained runtime default stays `learned`.
 # For falsification, use checked-in overlays instead of hand-editing this file:
@@ -45,6 +43,7 @@ rhythm_v3_eval_mode: learned
 rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
 rhythm_v3_drop_edge_runs_for_g: 1
+rhythm_v3_min_boundary_confidence_for_g: 0.5
 rhythm_v3_gate_quality_strict: true  # intent marker for report policy; strict fail/allow-partial is enforced by debug_records CLI flags
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
@@ -59,13 +58,12 @@ rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
 rhythm_v3_minimal_v1_profile: true
 rhythm_v3_simple_global_stats: true
-rhythm_v3_backbone: prompt_summary
+rhythm_v3_backbone: minimal_v1_global
 rhythm_v3_warp_mode: none
 rhythm_v3_allow_hybrid: false
 rhythm_v3_source_residual_gain: 0.0
 rhythm_v3_anchor_mode: source_observed
 rhythm_summary_dim: 64
-rhythm_num_summary_slots: 1
 # legacy aliases still accepted:
 # rhythm_role_dim: 64
 # rhythm_num_role_slots: 1
@@ -99,7 +97,6 @@ rhythm_v3_budget_mode: total  # total | speech_only | hybrid
 rhythm_prompt_dropout: 0.20
 rhythm_prompt_truncation: 0.50
 rhythm_v3_summary_pool_speech_only: true
-rhythm_v3_summary_use_unit_embedding: false
 rhythm_v3_debounce_min_run_frames: 2
 rhythm_v3_local_cold_start_runs: 2
 rhythm_v3_local_short_run_min_duration: 2.0
@@ -108,7 +105,8 @@ rhythm_v3_local_rate_decay: 0.95
 rhythm_v3_analytic_gap_clip: 0.35
 # Keep the maintained path attached to the shared global term; set true only
 # for identifiability/falsification ablations.
-rhythm_v3_detach_global_term_in_local_head: false
+rhythm_v3_detach_global_term_in_local_head: true
+rhythm_v3_freeze_src_rate_init: true
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
 # shaping remain non-minimal-only knobs and are intentionally omitted here.
 rhythm_v3_boundary_carry_decay: 0.25
@@ -165,3 +163,4 @@ rhythm_v3_alignment_min_dp_weight: 0.20
 rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15
 rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55
 rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60
+rhythm_v3_alignment_local_margin_p10_min: 0.02

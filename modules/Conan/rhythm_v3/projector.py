@@ -22,6 +22,7 @@ def _project_row_recurrence_script(
     row_budget_pos: int,
     row_budget_neg: int,
     boundary_carry_decay: float,
+    boundary_offset_decay: float,
     boundary_reset_thresh: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_units = int(row_exec.numel())
@@ -53,10 +54,13 @@ def _project_row_recurrence_script(
         boundary_event = bool(row_boundary[offset] >= boundary_reset_thresh) or bool(row_phrase_final[offset] > 0.5)
         if boundary_event:
             boundary_hit[offset] = 1.0
-            if boundary_carry_decay < (1.0 - 1.0e-6):
+            if (
+                boundary_carry_decay < (1.0 - 1.0e-6)
+                or boundary_offset_decay < (1.0 - 1.0e-6)
+            ):
                 carry[0] = carry[0] * boundary_carry_decay
                 prefix_offset[0] = torch.clamp(
-                    prefix_offset[0] * boundary_carry_decay,
+                    prefix_offset[0] * boundary_offset_decay,
                     min=-float(row_budget_neg),
                     max=float(row_budget_pos),
                 )
@@ -112,6 +116,7 @@ class StreamingDurationProjector(nn.Module):
         max_prefix_budget: int = 0,
         budget_mode: str = "total",
         boundary_carry_decay: float = 0.25,
+        boundary_offset_decay: float | None = None,
         boundary_reset_thresh: float = 0.5,
         export_projector_telemetry: bool = True,
     ) -> None:
@@ -125,6 +130,9 @@ class StreamingDurationProjector(nn.Module):
         if self.budget_mode not in {"total", "speech_only", "hybrid"}:
             raise ValueError(f"Unsupported rhythm_v3 budget_mode={budget_mode!r}")
         self.boundary_carry_decay = float(max(0.0, min(1.0, boundary_carry_decay)))
+        if boundary_offset_decay is None:
+            boundary_offset_decay = boundary_carry_decay
+        self.boundary_offset_decay = float(max(0.0, min(1.0, boundary_offset_decay)))
         self.boundary_reset_thresh = float(max(0.0, min(1.0, boundary_reset_thresh)))
         self.export_projector_telemetry = bool(export_projector_telemetry)
 
@@ -158,16 +166,44 @@ class StreamingDurationProjector(nn.Module):
         *,
         unit_mask: torch.Tensor,
         commit_mask: torch.Tensor,
+        sealed_mask: torch.Tensor | None = None,
     ) -> None:
         if unit_mask.numel() <= 0:
             return
         steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
-        visible_len = unit_mask.float().sum(dim=1).long()
-        committed_len = commit_mask.float().sum(dim=1).long()
+        visible = unit_mask.float() > 0.5
+        actual = commit_mask.float() > 0.5
+        visible_len = visible.float().sum(dim=1).long()
+        committed_len = actual.float().sum(dim=1).long()
         expected = (steps < committed_len[:, None]) & (steps < visible_len[:, None])
-        actual = commit_mask > 0.5
         if not torch.equal(actual, expected):
             raise ValueError("Duration V3 commit mask must form a contiguous visible prefix.")
+        if isinstance(sealed_mask, torch.Tensor):
+            closed = (sealed_mask.float() > 0.5) & visible
+            if bool((actual & ~closed).any().item()):
+                raise ValueError("Duration V3 commit mask cannot include open-tail units.")
+
+    @staticmethod
+    def _build_commit_invariant_telemetry(
+        *,
+        unit_mask: torch.Tensor,
+        commit_mask: torch.Tensor,
+        sealed_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        visible = unit_mask.float() > 0.5
+        committed = commit_mask.float() > 0.5
+        steps = torch.arange(unit_mask.size(1), device=unit_mask.device)[None, :]
+        visible_len = visible.float().sum(dim=1).long()
+        committed_len = committed.float().sum(dim=1).long()
+        expected = (steps < committed_len[:, None]) & (steps < visible_len[:, None])
+        closed_prefix_ok = (committed == expected).all(dim=1, keepdim=True).to(dtype=commit_mask.dtype)
+        if isinstance(sealed_mask, torch.Tensor):
+            closed = (sealed_mask.float() > 0.5) & visible
+            open_tail_commit_violation = (committed & ~closed).to(dtype=commit_mask.dtype)
+        else:
+            open_tail_commit_violation = commit_mask.new_zeros(commit_mask.shape)
+        open_tail_commit_violation_count = open_tail_commit_violation.float().sum(dim=1, keepdim=True)
+        return closed_prefix_ok, open_tail_commit_violation, open_tail_commit_violation_count
 
     @classmethod
     def _build_commit_mask(
@@ -177,7 +213,11 @@ class StreamingDurationProjector(nn.Module):
         sealed_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         commit_mask = unit_mask.float() if sealed_mask is None else unit_mask.float() * sealed_mask.float()
-        cls._validate_prefix_commit_mask(unit_mask=unit_mask.float(), commit_mask=commit_mask)
+        cls._validate_prefix_commit_mask(
+            unit_mask=unit_mask.float(),
+            commit_mask=commit_mask,
+            sealed_mask=sealed_mask,
+        )
         return commit_mask
 
     @staticmethod
@@ -302,6 +342,7 @@ class StreamingDurationProjector(nn.Module):
         max_prefix_budget: int = 0,
         budget_mode: str = "total",
         boundary_carry_decay: float = 0.25,
+        boundary_offset_decay: float | None = None,
         boundary_reset_thresh: float = 0.5,
         committed_len: torch.Tensor | None = None,
         budget_pos_tensor: torch.Tensor | None = None,
@@ -311,6 +352,11 @@ class StreamingDurationProjector(nn.Module):
         projected = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_hit = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_decay_applied = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        resolved_boundary_offset_decay = (
+            float(boundary_carry_decay)
+            if boundary_offset_decay is None
+            else float(boundary_offset_decay)
+        )
         source_anchor_rounded = torch.round(source_duration_obs.detach().float().clamp_min(0.0)).to(
             device=unit_duration_exec.device
         )
@@ -447,6 +493,7 @@ class StreamingDurationProjector(nn.Module):
                     row_budget_pos=row_budget_pos,
                     row_budget_neg=row_budget_neg,
                     boundary_carry_decay=boundary_carry_decay,
+                    boundary_offset_decay=resolved_boundary_offset_decay,
                     boundary_reset_thresh=boundary_reset_thresh,
                 )
             projected[batch_idx, start_unit:row_committed_len] = row_projected.to(
@@ -667,6 +714,13 @@ class StreamingDurationProjector(nn.Module):
             init_state=self.init_state,
         )
         commit_mask = self._build_commit_mask(unit_mask=unit_mask, sealed_mask=sealed_mask)
+        commit_closed_prefix_ok, open_tail_commit_violation, open_tail_commit_violation_count = (
+            self._build_commit_invariant_telemetry(
+                unit_mask=unit_mask.float(),
+                commit_mask=commit_mask,
+                sealed_mask=sealed_mask,
+            )
+        )
         committed_len = commit_mask.float().sum(dim=1).long()
         budget_pos_used = self._resolve_prefix_budget_tensor(
             source_duration_obs=source_duration_obs,
@@ -713,6 +767,7 @@ class StreamingDurationProjector(nn.Module):
             max_prefix_budget=self.max_prefix_budget,
             budget_mode=self.budget_mode,
             boundary_carry_decay=self.boundary_carry_decay,
+            boundary_offset_decay=self.boundary_offset_decay,
             boundary_reset_thresh=self.boundary_reset_thresh,
             committed_len=committed_len,
             budget_pos_tensor=budget_pos_used.reshape(batch_size),
@@ -725,6 +780,19 @@ class StreamingDurationProjector(nn.Module):
         )
         source_prefix_cumsum = (
             torch.cumsum(source_duration_obs.float() * commit_mask.float(), dim=1)
+            if self.export_projector_telemetry
+            else None
+        )
+        continuous_exec = unit_duration_exec.float() * commit_mask.float()
+        preclamp_rounded_exec = torch.clamp(torch.round(continuous_exec), min=1.0) * commit_mask.float()
+        projector_preclamp_exec = continuous_exec.detach() if self.export_projector_telemetry else None
+        projector_clamp_mass = (
+            (projected_duration_exec.float() - preclamp_rounded_exec).abs().detach()
+            if self.export_projector_telemetry
+            else None
+        )
+        projector_rounding_regret = (
+            (projected_duration_exec.float() - continuous_exec).abs().detach()
             if self.export_projector_telemetry
             else None
         )
@@ -752,6 +820,7 @@ class StreamingDurationProjector(nn.Module):
         )
         budget_hit_pos = prefix_unit_offset_next >= (budget_pos_used - 1.0e-6)
         budget_hit_neg = prefix_unit_offset_next <= -(budget_neg_used - 1.0e-6)
+        budget_hit_mask = budget_hit_pos | budget_hit_neg
         return DurationExecution(
             unit_logstretch=unit_logstretch,
             unit_duration_exec=materialized_duration_exec,
@@ -790,6 +859,7 @@ class StreamingDurationProjector(nn.Module):
             projector_budget_neg_used=budget_neg_used.detach(),
             projector_budget_hit_pos=budget_hit_pos.detach(),
             projector_budget_hit_neg=budget_hit_neg.detach(),
+            projector_budget_hit_mask=budget_hit_mask.detach(),
             projector_boundary_hit=(boundary_hit.detach() if self.export_projector_telemetry else None),
             projector_boundary_decay_applied=(
                 boundary_decay_applied.detach() if self.export_projector_telemetry else None
@@ -798,6 +868,13 @@ class StreamingDurationProjector(nn.Module):
                 next_state.since_last_boundary.detach() if self.export_projector_telemetry else None
             ),
             projector_budget_mode=self.budget_mode,
+            projector_prefix_drift=prefix_unit_offset_next.detach(),
+            projector_preclamp_exec=projector_preclamp_exec,
+            projector_clamp_mass=projector_clamp_mass,
+            projector_rounding_regret=projector_rounding_regret,
+            commit_closed_prefix_ok=commit_closed_prefix_ok.detach(),
+            open_tail_commit_violation=open_tail_commit_violation.detach(),
+            open_tail_commit_violation_count=open_tail_commit_violation_count.detach(),
             projected_prefix_cumsum=(
                 None if projected_prefix_cumsum is None else projected_prefix_cumsum.detach()
             ),

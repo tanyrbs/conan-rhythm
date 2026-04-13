@@ -233,6 +233,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
                 "rhythm_v3_simple_global_stats": True,
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_silence_coarse_weight": 0.45,
+                "lambda_rhythm_silence_aux": 0.03,
                 "lambda_rhythm_dur": 1.0,
                 "lambda_rhythm_pref": 0.10,
                 "lambda_rhythm_zero": 0.0,
@@ -242,6 +243,28 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         ):
             config = support.build_duration_v3_target_build_config()
         self.assertEqual(config.silence_coarse_weight, 0.0)
+        self.assertEqual(config.lambda_silence_aux, 0.0)
+
+    def test_build_duration_v3_target_build_config_threads_silence_aux_when_enabled(self) -> None:
+        support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {
+                "rhythm_v3_backbone": "minimal_v1_global",
+                "rhythm_v3_minimal_v1_profile": False,
+                "rhythm_v3_allow_silence_aux": True,
+                "rhythm_v3_silence_coarse_weight": 0.02,
+                "lambda_rhythm_silence_aux": 0.015,
+                "lambda_rhythm_dur": 1.0,
+                "lambda_rhythm_pref": 0.0,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+            },
+            clear=True,
+        ):
+            config = support.build_duration_v3_target_build_config()
+        self.assertAlmostEqual(config.lambda_silence_aux, 0.015)
+        self.assertAlmostEqual(config.silence_coarse_weight, 0.02)
 
     def test_build_duration_v3_target_build_config_threads_analytic_gap_clip(self) -> None:
         support = RhythmTaskRuntimeSupport(SimpleNamespace(mel_losses={"l1": 1.0}))

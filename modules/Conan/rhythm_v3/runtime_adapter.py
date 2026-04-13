@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from collections.abc import Mapping
-import warnings
 
 import torch
 import torch.nn as nn
@@ -35,6 +34,27 @@ _PROMPT_UNIT_REQUIRED_KEYS = (
     "prompt_content_units",
     "prompt_duration_obs",
 )
+_MINIMAL_REFERENCE_SUMMARY_KEYS = (
+    "summary_state",
+    "role_value",
+    "role_var",
+    "role_coverage",
+)
+_MISSING = object()
+
+
+def _resolve_reference_summary_usage(
+    *,
+    minimal_v1_profile: bool,
+    requested_use_reference_summary,
+) -> bool:
+    use_reference_summary = False if requested_use_reference_summary is _MISSING else bool(requested_use_reference_summary)
+    if minimal_v1_profile and use_reference_summary:
+        raise ValueError(
+            "rhythm_v3_minimal_v1_profile selects the minimal_v1_global path directly; "
+            "rhythm_v3_use_reference_summary only enables optional non-minimal reference-summary tensors and must be false."
+        )
+    return use_reference_summary
 
 
 class ConanDurationAdapter(nn.Module):
@@ -55,10 +75,15 @@ class ConanDurationAdapter(nn.Module):
             use_learned_residual_gate = not bool(hparams.get("rhythm_v3_disable_learned_gate", False))
         else:
             use_learned_residual_gate = bool(hparams.get("rhythm_v3_use_learned_residual_gate", False))
-        if "rhythm_v3_use_reference_summary" in hparams:
-            use_reference_summary = bool(hparams.get("rhythm_v3_use_reference_summary", False))
-        else:
-            use_reference_summary = False if minimal_v1_profile else False
+        requested_use_reference_summary = (
+            hparams.get("rhythm_v3_use_reference_summary", False)
+            if "rhythm_v3_use_reference_summary" in hparams
+            else _MISSING
+        )
+        use_reference_summary = _resolve_reference_summary_usage(
+            minimal_v1_profile=minimal_v1_profile,
+            requested_use_reference_summary=requested_use_reference_summary,
+        )
         self.baseline_train_mode = str(hparams.get("rhythm_v3_baseline_train_mode", "joint") or "joint").strip().lower()
         self.silent_token = int(hparams.get("silent_token", 57))
         self.emit_silence_runs = bool(hparams.get("rhythm_v3_emit_silence_runs", True))
@@ -145,6 +170,7 @@ class ConanDurationAdapter(nn.Module):
             max_prefix_budget=int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0),
             budget_mode=str(hparams.get("rhythm_v3_budget_mode", "total") or "total"),
             boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
+            boundary_offset_decay=hparams.get("rhythm_v3_boundary_offset_decay", None),
             boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
             rate_mode=rate_mode,
             simple_global_stats=simple_global_stats,
@@ -157,11 +183,20 @@ class ConanDurationAdapter(nn.Module):
             g_variant=str(hparams.get("rhythm_v3_g_variant", "raw_median")),
             g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2)),
             drop_edge_runs_for_g=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+            min_boundary_confidence_for_g=hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
             disable_local_residual=bool(hparams.get("rhythm_v3_disable_local_residual", False)),
             disable_coarse_bias=bool(hparams.get("rhythm_v3_disable_coarse_bias", False)),
             detach_global_term_in_local_head=bool(
-                hparams.get("rhythm_v3_detach_global_term_in_local_head", False)
+                hparams.get(
+                    "rhythm_v3_detach_global_term_in_local_head",
+                    bool(hparams.get("rhythm_v3_minimal_v1_profile", False)),
+                )
             ),
+            coarse_delta_scale=float(hparams.get("rhythm_v3_coarse_delta_scale", 0.20) or 0.0),
+            local_residual_scale=float(hparams.get("rhythm_v3_local_residual_scale", 0.35) or 0.0),
+            src_rate_init_mode=str(hparams.get("rhythm_v3_src_rate_init_mode", "auto") or "auto"),
+            src_rate_init_value=float(hparams.get("rhythm_v3_src_rate_init_value", 0.0) or 0.0),
+            freeze_src_rate_init=bool(hparams.get("rhythm_v3_freeze_src_rate_init", False)),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
             export_projector_telemetry=bool(
                 hparams.get(
@@ -179,6 +214,38 @@ class ConanDurationAdapter(nn.Module):
         self.pause_state = nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
         self.render_phase_mlp = None
         self.render_phase_gain = None
+
+    def _assert_minimal_ref_conditioning_contract(self, ref_conditioning) -> None:
+        if not self.minimal_v1_profile or ref_conditioning is None:
+            return
+        if isinstance(ref_conditioning, ReferenceDurationMemory):
+            violations = [
+                field_name
+                for field_name in _MINIMAL_REFERENCE_SUMMARY_KEYS
+                if getattr(ref_conditioning, field_name, None) is not None
+            ]
+            if violations:
+                raise RuntimeError(
+                    "rhythm_v3_minimal_v1_profile forbids non-minimal reference-summary memory at runtime: "
+                    + ", ".join(violations)
+                )
+            return
+        if not isinstance(ref_conditioning, Mapping):
+            return
+        nested = ref_conditioning.get("rhythm_ref_conditioning")
+        if nested is not None and nested is not ref_conditioning:
+            self._assert_minimal_ref_conditioning_contract(nested)
+        violations = [
+            field_name
+            for field_name in _MINIMAL_REFERENCE_SUMMARY_KEYS
+            if ref_conditioning.get(field_name) is not None
+        ]
+        if violations:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile prompt conditioning must stay on the minimal path; "
+                "remove non-minimal reference-summary fields: "
+                + ", ".join(violations)
+            )
 
     def render_frame_state_post(
         self,
@@ -468,7 +535,31 @@ class ConanDurationAdapter(nn.Module):
             enriched["prompt_unit_anchor_base"] = ref_conditioning["prompt_unit_anchor_base"].to(device=device).detach()
         if use_log_base_rate and isinstance(ref_conditioning.get("prompt_log_base"), torch.Tensor):
             enriched["prompt_log_base"] = ref_conditioning["prompt_log_base"].to(device=device).detach()
+        def _normalize_prompt_scalar(value, *, key: str) -> torch.Tensor | None:
+            if value is None:
+                return None
+            tensor = value.to(device=device).float() if isinstance(value, torch.Tensor) else torch.as_tensor(
+                value,
+                device=device,
+                dtype=torch.float32,
+            )
+            if tensor.ndim == 0:
+                tensor = tensor.reshape(1, 1).expand(prompt_duration_obs.size(0), 1)
+            elif tensor.ndim == 1:
+                tensor = tensor.reshape(-1, 1)
+                if int(tensor.size(0)) == 1 and int(prompt_duration_obs.size(0)) > 1:
+                    tensor = tensor.expand(prompt_duration_obs.size(0), 1)
+            else:
+                tensor = tensor.reshape(int(tensor.size(0)), -1)
+            if int(tensor.size(0)) != int(prompt_duration_obs.size(0)):
+                raise ValueError(
+                    f"{key} batch mismatch: expected batch_size={int(prompt_duration_obs.size(0))}, "
+                    f"got {tuple(tensor.shape)}."
+                )
+            return tensor[:, :1]
         for key in (
+            "prompt_closed_mask",
+            "prompt_boundary_confidence",
             "prompt_global_weight",
             "prompt_global_weight_present",
             "prompt_unit_log_prior",
@@ -481,6 +572,20 @@ class ConanDurationAdapter(nn.Module):
         ):
             if isinstance(ref_conditioning.get(key), torch.Tensor):
                 enriched[key] = ref_conditioning[key].to(device=device).float()
+        prompt_ref_len_sec = _normalize_prompt_scalar(
+            ref_conditioning.get("prompt_ref_len_sec"),
+            key="prompt_ref_len_sec",
+        )
+        if isinstance(prompt_ref_len_sec, torch.Tensor):
+            enriched["prompt_ref_len_sec"] = prompt_ref_len_sec
+        prompt_speech_ratio_scalar = _normalize_prompt_scalar(
+            ref_conditioning.get("prompt_speech_ratio_scalar"),
+            key="prompt_speech_ratio_scalar",
+        )
+        if prompt_speech_ratio_scalar is None:
+            valid_mass = prompt_valid_mask.float().sum(dim=1, keepdim=True).clamp_min(1.0)
+            prompt_speech_ratio_scalar = prompt_speech_mask.float().sum(dim=1, keepdim=True) / valid_mass
+        enriched["prompt_speech_ratio_scalar"] = prompt_speech_ratio_scalar
         if isinstance(enriched.get("prompt_unit_prior_vocab_size"), torch.Tensor):
             enriched["prompt_unit_prior_vocab_size"] = enriched["prompt_unit_prior_vocab_size"].to(device=device).long()
         if (
@@ -556,8 +661,8 @@ class ConanDurationAdapter(nn.Module):
         ret["unit_duration_exec"] = execution.unit_duration_exec
         ret["speech_duration_exec"] = execution.speech_duration_exec
         ret["commit_frontier"] = execution.commit_frontier
-        ret["rhythm_v3_runtime_mode"] = self.module.runtime_mode
-        ret["rhythm_v3_backbone_mode"] = self.module.backbone_mode
+        ret["rhythm_v3_runtime_mode"] = getattr(self.module, "public_runtime_mode", self.module.runtime_mode)
+        ret["rhythm_v3_backbone_mode"] = getattr(self.module, "public_backbone_mode", self.module.backbone_mode)
         ret["rhythm_v3_warp_mode"] = self.module.warp_mode
         ret["rhythm_v3_allow_hybrid"] = float(bool(self.module.allow_hybrid))
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
@@ -587,6 +692,14 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_v3_source_rate_init"] = self.module.duration_head.src_rate_init.detach().reshape(1)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
+        if isinstance(getattr(execution, "commit_closed_prefix_ok", None), torch.Tensor):
+            ret["rhythm_v3_commit_closed_prefix_ok"] = execution.commit_closed_prefix_ok.detach()
+        if isinstance(getattr(execution, "open_tail_commit_violation", None), torch.Tensor):
+            ret["rhythm_v3_open_tail_commit_violation"] = execution.open_tail_commit_violation.detach()
+        if isinstance(getattr(execution, "open_tail_commit_violation_count", None), torch.Tensor):
+            ret["rhythm_v3_open_tail_commit_violation_count"] = (
+                execution.open_tail_commit_violation_count.detach()
+            )
         if isinstance(ref_conditioning_meta, Mapping):
             if isinstance(ref_conditioning_meta.get("prompt_global_weight_present"), torch.Tensor):
                 ret["rhythm_prompt_global_weight_present"] = ref_conditioning_meta["prompt_global_weight_present"].detach()
@@ -878,6 +991,19 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "projector_budget_neg_used", None), torch.Tensor)
                     else None
                 ),
+                "projector_budget_hit_mask": (
+                    execution.projector_budget_hit_mask.detach()
+                    if isinstance(getattr(execution, "projector_budget_hit_mask", None), torch.Tensor)
+                    else (
+                        (
+                            execution.projector_budget_hit_pos.detach()
+                            | execution.projector_budget_hit_neg.detach()
+                        )
+                        if isinstance(getattr(execution, "projector_budget_hit_pos", None), torch.Tensor)
+                        and isinstance(getattr(execution, "projector_budget_hit_neg", None), torch.Tensor)
+                        else None
+                    )
+                ),
                 "projector_since_last_boundary": (
                     execution.projector_since_last_boundary.detach()
                     if isinstance(getattr(execution, "projector_since_last_boundary", None), torch.Tensor)
@@ -892,9 +1018,48 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "projected_prefix_cumsum", None), torch.Tensor)
                     else None
                 ),
+                "projector_prefix_drift": (
+                    execution.projector_prefix_drift.detach()
+                    if isinstance(getattr(execution, "projector_prefix_drift", None), torch.Tensor)
+                    else (
+                        execution.prefix_unit_offset.detach()
+                        if isinstance(getattr(execution, "prefix_unit_offset", None), torch.Tensor)
+                        else None
+                    )
+                ),
+                "projector_preclamp_exec": (
+                    execution.projector_preclamp_exec.detach()
+                    if isinstance(getattr(execution, "projector_preclamp_exec", None), torch.Tensor)
+                    else None
+                ),
+                "projector_clamp_mass": (
+                    execution.projector_clamp_mass.detach()
+                    if isinstance(getattr(execution, "projector_clamp_mass", None), torch.Tensor)
+                    else None
+                ),
+                "projector_rounding_regret": (
+                    execution.projector_rounding_regret.detach()
+                    if isinstance(getattr(execution, "projector_rounding_regret", None), torch.Tensor)
+                    else None
+                ),
                 "source_prefix_cumsum": (
                     execution.source_prefix_cumsum.detach()
                     if isinstance(getattr(execution, "source_prefix_cumsum", None), torch.Tensor)
+                    else None
+                ),
+                "commit_closed_prefix_ok": (
+                    execution.commit_closed_prefix_ok.detach()
+                    if isinstance(getattr(execution, "commit_closed_prefix_ok", None), torch.Tensor)
+                    else None
+                ),
+                "open_tail_commit_violation": (
+                    execution.open_tail_commit_violation.detach()
+                    if isinstance(getattr(execution, "open_tail_commit_violation", None), torch.Tensor)
+                    else None
+                ),
+                "open_tail_commit_violation_count": (
+                    execution.open_tail_commit_violation_count.detach()
+                    if isinstance(getattr(execution, "open_tail_commit_violation_count", None), torch.Tensor)
                     else None
                 ),
                 "projector_budget_mode": getattr(execution, "projector_budget_mode", None),
@@ -938,9 +1103,16 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_projector_boundary_decay"] = debug_bundle["projector_boundary_decay_applied"]
             ret["rhythm_debug_projector_budget_pos_used"] = debug_bundle["projector_budget_pos_used"]
             ret["rhythm_debug_projector_budget_neg_used"] = debug_bundle["projector_budget_neg_used"]
+            ret["rhythm_debug_projector_budget_hit_mask"] = debug_bundle["projector_budget_hit_mask"]
             ret["rhythm_debug_projector_since_last_boundary"] = debug_bundle["projector_since_last_boundary"]
+            ret["rhythm_debug_projector_prefix_drift"] = debug_bundle["projector_prefix_drift"]
             ret["rhythm_debug_projected_prefix_cumsum"] = debug_bundle["projected_prefix_cumsum"]
             ret["rhythm_debug_source_prefix_cumsum"] = debug_bundle["source_prefix_cumsum"]
+            ret["rhythm_debug_commit_closed_prefix_ok"] = debug_bundle["commit_closed_prefix_ok"]
+            ret["rhythm_debug_open_tail_commit_violation"] = debug_bundle["open_tail_commit_violation"]
+            ret["rhythm_debug_open_tail_commit_violation_count"] = debug_bundle[
+                "open_tail_commit_violation_count"
+            ]
             for key, value in g_debug_stats.items():
                 ret[f"rhythm_debug_{key}"] = value
             if isinstance(ret.get("rhythm_prompt_global_weight_present"), torch.Tensor):
@@ -960,6 +1132,8 @@ class ConanDurationAdapter(nn.Module):
             if isinstance(getattr(execution, "projector_budget_hit_neg", None), torch.Tensor):
                 debug_bundle["budget_hit_neg"] = execution.projector_budget_hit_neg.detach()
                 ret["rhythm_debug_budget_hit_neg"] = debug_bundle["budget_hit_neg"]
+            if isinstance(debug_bundle.get("projector_budget_hit_mask"), torch.Tensor):
+                ret["rhythm_debug_budget_hit_mask"] = debug_bundle["projector_budget_hit_mask"]
 
     @staticmethod
     def _pad_tail_sequences(
@@ -1130,10 +1304,9 @@ class ConanDurationAdapter(nn.Module):
                 if any(token in str(key).lower() for token in ("phase", "pause", "debt"))
             ]
             if legacy_override_keys:
-                warnings.warn(
-                    "Ignoring legacy phase/pause/debt override under rhythm_v3 minimal profile: "
+                raise ValueError(
+                    "rhythm_v3_minimal_v1_profile forbids legacy phase/pause/debt runtime overrides: "
                     + ", ".join(sorted(str(key) for key in legacy_override_keys)),
-                    stacklevel=2,
                 )
         if content_embed.device != content.device:
             raise ValueError(
@@ -1163,6 +1336,7 @@ class ConanDurationAdapter(nn.Module):
             ref_conditioning=rhythm_ref_conditioning,
             ref=ref,
         )
+        self._assert_minimal_ref_conditioning_contract(rhythm_ref_conditioning)
         if ref is None and rhythm_ref_conditioning is None and not infer and self.baseline_train_mode == "pretrain":
             rhythm_ref_conditioning = {
                 "global_rate": torch.zeros((content.size(0), 1), device=content.device, dtype=torch.float32),
@@ -1171,6 +1345,7 @@ class ConanDurationAdapter(nn.Module):
             ref_conditioning=rhythm_ref_conditioning,
             device=content.device,
         )
+        self._assert_minimal_ref_conditioning_contract(rhythm_ref_conditioning)
         if isinstance(rhythm_ref_conditioning, dict) and "prompt_spk_embed" not in rhythm_ref_conditioning and isinstance(spk_embed, torch.Tensor):
             prompt_spk = spk_embed
             if prompt_spk.dim() == 3 and prompt_spk.size(-1) == 1:
@@ -1225,6 +1400,7 @@ class ConanDurationAdapter(nn.Module):
             has_uncommitted_tail = bool(
                 (((source_batch.unit_mask.float() > 0.5) & (execution.commit_mask.float() <= 0.5))).any().item()
             )
+        ret["rhythm_v3_has_uncommitted_tail"] = float(has_uncommitted_tail)
         if (
             bool(apply_rhythm_render)
             and (
@@ -1259,6 +1435,11 @@ class ConanDurationAdapter(nn.Module):
             content_embed=content_embed,
             speech_state_fn=speech_state_fn,
         )
+        rendered_tail_frames = 0
+        if rendered_tail is not None:
+            rendered_tail_frames = int(rendered_tail.total_mask.float().sum().item())
+        ret["rhythm_v3_render_open_tail_frame_count"] = float(rendered_tail_frames)
+        ret["rhythm_v3_render_frame_plan_contains_uncommitted_tail"] = float(rendered_tail_frames > 0)
         has_prefix_render = bool(
             execution.frame_plan is not None
             and execution.frame_plan.total_mask.numel() > 0

@@ -145,6 +145,58 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
         for batched_tensor, expected_tensor in zip(batched, expected):
             assert torch.allclose(batched_tensor, expected_tensor)
 
+    def test_duration_v3_prefix_projection_separates_boundary_offset_decay_from_carry_decay(self):
+        keep_offset = StreamingDurationV3Projector._project_duration_prefix(
+            unit_duration_exec=torch.tensor([[2.4, 2.4]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+            commit_mask=torch.ones((1, 2), dtype=torch.float32),
+            speech_commit_mask=torch.ones((1, 2), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            source_boundary_cue=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 2), dtype=torch.float32),
+            residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.ones((1, 1), dtype=torch.float32),
+            committed_units_prev=None,
+            cached_duration_exec_prev=None,
+            budget_pos=1,
+            budget_neg=1,
+            boundary_carry_decay=1.0,
+            boundary_offset_decay=1.0,
+            boundary_reset_thresh=0.5,
+        )
+        reset_offset = StreamingDurationV3Projector._project_duration_prefix(
+            unit_duration_exec=torch.tensor([[2.4, 2.4]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+            commit_mask=torch.ones((1, 2), dtype=torch.float32),
+            speech_commit_mask=torch.ones((1, 2), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            source_boundary_cue=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 2), dtype=torch.float32),
+            residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.ones((1, 1), dtype=torch.float32),
+            committed_units_prev=None,
+            cached_duration_exec_prev=None,
+            budget_pos=1,
+            budget_neg=1,
+            boundary_carry_decay=1.0,
+            boundary_offset_decay=0.0,
+            boundary_reset_thresh=0.5,
+        )
+
+        projected_keep, residual_keep, prefix_offset_keep, boundary_hit_keep, boundary_decay_keep = keep_offset
+        projected_reset, residual_reset, prefix_offset_reset, boundary_hit_reset, boundary_decay_reset = reset_offset
+
+        assert torch.allclose(projected_keep, torch.tensor([[2.0, 2.0]], dtype=torch.float32))
+        assert torch.allclose(projected_reset, torch.tensor([[2.0, 3.0]], dtype=torch.float32))
+        assert torch.allclose(residual_keep, torch.tensor([[0.8]], dtype=torch.float32))
+        assert torch.allclose(residual_reset, torch.tensor([[-0.2]], dtype=torch.float32))
+        assert torch.allclose(prefix_offset_keep, torch.tensor([[1.0]], dtype=torch.float32))
+        assert torch.allclose(prefix_offset_reset, torch.tensor([[1.0]], dtype=torch.float32))
+        assert torch.allclose(boundary_hit_keep, torch.tensor([[1.0, 0.0]], dtype=torch.float32))
+        assert torch.allclose(boundary_hit_reset, boundary_hit_keep)
+        assert torch.allclose(boundary_decay_keep, torch.tensor([[0.0, 0.0]], dtype=torch.float32))
+        assert torch.allclose(boundary_decay_reset, torch.tensor([[1.0, 0.0]], dtype=torch.float32))
+
     def test_duration_v3_budget_mode_support_mass_changes_dynamic_budget(self):
         source = torch.tensor([[4.0, 6.0, 5.0]], dtype=torch.float32)
         speech = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)

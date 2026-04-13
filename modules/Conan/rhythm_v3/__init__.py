@@ -1,10 +1,10 @@
 from .contracts import DurationExecution, DurationRuntimeState, ReferenceDurationMemory, SourceUnitBatch
-from .minimal_head import MinimalStreamingDurationHeadV1G
+from .global_condition import PromptGlobalConditionEncoderV1G
+from .minimal_writer import MinimalStreamingDurationHeadV1G, MinimalStreamingDurationWriterV1G
 from .module import MixedEffectsDurationModule, StreamingDurationModule
+from .run_encoder import CausalUnitRunEncoder
 from .summary_memory import (
-    CausalUnitRunEncoder,
     PromptDurationMemoryEncoder,
-    PromptGlobalConditionEncoderV1G,
     SharedSummaryCodebook,
     StreamingDurationHead,
 )
@@ -15,6 +15,7 @@ __all__ = [
     "DurationExecution",
     "MixedEffectsDurationModule",
     "MinimalStreamingDurationHeadV1G",
+    "MinimalStreamingDurationWriterV1G",
     "PromptDurationMemoryEncoder",
     "PromptGlobalConditionEncoderV1G",
     "SharedSummaryCodebook",

@@ -74,6 +74,10 @@ def _build_prompt_conditioning():
         "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
         "prompt_valid_mask": torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
         "prompt_speech_mask": torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+        "prompt_closed_mask": torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+        "prompt_boundary_confidence": torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+        "prompt_ref_len_sec": torch.tensor([[4.0]], dtype=torch.float32),
+        "prompt_speech_ratio_scalar": torch.tensor([[1.0]], dtype=torch.float32),
     }
 
 
@@ -418,9 +422,77 @@ def test_prompt_summary_pool_speech_only_outputs_zero_when_no_speech_runs():
     summary_d = encoder_all(
         **{**common_kwargs, "prompt_duration_obs": durations + torch.tensor([[1.0, -1.0, 3.0]], dtype=torch.float32)},
     ).summary_state
+    memory_filter = encoder_filter(
+        **{**common_kwargs, "prompt_duration_obs": durations},
+    )
     delta_all = torch.max(torch.abs(summary_c - summary_d))
+    assert memory_filter.summary_state is not None
+    assert torch.isfinite(memory_filter.global_rate).all()
+    assert torch.allclose(memory_filter.global_rate, torch.zeros_like(memory_filter.global_rate))
     assert delta_filter < 5e-2
     assert delta_all > 1e-4
+
+
+def test_prompt_summary_pool_speech_only_handles_mixed_speech_and_all_silence_batch():
+    encoder = PromptDurationMemoryEncoder(
+        vocab_size=16,
+        dim=32,
+        num_slots=4,
+        operator_rank=2,
+        coverage_floor=0.05,
+        summary_pool_speech_only=True,
+    )
+    memory = encoder(
+        prompt_content_units=torch.tensor([[5, 6, 7], [8, 9, 10]], dtype=torch.long),
+        prompt_duration_obs=torch.tensor([[3.0, 4.0, 5.0], [6.0, 2.0, 1.0]], dtype=torch.float32),
+        prompt_mask=torch.ones((2, 3), dtype=torch.float32),
+        prompt_valid_mask=torch.ones((2, 3), dtype=torch.float32),
+        prompt_speech_mask=torch.tensor([[1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], dtype=torch.float32),
+        prompt_unit_anchor_base=torch.ones((2, 3), dtype=torch.float32),
+    )
+    assert memory.summary_state is not None
+    assert torch.isfinite(memory.global_rate).all()
+    assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
+    assert torch.count_nonzero(memory.prompt_mask[1]).item() == 3
+
+
+def test_prompt_summary_strict_clean_global_support_uses_closed_boundary_clean_runs():
+    encoder = PromptDurationMemoryEncoder(
+        vocab_size=16,
+        dim=32,
+        num_slots=4,
+        operator_rank=2,
+        coverage_floor=0.05,
+        summary_pool_speech_only=True,
+        strict_clean_global_support=True,
+        min_boundary_confidence=0.8,
+    )
+    encoder.eval()
+    memory = encoder(
+        prompt_content_units=torch.tensor([[5, 6, 7, 8, 9], [10, 11, 12, 13, 14]], dtype=torch.long),
+        prompt_duration_obs=torch.tensor(
+            [[2.0, 16.0, 8.0, 4.0, 32.0], [3.0, 5.0, 7.0, 11.0, 13.0]],
+            dtype=torch.float32,
+        ),
+        prompt_mask=torch.ones((2, 5), dtype=torch.float32),
+        prompt_valid_mask=torch.ones((2, 5), dtype=torch.float32),
+        prompt_speech_mask=torch.ones((2, 5), dtype=torch.float32),
+        prompt_unit_anchor_base=torch.ones((2, 5), dtype=torch.float32),
+        prompt_closed_mask=torch.tensor(
+            [[1.0, 0.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        prompt_boundary_confidence=torch.tensor(
+            [[0.95, 0.95, 0.92, 0.85, 0.30], [0.20, 0.30, 0.40, 0.10, 0.25]],
+            dtype=torch.float32,
+        ),
+    )
+    expected_clean_rate = torch.log(torch.tensor([[4.0]], dtype=torch.float32))
+    assert memory.summary_state is not None
+    assert torch.allclose(memory.global_rate[0], expected_clean_rate[0], atol=1.0e-5)
+    assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
+    assert torch.isfinite(memory.summary_state).all()
+    assert torch.isfinite(memory.prompt_role_attn).all()
 
 
 def test_prompt_summary_pool_speech_only_zeros_role_attention_on_silence():
@@ -1023,6 +1095,82 @@ def test_rhythm_v3_loss_builder_exports_exec_prefix_and_role_diagnostics():
     assert torch.allclose(losses["rhythm_v3_global_bias_tgt_support_count"], torch.tensor(2.0))
     assert torch.allclose(losses["rhythm_v3_coarse_target_speech_conf_mean"], torch.tensor(0.75))
     assert torch.allclose(losses["rhythm_v3_silence_coarse_logstretch_tgt_abs_mean"], torch.tensor(0.20))
+
+
+def test_rhythm_v3_silence_aux_defaults_off_even_with_available_targets():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+            "unit_logstretch_raw": torch.tensor([[0.0, 0.8]], dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        prediction_anchor=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        committed_silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        silence_coarse_logstretch_tgt=torch.tensor([[0.0, 0.1]], dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=0.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        lambda_bias=0.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+        lambda_silence_aux=0.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    assert torch.allclose(losses["rhythm_v3_silence_aux"], torch.tensor(0.0))
+    assert torch.allclose(losses["rhythm_total"], torch.tensor(0.0))
+
+
+def test_rhythm_v3_silence_aux_uses_raw_logstretch_when_enabled():
+    execution = type(
+        "DummyExec",
+        (),
+        {
+            "unit_logstretch": torch.tensor([[0.0, 0.1]], dtype=torch.float32),
+            "unit_logstretch_raw": torch.tensor([[0.0, 0.6]], dtype=torch.float32),
+            "speech_duration_exec": torch.ones((1, 2), dtype=torch.float32),
+            "basis_activation": None,
+        },
+    )()
+    targets = DurationV3LossTargets(
+        unit_duration_tgt=torch.ones((1, 2), dtype=torch.float32),
+        unit_anchor_base=torch.ones((1, 2), dtype=torch.float32),
+        prediction_anchor=torch.ones((1, 2), dtype=torch.float32),
+        unit_mask=torch.ones((1, 2), dtype=torch.float32),
+        committed_mask=torch.ones((1, 2), dtype=torch.float32),
+        silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        committed_silence_mask=torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+        silence_coarse_logstretch_tgt=torch.tensor([[0.0, 0.1]], dtype=torch.float32),
+        unit_confidence_coarse_tgt=torch.ones((1, 2), dtype=torch.float32),
+        lambda_dur=0.0,
+        lambda_op=0.0,
+        lambda_pref=0.0,
+        lambda_bias=0.0,
+        lambda_cons=0.0,
+        lambda_zero=0.0,
+        lambda_ortho=0.0,
+        lambda_silence_aux=1.0,
+    )
+    losses = build_rhythm_loss_dict(execution, targets)
+    expected = torch.nn.functional.smooth_l1_loss(
+        torch.tensor([0.6], dtype=torch.float32),
+        torch.tensor([0.1], dtype=torch.float32),
+        beta=0.25,
+        reduction="mean",
+    )
+    assert torch.allclose(losses["rhythm_v3_silence_aux"], expected)
+    assert torch.allclose(losses["rhythm_total"], expected)
 
 
 def test_rhythm_v3_loss_routes_local_and_coarse_confidence_separately():

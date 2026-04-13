@@ -8,6 +8,7 @@ import torch
 EPS = 1.0e-6
 _VALID_G_VARIANTS = {"raw_median", "weighted_median", "trimmed_mean", "unit_norm"}
 _VALID_EVAL_MODES = {"analytic", "coarse_only", "learned"}
+_VALID_INVALID_WEIGHT_BEHAVIORS = {"raise", "nan", "fallback"}
 
 
 @dataclass(frozen=True)
@@ -61,16 +62,46 @@ def normalize_falsification_eval_mode(value) -> str:
     return normalized
 
 
-def weighted_median_1d(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+def normalize_invalid_weight_behavior(value) -> str:
+    normalized = str(value or "raise").strip().lower()
+    aliases = {
+        "strict": "raise",
+        "error": "raise",
+        "none": "raise",
+        "flag": "nan",
+        "quiet_nan": "nan",
+        "legacy": "fallback",
+        "raw_median": "fallback",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in _VALID_INVALID_WEIGHT_BEHAVIORS:
+        raise ValueError(
+            f"Unsupported invalid_weight_behavior={value!r}. "
+            f"Expected one of: {sorted(_VALID_INVALID_WEIGHT_BEHAVIORS)}"
+        )
+    return normalized
+
+
+def weighted_median_1d(
+    values: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    invalid_weight_behavior: str = "raise",
+) -> torch.Tensor:
     if values.ndim != 1 or weights.ndim != 1:
         raise ValueError("weighted_median_1d expects 1D tensors.")
     if values.numel() <= 0:
         raise ValueError("weighted_median_1d requires at least one value.")
+    invalid_weight_behavior = normalize_invalid_weight_behavior(invalid_weight_behavior)
     order = torch.argsort(values)
     values_sorted = values[order]
     weights_sorted = weights[order].float().clamp_min(0.0)
     total = weights_sorted.sum()
     if not torch.isfinite(total) or float(total.item()) <= 0.0:
+        if invalid_weight_behavior == "raise":
+            raise ValueError("weighted_median_1d requires positive finite total weight.")
+        if invalid_weight_behavior == "nan":
+            return values_sorted.new_full((), float("nan"))
         return true_median_1d(values_sorted)
     if values_sorted.numel() == 1:
         return values_sorted[0]
@@ -195,6 +226,35 @@ def _resolve_support_mask_input(
             f"support_mask shape mismatch: expected {expected_shape}, got {tuple(resolved.shape)}"
         )
     return resolved
+
+
+def _resolve_or_build_support_mask(
+    *,
+    log_dur: torch.Tensor,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None,
+    drop_edge_runs: int,
+    closed_mask: torch.Tensor | None,
+    boundary_confidence: torch.Tensor | None,
+    min_boundary_confidence: float | None,
+    support_mask: torch.Tensor | None,
+    support_stats: GlobalRateSupportStats | None,
+) -> torch.Tensor:
+    resolved = _resolve_support_mask_input(
+        log_dur=log_dur,
+        support_mask=support_mask,
+        support_stats=support_stats,
+    )
+    if resolved is not None:
+        return resolved
+    return build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
+    )
 
 
 def build_global_rate_support_mask(
@@ -448,6 +508,7 @@ def _compute_single_global_rate(
     unit_count: torch.Tensor | None,
     unit_prior_min_count: int | None,
     unit_prior_global_backoff: float | torch.Tensor | None,
+    invalid_weight_behavior: str,
 ) -> torch.Tensor:
     valid = mask.bool()
     if not bool(valid.any().item()):
@@ -467,14 +528,22 @@ def _compute_single_global_rate(
         prior_values = prior[valid]
         values = values - prior_values.float()
         if weights is not None:
-            return weighted_median_1d(values, weights)
+            return weighted_median_1d(
+                values,
+                weights,
+                invalid_weight_behavior=invalid_weight_behavior,
+            )
         return true_median_1d(values)
     if variant == "raw_median":
         return true_median_1d(values)
     if variant == "weighted_median":
         if weights is None:
             weights = torch.ones_like(values)
-        return weighted_median_1d(values, weights)
+        return weighted_median_1d(
+            values,
+            weights,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     if variant == "trimmed_mean":
         sorted_values = values.sort().values
         trim = int(float(max(0.0, min(0.49, trim_ratio))) * int(sorted_values.numel()))
@@ -513,10 +582,13 @@ def masked_weighted_median_batch(
     values: torch.Tensor,
     mask: torch.Tensor,
     weights: torch.Tensor,
+    *,
+    invalid_weight_behavior: str = "raise",
 ) -> torch.Tensor:
     values = values.float()
     mask = mask.bool()
     weights = weights.float().clamp_min(0.0)
+    invalid_weight_behavior = normalize_invalid_weight_behavior(invalid_weight_behavior)
     if values.ndim == 1:
         values = values.unsqueeze(0)
         mask = mask.unsqueeze(0)
@@ -534,6 +606,9 @@ def masked_weighted_median_batch(
     safe_weights = torch.where(mask, weights, torch.zeros_like(weights))
     total = safe_weights.sum(dim=1, keepdim=True)
     no_mass = total <= 0.0
+    invalid_total = no_mass | (~torch.isfinite(total))
+    if bool(invalid_total.any().item()) and invalid_weight_behavior == "raise":
+        raise ValueError("masked_weighted_median_batch requires positive finite total weight per batch row.")
     order = torch.argsort(values.masked_fill(~mask, torch.finfo(values.dtype).max), dim=1)
     sorted_values = torch.gather(values, 1, order)
     sorted_mask = torch.gather(mask.long(), 1, order).bool()
@@ -560,9 +635,13 @@ def masked_weighted_median_batch(
         ),
         median,
     )
-    if bool(no_mass.any().item()):
-        raw = masked_true_median_batch(values, mask)
-        median = torch.where(no_mass, raw, median)
+    if bool(invalid_total.any().item()):
+        if invalid_weight_behavior == "nan":
+            nan_row = torch.full_like(median, float("nan"))
+            median = torch.where(invalid_total, nan_row, median)
+        else:
+            raw = masked_true_median_batch(values, mask)
+            median = torch.where(invalid_total, raw, median)
     return median
 
 
@@ -586,21 +665,19 @@ def compute_global_rate_1d(
     unit_prior_global_backoff: float | torch.Tensor | None = None,
     support_mask: torch.Tensor | None = None,
     support_stats: GlobalRateSupportStats | None = None,
+    invalid_weight_behavior: str = "raise",
 ) -> torch.Tensor:
-    support_mask = _resolve_support_mask_input(
+    support_mask = _resolve_or_build_support_mask(
         log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
         support_mask=support_mask,
         support_stats=support_stats,
     )
-    if support_mask is None:
-        support_mask = build_global_rate_support_mask(
-            speech_mask=speech_mask,
-            valid_mask=valid_mask,
-            drop_edge_runs=drop_edge_runs,
-            closed_mask=closed_mask,
-            boundary_confidence=boundary_confidence,
-            min_boundary_confidence=min_boundary_confidence,
-        )
     return _compute_single_global_rate(
         log_dur=log_dur.float(),
         mask=support_mask,
@@ -613,6 +690,7 @@ def compute_global_rate_1d(
         unit_count=unit_count,
         unit_prior_min_count=unit_prior_min_count,
         unit_prior_global_backoff=unit_prior_global_backoff,
+        invalid_weight_behavior=invalid_weight_behavior,
     )
 
 
@@ -636,8 +714,10 @@ def compute_global_rate_batch(
     unit_prior_global_backoff: float | torch.Tensor | None = None,
     support_mask: torch.Tensor | None = None,
     support_stats: GlobalRateSupportStats | None = None,
+    invalid_weight_behavior: str = "raise",
 ) -> torch.Tensor:
     variant = normalize_global_rate_variant(variant)
+    invalid_weight_behavior = normalize_invalid_weight_behavior(invalid_weight_behavior)
     log_dur = log_dur.float()
     if log_dur.ndim == 1:
         return compute_global_rate_1d(
@@ -659,23 +739,21 @@ def compute_global_rate_batch(
             unit_prior_global_backoff=unit_prior_global_backoff,
             support_mask=support_mask,
             support_stats=support_stats,
+            invalid_weight_behavior=invalid_weight_behavior,
         )
     if log_dur.ndim != 2:
         raise ValueError(f"compute_global_rate expects rank-1 or rank-2 log_dur, got {tuple(log_dur.shape)}")
-    support = _resolve_support_mask_input(
+    support = _resolve_or_build_support_mask(
         log_dur=log_dur,
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
         support_mask=support_mask,
         support_stats=support_stats,
     )
-    if support is None:
-        support = build_global_rate_support_mask(
-            speech_mask=speech_mask,
-            valid_mask=valid_mask,
-            drop_edge_runs=drop_edge_runs,
-            closed_mask=closed_mask,
-            boundary_confidence=boundary_confidence,
-            min_boundary_confidence=min_boundary_confidence,
-        )
     resolved_unit_prior = None
     if variant == "unit_norm":
         resolved_unit_prior = _resolve_unit_prior(
@@ -693,13 +771,23 @@ def compute_global_rate_batch(
         if weight is None:
             return masked_true_median_batch(log_dur, support)
         resolved_weight = weight.float()
-        return masked_weighted_median_batch(log_dur, support, resolved_weight)
+        return masked_weighted_median_batch(
+            log_dur,
+            support,
+            resolved_weight,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     if variant == "unit_norm":
         normalized = log_dur - resolved_unit_prior.float()
         if weight is None:
             return masked_true_median_batch(normalized, support)
         resolved_weight = weight.float()
-        return masked_weighted_median_batch(normalized, support, resolved_weight)
+        return masked_weighted_median_batch(
+            normalized,
+            support,
+            resolved_weight,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     if variant == "trimmed_mean" and _normalize_drop_edge_runs(drop_edge_runs) <= 0:
         support_count = support.sum(dim=1, keepdim=True)
         if bool((support_count <= 0).any().item()):
@@ -724,12 +812,17 @@ def compute_global_rate_batch(
             unit_prior_row = unit_prior[batch_idx]
         out[batch_idx, 0] = compute_global_rate_1d(
             log_dur=log_dur[batch_idx],
-            speech_mask=support[batch_idx],
-            valid_mask=None,
+            speech_mask=speech_mask[batch_idx],
+            valid_mask=None if valid_mask is None else valid_mask[batch_idx],
             variant=variant,
             weight=None if weight is None else weight[batch_idx],
             trim_ratio=trim_ratio,
-            drop_edge_runs=0,
+            drop_edge_runs=drop_edge_runs,
+            closed_mask=None if closed_mask is None else closed_mask[batch_idx],
+            boundary_confidence=(
+                None if boundary_confidence is None else boundary_confidence[batch_idx]
+            ),
+            min_boundary_confidence=min_boundary_confidence,
             unit_ids=None if resolved_unit_prior is not None or unit_ids is None else unit_ids[batch_idx],
             unit_prior=(
                 resolved_unit_prior[batch_idx]
@@ -740,6 +833,8 @@ def compute_global_rate_batch(
             unit_count=None if unit_count is None else unit_count[batch_idx] if unit_count.ndim == 2 and int(unit_count.size(0)) == batch_size else unit_count,
             unit_prior_min_count=unit_prior_min_count,
             unit_prior_global_backoff=unit_prior_global_backoff,
+            support_mask=support[batch_idx],
+            invalid_weight_behavior=invalid_weight_behavior,
         )
     return out
 
@@ -764,6 +859,7 @@ def compute_global_rate(
     unit_prior_global_backoff: float | torch.Tensor | None = None,
     support_mask: torch.Tensor | None = None,
     support_stats: GlobalRateSupportStats | None = None,
+    invalid_weight_behavior: str = "raise",
 ) -> torch.Tensor:
     return compute_global_rate_batch(
         log_dur=log_dur,
@@ -784,6 +880,7 @@ def compute_global_rate(
         unit_prior_global_backoff=unit_prior_global_backoff,
         support_mask=support_mask,
         support_stats=support_stats,
+        invalid_weight_behavior=invalid_weight_behavior,
     )
 
 

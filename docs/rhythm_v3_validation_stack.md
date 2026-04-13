@@ -72,6 +72,11 @@ The maintained debug/summary surface now includes both:
 - prompt-side audit sidecars such as `g_trim_ratio`,
   `prompt_global_weight_present`, `prompt_unit_log_prior_present`, and
   `prompt_unit_prior_vocab_size`
+- writer / projector observability such as
+  `rhythm_debug_detach_global_term_in_local_head`,
+  `projector_preclamp_exec`,
+  `projector_clamp_mass`, and
+  `projector_rounding_regret`
 
 ### 2.3 Five-figure review util
 
@@ -171,6 +176,7 @@ Important convenience fields now emitted by the single export path:
   `projector_boundary_decay_rate`
 - monotonicity table: `sample_id`, `pair_id`, `tempo_delta`, `mono_triplet_ok`
 - ladder table: `tempo_transfer_slope`
+- gate status: `analytic_negative_control_gap`, `analytic_same_text_gap`
 
 ## 4. Review util entry points
 
@@ -258,6 +264,8 @@ The same caution applies when the gate contract itself is incomplete:
 - missing `analytic`, `coarse_only`, or `learned` means the mode ladder is incomplete
 - missing full `slow / mid / fast` triplets means Gate 1 is incomplete even if a figure exists
 - missing `ref_condition` / negative-control exports means you only have correlation evidence, not a full control audit
+- negative controls only count when they actually lose to real references on the
+  exported control metrics; existence alone is not a verdict
 
 ## 5. Important local implementation boundaries
 
@@ -289,6 +297,11 @@ speech-only `g` contract, and the config/runtime surfaces should keep that
 visible. In the current strict minimal runtime, silence-token fallback should
 not be treated as equivalent evidence; `prompt_silence_mask` remains useful for
 consistency checks, but it does not replace explicit `prompt_speech_mask`.
+When prompt-side clean-support sidecars are present (`prompt_closed_mask`,
+`prompt_boundary_confidence`, `prompt_ref_len_sec`), the maintained mainline
+`g` path uses them for domain gating even though the generic review summary
+still reports the core speech-support counters as the stable cross-run audit
+surface.
 
 ### 5.4 Projector debug now distinguishes carry from boundary-side smoothing
 
@@ -304,10 +317,15 @@ So when reviewing prefix drift, prefer keeping these signals together:
 - `projector_boundary_hit`
 - `projector_boundary_decay_applied`
 - `projector_since_last_boundary`
+- `projector_preclamp_exec`
+- `projector_clamp_mass`
+- `projector_rounding_regret`
 
 `projector_boundary_hit` marks boundary/phrase-final events, while
 `projector_boundary_decay_applied` only marks the subset where decay was
-actually applied.
+actually applied. `projector_preclamp_exec`, `projector_clamp_mass`, and
+`projector_rounding_regret` make the pre-vs-post projector audit explicit
+instead of inferring it indirectly from budget hits alone.
 
 ### 5.5 Closed and committed are different
 

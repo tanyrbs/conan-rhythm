@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from tasks.Conan.rhythm.config_contract import build_contract_context
 from tasks.Conan.rhythm.config_contract_cache_rules import validate_cache_field_contract
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
+from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.duration_v3.dataset_mixin import _align_target_runs_to_source_discrete
 from modules.Conan.rhythm_v3.source_cache import duration_v3_cache_meta_signature
@@ -24,6 +25,49 @@ class _DummyDataset(RhythmConanDatasetMixin):
     def __init__(self, hparams: dict):
         self.hparams = hparams
         self.prefix = "train"
+
+
+class _RetryDatasetBase:
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index):
+        item_name = "bad_prefilter" if int(index) == 0 else "good_prefilter"
+        return {
+            "id": int(index),
+            "item_id": int(index),
+            "_raw_item": {"item_name": item_name, "content_units": np.asarray([1], dtype=np.int64)},
+        }
+
+
+class _RetryAssembler:
+    def assemble(self, *, sample, item, ref_item, item_name):
+        del ref_item
+        if item_name == "bad_prefilter":
+            raise RhythmDatasetPrefilterDrop("paired target alignment prefilter dropped bad_prefilter")
+        sample["assembled_item_name"] = item_name
+        return sample
+
+
+class _RetryDataset(RhythmConanDatasetMixin, _RetryDatasetBase):
+    def __init__(self):
+        self.hparams = {
+            "rhythm_enable_v3": True,
+            "rhythm_v3_alignment_prefilter_bad_samples": True,
+            "rhythm_v3_alignment_prefilter_max_attempts": 2,
+        }
+        self.prefix = "train"
+        self._assembler = _RetryAssembler()
+
+    def _materialize_rhythm_cache_compat(self, raw_item, *, item_name: str):
+        del item_name
+        return raw_item
+
+    def _resolve_rhythm_target_mode(self):
+        return "cached_only"
+
+    def _rhythm_sample_assembler(self):
+        return self._assembler
 
 
 class RhythmCacheContractTests(unittest.TestCase):
@@ -259,6 +303,8 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertGreaterEqual(float(np.asarray(conditioning["prompt_speech_mask"]).sum()), 1.0)
         zeroed = mask <= 0.0
         self.assertTrue(np.all(conditioning["prompt_duration_obs"][zeroed] == 0.0))
+        self.assertTrue(np.all(conditioning["prompt_closed_mask"][zeroed] == 0.0))
+        self.assertTrue(np.all(conditioning["prompt_boundary_confidence"][zeroed] == 0.0))
         self.assertTrue(np.all(conditioning["prompt_source_boundary_cue"][zeroed] == 0.0))
 
     def test_prompt_summary_conditioning_runtime_prompt_no_longer_embeds_paired_target_sidecars(self) -> None:
@@ -299,16 +345,100 @@ class RhythmCacheContractTests(unittest.TestCase):
             "item_name": "prompt_weighted",
             "content_units": np.asarray([1, 57, 2], dtype=np.int64),
             "dur_anchor_src": np.asarray([3.0, 2.0, 4.0], dtype=np.float32),
+            "dur_sec": 5.25,
             "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
             "source_run_stability": np.asarray([1.0, 0.2, 0.6], dtype=np.float32),
         }
         conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
-        expected = np.asarray([1.0, 0.0, 0.7], dtype=np.float32)
+        expected = np.asarray([1.0, 0.0, 0.6], dtype=np.float32)
         self.assertIn("prompt_global_weight", conditioning)
         self.assertIn("prompt_global_weight_present", conditioning)
+        self.assertIn("prompt_speech_ratio_scalar", conditioning)
+        self.assertIn("prompt_ref_len_sec", conditioning)
         self.assertIn("g_trim_ratio", conditioning)
         self.assertEqual(float(np.asarray(conditioning["prompt_global_weight_present"]).reshape(-1)[0]), 1.0)
         self.assertTrue(np.allclose(conditioning["prompt_global_weight"], expected))
+        self.assertTrue(
+            np.allclose(
+                np.asarray(conditioning["prompt_speech_ratio_scalar"], dtype=np.float32),
+                np.asarray([2.0 / 3.0], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                np.asarray(conditioning["prompt_ref_len_sec"], dtype=np.float32),
+                np.asarray([5.25], dtype=np.float32),
+            )
+        )
+
+    def test_prompt_summary_conditioning_drops_edge_speech_runs_from_prompt_global_weight(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_g_variant": "weighted_median",
+                "rhythm_v3_drop_edge_runs_for_g": 1,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_edge_drop",
+            "content_units": np.asarray([1, 2, 3, 4, 5], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0, 3.0, 3.0, 3.0], dtype=np.float32),
+            "source_silence_mask": np.zeros((5,), dtype=np.float32),
+            "source_run_stability": np.ones((5,), dtype=np.float32),
+        }
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        self.assertTrue(
+            np.allclose(
+                conditioning["prompt_global_weight"],
+                np.asarray([0.0, 1.0, 1.0, 1.0, 0.0], dtype=np.float32),
+            )
+        )
+
+    def test_prompt_summary_conditioning_exports_closed_and_boundary_sidecars(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_g_variant": "weighted_median",
+                "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_clean_support",
+            "content_units": np.asarray([1, 2, 3, 4], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0, 3.0, 3.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+            "source_run_stability": np.asarray([1.0, 0.8, 0.9, 0.6], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.95, 0.8, 0.3, 0.4], dtype=np.float32),
+        }
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+
+        self.assertIn("prompt_closed_mask", conditioning)
+        self.assertIn("prompt_boundary_confidence", conditioning)
+        self.assertTrue(
+            np.allclose(
+                conditioning["prompt_closed_mask"],
+                np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                conditioning["prompt_boundary_confidence"],
+                np.asarray([0.95, 0.8, 0.3, 0.4], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                conditioning["prompt_global_weight"],
+                np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            )
+        )
 
     def test_prompt_summary_conditioning_rejects_prompt_weight_shape_mismatch_by_default(self) -> None:
         dataset = _DummyDataset(
@@ -441,12 +571,77 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertGreater(float(merged["unit_confidence_coarse_tgt"][0]), 0.5)
         self.assertGreater(float(merged["unit_confidence_coarse_tgt"][2]), 0.5)
         self.assertEqual(float(merged["unit_confidence_local_tgt"][1]), 0.0)
-        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
-        self.assertLessEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.35)
+        self.assertEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
         self.assertTrue(np.all((merged["unit_alignment_coverage_tgt"] >= 0.0) & (merged["unit_alignment_coverage_tgt"] <= 1.0)))
         self.assertTrue(np.all((merged["unit_alignment_match_tgt"] >= 0.0) & (merged["unit_alignment_match_tgt"] <= 1.0)))
         self.assertTrue(np.all(np.isfinite(merged["unit_alignment_cost_tgt"])))
         self.assertTrue(np.all(merged["unit_alignment_cost_tgt"] >= 0.0))
+
+    def test_duration_v3_target_merge_can_enable_silence_aux_confidence_floor(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_allow_silence_aux": True,
+            }
+        )
+        source_cache = {
+            "content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([2.0, 1.0, 2.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        paired_target_conditioning = {
+            "paired_target_content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "paired_target_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "paired_target_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "paired_target_speech_mask": np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+        }
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_a"},
+            source_cache=source_cache,
+            paired_target_conditioning=paired_target_conditioning,
+            sample={},
+        )
+        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][1]), 0.0)
+        self.assertLessEqual(float(merged["unit_confidence_coarse_tgt"][1]), 0.35)
+
+    def test_duration_v3_target_merge_multiplies_alignment_confidence_by_annotation_weight(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_emit_silence_runs": True,
+            }
+        )
+        source_cache = {
+            "content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([2.0, 1.0, 2.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        paired_target_conditioning = {
+            "paired_target_content_units": np.asarray([1, 57, 2], dtype=np.int64),
+            "paired_target_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "paired_target_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "paired_target_speech_mask": np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+            "unit_annotation_weight_tgt": np.asarray([1.0, 0.5, 0.25], dtype=np.float32),
+        }
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_a"},
+            source_cache=source_cache,
+            paired_target_conditioning=paired_target_conditioning,
+            sample={},
+        )
+        self.assertTrue(
+            np.allclose(
+                merged["unit_annotation_weight_tgt"],
+                np.asarray([1.0, 0.5, 0.25], dtype=np.float32),
+            )
+        )
+        self.assertGreater(float(merged["unit_confidence_local_tgt"][0]), float(merged["unit_confidence_local_tgt"][2]))
+        self.assertGreater(float(merged["unit_confidence_coarse_tgt"][0]), float(merged["unit_confidence_coarse_tgt"][2]))
 
     def test_duration_v3_target_merge_rejects_cross_text_paired_projection_when_same_text_is_required(self) -> None:
         dataset = _DummyDataset(
@@ -855,6 +1050,163 @@ class RhythmCacheContractTests(unittest.TestCase):
             )
         )
 
+    def test_duration_v3_target_build_exports_projection_health_surface(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        projection = {
+            "projected": np.asarray([2.0, 3.0], dtype=np.float32),
+            "projected_weighted": np.asarray([2.0, 3.0], dtype=np.float32),
+            "confidence_local": np.asarray([0.8, 0.6], dtype=np.float32),
+            "confidence_coarse": np.asarray([0.9, 0.7], dtype=np.float32),
+            "coverage": np.asarray([1.0, 1.0], dtype=np.float32),
+            "match_rate": np.asarray([1.0, 1.0], dtype=np.float32),
+            "mean_cost": np.asarray([0.1, 0.1], dtype=np.float32),
+            "alignment_kind": "continuous_viterbi_v1",
+            "alignment_source": "run_state_viterbi",
+            "alignment_version": "2026-04-13",
+            "unmatched_speech_ratio": 0.25,
+            "mean_local_confidence_speech": 0.4,
+            "mean_coarse_confidence_speech": 0.7,
+            "projection_fallback_ratio": np.asarray([0.25], dtype=np.float32),
+            "projection_hard_bad": np.asarray([1.0], dtype=np.float32),
+        }
+        with mock.patch(
+            "tasks.Conan.rhythm.duration_v3.dataset_mixin._project_target_runs_onto_source",
+            return_value=projection,
+        ):
+            built = dataset._build_paired_duration_v3_targets(
+                item={"item_name": "src_projection_health"},
+                source_cache={
+                    "content_units": np.asarray([1, 2], dtype=np.int64),
+                    "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                },
+                paired_target_conditioning={
+                    "paired_target_content_units": np.asarray([1, 2], dtype=np.int64),
+                    "paired_target_duration_obs": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "paired_target_valid_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                    "paired_target_speech_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                },
+            )
+
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_projection_fallback_ratio_tgt"]).reshape(-1)[0]),
+            0.25,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_projection_hard_bad_tgt"]).reshape(-1)[0]),
+            1.0,
+            places=6,
+        )
+        self.assertIn("unit_alignment_local_margin_p10_tgt", built)
+        self.assertTrue(np.isnan(float(np.asarray(built["unit_alignment_local_margin_p10_tgt"]).reshape(-1)[0])))
+
+    def test_duration_v3_target_build_prefilter_drops_hard_bad_projection_when_enabled(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_use_continuous_alignment": True,
+                "rhythm_v3_alignment_prefilter_bad_samples": True,
+            }
+        )
+        projection = {
+            "projected": np.asarray([2.0, 3.0], dtype=np.float32),
+            "projected_weighted": np.asarray([2.0, 3.0], dtype=np.float32),
+            "confidence_local": np.asarray([0.8, 0.6], dtype=np.float32),
+            "confidence_coarse": np.asarray([0.9, 0.7], dtype=np.float32),
+            "coverage": np.asarray([1.0, 1.0], dtype=np.float32),
+            "match_rate": np.asarray([1.0, 1.0], dtype=np.float32),
+            "mean_cost": np.asarray([0.1, 0.1], dtype=np.float32),
+            "alignment_kind": "continuous_viterbi_v1",
+            "alignment_source": "run_state_viterbi",
+            "alignment_version": "2026-04-13",
+            "unmatched_speech_ratio": 0.25,
+            "mean_local_confidence_speech": 0.4,
+            "mean_coarse_confidence_speech": 0.7,
+            "projection_fallback_ratio": np.asarray([0.25], dtype=np.float32),
+            "projection_hard_bad": np.asarray([1.0], dtype=np.float32),
+            "projection_gate_reason": "unmatched_speech_ratio=0.250 > 0.150",
+            "projection_health_bucket": "hard_bad",
+        }
+        with mock.patch(
+            "tasks.Conan.rhythm.duration_v3.dataset_mixin._project_target_runs_onto_source",
+            return_value=projection,
+        ):
+            with self.assertRaisesRegex(RhythmDatasetPrefilterDrop, "prefilter dropped"):
+                dataset._build_paired_duration_v3_targets(
+                    item={"item_name": "src_prefilter_drop"},
+                    source_cache={
+                        "content_units": np.asarray([1, 2], dtype=np.int64),
+                        "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                        "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                    },
+                    paired_target_conditioning={
+                        "paired_target_content_units": np.asarray([1, 2], dtype=np.int64),
+                        "paired_target_duration_obs": np.asarray([2.0, 3.0], dtype=np.float32),
+                        "paired_target_valid_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                        "paired_target_speech_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+                    },
+                )
+
+    def test_common_rhythm_dataset_getitem_retries_bad_alignment_prefilter(self) -> None:
+        dataset = _RetryDataset()
+        with mock.patch("numpy.random.randint", return_value=1):
+            sample = dataset[0]
+
+        self.assertEqual(sample["assembled_item_name"], "good_prefilter")
+
+    def test_duration_v3_target_merge_preserves_cached_projection_health_surface(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        merged = dataset._merge_duration_v3_rhythm_targets(
+            item={"item_name": "src_cached_projection_health"},
+            source_cache={
+                "content_units": np.asarray([1, 2], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2.0, 3.0], dtype=np.float32),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+            },
+            paired_target_conditioning={},
+            sample={
+                "unit_duration_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                "unit_duration_proj_raw_tgt": np.asarray([2.0, 3.0], dtype=np.float32),
+                "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+                "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
+                "unit_alignment_source_tgt": np.asarray(["run_state_viterbi"], dtype=object),
+                "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+                "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.25], dtype=np.float32),
+                "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.4], dtype=np.float32),
+                "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.7], dtype=np.float32),
+                "unit_alignment_projection_fallback_ratio_tgt": np.asarray([0.25], dtype=np.float32),
+                "unit_alignment_projection_hard_bad_tgt": np.asarray([1.0], dtype=np.float32),
+            },
+        )
+
+        self.assertAlmostEqual(
+            float(np.asarray(merged["unit_alignment_projection_fallback_ratio_tgt"]).reshape(-1)[0]),
+            0.25,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(merged["unit_alignment_projection_hard_bad_tgt"]).reshape(-1)[0]),
+            1.0,
+            places=6,
+        )
+
     def test_duration_v3_target_build_re_raises_when_discrete_fallback_disabled(self) -> None:
         dataset = _DummyDataset(
             {
@@ -1022,8 +1374,12 @@ class RhythmCacheContractTests(unittest.TestCase):
             "alignment_source": "run_state_viterbi",
             "alignment_version": "2026-04-13",
             "unmatched_speech_ratio": 0.1,
+            "projection_fallback_ratio": 0.1,
+            "projection_hard_bad": 0.0,
             "mean_local_confidence_speech": 0.85,
             "mean_coarse_confidence_speech": 0.75,
+            "alignment_global_path_cost": 1.5,
+            "alignment_global_path_mean_cost": 0.5,
             "alignment_lambda_emb": np.asarray([1.4], dtype=np.float32),
             "alignment_lambda_type": np.asarray([0.7], dtype=np.float32),
             "alignment_band_ratio": np.asarray([0.12], dtype=np.float32),
@@ -1117,6 +1473,34 @@ class RhythmCacheContractTests(unittest.TestCase):
                 built["unit_alignment_run_skip_flag_tgt"],
                 np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
             )
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_projection_hard_bad_tgt"]).reshape(-1)[0]),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_projection_hard_bad_source_tgt"]).reshape(-1)[0]),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_projection_fallback_ratio_tgt"]).reshape(-1)[0]),
+            0.1,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_global_path_cost_tgt"]).reshape(-1)[0]),
+            1.5,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(built["unit_alignment_global_path_mean_cost_tgt"]).reshape(-1)[0]),
+            0.5,
+        )
+        self.assertEqual(
+            str(np.asarray(built["unit_alignment_projection_health_bucket_tgt"], dtype=object).reshape(-1)[0]),
+            "degraded",
+        )
+        self.assertEqual(
+            str(np.asarray(built["unit_alignment_projection_gate_reason_tgt"], dtype=object).reshape(-1)[0]),
+            "",
         )
         self.assertEqual(
             np.asarray(built["unit_alignment_source_valid_run_index_tgt"], dtype=object).tolist(),
@@ -1432,6 +1816,17 @@ class RhythmCacheContractTests(unittest.TestCase):
             "unit_alignment_skipped_source_speech_ratio_tgt": np.asarray([0.5], dtype=np.float32),
             "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.4], dtype=np.float32),
             "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.7], dtype=np.float32),
+            "unit_alignment_projection_hard_bad_tgt": np.asarray([1.0], dtype=np.float32),
+            "unit_alignment_projection_hard_bad_source_tgt": np.asarray([1.0], dtype=np.float32),
+            "unit_alignment_projection_violation_count_tgt": np.asarray([1.0], dtype=np.float32),
+            "unit_alignment_projection_fallback_ratio_tgt": np.asarray([0.5], dtype=np.float32),
+            "unit_alignment_global_path_cost_tgt": np.asarray([3.0], dtype=np.float32),
+            "unit_alignment_global_path_mean_cost_tgt": np.asarray([1.5], dtype=np.float32),
+            "unit_alignment_projection_gate_reason_tgt": np.asarray(
+                ["unmatched_speech_ratio=0.500 > 0.150"],
+                dtype=object,
+            ),
+            "unit_alignment_projection_health_bucket_tgt": np.asarray(["hard_bad"], dtype=object),
         }
         merged = dataset._merge_duration_v3_rhythm_targets(
             item={"item_name": "src_passthrough"},
@@ -1478,6 +1873,38 @@ class RhythmCacheContractTests(unittest.TestCase):
                 merged["unit_alignment_skipped_source_speech_ratio_tgt"],
                 sample["unit_alignment_skipped_source_speech_ratio_tgt"],
             )
+        )
+        self.assertTrue(
+            np.allclose(
+                merged["unit_alignment_projection_hard_bad_tgt"],
+                sample["unit_alignment_projection_hard_bad_tgt"],
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                merged["unit_alignment_projection_hard_bad_source_tgt"],
+                sample["unit_alignment_projection_hard_bad_source_tgt"],
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                merged["unit_alignment_projection_fallback_ratio_tgt"],
+                sample["unit_alignment_projection_fallback_ratio_tgt"],
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                merged["unit_alignment_global_path_cost_tgt"],
+                sample["unit_alignment_global_path_cost_tgt"],
+            )
+        )
+        self.assertEqual(
+            str(np.asarray(merged["unit_alignment_projection_gate_reason_tgt"], dtype=object).reshape(-1)[0]),
+            "unmatched_speech_ratio=0.500 > 0.150",
+        )
+        self.assertEqual(
+            str(np.asarray(merged["unit_alignment_projection_health_bucket_tgt"], dtype=object).reshape(-1)[0]),
+            "hard_bad",
         )
 
     def test_duration_v3_target_merge_strict_gate_rejects_low_quality_cached_alignment(self) -> None:

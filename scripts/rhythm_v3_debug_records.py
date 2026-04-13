@@ -30,12 +30,16 @@ from utils.plot.rhythm_v3_viz import (
 
 _GATE1_MONOTONICITY_RATE_MIN = 0.95
 _REQUIRED_NEGATIVE_CONTROLS = ("source_only", "random_ref", "shuffled_ref")
+_GATE0_EXPLAINABILITY_SLOPE_MIN = 0.0
+_GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
 _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
     "silence_leakage": 0.05,
     "prefix_discrepancy": 0.05,
     "budget_hit_rate": 0.05,
     "cumulative_drift": 0.25,
 }
+_GATE2_MONOTONICITY_DROP_TOL = 0.01
+_GATE2_TRANSFER_SLOPE_DROP_TOL = 0.05
 
 
 def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
@@ -160,6 +164,20 @@ def collect_gate_issues(frame) -> list[str]:
                 quality_issues.append(
                     f"analytic_tempo_monotonicity_rate={analytic_mono:.3f}<{_GATE1_MONOTONICITY_RATE_MIN:.3f}"
                 )
+            analytic_slope = _mean_for_eval_mode(frame, column="explainability_slope", eval_mode="analytic")
+            if not np.isfinite(analytic_slope):
+                quality_issues.append("analytic_explainability_slope=missing")
+            elif analytic_slope <= _GATE0_EXPLAINABILITY_SLOPE_MIN:
+                quality_issues.append(
+                    f"analytic_explainability_slope={analytic_slope:.3f}<={_GATE0_EXPLAINABILITY_SLOPE_MIN:.3f}"
+                )
+            analytic_neg_gap = _mean_for_eval_mode(frame, column="negative_control_gap", eval_mode="analytic")
+            if not np.isfinite(analytic_neg_gap):
+                quality_issues.append("analytic_negative_control_gap=missing")
+            elif analytic_neg_gap <= _GATE1_NEGATIVE_CONTROL_GAP_MIN:
+                quality_issues.append(
+                    f"analytic_negative_control_gap={analytic_neg_gap:.3f}<={_GATE1_NEGATIVE_CONTROL_GAP_MIN:.3f}"
+                )
         if {"coarse_only", "learned"}.issubset(observed_modes):
             for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
                 if column not in frame.columns:
@@ -174,6 +192,22 @@ def collect_gate_issues(frame) -> list[str]:
                     quality_issues.append(
                         f"learned_{column}_regression={learned_mean:.3f}>{coarse_mean:.3f}+{float(tolerance):.3f}"
                     )
+            coarse_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="coarse_only")
+            learned_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="learned")
+            if not np.isfinite(coarse_mono) or not np.isfinite(learned_mono):
+                quality_issues.append("monotonicity_rate_mode_mean=missing")
+            elif learned_mono < (coarse_mono - _GATE2_MONOTONICITY_DROP_TOL):
+                quality_issues.append(
+                    f"learned_monotonicity_rate_regression={learned_mono:.3f}<{coarse_mono:.3f}-{_GATE2_MONOTONICITY_DROP_TOL:.3f}"
+                )
+            coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
+            learned_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="learned")
+            if not np.isfinite(coarse_transfer) or not np.isfinite(learned_transfer):
+                quality_issues.append("tempo_transfer_slope_mode_mean=missing")
+            elif learned_transfer < (coarse_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+                quality_issues.append(
+                    f"learned_tempo_transfer_slope_regression={learned_transfer:.3f}<{coarse_transfer:.3f}-{_GATE2_TRANSFER_SLOPE_DROP_TOL:.3f}"
+                )
     if {"src_id", "eval_mode", "ref_bin"}.issubset(frame.columns):
         triplet_frame = frame.copy()
         if "ref_condition" in triplet_frame.columns:
@@ -224,11 +258,15 @@ def build_gate_status(frame) -> dict[str, object]:
             "continuous_alignment_coverage": float("nan"),
             "g_domain_valid_mean": float("nan"),
             "gate0_drop_rate": float("nan"),
+            "analytic_explainability_slope": float("nan"),
+            "analytic_negative_control_gap": float("nan"),
+            "analytic_same_text_gap": float("nan"),
             "analytic_tempo_monotonicity_rate": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
             "coarse_only_runtime_metrics": {},
             "learned_runtime_metrics": {},
             "learned_runtime_regressions": [],
+            "learned_control_regressions": [],
             "warnings": ["summary_rows=empty"],
         }
     issues = collect_gate_issues(frame)
@@ -238,11 +276,15 @@ def build_gate_status(frame) -> dict[str, object]:
     continuous_alignment_coverage = float("nan")
     g_domain_valid_mean = float("nan")
     gate0_drop_rate = float("nan")
+    analytic_explainability_slope = float("nan")
+    analytic_negative_control_gap = float("nan")
+    analytic_same_text_gap = float("nan")
     analytic_tempo_monotonicity_rate = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
     coarse_only_runtime_metrics: dict[str, float] = {}
     learned_runtime_metrics: dict[str, float] = {}
     learned_runtime_regressions: list[str] = []
+    learned_control_regressions: list[str] = []
     domain_column = "g_domain_valid" if "g_domain_valid" in frame.columns else "g_valid"
     if domain_column in frame.columns:
         g_domain_valid_mean = float(
@@ -281,6 +323,21 @@ def build_gate_status(frame) -> dict[str, object]:
         if str(mode).strip() and str(mode).strip().lower() != "nan"
     } if "eval_mode" in frame.columns else set()
     if "analytic" in observed_modes:
+        analytic_explainability_slope = _mean_for_eval_mode(
+            frame,
+            column="explainability_slope",
+            eval_mode="analytic",
+        )
+        analytic_negative_control_gap = _mean_for_eval_mode(
+            frame,
+            column="negative_control_gap",
+            eval_mode="analytic",
+        )
+        analytic_same_text_gap = _mean_for_eval_mode(
+            frame,
+            column="same_text_gap",
+            eval_mode="analytic",
+        )
         analytic_tempo_monotonicity_rate = _mean_for_eval_mode(
             frame,
             column="tempo_monotonicity_rate",
@@ -293,6 +350,14 @@ def build_gate_status(frame) -> dict[str, object]:
         learned_mean = learned_runtime_metrics[column]
         if np.isfinite(coarse_mean) and np.isfinite(learned_mean) and learned_mean > (coarse_mean + float(tolerance)):
             learned_runtime_regressions.append(column)
+    coarse_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="coarse_only")
+    learned_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="learned")
+    if np.isfinite(coarse_mono) and np.isfinite(learned_mono) and learned_mono < (coarse_mono - _GATE2_MONOTONICITY_DROP_TOL):
+        learned_control_regressions.append("monotonicity_rate")
+    coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
+    learned_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="learned")
+    if np.isfinite(coarse_transfer) and np.isfinite(learned_transfer) and learned_transfer < (coarse_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+        learned_control_regressions.append("tempo_transfer_slope")
     gate0_pass = (
         np.isfinite(g_domain_valid_mean)
         and g_domain_valid_mean >= 0.95
@@ -300,6 +365,8 @@ def build_gate_status(frame) -> dict[str, object]:
         and gate0_drop_rate <= 0.05
         and np.isfinite(continuous_alignment_coverage)
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
+        and np.isfinite(analytic_explainability_slope)
+        and analytic_explainability_slope > _GATE0_EXPLAINABILITY_SLOPE_MIN
     )
     gate1_criteria_pass = (
         "analytic" in observed_modes
@@ -307,6 +374,8 @@ def build_gate_status(frame) -> dict[str, object]:
         and not missing_controls
         and np.isfinite(analytic_tempo_monotonicity_rate)
         and analytic_tempo_monotonicity_rate >= _GATE1_MONOTONICITY_RATE_MIN
+        and np.isfinite(analytic_negative_control_gap)
+        and analytic_negative_control_gap > _GATE1_NEGATIVE_CONTROL_GAP_MIN
     )
     gate1_pass = gate0_pass and gate1_criteria_pass
     gate2_criteria_pass = (
@@ -314,6 +383,7 @@ def build_gate_status(frame) -> dict[str, object]:
         and np.isfinite(unmatched_speech_ratio_p95)
         and unmatched_speech_ratio_p95 <= 0.15
         and not learned_runtime_regressions
+        and not learned_control_regressions
     )
     gate2_pass = gate1_pass and gate2_criteria_pass
     return {
@@ -326,11 +396,15 @@ def build_gate_status(frame) -> dict[str, object]:
         "continuous_alignment_coverage": continuous_alignment_coverage,
         "g_domain_valid_mean": g_domain_valid_mean,
         "gate0_drop_rate": gate0_drop_rate,
+        "analytic_explainability_slope": analytic_explainability_slope,
+        "analytic_negative_control_gap": analytic_negative_control_gap,
+        "analytic_same_text_gap": analytic_same_text_gap,
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
         "coarse_only_runtime_metrics": coarse_only_runtime_metrics,
         "learned_runtime_metrics": learned_runtime_metrics,
         "learned_runtime_regressions": learned_runtime_regressions,
+        "learned_control_regressions": learned_control_regressions,
         "warnings": issues,
     }
 
@@ -559,9 +633,9 @@ def main() -> None:
                 encoding="utf-8",
             )
         if strict_gate_mode and issues:
-            raise SystemExit(
-                "[rhythm_v3_debug_records] strict gate failure: " + ", ".join(issues)
-            )
+            msg = "[rhythm_v3_debug_records] strict gate failure: " + ", ".join(issues)
+            print(msg, file=sys.stderr)
+            raise SystemExit(2)
     else:  # pragma: no cover
         fieldnames = sorted({key for row in rows for key in row.keys()})
         with output.open("w", encoding="utf-8", newline="") as handle:

@@ -15,11 +15,21 @@ from modules.Conan.rhythm_v3.source_cache import (
     estimate_run_stability,
 )
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
+from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_target_builder import RhythmDatasetTargetBuilder
 
 
 class CommonRhythmDatasetMixin:
+    def _sample_prefilter_retry_index(self, current_index: int) -> int:
+        dataset_len = int(len(self))
+        if dataset_len <= 1:
+            return int(current_index)
+        candidate = int(np.random.randint(0, dataset_len))
+        if candidate == int(current_index):
+            candidate = (candidate + 1) % dataset_len
+        return candidate
+
     @staticmethod
     def _rhythm_text_signature(item) -> tuple | str | None:
         if not isinstance(item, dict):
@@ -253,6 +263,10 @@ class CommonRhythmDatasetMixin:
             "prompt_unit_mask": ("float", 0.0),
             "prompt_valid_mask": ("float", 0.0),
             "prompt_speech_mask": ("float", 0.0),
+            "prompt_closed_mask": ("float", 0.0),
+            "prompt_boundary_confidence": ("float", 0.0),
+            "prompt_ref_len_sec": ("float", 0.0),
+            "prompt_speech_ratio_scalar": ("float", 0.0),
             "prompt_global_weight": ("float", 0.0),
             "prompt_global_weight_present": ("float", 0.0),
             "prompt_unit_log_prior": ("float", 0.0),
@@ -269,12 +283,21 @@ class CommonRhythmDatasetMixin:
             "unit_confidence_tgt": ("float", 0.0),
             "unit_confidence_local_tgt": ("float", 0.0),
             "unit_confidence_coarse_tgt": ("float", 0.0),
+            "unit_annotation_weight_tgt": ("float", 0.0),
             "unit_alignment_coverage_tgt": ("float", 0.0),
             "unit_alignment_match_tgt": ("float", 0.0),
             "unit_alignment_cost_tgt": ("float", 0.0),
             "unit_alignment_unmatched_speech_ratio_tgt": ("float", 0.0),
             "unit_alignment_mean_local_confidence_speech_tgt": ("float", 0.0),
             "unit_alignment_mean_coarse_confidence_speech_tgt": ("float", 0.0),
+            "unit_alignment_projection_hard_bad_tgt": ("float", 0.0),
+            "unit_alignment_projection_hard_bad_source_tgt": ("float", 0.0),
+            "unit_alignment_projection_violation_count_tgt": ("float", 0.0),
+            "unit_alignment_projection_fallback_ratio_tgt": ("float", 0.0),
+            "unit_alignment_global_path_cost_tgt": ("float", 0.0),
+            "unit_alignment_global_path_mean_cost_tgt": ("float", 0.0),
+            "unit_alignment_projection_gate_reason_tgt": ("object", None),
+            "unit_alignment_projection_health_bucket_tgt": ("object", None),
             "unit_alignment_mode_id_tgt": ("long", 0),
             "unit_alignment_kind_tgt": ("object", None),
             "unit_alignment_source_tgt": ("object", None),
@@ -783,24 +806,45 @@ class CommonRhythmDatasetMixin:
         return self._merge_legacy_rhythm_targets(item, source_cache, ref_conditioning, sample)
 
     def __getitem__(self, index):
-        sample = super().__getitem__(index)
-        raw_item = sample.pop("_raw_item", None)
-        if raw_item is None:
-            raw_item = self._get_raw_item_cached(self._require_source_local_item_id(sample))
-        item_name = str(raw_item.get("item_name", "<unknown-item>"))
-        item = self._materialize_rhythm_cache_compat(raw_item, item_name=item_name)
-        target_mode = self._resolve_rhythm_target_mode()
-        ref_item = self._resolve_reference_rhythm_item(
-            sample=sample,
-            item=item,
-            target_mode=target_mode,
-        )
-        return self._rhythm_sample_assembler().assemble(
-            sample=sample,
-            item=item,
-            ref_item=ref_item,
-            item_name=item_name,
-        )
+        max_prefilter_attempts = 0
+        resolve_attempts = getattr(self, "_alignment_prefilter_max_attempts", None)
+        if callable(resolve_attempts):
+            max_prefilter_attempts = max(0, int(resolve_attempts() or 0))
+        candidate_index = int(index)
+        attempts = 0
+        while True:
+            try:
+                sample = super().__getitem__(candidate_index)
+                raw_item = sample.pop("_raw_item", None)
+                if raw_item is None:
+                    raw_item = self._get_raw_item_cached(self._require_source_local_item_id(sample))
+                item_name = str(raw_item.get("item_name", "<unknown-item>"))
+                item = self._materialize_rhythm_cache_compat(raw_item, item_name=item_name)
+                target_mode = self._resolve_rhythm_target_mode()
+                ref_item = self._resolve_reference_rhythm_item(
+                    sample=sample,
+                    item=item,
+                    target_mode=target_mode,
+                )
+                return self._rhythm_sample_assembler().assemble(
+                    sample=sample,
+                    item=item,
+                    ref_item=ref_item,
+                    item_name=item_name,
+                )
+            except RhythmDatasetPrefilterDrop as exc:
+                if attempts >= max_prefilter_attempts:
+                    raise RuntimeError(
+                        "Failed to fetch rhythm sample after bounded bad-alignment prefilter retries: "
+                        f"start_index={int(index)}, attempts={attempts + 1}, last_error={exc}"
+                    ) from exc
+                next_index = self._sample_prefilter_retry_index(candidate_index)
+                if next_index == candidate_index:
+                    raise RuntimeError(
+                        "Bad-alignment prefilter could not select an alternate dataset index for retry."
+                    ) from exc
+                attempts += 1
+                candidate_index = next_index
 
     def _collate_optional_rhythm_fields(self, *, batch: dict, samples) -> None:
         optional_collate = self._build_optional_collate_spec()

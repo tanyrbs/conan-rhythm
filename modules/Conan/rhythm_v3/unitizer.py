@@ -494,6 +494,36 @@ class StreamingRunLengthUnitizer:
         *,
         mark_last_open: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if mark_last_open:
+            units = row_state.units.detach().to(dtype=torch.long)
+            durations = row_state.durations.detach().to(dtype=torch.long)
+            silence_mask = row_state.silence_mask.detach().to(dtype=torch.long)
+            sep_hint = row_state.sep_hint.detach().to(dtype=torch.long)
+            open_run_mask = torch.zeros_like(units, dtype=torch.long, device=units.device)
+            if open_run_mask.numel() > 0:
+                keep_open_from = max(0, open_run_mask.numel() - self.tail_open_units)
+                open_run_mask[keep_open_from:] = 1
+            sealed_mask = (1 - open_run_mask).clamp_min(0)
+            boundary_confidence = _estimate_boundary_confidence_tensor(durations, sep_hint, open_run_mask)
+            run_stability = _estimate_run_stability_tensor(
+                durations,
+                silence_mask,
+                open_run_mask,
+                sep_hint=sep_hint,
+                boundary_confidence=boundary_confidence,
+                min_speech_frames=self.debounce_min_run_frames,
+                min_silence_frames=self.debounce_min_run_frames,
+            )
+            return (
+                units,
+                durations,
+                silence_mask,
+                open_run_mask,
+                sealed_mask,
+                sep_hint,
+                boundary_confidence,
+                run_stability,
+            )
         units_list = _cpu_int64_list(row_state.units)
         durations_list = _cpu_int64_list(row_state.durations)
         silence_list = _cpu_int64_list(row_state.silence_mask)

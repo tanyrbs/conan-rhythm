@@ -21,6 +21,7 @@ from tasks.Conan.rhythm.duration_v3.alignment_projection import (
     project_target_runs_onto_source as _project_target_runs_onto_source,
     resolve_run_silence_mask as _resolve_run_silence_mask,
 )
+from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from tasks.Conan.rhythm.duration_v3.targets import build_pseudo_source_duration_context
 from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 
@@ -56,6 +57,19 @@ _ALIGNMENT_PROVENANCE_INDEX_OBJECT_KEYS = (
     "unit_alignment_target_valid_observation_index_tgt",
     "unit_alignment_target_valid_observation_index_pre_dp_filter_tgt",
     "unit_alignment_target_dp_weight_pruned_index_tgt",
+)
+_ALIGNMENT_HEALTH_FLOAT_KEYS = (
+    "unit_alignment_projection_hard_bad_tgt",
+    "unit_alignment_projection_hard_bad_source_tgt",
+    "unit_alignment_projection_violation_count_tgt",
+    "unit_alignment_projection_fallback_ratio_tgt",
+    "unit_alignment_local_margin_p10_tgt",
+    "unit_alignment_global_path_cost_tgt",
+    "unit_alignment_global_path_mean_cost_tgt",
+)
+_ALIGNMENT_HEALTH_OBJECT_KEYS = (
+    "unit_alignment_projection_gate_reason_tgt",
+    "unit_alignment_projection_health_bucket_tgt",
 )
 _MINIMAL_CONTINUOUS_QUALITY_KEYS = (
     "unit_alignment_unmatched_speech_ratio_tgt",
@@ -149,7 +163,7 @@ class DurationV3DatasetMixin:
             "continuous"
         )
 
-    def _alignment_quality_thresholds(self) -> tuple[float, float, float]:
+    def _alignment_quality_thresholds(self) -> tuple[float, float, float, float]:
         return (
             float(
                 self._resolve_hparam_alias(
@@ -175,6 +189,14 @@ class DurationV3DatasetMixin:
                 )
                 or 0.60
             ),
+            float(
+                self._resolve_hparam_alias(
+                    "rhythm_v3_alignment_local_margin_p10_min",
+                    "rhythm_v3_align_local_margin_p10_min",
+                    default=0.0,
+                )
+                or 0.0
+            ),
         )
 
     def _hard_fail_bad_alignment_projection(self) -> bool:
@@ -195,11 +217,13 @@ class DurationV3DatasetMixin:
         unmatched_speech_ratio,
         mean_local_confidence_speech,
         mean_coarse_confidence_speech,
+        local_margin_p10=None,
     ) -> tuple[str, ...]:
         unmatched = self._extract_optional_float_scalar(unmatched_speech_ratio)
         mean_local = self._extract_optional_float_scalar(mean_local_confidence_speech)
         mean_coarse = self._extract_optional_float_scalar(mean_coarse_confidence_speech)
-        unmatched_max, local_min, coarse_min = self._alignment_quality_thresholds()
+        local_margin = self._extract_optional_float_scalar(local_margin_p10)
+        unmatched_max, local_min, coarse_min, margin_min = self._alignment_quality_thresholds()
         violations = []
         if unmatched is not None and np.isfinite(unmatched) and unmatched > unmatched_max:
             violations.append(
@@ -213,7 +237,99 @@ class DurationV3DatasetMixin:
             violations.append(
                 f"mean_coarse_confidence_speech={float(mean_coarse):.3f} < {coarse_min:.3f}"
             )
+        if (
+            margin_min > 0.0
+            and local_margin is not None
+            and np.isfinite(local_margin)
+            and local_margin < margin_min
+        ):
+            violations.append(
+                f"alignment_local_margin_p10={float(local_margin):.3f} < {margin_min:.3f}"
+            )
         return tuple(violations)
+
+    def _build_alignment_health_exports(
+        self,
+        *,
+        projection: dict | None,
+        unmatched_speech_ratio,
+        mean_local_confidence_speech,
+        mean_coarse_confidence_speech,
+        local_margin_p10=None,
+    ) -> dict[str, np.ndarray]:
+        projection = projection if isinstance(projection, dict) else {}
+        violation_messages = self._alignment_quality_violation_messages(
+            unmatched_speech_ratio=unmatched_speech_ratio,
+            mean_local_confidence_speech=mean_local_confidence_speech,
+            mean_coarse_confidence_speech=mean_coarse_confidence_speech,
+            local_margin_p10=local_margin_p10,
+        )
+        fallback_ratio = self._extract_optional_float_scalar(projection.get("projection_fallback_ratio"))
+        if fallback_ratio is None:
+            fallback_ratio = self._extract_optional_float_scalar(unmatched_speech_ratio)
+        if fallback_ratio is None or not np.isfinite(fallback_ratio):
+            fallback_ratio = 0.0
+        local_margin_p10_scalar = self._extract_optional_float_scalar(local_margin_p10)
+        if local_margin_p10_scalar is None:
+            local_margin_p10_scalar = self._extract_optional_float_scalar(
+                projection.get("alignment_local_margin_p10")
+            )
+        if local_margin_p10_scalar is None:
+            local_margin_p10_scalar = float("nan")
+        global_path_cost = self._extract_optional_float_scalar(projection.get("alignment_global_path_cost"))
+        if global_path_cost is None:
+            global_path_cost = self._extract_optional_float_scalar(projection.get("global_path_cost"))
+        if global_path_cost is None:
+            global_path_cost = float("nan")
+        global_path_mean_cost = self._extract_optional_float_scalar(projection.get("alignment_global_path_mean_cost"))
+        if global_path_mean_cost is None:
+            global_path_mean_cost = float("nan")
+        hard_bad_source = self._extract_optional_float_scalar(projection.get("projection_hard_bad"))
+        hard_bad_source_flag = bool(float(hard_bad_source or 0.0) > 0.5)
+        hard_bad_flag = hard_bad_source_flag or bool(violation_messages)
+        violation_count = self._extract_optional_float_scalar(projection.get("projection_violation_count"))
+        if violation_count is None or not np.isfinite(violation_count):
+            violation_count = float(len(violation_messages))
+        gate_reason = str(_extract_object_scalar(projection.get("projection_gate_reason")) or "").strip()
+        if not gate_reason and violation_messages:
+            gate_reason = "; ".join(violation_messages)
+        fallback_from_continuous = bool(
+            float(_extract_object_scalar(projection.get("alignment_fallback_from_continuous")) or 0.0) > 0.5
+        )
+        health_bucket = str(_extract_object_scalar(projection.get("projection_health_bucket")) or "").strip().lower()
+        if health_bucket not in {"clean", "degraded", "hard_bad"}:
+            if hard_bad_flag:
+                health_bucket = "hard_bad"
+            elif fallback_from_continuous or (float(fallback_ratio) > 0.0):
+                health_bucket = "degraded"
+            else:
+                health_bucket = "clean"
+        return {
+            "unit_alignment_projection_hard_bad_tgt": np.asarray([float(hard_bad_flag)], dtype=np.float32),
+            "unit_alignment_projection_hard_bad_source_tgt": np.asarray(
+                [float(hard_bad_source_flag)],
+                dtype=np.float32,
+            ),
+            "unit_alignment_projection_violation_count_tgt": np.asarray(
+                [float(max(0.0, violation_count))],
+                dtype=np.float32,
+            ),
+            "unit_alignment_projection_fallback_ratio_tgt": np.asarray(
+                [float(fallback_ratio)],
+                dtype=np.float32,
+            ),
+            "unit_alignment_local_margin_p10_tgt": np.asarray(
+                [float(local_margin_p10_scalar)],
+                dtype=np.float32,
+            ),
+            "unit_alignment_global_path_cost_tgt": np.asarray([float(global_path_cost)], dtype=np.float32),
+            "unit_alignment_global_path_mean_cost_tgt": np.asarray(
+                [float(global_path_mean_cost)],
+                dtype=np.float32,
+            ),
+            "unit_alignment_projection_gate_reason_tgt": np.asarray([gate_reason], dtype=object),
+            "unit_alignment_projection_health_bucket_tgt": np.asarray([health_bucket], dtype=object),
+        }
 
     @staticmethod
     def _normalize_signature_text(value) -> str:
@@ -302,6 +418,7 @@ class DurationV3DatasetMixin:
         unmatched_speech_ratio,
         mean_local_confidence_speech,
         mean_coarse_confidence_speech,
+        local_margin_p10=None,
         context: str,
         require_quality_metrics: bool = True,
     ) -> None:
@@ -317,6 +434,7 @@ class DurationV3DatasetMixin:
             unmatched_speech_ratio=unmatched_speech_ratio,
             mean_local_confidence_speech=mean_local_confidence_speech,
             mean_coarse_confidence_speech=mean_coarse_confidence_speech,
+            local_margin_p10=local_margin_p10,
         )
         if violations:
             raise RuntimeError(
@@ -331,6 +449,7 @@ class DurationV3DatasetMixin:
         unmatched_speech_ratio,
         mean_local_confidence_speech,
         mean_coarse_confidence_speech,
+        local_margin_p10=None,
         context: str,
         gate_label: str = "paired target alignment",
     ) -> None:
@@ -339,12 +458,58 @@ class DurationV3DatasetMixin:
             unmatched_speech_ratio=unmatched_speech_ratio,
             mean_local_confidence_speech=mean_local_confidence_speech,
             mean_coarse_confidence_speech=mean_coarse_confidence_speech,
+            local_margin_p10=local_margin_p10,
         )
         if not violations:
             return
         raise RuntimeError(
             f"{gate_label} rejected in {context} "
             f"(alignment_kind={normalized_kind!r}): " + "; ".join(violations)
+        )
+
+    def _should_prefilter_bad_alignment_samples(self) -> bool:
+        enabled = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_alignment_prefilter_bad_samples", False)
+        )
+        prefix = str(getattr(self, "prefix", "") or "").strip().lower()
+        return bool(enabled and prefix == "train")
+
+    def _alignment_prefilter_max_attempts(self) -> int:
+        if not self._should_prefilter_bad_alignment_samples():
+            return 0
+        return max(
+            0,
+            int(self.hparams.get("rhythm_v3_alignment_prefilter_max_attempts", 2) or 0),
+        )
+
+    def _maybe_raise_alignment_prefilter_drop(
+        self,
+        *,
+        alignment_health_exports: dict[str, np.ndarray],
+        context: str,
+        gate_label: str,
+    ) -> None:
+        if not self._should_prefilter_bad_alignment_samples():
+            return
+        hard_bad = self._extract_optional_float_scalar(
+            alignment_health_exports.get("unit_alignment_projection_hard_bad_tgt")
+        )
+        if hard_bad is None or float(hard_bad) <= 0.5:
+            return
+        bucket = str(
+            _extract_object_scalar(
+                alignment_health_exports.get("unit_alignment_projection_health_bucket_tgt")
+            )
+            or "hard_bad"
+        ).strip()
+        gate_reason = str(
+            _extract_object_scalar(
+                alignment_health_exports.get("unit_alignment_projection_gate_reason_tgt")
+            )
+            or "projection_hard_bad"
+        ).strip()
+        raise RhythmDatasetPrefilterDrop(
+            f"{gate_label} prefilter dropped {context} (bucket={bucket}): {gate_reason}"
         )
 
     def _validate_cached_minimal_continuous_target(self, sample: dict, *, context: str) -> None:
@@ -415,12 +580,37 @@ class DurationV3DatasetMixin:
                     "minimal_v1_profile cached paired-target supervision must carry parseable "
                     f"{key} ({context})."
                 )
+        alignment_health_exports = self._build_alignment_health_exports(
+            projection={
+                "projection_hard_bad": sample.get(
+                    "unit_alignment_projection_hard_bad_source_tgt",
+                    sample.get("unit_alignment_projection_hard_bad_tgt"),
+                ),
+                "projection_violation_count": sample.get("unit_alignment_projection_violation_count_tgt"),
+                "projection_fallback_ratio": sample.get("unit_alignment_projection_fallback_ratio_tgt"),
+                "projection_gate_reason": sample.get("unit_alignment_projection_gate_reason_tgt"),
+                "projection_health_bucket": sample.get("unit_alignment_projection_health_bucket_tgt"),
+                "alignment_local_margin_p10": sample.get("unit_alignment_local_margin_p10_tgt"),
+                "alignment_global_path_cost": sample.get("unit_alignment_global_path_cost_tgt"),
+                "alignment_global_path_mean_cost": sample.get("unit_alignment_global_path_mean_cost_tgt"),
+            },
+            unmatched_speech_ratio=float(unmatched),
+            mean_local_confidence_speech=float(mean_local),
+            mean_coarse_confidence_speech=float(mean_coarse),
+            local_margin_p10=sample.get("unit_alignment_local_margin_p10_tgt"),
+        )
+        self._maybe_raise_alignment_prefilter_drop(
+            alignment_health_exports=alignment_health_exports,
+            context=context,
+            gate_label="cached minimal paired target alignment",
+        )
         self._enforce_minimal_continuous_alignment_gate(
             alignment_kind=normalized_kind,
             alignment_mode_id=alignment_mode_id,
             unmatched_speech_ratio=float(unmatched),
             mean_local_confidence_speech=float(mean_local),
             mean_coarse_confidence_speech=float(mean_coarse),
+            local_margin_p10=sample.get("unit_alignment_local_margin_p10_tgt"),
             context=context,
             require_quality_metrics=True,
         )
@@ -553,6 +743,11 @@ class DurationV3DatasetMixin:
         *,
         prompt_speech_mask: np.ndarray,
         run_stability,
+        open_run_mask=None,
+        prompt_closed_mask=None,
+        prompt_boundary_confidence=None,
+        min_boundary_confidence: float | None = None,
+        drop_edge_runs: int = 0,
         allow_shape_repair: bool = False,
     ) -> np.ndarray:
         speech = np.asarray(prompt_speech_mask, dtype=np.float32)
@@ -573,17 +768,127 @@ class DurationV3DatasetMixin:
             resized.reshape(-1)[:limit] = stability.reshape(-1)[:limit]
             stability = resized
         stability = stability.clip(0.0, 1.0)
-        return (speech * (0.25 + (0.75 * stability))).astype(np.float32)
+        weight = (speech * stability).astype(np.float32, copy=False)
+        if open_run_mask is not None:
+            open_mask = np.asarray(open_run_mask, dtype=np.float32)
+            if open_mask.shape != speech.shape:
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_open_run_mask shape mismatch: "
+                        f"{tuple(open_mask.shape)} vs {tuple(speech.shape)}. "
+                        f"Set {_PROMPT_WEIGHT_REPAIR_FLAG}=true only for explicit debug repair."
+                    )
+                resized = np.zeros_like(speech, dtype=np.float32)
+                limit = min(int(resized.size), int(open_mask.reshape(-1).shape[0]))
+                resized.reshape(-1)[:limit] = open_mask.reshape(-1)[:limit]
+                open_mask = resized
+            weight *= (1.0 - open_mask.clip(0.0, 1.0))
+        if prompt_closed_mask is not None:
+            closed_mask = np.asarray(prompt_closed_mask, dtype=np.float32)
+            if closed_mask.shape != speech.shape:
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_closed_mask shape mismatch: "
+                        f"{tuple(closed_mask.shape)} vs {tuple(speech.shape)}. "
+                        f"Set {_PROMPT_WEIGHT_REPAIR_FLAG}=true only for explicit debug repair."
+                    )
+                resized = np.zeros_like(speech, dtype=np.float32)
+                limit = min(int(resized.size), int(closed_mask.reshape(-1).shape[0]))
+                resized.reshape(-1)[:limit] = closed_mask.reshape(-1)[:limit]
+                closed_mask = resized
+            weight *= closed_mask.clip(0.0, 1.0)
+        if prompt_boundary_confidence is not None and min_boundary_confidence is not None:
+            boundary_conf = np.asarray(prompt_boundary_confidence, dtype=np.float32)
+            if boundary_conf.shape != speech.shape:
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_boundary_confidence shape mismatch: "
+                        f"{tuple(boundary_conf.shape)} vs {tuple(speech.shape)}. "
+                        f"Set {_PROMPT_WEIGHT_REPAIR_FLAG}=true only for explicit debug repair."
+                    )
+                resized = np.zeros_like(speech, dtype=np.float32)
+                limit = min(int(resized.size), int(boundary_conf.reshape(-1).shape[0]))
+                resized.reshape(-1)[:limit] = boundary_conf.reshape(-1)[:limit]
+                boundary_conf = resized
+            weight *= (boundary_conf >= float(min_boundary_confidence)).astype(np.float32)
+        drop_edge_runs = max(0, int(drop_edge_runs))
+        if drop_edge_runs > 0:
+            active = np.flatnonzero(weight > 0.0)
+            if active.size > (2 * drop_edge_runs):
+                weight[active[:drop_edge_runs]] = 0.0
+                weight[active[-drop_edge_runs:]] = 0.0
+        return weight.astype(np.float32)
 
-    def _attach_prompt_global_stats_sidecars(self, *, conditioning: dict, source_cache: dict) -> None:
+    def _resolve_prompt_ref_len_sec(self, *, prompt_duration_obs, prompt_item=None) -> float | None:
+        truncation = float(self.hparams.get("rhythm_prompt_truncation", 0.0) or 0.0)
+        dropout = float(self.hparams.get("rhythm_prompt_dropout", 0.0) or 0.0)
+        if (
+            truncation <= 0.0
+            and dropout <= 0.0
+            and isinstance(prompt_item, dict)
+            and prompt_item.get("dur_sec") is not None
+        ):
+            try:
+                value = float(prompt_item.get("dur_sec"))
+                if np.isfinite(value) and value > 0.0:
+                    return value
+            except Exception:
+                pass
+        hop_size = float(self.hparams.get("hop_size", 0.0) or 0.0)
+        sample_rate = float(self.hparams.get("audio_sample_rate", 0.0) or 0.0)
+        if hop_size > 0.0 and sample_rate > 0.0:
+            total_frames = float(np.asarray(prompt_duration_obs, dtype=np.float32).sum(dtype=np.float64))
+            if total_frames > 0.0:
+                return total_frames * hop_size / sample_rate
+        return None
+
+    def _attach_prompt_global_stats_sidecars(self, *, conditioning: dict, source_cache: dict, prompt_item=None) -> None:
         prompt_duration_obs = np.asarray(conditioning["prompt_duration_obs"], dtype=np.float32)
+        prompt_valid_mask = np.asarray(
+            conditioning.get("prompt_valid_mask", conditioning.get("prompt_unit_mask")),
+            dtype=np.float32,
+        )
         prompt_speech_mask = np.asarray(conditioning["prompt_speech_mask"], dtype=np.float32)
+        prompt_closed_mask = np.asarray(
+            conditioning.get("prompt_closed_mask", prompt_valid_mask),
+            dtype=np.float32,
+        )
+        prompt_boundary_confidence = np.asarray(
+            conditioning.get(
+                "prompt_boundary_confidence",
+                source_cache.get(
+                    "boundary_confidence",
+                    source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
+                ),
+            ),
+            dtype=np.float32,
+        )
+        min_boundary_confidence = self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
+        if min_boundary_confidence is not None:
+            min_boundary_confidence = float(min_boundary_confidence)
         conditioning["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             run_stability=source_cache.get("source_run_stability"),
+            open_run_mask=source_cache.get("open_run_mask"),
+            prompt_closed_mask=prompt_closed_mask,
+            prompt_boundary_confidence=prompt_boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
+            drop_edge_runs=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             allow_shape_repair=self._allow_prompt_weight_shape_repair(),
         )
         conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
+        valid_mass = float(np.asarray(prompt_valid_mask, dtype=np.float32).sum(dtype=np.float64))
+        speech_mass = float(np.asarray(prompt_speech_mask, dtype=np.float32).sum(dtype=np.float64))
+        conditioning["prompt_speech_ratio_scalar"] = np.asarray(
+            [speech_mass / max(1.0, valid_mass)],
+            dtype=np.float32,
+        )
+        prompt_ref_len_sec = self._resolve_prompt_ref_len_sec(
+            prompt_duration_obs=prompt_duration_obs,
+            prompt_item=prompt_item,
+        )
+        if prompt_ref_len_sec is not None:
+            conditioning["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
         conditioning["g_trim_ratio"] = np.asarray(
             [float(self.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2)],
             dtype=np.float32,
@@ -739,10 +1044,11 @@ class DurationV3DatasetMixin:
         augmented["prompt_valid_mask"] = keep_np
         augmented["prompt_speech_mask"] = prompt_speech_mask * keep_np
         for key in (
+            "prompt_closed_mask",
+            "prompt_boundary_confidence",
             "prompt_duration_obs",
             "prompt_unit_anchor_base",
             "prompt_log_base",
-            "prompt_global_weight",
             "prompt_unit_log_prior",
             "prompt_source_boundary_cue",
             "prompt_phrase_group_pos",
@@ -750,6 +1056,21 @@ class DurationV3DatasetMixin:
         ):
             if key in augmented:
                 augmented[key] = np.asarray(augmented[key], dtype=np.float32) * keep_np
+        if "prompt_global_weight" in augmented:
+            augmented["prompt_global_weight"] = np.asarray(augmented["prompt_global_weight"], dtype=np.float32) * keep_np
+        if "prompt_speech_ratio_scalar" in augmented:
+            valid_mass = float(np.asarray(augmented["prompt_valid_mask"], dtype=np.float32).sum(dtype=np.float64))
+            speech_mass = float(np.asarray(augmented["prompt_speech_mask"], dtype=np.float32).sum(dtype=np.float64))
+            augmented["prompt_speech_ratio_scalar"] = np.asarray(
+                [speech_mass / max(1.0, valid_mass)],
+                dtype=np.float32,
+            )
+        if "prompt_ref_len_sec" in augmented:
+            prompt_ref_len_sec = self._resolve_prompt_ref_len_sec(
+                prompt_duration_obs=augmented["prompt_duration_obs"],
+            )
+            if prompt_ref_len_sec is not None:
+                augmented["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
         return augmented
 
     def _build_reference_prompt_unit_conditioning(self, prompt_item, *, target_mode: str):
@@ -772,7 +1093,16 @@ class DurationV3DatasetMixin:
                 source_cache["source_silence_mask"] = prompt_item["source_silence_mask"]
             if "sep_hint" in prompt_item:
                 source_cache["sep_hint"] = prompt_item["sep_hint"]
-            for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask", "source_run_stability", "unit_log_prior"):
+            for extra_key in (
+                "source_boundary_cue",
+                "boundary_confidence",
+                "phrase_group_pos",
+                "phrase_final_mask",
+                "source_run_stability",
+                "open_run_mask",
+                "sealed_mask",
+                "unit_log_prior",
+            ):
                 if extra_key in prompt_item:
                     source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode != "cached_only" and "hubert" in prompt_item:
@@ -814,7 +1144,16 @@ class DurationV3DatasetMixin:
                         source_cache[extra_key] = prompt_item[extra_key]
                 if "sep_hint" in prompt_item:
                     source_cache["sep_hint"] = prompt_item["sep_hint"]
-                for extra_key in ("source_boundary_cue", "phrase_group_pos", "phrase_final_mask", "source_run_stability", "unit_log_prior"):
+                for extra_key in (
+                    "source_boundary_cue",
+                    "boundary_confidence",
+                    "phrase_group_pos",
+                    "phrase_final_mask",
+                    "source_run_stability",
+                    "open_run_mask",
+                    "sealed_mask",
+                    "unit_log_prior",
+                ):
                     if extra_key in prompt_item:
                         source_cache[extra_key] = prompt_item[extra_key]
         elif target_mode == "cached_only" and explicit_silence and has_cached_prompt_source and not has_prompt_silence:
@@ -833,12 +1172,25 @@ class DurationV3DatasetMixin:
             silence_mask=source_cache.get("source_silence_mask"),
         )
         prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clip(0.0, 1.0))
+        prompt_closed_mask = np.asarray(
+            source_cache.get("sealed_mask", prompt_valid_mask),
+            dtype=np.float32,
+        ) * prompt_valid_mask
+        prompt_boundary_confidence = np.asarray(
+            source_cache.get(
+                "boundary_confidence",
+                source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
+            ),
+            dtype=np.float32,
+        ) * prompt_valid_mask
         conditioning = {
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
             "prompt_unit_mask": prompt_valid_mask,
             "prompt_valid_mask": prompt_valid_mask,
             "prompt_speech_mask": prompt_speech_mask,
+            "prompt_closed_mask": prompt_closed_mask,
+            "prompt_boundary_confidence": prompt_boundary_confidence,
             "prompt_source_boundary_cue": np.asarray(
                 source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
                 dtype=np.float32,
@@ -857,14 +1209,42 @@ class DurationV3DatasetMixin:
             conditioning["prompt_unit_anchor_base"] = np.asarray(source_cache["unit_anchor_base"], dtype=np.float32)
         if use_log_base_rate and "unit_rate_log_base" in source_cache:
             conditioning["prompt_log_base"] = np.asarray(source_cache["unit_rate_log_base"], dtype=np.float32)
-        self._attach_prompt_global_stats_sidecars(
-            conditioning=conditioning,
-            source_cache=source_cache,
-        )
-        return self._maybe_augment_prompt_unit_conditioning(
+        conditioning = self._maybe_augment_prompt_unit_conditioning(
             conditioning,
             item_name=item_name,
         )
+        self._attach_prompt_global_stats_sidecars(
+            conditioning=conditioning,
+            source_cache=source_cache,
+            prompt_item=prompt_item if isinstance(prompt_item, dict) else None,
+        )
+        return conditioning
+
+    @staticmethod
+    def _resolve_optional_annotation_weight(
+        paired_target_conditioning: dict | None,
+        *,
+        expected_length: int,
+    ) -> np.ndarray | None:
+        if not isinstance(paired_target_conditioning, dict):
+            return None
+        for key in (
+            "unit_annotation_weight_tgt",
+            "paired_target_annotation_weight",
+            "paired_target_unit_annotation_weight",
+            "paired_target_run_annotation_weight",
+        ):
+            value = paired_target_conditioning.get(key)
+            if value is None:
+                continue
+            weight = np.asarray(value, dtype=np.float32).reshape(-1)
+            if weight.shape[0] != int(expected_length):
+                raise RuntimeError(
+                    f"{key} must match source-run lattice length: "
+                    f"expected {int(expected_length)}, got {int(weight.shape[0])}"
+                )
+            return np.clip(weight, 0.0, 1.0).astype(np.float32, copy=False)
+        return None
 
     @staticmethod
     def _resolve_paired_target_projection_inputs(
@@ -1088,22 +1468,29 @@ class DurationV3DatasetMixin:
         return exports
 
     def _alignment_provenance_optional_keys(self) -> tuple[str, ...]:
-        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + _ALIGNMENT_PROVENANCE_OBJECT_KEYS + _ALIGNMENT_PROVENANCE_INDEX_OBJECT_KEYS + (
-            "unit_alignment_is_continuous_tgt",
-            "unit_alignment_coverage_binary_tgt",
-            "unit_alignment_coverage_fraction_tgt",
-            "unit_alignment_expected_frame_support_tgt",
-            "unit_alignment_confidence_cost_term_tgt",
-            "unit_alignment_confidence_margin_term_tgt",
-            "unit_alignment_confidence_type_term_tgt",
-            "unit_alignment_confidence_match_term_tgt",
-            "unit_alignment_run_skip_flag_tgt",
-            "unit_alignment_unmatched_target_speech_ratio_tgt",
-            "unit_alignment_skipped_source_speech_ratio_tgt",
-            "unit_alignment_fallback_from_continuous_tgt",
-            "unit_duration_proj_weighted_tgt",
-            "unit_duration_projection_surface_tgt",
-            "unit_alignment_fallback_reason_tgt",
+        return (
+            _ALIGNMENT_PROVENANCE_FLOAT_KEYS
+            + _ALIGNMENT_PROVENANCE_OBJECT_KEYS
+            + _ALIGNMENT_PROVENANCE_INDEX_OBJECT_KEYS
+            + _ALIGNMENT_HEALTH_FLOAT_KEYS
+            + _ALIGNMENT_HEALTH_OBJECT_KEYS
+            + (
+                "unit_alignment_is_continuous_tgt",
+                "unit_alignment_coverage_binary_tgt",
+                "unit_alignment_coverage_fraction_tgt",
+                "unit_alignment_expected_frame_support_tgt",
+                "unit_alignment_confidence_cost_term_tgt",
+                "unit_alignment_confidence_margin_term_tgt",
+                "unit_alignment_confidence_type_term_tgt",
+                "unit_alignment_confidence_match_term_tgt",
+                "unit_alignment_run_skip_flag_tgt",
+                "unit_alignment_unmatched_target_speech_ratio_tgt",
+                "unit_alignment_skipped_source_speech_ratio_tgt",
+                "unit_alignment_fallback_from_continuous_tgt",
+                "unit_duration_proj_weighted_tgt",
+                "unit_duration_projection_surface_tgt",
+                "unit_alignment_fallback_reason_tgt",
+            )
         )
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
@@ -1118,6 +1505,10 @@ class DurationV3DatasetMixin:
         for key in _ALIGNMENT_PROVENANCE_OBJECT_KEYS:
             spec[key] = ("object", None)
         for key in _ALIGNMENT_PROVENANCE_INDEX_OBJECT_KEYS:
+            spec[key] = ("object", None)
+        for key in _ALIGNMENT_HEALTH_FLOAT_KEYS:
+            spec[key] = ("float", 0.0)
+        for key in _ALIGNMENT_HEALTH_OBJECT_KEYS:
             spec[key] = ("object", None)
         for key in (
             "unit_alignment_is_continuous_tgt",
@@ -1525,6 +1916,10 @@ class DurationV3DatasetMixin:
         allow_source_self_target_fallback = self._is_enabled_flag(
             self.hparams.get("rhythm_v3_allow_source_self_target_fallback", False)
         )
+        allow_silence_aux = self._is_enabled_flag(
+            self.hparams.get("rhythm_v3_allow_silence_aux", False)
+        )
+        disable_silence_aux = minimal_v1_profile or (not allow_silence_aux)
         allow_discrete_fallback_from_continuous = (
             use_continuous_alignment
             and (not minimal_v1_profile)
@@ -1568,6 +1963,7 @@ class DurationV3DatasetMixin:
                 precomputed_alignment=precomputed_alignment,
                 allow_source_self_target_fallback=allow_source_self_target_fallback,
                 alignment_soft_repair=alignment_soft_repair,
+                disable_silence_aux=disable_silence_aux,
             )
         except Exception as exc:
             if allow_discrete_fallback_from_continuous and has_continuous_sidecars:
@@ -1583,6 +1979,7 @@ class DurationV3DatasetMixin:
                         use_continuous_alignment=False,
                         allow_source_self_target_fallback=allow_source_self_target_fallback,
                         alignment_soft_repair=alignment_soft_repair,
+                        disable_silence_aux=disable_silence_aux,
                     )
                 except Exception as fallback_exc:
                     raise RuntimeError(
@@ -1655,12 +2052,25 @@ class DurationV3DatasetMixin:
             alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_PRECOMPUTED
         elif alignment_kind == _ALIGNMENT_KIND_CONTINUOUS_VITERBI_V1:
             alignment_mode_id = _ALIGNMENT_MODE_ID_CONTINUOUS_VITERBI_V1
+        alignment_health_exports = self._build_alignment_health_exports(
+            projection=projection,
+            unmatched_speech_ratio=projection.get("unmatched_speech_ratio", 0.0),
+            mean_local_confidence_speech=projection.get("mean_local_confidence_speech", 0.0),
+            mean_coarse_confidence_speech=projection.get("mean_coarse_confidence_speech", 0.0),
+            local_margin_p10=projection.get("alignment_local_margin_p10"),
+        )
+        self._maybe_raise_alignment_prefilter_drop(
+            alignment_health_exports=alignment_health_exports,
+            context=item_name,
+            gate_label="paired target alignment",
+        )
         if minimal_v1_profile:
             self._enforce_minimal_continuous_alignment_gate(
                 alignment_kind=alignment_kind,
                 unmatched_speech_ratio=projection.get("unmatched_speech_ratio", 0.0),
                 mean_local_confidence_speech=projection.get("mean_local_confidence_speech", 0.0),
                 mean_coarse_confidence_speech=projection.get("mean_coarse_confidence_speech", 0.0),
+                local_margin_p10=projection.get("alignment_local_margin_p10"),
                 context=item_name,
             )
         elif self._hard_fail_bad_alignment_projection():
@@ -1670,8 +2080,16 @@ class DurationV3DatasetMixin:
                 unmatched_speech_ratio=projection.get("unmatched_speech_ratio", 0.0),
                 mean_local_confidence_speech=projection.get("mean_local_confidence_speech", 0.0),
                 mean_coarse_confidence_speech=projection.get("mean_coarse_confidence_speech", 0.0),
+                local_margin_p10=projection.get("alignment_local_margin_p10"),
                 context=item_name,
             )
+        annotation_weight = self._resolve_optional_annotation_weight(
+            paired_target_conditioning,
+            expected_length=source_duration.shape[0],
+        )
+        if annotation_weight is not None:
+            confidence_local = (confidence_local * annotation_weight).astype(np.float32, copy=False)
+            confidence_coarse = (confidence_coarse * annotation_weight).astype(np.float32, copy=False)
         out = {
             "unit_duration_tgt": projected.astype(np.float32),
             "unit_duration_proj_raw_tgt": projected_raw.astype(np.float32),
@@ -1684,6 +2102,11 @@ class DurationV3DatasetMixin:
             "unit_confidence_local_tgt": confidence_local.astype(np.float32),
             "unit_confidence_coarse_tgt": confidence_coarse.astype(np.float32),
             "unit_confidence_tgt": confidence_coarse.astype(np.float32),
+            "unit_annotation_weight_tgt": (
+                annotation_weight.astype(np.float32)
+                if annotation_weight is not None
+                else np.ones_like(source_duration, dtype=np.float32)
+            ),
             "unit_alignment_coverage_tgt": coverage.astype(np.float32),
             "unit_alignment_coverage_binary_tgt": coverage_binary.astype(np.float32),
             "unit_alignment_coverage_fraction_tgt": coverage_fraction.astype(np.float32),
@@ -1726,6 +2149,11 @@ class DurationV3DatasetMixin:
                 [float(projection.get("mean_coarse_confidence_speech", 0.0))],
                 dtype=np.float32,
             ),
+            "unit_alignment_local_margin_p10_tgt": np.asarray(
+                [float(projection.get("alignment_local_margin_p10", float("nan")))],
+                dtype=np.float32,
+            ),
+            **alignment_health_exports,
             "unit_alignment_mode_id_tgt": np.asarray(
                 [alignment_mode_id],
                 dtype=np.int64,
@@ -1879,6 +2307,8 @@ class DurationV3DatasetMixin:
                 out["unit_confidence_coarse_tgt"] = np.asarray(sample["unit_confidence_coarse_tgt"], dtype=np.float32)
             if "unit_confidence_tgt" in sample:
                 out["unit_confidence_tgt"] = np.asarray(sample["unit_confidence_tgt"], dtype=np.float32)
+            if "unit_annotation_weight_tgt" in sample:
+                out["unit_annotation_weight_tgt"] = np.asarray(sample["unit_annotation_weight_tgt"], dtype=np.float32)
             if "unit_confidence_tgt" in out:
                 out.setdefault("unit_confidence_local_tgt", out["unit_confidence_tgt"])
                 out.setdefault("unit_confidence_coarse_tgt", out["unit_confidence_tgt"])
@@ -1899,6 +2329,7 @@ class DurationV3DatasetMixin:
                 "unit_alignment_unmatched_speech_ratio_tgt",
                 "unit_alignment_mean_local_confidence_speech_tgt",
                 "unit_alignment_mean_coarse_confidence_speech_tgt",
+                "unit_alignment_local_margin_p10_tgt",
                 "unit_alignment_mode_id_tgt",
                 "unit_alignment_is_continuous_tgt",
                 "unit_alignment_run_skip_flag_tgt",
@@ -1914,6 +2345,28 @@ class DurationV3DatasetMixin:
                     sample["unit_alignment_fallback_reason_tgt"],
                     dtype=object,
                 )
+            out.update(
+                self._build_alignment_health_exports(
+                    projection={
+                        "projection_hard_bad": sample.get(
+                            "unit_alignment_projection_hard_bad_source_tgt",
+                            sample.get("unit_alignment_projection_hard_bad_tgt"),
+                        ),
+                        "projection_violation_count": sample.get("unit_alignment_projection_violation_count_tgt"),
+                        "projection_fallback_ratio": sample.get("unit_alignment_projection_fallback_ratio_tgt"),
+                        "projection_gate_reason": sample.get("unit_alignment_projection_gate_reason_tgt"),
+                        "projection_health_bucket": sample.get("unit_alignment_projection_health_bucket_tgt"),
+                        "alignment_local_margin_p10": sample.get("unit_alignment_local_margin_p10_tgt"),
+                        "alignment_global_path_cost": sample.get("unit_alignment_global_path_cost_tgt"),
+                        "alignment_global_path_mean_cost": sample.get("unit_alignment_global_path_mean_cost_tgt"),
+                        "alignment_fallback_from_continuous": sample.get("unit_alignment_fallback_from_continuous_tgt"),
+                    },
+                    unmatched_speech_ratio=sample.get("unit_alignment_unmatched_speech_ratio_tgt"),
+                    mean_local_confidence_speech=sample.get("unit_alignment_mean_local_confidence_speech_tgt"),
+                    mean_coarse_confidence_speech=sample.get("unit_alignment_mean_coarse_confidence_speech_tgt"),
+                    local_margin_p10=sample.get("unit_alignment_local_margin_p10_tgt"),
+                )
+            )
             alignment_mode_id = out.get("unit_alignment_mode_id_tgt", sample.get("unit_alignment_mode_id_tgt"))
             out["unit_alignment_kind_tgt"] = np.asarray(
                 [
@@ -1943,6 +2396,19 @@ class DurationV3DatasetMixin:
                 [1.0 if alignment_kind.startswith("continuous") else 0.0],
                 dtype=np.float32,
             )
+            self._maybe_raise_alignment_prefilter_drop(
+                alignment_health_exports={
+                    key: out[key]
+                    for key in (
+                        "unit_alignment_projection_hard_bad_tgt",
+                        "unit_alignment_projection_gate_reason_tgt",
+                        "unit_alignment_projection_health_bucket_tgt",
+                    )
+                    if key in out
+                },
+                context=f"cached unit_duration_tgt:{item_name}",
+                gate_label="cached paired target alignment",
+            )
             if (not minimal_v1_profile) and self._hard_fail_bad_alignment_projection():
                 self._enforce_alignment_quality_gate(
                     alignment_kind=alignment_kind,
@@ -1950,6 +2416,7 @@ class DurationV3DatasetMixin:
                     unmatched_speech_ratio=out.get("unit_alignment_unmatched_speech_ratio_tgt"),
                     mean_local_confidence_speech=out.get("unit_alignment_mean_local_confidence_speech_tgt"),
                     mean_coarse_confidence_speech=out.get("unit_alignment_mean_coarse_confidence_speech_tgt"),
+                    local_margin_p10=out.get("unit_alignment_local_margin_p10_tgt"),
                     context=f"cached unit_duration_tgt:{item_name}",
                 )
             for key in self._alignment_provenance_optional_keys():
@@ -1959,6 +2426,7 @@ class DurationV3DatasetMixin:
                         if key in (
                             _ALIGNMENT_PROVENANCE_OBJECT_KEYS
                             + _ALIGNMENT_PROVENANCE_INDEX_OBJECT_KEYS
+                            + _ALIGNMENT_HEALTH_OBJECT_KEYS
                             + (
                                 "unit_duration_projection_surface_tgt",
                                 "unit_alignment_fallback_reason_tgt",
@@ -2062,6 +2530,7 @@ class DurationV3DatasetMixin:
                         paired.get("unit_alignment_mean_coarse_confidence_speech_tgt")
                     )
                     or 0.0,
+                    local_margin_p10=_extract_object_scalar(paired.get("unit_alignment_local_margin_p10_tgt")),
                     context=source_item_name,
                 )
             return paired

@@ -38,13 +38,17 @@ Operationally, the maintained default means:
 - `rhythm_v3_use_learned_residual_gate: false`
 - `rhythm_v3_disable_learned_gate: true`
 - `rhythm_v3_drop_edge_runs_for_g: 1`
+- `rhythm_v3_min_boundary_confidence_for_g: 0.5`
+- `rhythm_v3_min_prompt_ref_len_sec: 3.0`
+- `rhythm_v3_max_prompt_ref_len_sec: 8.0`
 - `rhythm_v3_require_same_text_paired_target: true`
 - `rhythm_v3_g_variant: raw_median`
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
+- `rhythm_v3_detach_global_term_in_local_head: true`
 - `rhythm_v3_gate_quality_strict: true`  (intent marker; CLI export controls strict fail/allow-partial behavior)
 - `rhythm_v3_eval_mode: learned`
-- speech-only prompt global-rate estimation
+- speech-only prompt global-rate estimation, with closed/boundary-clean support when prompt sidecars are available
 - speech = coarse + local
 - silence = clipped coarse-only follower
 - carry rounding + prefix budget at execution time
@@ -55,22 +59,23 @@ short fake silence islands when boundary evidence is weak, instead of asking
 the duration writer to absorb that noise.
 
 So this branch is **not** training a free-form pause planner. It is training a **source-anchored causal retimer** over a stabilized run lattice.
-The maintained runtime default is therefore `raw_median + learned`; the
+The maintained runtime default is therefore `raw_median + learned(detach)`; the
 falsification ladder should only override `eval_mode` (and, when needed,
 `g_variant`) on that same surface.
 
 ### 1.1 Recommended falsification profiles
 
 The maintained yaml already exposes the switches needed for staged validation.
-In practice, keep one base config and move between these four profiles with
+In practice, keep one base config and move between these five profiles with
 small overrides:
 
 | Profile | Purpose | Key overrides |
 | --- | --- | --- |
 | `A` | static / analytic falsification | `rhythm_v3_eval_mode=analytic`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0`, `rhythm_v3_silence_coarse_weight=0.0` |
 | `B` | coarse-only validation training | `rhythm_v3_eval_mode=coarse_only`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_bias=0.20`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
-| `C` | full learned sanity | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
-| `D` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
+| `C` | maintained learned sanity | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
+| `D` | no-detach ablation | same as `C`, but `rhythm_v3_detach_global_term_in_local_head=false`; treat this as an explicit comparison run rather than the maintained minimal-V1 contract |
+| `E` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
 
 Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
 `weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
@@ -85,7 +90,9 @@ themselves.
 One practical note: the maintained config file still ships with
 `rhythm_v3_eval_mode=learned` because that is the runtime default surface. For
 actual falsification work, do not start there. Override into profile `A`
-first, then `B`, and only then come back to `C`.
+first, then `B`, then `C`. Only use `D` if you are explicitly testing whether
+local residual quality depends on letting the local head backprop through the
+global/coarse term.
 
 --- 
 
@@ -138,9 +145,13 @@ For the maintained prompt-summary path, `prompt_speech_mask` is part of the
 public conditioning contract rather than an internal optional hint. In the
 current strict minimal runtime, that means `prompt_speech_mask` should be
 materialized explicitly instead of being reconstructed from silence-token
-fallback. The shared `g` path is also fail-fast now: when prompt speech support
-disappears after masking / edge cleanup, the maintained mainline raises rather
-than silently widening into non-speech support.
+fallback. When available, `prompt_closed_mask`,
+`prompt_boundary_confidence`, and `prompt_ref_len_sec` now also feed the
+maintained prompt-domain contract: minimal V1 expects speech-dominant
+3-8 second references, and the mainline `g` path uses closed/boundary-clean
+support rather than only speech-mask edge drop. The generic summary-pooling
+path still keeps a lenient all-silence zero-summary fallback for diagnostics,
+but maintained V1-G prompt conditioning remains the strict path.
 
 ---
 
@@ -301,6 +312,9 @@ Likewise, treat gate completeness as a contract rather than a plotting detail:
 - missing complete `slow / mid / fast` triplets means Gate 1 is incomplete
 - missing `source_only` / `random_ref` / `shuffled_ref` style controls means
   you only have correlation evidence, not a strong control claim
+- a bundle only counts as a control result when real-reference rows beat the
+  negative controls on monotonicity / transfer metrics; mere presence is not
+  enough
 
 ---
 
@@ -622,7 +636,14 @@ from the maintained train/eval path with pair metadata still attached
 plots will only provide partial evidence.
 When reading prefix/runtime audit, keep `projector_boundary_hit_rate` separate
 from `projector_boundary_decay_rate`: the first counts boundary events, the
-second counts only the subset where decay was actually applied.
+second counts only the subset where decay was actually applied. Also read the
+new projector telemetry as the companion pre/post surface:
+
+- `projector_preclamp_exec`: continuous proposal before rounding/budget clamp
+- `projector_clamp_mass`: absolute correction applied by the projector after
+  rounded preclamp execution
+- `projector_rounding_regret`: gap between committed discrete execution and the
+  continuous proposal
 
 ---
 

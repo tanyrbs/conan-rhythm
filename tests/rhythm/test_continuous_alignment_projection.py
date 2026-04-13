@@ -67,6 +67,15 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             np.asarray([0, 1, 2, 3], dtype=np.int64),
         )
         self.assertAlmostEqual(float(result["unmatched_speech_ratio"]), 0.0, places=6)
+        self.assertAlmostEqual(float(result["projection_fallback_ratio"]), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(result["mean_local_conf_speech"]),
+            float(result["mean_local_confidence_speech"]),
+            places=6,
+        )
+        self.assertAlmostEqual(float(result["projection_hard_bad"]), 0.0, places=6)
+        self.assertTrue(np.isnan(float(result["alignment_global_path_cost"])))
+        self.assertTrue(np.isnan(float(result["alignment_global_path_mean_cost"])))
 
     def test_continuous_alignment_request_without_metadata_fails_fast(self) -> None:
         with self.assertRaisesRegex(
@@ -225,6 +234,9 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         self.assertEqual(tuple(result["confidence_margin_term"].shape), (3,))
         self.assertEqual(tuple(result["confidence_type_term"].shape), (3,))
         self.assertEqual(tuple(result["confidence_match_term"].shape), (3,))
+        self.assertEqual(tuple(result["run_margin"].shape), (3,))
+        self.assertIn("alignment_local_margin_p10", result)
+        self.assertTrue(np.isfinite(float(result["alignment_local_margin_p10"])))
         self.assertTrue(np.all(result["confidence_cost_term"] > 0.0))
         self.assertTrue(np.all(result["confidence_margin_term"] > 0.0))
         self.assertTrue(np.all(result["confidence_type_term"] > 0.0))
@@ -431,6 +443,12 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         )
         self.assertGreater(float(result["assigned_cost"][1]), 1.2)
         self.assertAlmostEqual(float(result["unmatched_speech_ratio"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(result["projection_fallback_ratio"]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(result["projection_hard_bad"]), 1.0, places=6)
+        self.assertIn("projection_gate_reason", result)
+        self.assertTrue(str(result["projection_gate_reason"]).strip())
+        self.assertTrue(np.isfinite(float(result["alignment_global_path_cost"])))
+        self.assertTrue(np.isfinite(float(result["alignment_global_path_mean_cost"])))
 
     def test_continuous_viterbi_skip_source_mode_allows_zero_occupancy_with_low_confidence(self) -> None:
         aligner = ContinuousRunAligner(
@@ -528,6 +546,62 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         )
         self.assertEqual(float(projected["confidence_local"][2]), 0.0)
         self.assertEqual(float(projected["confidence_coarse"][2]), 0.0)
+
+    def test_projection_health_exports_skipped_source_run_as_hard_bad_fallback(self) -> None:
+        source_run_units = np.asarray([11, 12, 13, 14], dtype=np.int64)
+        source_frame_states = np.eye(4, dtype=np.float32)
+        target_frame_states = np.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        projected = project_target_runs_onto_source(
+            source_units=source_run_units,
+            source_durations=np.asarray([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            source_silence_mask=np.zeros((4,), dtype=np.float32),
+            target_units=np.asarray([11, 12, 14], dtype=np.int64),
+            target_durations=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            target_valid_mask=np.ones((3,), dtype=np.float32),
+            target_speech_mask=np.ones((3,), dtype=np.float32),
+            use_continuous_alignment=True,
+            source_frame_states=source_frame_states,
+            source_frame_to_run=np.asarray([0, 1, 2, 3], dtype=np.int64),
+            target_frame_states=target_frame_states,
+            target_frame_speech_prob=np.ones((3,), dtype=np.float32),
+            target_frame_valid=np.ones((3,), dtype=np.float32),
+            alignment_soft_repair=True,
+            continuous_aligner_kwargs={
+                "lambda_emb": 1.0,
+                "lambda_type": 0.0,
+                "lambda_band": 0.0,
+                "lambda_unit": 0.0,
+                "allow_source_skip": True,
+                "skip_penalty": 0.25,
+            },
+        )
+
+        np.testing.assert_allclose(projected["projected"], np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(
+            projected["run_skip_flag"],
+            np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        )
+        self.assertAlmostEqual(float(projected["unmatched_speech_ratio"]), 0.25, places=6)
+        self.assertIn("projection_fallback_ratio", projected)
+        self.assertIn("projection_hard_bad", projected)
+        self.assertAlmostEqual(
+            float(np.asarray(projected["projection_fallback_ratio"], dtype=np.float32).reshape(-1)[0]),
+            0.25,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(np.asarray(projected["projection_hard_bad"], dtype=np.float32).reshape(-1)[0]),
+            1.0,
+            places=6,
+        )
 
 
 if __name__ == "__main__":

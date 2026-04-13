@@ -270,6 +270,8 @@ class StreamingVoiceConversion:
         *,
         prompt_speech_mask: torch.Tensor,
         prompt_run_stability: torch.Tensor | None,
+        prompt_open_run_mask: torch.Tensor | None = None,
+        drop_edge_runs: int = 0,
         allow_shape_repair: bool = False,
     ) -> torch.Tensor:
         speech = prompt_speech_mask.float().clamp(0.0, 1.0)
@@ -290,7 +292,31 @@ class StreamingVoiceConversion:
             limit = min(int(resized.numel()), int(flat.numel()))
             resized.reshape(-1)[:limit] = flat[:limit]
             stability = resized
-        return speech * (0.25 + (0.75 * stability))
+        weight = speech * stability
+        if isinstance(prompt_open_run_mask, torch.Tensor):
+            open_mask = prompt_open_run_mask.float().clamp(0.0, 1.0)
+            if tuple(open_mask.shape) != tuple(speech.shape):
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_open_run_mask shape mismatch: "
+                        f"{tuple(open_mask.shape)} vs {tuple(speech.shape)}. "
+                        "Set rhythm_v3_allow_prompt_weight_shape_repair=true only for explicit debug repair."
+                    )
+                resized = torch.zeros_like(speech)
+                flat = open_mask.reshape(-1)
+                limit = min(int(resized.numel()), int(flat.numel()))
+                resized.reshape(-1)[:limit] = flat[:limit]
+                open_mask = resized
+            weight = weight * (1.0 - open_mask)
+        drop_edge_runs = max(0, int(drop_edge_runs))
+        if drop_edge_runs > 0:
+            active = torch.nonzero(weight.reshape(-1) > 0.0, as_tuple=False).reshape(-1)
+            if int(active.numel()) > (2 * drop_edge_runs):
+                flat_weight = weight.reshape(-1)
+                flat_weight[active[:drop_edge_runs]] = 0.0
+                flat_weight[active[-drop_edge_runs:]] = 0.0
+                weight = flat_weight.reshape_as(weight)
+        return weight
 
     @staticmethod
     def _extract_batch_vector(
@@ -325,6 +351,47 @@ class StreamingVoiceConversion:
         if tensor.numel() <= 0:
             return None
         return float(torch.quantile(tensor, 0.95).item())
+
+    @staticmethod
+    def _summarize_rounding_residual_abs_p95(rounding_residual) -> float | None:
+        vector = StreamingVoiceConversion._extract_batch_vector(rounding_residual)
+        if vector is None:
+            return None
+        tensor = torch.as_tensor(vector, dtype=torch.float32).reshape(-1).abs()
+        if tensor.numel() <= 0:
+            return None
+        return float(torch.quantile(tensor, 0.95).item())
+
+    @staticmethod
+    def _summarize_budget_hit_rate(budget_hit_mask) -> float | None:
+        vector = StreamingVoiceConversion._extract_batch_vector(budget_hit_mask)
+        if vector is None:
+            return None
+        tensor = torch.as_tensor(vector, dtype=torch.float32).reshape(-1)
+        if tensor.numel() <= 0:
+            return None
+        return float((tensor > 0.5).float().mean().item())
+
+    @staticmethod
+    def _summarize_mask_sum(mask) -> float | None:
+        vector = StreamingVoiceConversion._extract_batch_vector(mask)
+        if vector is None:
+            return None
+        tensor = torch.as_tensor(vector, dtype=torch.float32).reshape(-1)
+        if tensor.numel() <= 0:
+            return None
+        return float((tensor > 0.5).float().sum().item())
+
+    @staticmethod
+    def _assert_runtime_commit_invariants(execution) -> None:
+        if execution is None:
+            return
+        open_tail_violation = getattr(execution, "open_tail_commit_violation", None)
+        if isinstance(open_tail_violation, torch.Tensor) and bool((open_tail_violation.float() > 0.5).any().item()):
+            raise RuntimeError("Open-tail units reached the committed runtime surface.")
+        closed_prefix_ok = getattr(execution, "commit_closed_prefix_ok", None)
+        if isinstance(closed_prefix_ok, torch.Tensor) and bool((closed_prefix_ok.float() <= 0.5).any().item()):
+            raise RuntimeError("Committed runtime units must form a contiguous closed prefix.")
 
     @staticmethod
     def _summarize_boundary_decay_applied_rate(boundary_decay) -> float | None:
@@ -511,12 +578,32 @@ class StreamingVoiceConversion:
             device=self.device,
             dtype=torch.float32,
         ).unsqueeze(0)
+        prompt_open_run_mask = torch.tensor(
+            cache.get("open_run_mask", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
         out["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             prompt_run_stability=prompt_run_stability,
+            prompt_open_run_mask=prompt_open_run_mask,
+            drop_edge_runs=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             allow_shape_repair=bool(self.hparams.get("rhythm_v3_allow_prompt_weight_shape_repair", False)),
         )
         out["prompt_global_weight_present"] = torch.ones((1, 1), device=self.device, dtype=torch.float32)
+        valid_mass = prompt_valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        speech_mass = prompt_speech_mask.sum(dim=1, keepdim=True)
+        out["prompt_speech_ratio_scalar"] = (speech_mass / valid_mass).to(dtype=torch.float32)
+        hop_size = float(self.hparams.get("hop_size", 0.0) or 0.0)
+        sample_rate = float(self.hparams.get("audio_sample_rate", 0.0) or 0.0)
+        if hop_size > 0.0 and sample_rate > 0.0:
+            total_frames = float(prompt_duration_obs.sum().item())
+            out["prompt_ref_len_sec"] = torch.full(
+                (1, 1),
+                total_frames * hop_size / sample_rate,
+                device=self.device,
+                dtype=torch.float32,
+            )
         out["g_trim_ratio"] = torch.full(
             (1, 1),
             float(self.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
@@ -653,7 +740,12 @@ class StreamingVoiceConversion:
         max_content_window_start = 0
         final_debug_bundle = None
         last_projector_prefix_offset = None
+        last_projector_prefix_drift = None
+        last_projector_rounding_residual = None
+        last_projector_budget_hit_mask = None
         last_projector_boundary_decay = None
+        last_open_tail_commit_violation = None
+        last_commit_closed_prefix_ok = None
         allow_eos_tail_flush_fallback = bool(
             self.hparams.get(
                 "rhythm_allow_eos_tail_flush_fallback",
@@ -785,12 +877,33 @@ class StreamingVoiceConversion:
                 rhythm_state = next_rhythm_state
                 execution = out.get("rhythm_execution")
                 if execution is not None:
+                    self._assert_runtime_commit_invariants(execution)
                     last_projector_prefix_offset = self._extract_batch_vector(
                         getattr(execution, "prefix_unit_offset", None),
                         batch_index=0,
                     )
+                    last_projector_prefix_drift = self._extract_batch_vector(
+                        getattr(execution, "projector_prefix_drift", None),
+                        batch_index=0,
+                    )
+                    last_projector_rounding_residual = self._extract_batch_vector(
+                        getattr(execution, "projector_rounding_residual", None),
+                        batch_index=0,
+                    )
+                    last_projector_budget_hit_mask = self._extract_batch_vector(
+                        getattr(execution, "projector_budget_hit_mask", None),
+                        batch_index=0,
+                    )
                     last_projector_boundary_decay = self._extract_batch_vector(
                         getattr(execution, "projector_boundary_decay_applied", None),
+                        batch_index=0,
+                    )
+                    last_open_tail_commit_violation = self._extract_batch_vector(
+                        getattr(execution, "open_tail_commit_violation", None),
+                        batch_index=0,
+                    )
+                    last_commit_closed_prefix_ok = self._extract_batch_vector(
+                        getattr(execution, "commit_closed_prefix_ok", None),
                         batch_index=0,
                     )
                 rhythm_ref_conditioning = out.get("rhythm_ref_conditioning", rhythm_ref_conditioning)
@@ -881,12 +994,33 @@ class StreamingVoiceConversion:
             rhythm_state = next_rhythm_state
             execution = final_out.get("rhythm_execution")
             if execution is not None:
+                self._assert_runtime_commit_invariants(execution)
                 last_projector_prefix_offset = self._extract_batch_vector(
                     getattr(execution, "prefix_unit_offset", None),
                     batch_index=0,
                 )
+                last_projector_prefix_drift = self._extract_batch_vector(
+                    getattr(execution, "projector_prefix_drift", None),
+                    batch_index=0,
+                )
+                last_projector_rounding_residual = self._extract_batch_vector(
+                    getattr(execution, "projector_rounding_residual", None),
+                    batch_index=0,
+                )
+                last_projector_budget_hit_mask = self._extract_batch_vector(
+                    getattr(execution, "projector_budget_hit_mask", None),
+                    batch_index=0,
+                )
                 last_projector_boundary_decay = self._extract_batch_vector(
                     getattr(execution, "projector_boundary_decay_applied", None),
+                    batch_index=0,
+                )
+                last_open_tail_commit_violation = self._extract_batch_vector(
+                    getattr(execution, "open_tail_commit_violation", None),
+                    batch_index=0,
+                )
+                last_commit_closed_prefix_ok = self._extract_batch_vector(
+                    getattr(execution, "commit_closed_prefix_ok", None),
                     batch_index=0,
                 )
             decoder_cache = final_out.get("decoder_cache", decoder_cache)
@@ -966,8 +1100,24 @@ class StreamingVoiceConversion:
         )
         if last_projector_prefix_offset is None and isinstance(final_debug_bundle, dict):
             last_projector_prefix_offset = final_debug_bundle.get("prefix_unit_offset")
+        if last_projector_prefix_drift is None:
+            last_projector_prefix_drift = (
+                final_debug_bundle.get("projector_prefix_drift")
+                if isinstance(final_debug_bundle, dict)
+                else None
+            )
+        if last_projector_prefix_drift is None:
+            last_projector_prefix_drift = last_projector_prefix_offset
+        if last_projector_rounding_residual is None and isinstance(final_debug_bundle, dict):
+            last_projector_rounding_residual = final_debug_bundle.get("projector_rounding_residual")
+        if last_projector_budget_hit_mask is None and isinstance(final_debug_bundle, dict):
+            last_projector_budget_hit_mask = final_debug_bundle.get("projector_budget_hit_mask")
         if last_projector_boundary_decay is None and isinstance(final_debug_bundle, dict):
             last_projector_boundary_decay = final_debug_bundle.get("projector_boundary_decay_applied")
+        if last_open_tail_commit_violation is None and isinstance(final_debug_bundle, dict):
+            last_open_tail_commit_violation = final_debug_bundle.get("open_tail_commit_violation")
+        if last_commit_closed_prefix_ok is None and isinstance(final_debug_bundle, dict):
+            last_commit_closed_prefix_ok = final_debug_bundle.get("commit_closed_prefix_ok")
         eos_tail_flush_severity = "none"
         if unresolved_eos_tail_frames > 0:
             eos_tail_flush_severity = "warning" if allow_eos_tail_flush_fallback else "error"
@@ -992,7 +1142,22 @@ class StreamingVoiceConversion:
                 "prompt_unit_log_prior_present": bool(prompt_sidecar_unit_log_prior_present),
                 "rhythm_v3_g_variant": str(g_variant),
                 "rhythm_prefix_budget_abs_p95": self._summarize_prefix_budget_abs_p95(last_projector_prefix_offset),
+                "rhythm_prefix_drift_abs_p95": self._summarize_prefix_budget_abs_p95(last_projector_prefix_drift),
+                "rhythm_rounding_residual_abs_p95": self._summarize_rounding_residual_abs_p95(last_projector_rounding_residual),
+                "rhythm_budget_hit_rate": self._summarize_budget_hit_rate(last_projector_budget_hit_mask),
                 "rhythm_boundary_decay_applied_rate": self._summarize_boundary_decay_applied_rate(last_projector_boundary_decay),
+                "rhythm_open_tail_commit_violation_count": self._summarize_mask_sum(last_open_tail_commit_violation),
+                "rhythm_committed_closed_prefix_ok": (
+                    None
+                    if last_commit_closed_prefix_ok is None
+                    else bool(
+                        torch.as_tensor(last_commit_closed_prefix_ok, dtype=torch.float32)
+                        .reshape(-1)
+                        .gt(0.5)
+                        .all()
+                        .item()
+                    )
+                ),
                 "content_history_windowing_enabled": True,
                 "content_history_left_context_tokens": int(content_window_left_tokens),
                 "content_history_max_trimmed_tokens": int(max_content_window_start),

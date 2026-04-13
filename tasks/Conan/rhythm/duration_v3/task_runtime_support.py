@@ -42,6 +42,11 @@ class DurationV3TaskRuntimeSupportMixin:
             lambda_cons=max(0.0, float(hparams.get("lambda_rhythm_cons", 0.0) or 0.0)),
             lambda_zero=max(0.0, float(hparams.get("lambda_rhythm_zero", 0.05) or 0.0)),
             lambda_ortho=max(0.0, float(hparams.get("lambda_rhythm_ortho", 0.0) or 0.0)),
+            lambda_silence_aux=(
+                0.0
+                if minimal_v1_profile
+                else max(0.0, float(hparams.get("lambda_rhythm_silence_aux", 0.0) or 0.0))
+            ),
             strict_target_alignment=bool(hparams.get("rhythm_v3_strict_target_alignment", True)),
             anchor_mode=str(hparams.get("rhythm_v3_anchor_mode", "baseline") or "baseline").strip().lower(),
             baseline_target_mode=str(
