@@ -670,7 +670,16 @@ class DurationV3DatasetMixin:
         return exports
 
     def _alignment_provenance_optional_keys(self) -> tuple[str, ...]:
-        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + ("unit_alignment_is_continuous_tgt",)
+        return _ALIGNMENT_PROVENANCE_FLOAT_KEYS + (
+            "unit_alignment_is_continuous_tgt",
+            "unit_alignment_coverage_binary_tgt",
+            "unit_alignment_coverage_fraction_tgt",
+            "unit_alignment_expected_frame_support_tgt",
+            "unit_alignment_confidence_cost_term_tgt",
+            "unit_alignment_confidence_margin_term_tgt",
+            "unit_alignment_confidence_type_term_tgt",
+            "unit_alignment_confidence_match_term_tgt",
+        )
 
     def _resolve_optional_sample_keys(self) -> tuple[str, ...]:
         keys = list(super()._resolve_optional_sample_keys())
