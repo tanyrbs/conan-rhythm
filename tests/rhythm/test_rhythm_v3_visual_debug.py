@@ -862,10 +862,55 @@ def test_collect_gate_issues_flags_large_analytic_same_text_gap():
         ]
     )
     issues = collect_gate_issues(frame)
-    assert any(issue.startswith("analytic_same_text_gap=0.200>") for issue in issues)
+    assert any(issue.startswith("analytic_same_text_gap_max=0.200>") for issue in issues)
     status = build_gate_status(frame)
     assert status["gate0_pass"] is True
     assert status["gate1_pass"] is False
+    assert status["analytic_same_text_gap"] == pytest.approx(0.2)
+    assert status["analytic_same_text_gap_max"] == pytest.approx(0.2)
+
+
+def test_build_gate_status_fails_gate1_on_single_large_analytic_same_text_gap_outlier():
+    def make_row(
+        *,
+        eval_mode: str,
+        ref_bin: str,
+        ref_condition: str,
+        same_text_gap: float,
+    ) -> dict[str, float | str]:
+        row = _make_debug_records_cli_row(
+            eval_mode=eval_mode,
+            ref_bin=ref_bin,
+            ref_condition=ref_condition,
+            explainability_slope=0.4,
+            negative_control_gap=0.3,
+            same_text_gap=same_text_gap,
+            tempo_monotonicity_rate=1.0 if eval_mode == "analytic" else np.nan,
+            alignment_local_margin_p10=0.05,
+        )
+        row["silence_leakage"] = 0.01
+        row["prefix_discrepancy"] = 0.01
+        row["budget_hit_rate"] = 0.01
+        row["cumulative_drift"] = 0.05
+        return row
+
+    frame = pd.DataFrame(
+        [
+            make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real", same_text_gap=0.0),
+            make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real", same_text_gap=0.0),
+            make_row(eval_mode="analytic", ref_bin="fast", ref_condition="real", same_text_gap=0.2),
+            make_row(eval_mode="coarse_only", ref_bin="mid", ref_condition="source_only", same_text_gap=0.0),
+            make_row(eval_mode="learned", ref_bin="mid", ref_condition="random_ref", same_text_gap=0.0),
+            make_row(eval_mode="learned", ref_bin="fast", ref_condition="shuffled_ref", same_text_gap=0.0),
+        ]
+    )
+    issues = collect_gate_issues(frame)
+    assert any(issue.startswith("analytic_same_text_gap_max=0.200>") for issue in issues)
+    status = build_gate_status(frame)
+    assert status["gate0_pass"] is True
+    assert status["gate1_pass"] is False
+    assert status["analytic_same_text_gap"] == pytest.approx(0.06666667, abs=1.0e-6)
+    assert status["analytic_same_text_gap_max"] == pytest.approx(0.2)
 
 
 def test_build_gate_status_treats_missing_ref_condition_as_missing_all_negative_controls():

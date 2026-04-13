@@ -337,6 +337,36 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertTrue(np.allclose(adapted["phrase_group_pos"], item["phrase_group_pos"]))
         self.assertTrue(np.allclose(adapted["phrase_final_mask"], item["phrase_final_mask"]))
 
+    def test_adapt_source_cache_to_visible_prefix_falls_back_when_debug_sidecar_shape_mismatches(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_export_debug_sidecars": True,
+            }
+        )
+        item = {
+            "item_name": "prefix_debug_sidecars_bad_shape",
+            "content_units": np.asarray([1, 2, 3], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3, 2, 4], dtype=np.int64),
+            "open_run_mask": np.asarray([0, 0, 0], dtype=np.int64),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "sep_hint": np.asarray([0, 1, 0], dtype=np.int64),
+            "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+            "source_boundary_cue": np.asarray([0.1, 0.7], dtype=np.float32),
+            "phrase_group_index": np.asarray([0, 1], dtype=np.int64),
+            "phrase_group_pos": np.asarray([0.0, 0.5], dtype=np.float32),
+            "phrase_final_mask": np.asarray([0.0, 1.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.2, 0.8, 0.4], dtype=np.float32),
+        }
+        adapted = dataset._adapt_source_cache_to_visible_prefix(
+            item=item,
+            visible_tokens=np.arange(9, dtype=np.int64),
+        )
+        self.assertTrue(np.allclose(adapted["source_boundary_cue"], adapted["boundary_confidence"]))
+        self.assertTrue(np.array_equal(adapted["phrase_group_index"], np.zeros((3,), dtype=np.int64)))
+        self.assertTrue(np.allclose(adapted["phrase_group_pos"], np.zeros((3,), dtype=np.float32)))
+        self.assertTrue(np.allclose(adapted["phrase_final_mask"], np.zeros((3,), dtype=np.float32)))
+
     def test_prompt_summary_conditioning_runtime_prompt_no_longer_embeds_paired_target_sidecars(self) -> None:
         dataset = _DummyDataset(
             {

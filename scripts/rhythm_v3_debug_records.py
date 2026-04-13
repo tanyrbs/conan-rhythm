@@ -52,6 +52,14 @@ def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
     return float(np.nanmean(values)) if values.size > 0 and np.isfinite(values).any() else float("nan")
 
 
+def _max_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
+    if column not in frame.columns or "eval_mode" not in frame.columns:
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    values = pd.to_numeric(frame.loc[mode_mask, column], errors="coerce").to_numpy(dtype=np.float32)
+    return float(np.nanmax(values)) if values.size > 0 and np.isfinite(values).any() else float("nan")
+
+
 def _collect_missing_metadata_issues(frame) -> list[str]:
     if pd is None or frame is None or not hasattr(frame, "columns"):
         return []
@@ -181,9 +189,10 @@ def collect_gate_issues(frame) -> list[str]:
                     f"analytic_negative_control_gap={analytic_neg_gap:.3f}<={_GATE1_NEGATIVE_CONTROL_GAP_MIN:.3f}"
                 )
             analytic_same_text_gap = _mean_for_eval_mode(frame, column="same_text_gap", eval_mode="analytic")
-            if np.isfinite(analytic_same_text_gap) and analytic_same_text_gap > _GATE1_SAME_TEXT_GAP_MAX:
+            analytic_same_text_gap_max = _max_for_eval_mode(frame, column="same_text_gap", eval_mode="analytic")
+            if np.isfinite(analytic_same_text_gap_max) and analytic_same_text_gap_max > _GATE1_SAME_TEXT_GAP_MAX:
                 quality_issues.append(
-                    f"analytic_same_text_gap={analytic_same_text_gap:.3f}>{_GATE1_SAME_TEXT_GAP_MAX:.3f}"
+                    f"analytic_same_text_gap_max={analytic_same_text_gap_max:.3f}>{_GATE1_SAME_TEXT_GAP_MAX:.3f}"
                 )
             analytic_margin = _mean_for_eval_mode(
                 frame, column="alignment_local_margin_p10", eval_mode="analytic"
@@ -277,6 +286,7 @@ def build_gate_status(frame) -> dict[str, object]:
             "analytic_explainability_slope": float("nan"),
             "analytic_negative_control_gap": float("nan"),
             "analytic_same_text_gap": float("nan"),
+            "analytic_same_text_gap_max": float("nan"),
             "analytic_tempo_monotonicity_rate": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
             "coarse_only_runtime_metrics": {},
@@ -295,6 +305,7 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_explainability_slope = float("nan")
     analytic_negative_control_gap = float("nan")
     analytic_same_text_gap = float("nan")
+    analytic_same_text_gap_max = float("nan")
     analytic_alignment_local_margin_p10 = float("nan")
     analytic_tempo_monotonicity_rate = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
@@ -355,6 +366,11 @@ def build_gate_status(frame) -> dict[str, object]:
             column="same_text_gap",
             eval_mode="analytic",
         )
+        analytic_same_text_gap_max = _max_for_eval_mode(
+            frame,
+            column="same_text_gap",
+            eval_mode="analytic",
+        )
         analytic_alignment_local_margin_p10 = _mean_for_eval_mode(
             frame,
             column="alignment_local_margin_p10",
@@ -401,8 +417,8 @@ def build_gate_status(frame) -> dict[str, object]:
         and np.isfinite(analytic_negative_control_gap)
         and analytic_negative_control_gap > _GATE1_NEGATIVE_CONTROL_GAP_MIN
         and (
-            (not np.isfinite(analytic_same_text_gap))
-            or analytic_same_text_gap <= _GATE1_SAME_TEXT_GAP_MAX
+            (not np.isfinite(analytic_same_text_gap_max))
+            or analytic_same_text_gap_max <= _GATE1_SAME_TEXT_GAP_MAX
         )
     )
     gate1_pass = gate0_pass and gate1_criteria_pass
@@ -427,6 +443,7 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_explainability_slope": analytic_explainability_slope,
         "analytic_negative_control_gap": analytic_negative_control_gap,
         "analytic_same_text_gap": analytic_same_text_gap,
+        "analytic_same_text_gap_max": analytic_same_text_gap_max,
         "analytic_alignment_local_margin_p10": analytic_alignment_local_margin_p10,
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
