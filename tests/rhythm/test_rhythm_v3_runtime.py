@@ -349,6 +349,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "open_tail_commit_violation_count" in debug
     assert "projected_prefix_cumsum" in debug
     assert "source_prefix_cumsum" in debug
+    assert "projector_preclamp_duration_exec" in debug
+    assert "projector_clamp_delta" in debug
+    assert "projector_projection_regret" in debug
+    assert "projector_preclamp_prefix_cumsum" in debug
     assert debug["projector_budget_mode"] == "total"
     assert "coarse_path_logstretch" in debug
     assert "analytic_logstretch" in debug
@@ -379,6 +383,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_projector_prefix_drift" in ret
     assert "rhythm_debug_projected_prefix_cumsum" in ret
     assert "rhythm_debug_source_prefix_cumsum" in ret
+    assert "rhythm_debug_projector_preclamp_duration_exec" in ret
+    assert "rhythm_debug_projector_clamp_delta" in ret
+    assert "rhythm_debug_projector_projection_regret" in ret
+    assert "rhythm_debug_projector_preclamp_prefix_cumsum" in ret
     assert "rhythm_debug_commit_closed_prefix_ok" in ret
     assert "rhythm_debug_open_tail_commit_violation" in ret
     assert "rhythm_debug_open_tail_commit_violation_count" in ret
@@ -417,6 +425,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["g_valid_count"], torch.tensor([[3.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_support_ratio_vs_speech"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_support_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_support_ratio_vs_speech"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_support_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_clean_ratio_vs_speech"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_clean_ratio_vs_valid"], torch.tensor([[2.0 / 3.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_valid_support"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
@@ -459,6 +471,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["commit_closed_prefix_ok"], torch.ones((1, 1), dtype=torch.float32))
     assert torch.allclose(debug["open_tail_commit_violation"], torch.zeros_like(execution.commit_mask))
     assert torch.allclose(debug["open_tail_commit_violation_count"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["projector_preclamp_duration_exec"], execution.projector_preclamp_duration_exec)
+    assert torch.allclose(debug["projector_clamp_delta"], execution.projector_clamp_delta)
+    assert torch.allclose(debug["projector_projection_regret"], execution.projector_projection_regret)
+    assert torch.allclose(debug["projector_preclamp_prefix_cumsum"], execution.projector_preclamp_prefix_cumsum)
     assert torch.allclose(ret["rhythm_v3_commit_closed_prefix_ok"], debug["commit_closed_prefix_ok"])
     assert torch.allclose(ret["rhythm_v3_open_tail_commit_violation"], debug["open_tail_commit_violation"])
     assert torch.allclose(

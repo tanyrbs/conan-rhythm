@@ -206,6 +206,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
         )
     minimal_v1_profile = _is_enabled_flag(hparams.get("rhythm_v3_minimal_v1_profile", False))
+    strict_minimal_claim_profile = _is_enabled_flag(
+        hparams.get("rhythm_v3_strict_minimal_claim_profile", True)
+    )
     if minimal_v1_profile:
         if "rhythm_v3_detach_global_term_in_local_head" not in hparams:
             hparams["rhythm_v3_detach_global_term_in_local_head"] = True
@@ -345,6 +348,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 raise ValueError(
                     "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
                 )
+        if _is_enabled_flag(hparams.get("rhythm_v3_use_src_gap_in_coarse_head", False)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_use_src_gap_in_coarse_head=false."
+            )
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)
     ):
@@ -479,10 +486,32 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError("rhythm_v3_min_boundary_confidence_for_g must be within [0, 1] for rhythm_v3.")
     g_variant = str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower()
     if _is_unit_norm_variant(g_variant):
-        if minimal_v1_profile:
-            raise ValueError("rhythm_v3_minimal_v1_profile forbids rhythm_v3_g_variant=unit_norm.")
+        if minimal_v1_profile and strict_minimal_claim_profile:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile with strict minimal claim profile forbids rhythm_v3_g_variant=unit_norm."
+            )
         if unit_prior_path is None:
             raise ValueError("rhythm_v3_g_variant=unit_norm requires rhythm_v3_unit_prior_path.")
+    strict_gate = _is_enabled_flag(hparams.get("rhythm_v3_gate_quality_strict", False))
+    gate_status_json = hparams.get("rhythm_v3_required_gate_status_json")
+    if minimal_v1_profile and strict_gate:
+        if not _is_enabled_flag(hparams.get("rhythm_v3_debug_export", True)):
+            raise ValueError("rhythm_v3_gate_quality_strict requires rhythm_v3_debug_export=true.")
+        if not _is_enabled_flag(hparams.get("rhythm_v3_export_projector_telemetry", True)):
+            raise ValueError(
+                "rhythm_v3_gate_quality_strict requires rhythm_v3_export_projector_telemetry=true."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_detach_global_term_in_local_head", True)):
+            raise ValueError(
+                "rhythm_v3_gate_quality_strict requires rhythm_v3_detach_global_term_in_local_head=true."
+            )
+        if not gate_status_json:
+            raise ValueError(
+                "rhythm_v3_gate_quality_strict requires rhythm_v3_required_gate_status_json."
+            )
+        _validate_optional_existing_path(
+            gate_status_json, key="rhythm_v3_required_gate_status_json"
+        )
     for key in (
         "rhythm_v3_alignment_unmatched_speech_ratio_max",
         "rhythm_v3_alignment_mean_local_confidence_speech_min",

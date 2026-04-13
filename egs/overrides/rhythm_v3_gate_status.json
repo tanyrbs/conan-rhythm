@@ -1,0 +1,8 @@
+{
+  "gate0_pass": false,
+  "gate1_pass": false,
+  "gate2_pass": false,
+  "warnings": [
+    "placeholder gate-status file; replace with scripts/rhythm_v3_debug_records.py output before training"
+  ]
+}

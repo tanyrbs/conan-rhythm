@@ -126,6 +126,10 @@ class PromptConditioningEvidence:
     prompt_g_clean_count: Optional[torch.Tensor] = None
     prompt_g_support_weight: Optional[torch.Tensor] = None
     prompt_g_domain_valid: Optional[torch.Tensor] = None
+    prompt_g_support_ratio_vs_speech: Optional[torch.Tensor] = None
+    prompt_g_support_ratio_vs_valid: Optional[torch.Tensor] = None
+    prompt_g_clean_ratio_vs_speech: Optional[torch.Tensor] = None
+    prompt_g_clean_ratio_vs_valid: Optional[torch.Tensor] = None
 
 @dataclass
 class ReferenceDurationMemory:
@@ -310,6 +314,22 @@ class ReferenceDurationMemory:
     def prompt_g_domain_valid(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_g_domain_valid
 
+    @property
+    def prompt_g_support_ratio_vs_speech(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_support_ratio_vs_speech
+
+    @property
+    def prompt_g_support_ratio_vs_valid(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_support_ratio_vs_valid
+
+    @property
+    def prompt_g_clean_ratio_vs_speech(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_clean_ratio_vs_speech
+
+    @property
+    def prompt_g_clean_ratio_vs_valid(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_clean_ratio_vs_valid
+
 
 @dataclass
 class DurationRuntimeState:
@@ -384,12 +404,16 @@ class DurationExecution:
     projector_budget_mode: Optional[str] = None
     projector_prefix_drift: Optional[torch.Tensor] = None
     projector_preclamp_exec: Optional[torch.Tensor] = None
+    projector_preclamp_duration_exec: Optional[torch.Tensor] = None
+    projector_clamp_delta: Optional[torch.Tensor] = None
     projector_clamp_mass: Optional[torch.Tensor] = None
     projector_rounding_regret: Optional[torch.Tensor] = None
+    projector_projection_regret: Optional[torch.Tensor] = None
     commit_closed_prefix_ok: Optional[torch.Tensor] = None
     open_tail_commit_violation: Optional[torch.Tensor] = None
     open_tail_commit_violation_count: Optional[torch.Tensor] = None
     projected_prefix_cumsum: Optional[torch.Tensor] = None
+    projector_preclamp_prefix_cumsum: Optional[torch.Tensor] = None
     source_prefix_cumsum: Optional[torch.Tensor] = None
     coarse_scalar_raw: Optional[torch.Tensor] = None
     global_term_before_local: Optional[torch.Tensor] = None
@@ -587,6 +611,18 @@ def move_prompt_conditioning_evidence(
         prompt_g_clean_count=_move_tensor(prompt.prompt_g_clean_count, device=device, dtype=dtype),
         prompt_g_support_weight=_move_tensor(prompt.prompt_g_support_weight, device=device, dtype=dtype),
         prompt_g_domain_valid=_move_tensor(prompt.prompt_g_domain_valid, device=device, dtype=dtype),
+        prompt_g_support_ratio_vs_speech=_move_tensor(
+            prompt.prompt_g_support_ratio_vs_speech, device=device, dtype=dtype
+        ),
+        prompt_g_support_ratio_vs_valid=_move_tensor(
+            prompt.prompt_g_support_ratio_vs_valid, device=device, dtype=dtype
+        ),
+        prompt_g_clean_ratio_vs_speech=_move_tensor(
+            prompt.prompt_g_clean_ratio_vs_speech, device=device, dtype=dtype
+        ),
+        prompt_g_clean_ratio_vs_valid=_move_tensor(
+            prompt.prompt_g_clean_ratio_vs_valid, device=device, dtype=dtype
+        ),
     )
 
 
@@ -638,6 +674,10 @@ def move_reference_duration_memory(
             memory.prompt.prompt_g_clean_count if memory.prompt is not None else None,
             memory.prompt.prompt_g_support_weight if memory.prompt is not None else None,
             memory.prompt.prompt_g_domain_valid if memory.prompt is not None else None,
+            memory.prompt.prompt_g_support_ratio_vs_speech if memory.prompt is not None else None,
+            memory.prompt.prompt_g_support_ratio_vs_valid if memory.prompt is not None else None,
+            memory.prompt.prompt_g_clean_ratio_vs_speech if memory.prompt is not None else None,
+            memory.prompt.prompt_g_clean_ratio_vs_valid if memory.prompt is not None else None,
         )
     ):
         return memory
@@ -793,6 +833,30 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_g_clean_count", prompt.prompt_g_clean_count, dims=2)
     _check_batch("prompt_g_support_weight", prompt.prompt_g_support_weight, dims=2)
     _check_batch("prompt_g_domain_valid", prompt.prompt_g_domain_valid, dims=2)
+    _check_batch(
+        "prompt_g_support_ratio_vs_speech",
+        prompt.prompt_g_support_ratio_vs_speech,
+        dims=2,
+    )
+    _check_batch(
+        "prompt_g_support_ratio_vs_valid",
+        prompt.prompt_g_support_ratio_vs_valid,
+        dims=2,
+    )
+    _check_batch(
+        "prompt_g_clean_ratio_vs_speech",
+        prompt.prompt_g_clean_ratio_vs_speech,
+        dims=2,
+    )
+    _check_batch(
+        "prompt_g_clean_ratio_vs_valid",
+        prompt.prompt_g_clean_ratio_vs_valid,
+        dims=2,
+    )
+    _check_batch("prompt_g_support_ratio_vs_speech", prompt.prompt_g_support_ratio_vs_speech, dims=2)
+    _check_batch("prompt_g_support_ratio_vs_valid", prompt.prompt_g_support_ratio_vs_valid, dims=2)
+    _check_batch("prompt_g_clean_ratio_vs_speech", prompt.prompt_g_clean_ratio_vs_speech, dims=2)
+    _check_batch("prompt_g_clean_ratio_vs_valid", prompt.prompt_g_clean_ratio_vs_valid, dims=2)
 
     if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
         raise ValueError(
@@ -876,6 +940,10 @@ def validate_prompt_conditioning_evidence(
         ("prompt_g_clean_count", prompt.prompt_g_clean_count),
         ("prompt_g_support_weight", prompt.prompt_g_support_weight),
         ("prompt_g_domain_valid", prompt.prompt_g_domain_valid),
+        ("prompt_g_support_ratio_vs_speech", prompt.prompt_g_support_ratio_vs_speech),
+        ("prompt_g_support_ratio_vs_valid", prompt.prompt_g_support_ratio_vs_valid),
+        ("prompt_g_clean_ratio_vs_speech", prompt.prompt_g_clean_ratio_vs_speech),
+        ("prompt_g_clean_ratio_vs_valid", prompt.prompt_g_clean_ratio_vs_valid),
     ):
         if value is not None and value.size(1) != 1:
             raise ValueError(
@@ -1029,6 +1097,10 @@ def ensure_reference_duration_memory_batch(
                 prompt_g_clean_count=_expand(memory.prompt.prompt_g_clean_count),
                 prompt_g_support_weight=_expand(memory.prompt.prompt_g_support_weight),
                 prompt_g_domain_valid=_expand(memory.prompt.prompt_g_domain_valid),
+                prompt_g_support_ratio_vs_speech=_expand(memory.prompt.prompt_g_support_ratio_vs_speech),
+                prompt_g_support_ratio_vs_valid=_expand(memory.prompt.prompt_g_support_ratio_vs_valid),
+                prompt_g_clean_ratio_vs_speech=_expand(memory.prompt.prompt_g_clean_ratio_vs_speech),
+                prompt_g_clean_ratio_vs_valid=_expand(memory.prompt.prompt_g_clean_ratio_vs_valid),
             )
         ),
         summary_state=_expand(memory.summary_state),

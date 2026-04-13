@@ -507,6 +507,16 @@ def test_prompt_summary_strict_clean_global_support_uses_closed_boundary_clean_r
     )
     assert torch.count_nonzero(memory.prompt_g_support_mask[1]).item() == 0
     assert torch.allclose(memory.prompt_g_domain_valid, torch.tensor([[1.0], [0.0]], dtype=torch.float32))
+    assert torch.allclose(
+        memory.prompt_g_support_ratio_vs_speech,
+        torch.tensor([[3.0 / 5.0], [0.0]], dtype=torch.float32),
+        atol=1.0e-6,
+    )
+    assert torch.allclose(
+        memory.prompt_g_clean_ratio_vs_valid,
+        torch.tensor([[3.0 / 5.0], [0.0]], dtype=torch.float32),
+        atol=1.0e-6,
+    )
 
 
 def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empty():
@@ -535,6 +545,11 @@ def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empt
     assert torch.count_nonzero(memory.prompt_log_residual[1]).item() == 0
     assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
     assert torch.allclose(memory.prompt_g_domain_valid, torch.tensor([[1.0], [0.0]], dtype=torch.float32))
+    assert torch.allclose(
+        memory.prompt_g_support_ratio_vs_valid,
+        torch.tensor([[0.5], [0.0]], dtype=torch.float32),
+        atol=1.0e-6,
+    )
 
 
 def test_prompt_summary_pool_speech_only_zeros_role_attention_on_silence():
@@ -1116,6 +1131,8 @@ def test_rhythm_v3_loss_builder_exports_exec_prefix_and_role_diagnostics():
         global_bias_tgt_support_mass=torch.tensor([[1.5]], dtype=torch.float32),
         global_bias_tgt_support_count=torch.tensor([[2.0]], dtype=torch.float32),
         coarse_target_speech_conf_mean=torch.tensor([[0.75]], dtype=torch.float32),
+        local_residual_tgt_center=torch.tensor([[0.10]], dtype=torch.float32),
+        local_residual_tgt_abs_mean=torch.tensor([[0.25]], dtype=torch.float32),
         unit_confidence_local_tgt=torch.ones((1, 3), dtype=torch.float32),
         unit_confidence_coarse_tgt=torch.ones((1, 3), dtype=torch.float32),
         lambda_dur=1.0,
@@ -1132,6 +1149,9 @@ def test_rhythm_v3_loss_builder_exports_exec_prefix_and_role_diagnostics():
     assert 0.0 < float(losses["rhythm_v3_coarse_explained_ratio"].item()) < 1.0
     assert torch.allclose(losses["rhythm_v3_local_residual_mean"], torch.tensor(-0.05))
     assert torch.allclose(losses["rhythm_v3_local_residual_abs_mean"], torch.tensor(0.15))
+    assert torch.allclose(losses["rhythm_v3_local_residual_tgt_center_abs"], torch.tensor(0.10))
+    assert torch.allclose(losses["rhythm_v3_local_residual_tgt_abs_mean"], torch.tensor(0.25))
+    assert torch.allclose(losses["rhythm_v3_local_residual_center_gap"], torch.tensor(0.15))
     assert torch.allclose(losses["rhythm_v3_silence_local_leak_rate"], torch.tensor(1.0))
     assert torch.allclose(losses["rhythm_v3_global_bias_tgt_support_mass"], torch.tensor(1.5))
     assert torch.allclose(losses["rhythm_v3_global_bias_tgt_support_count"], torch.tensor(2.0))

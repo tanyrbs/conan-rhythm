@@ -489,6 +489,60 @@ class RhythmCacheContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "prompt_ref_len_sec/ref_len_sec/dur_sec"):
             dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
 
+    def test_minimal_v1_prompt_summary_conditioning_prefilters_low_speech_ratio(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_rate_mode": "simple_global",
+                "rhythm_v3_simple_global_stats": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "hop_size": 0,
+                "audio_sample_rate": 0,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_low_speech_ratio",
+            "content_units": np.asarray([1, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0], dtype=np.float32),
+            "ref_len_sec": 4.2,
+            "source_silence_mask": np.asarray([1.0, 0.0], dtype=np.float32),
+            "source_run_stability": np.asarray([0.8, 0.9], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 1.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.9, 0.95], dtype=np.float32),
+        }
+        with self.assertRaisesRegex(RhythmDatasetPrefilterDrop, "speech_ratio"):
+            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+
+    def test_minimal_v1_prompt_summary_conditioning_prefilters_ref_len_out_of_range(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_rate_mode": "simple_global",
+                "rhythm_v3_simple_global_stats": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "hop_size": 0,
+                "audio_sample_rate": 0,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_ref_too_long",
+            "content_units": np.asarray([1, 2, 3], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0, 3.0], dtype=np.float32),
+            "ref_len_sec": 9.2,
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "source_run_stability": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
+        }
+        with self.assertRaisesRegex(RhythmDatasetPrefilterDrop, "ref_len_sec"):
+            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+
     def test_prompt_summary_conditioning_rejects_prompt_weight_shape_mismatch_by_default(self) -> None:
         dataset = _DummyDataset(
             {
@@ -1985,6 +2039,39 @@ class RhythmCacheContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cached unit_duration_tgt:src_cached_strict"):
             dataset._merge_duration_v3_rhythm_targets(
                 item={"item_name": "src_cached_strict"},
+                source_cache={},
+                paired_target_conditioning={},
+                sample=sample,
+            )
+
+    def test_duration_v3_target_merge_rejects_cached_alignment_with_projection_fallback_ratio(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_use_continuous_alignment": True,
+            }
+        )
+        sample = {
+            "unit_duration_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_duration_proj_raw_tgt": np.asarray([2.0], dtype=np.float32),
+            "unit_alignment_mode_id_tgt": np.asarray([2], dtype=np.int64),
+            "unit_alignment_kind_tgt": np.asarray(["continuous_viterbi_v1"], dtype=object),
+            "unit_alignment_source_tgt": np.asarray(["cached"], dtype=object),
+            "unit_alignment_version_tgt": np.asarray(["2026-04-13"], dtype=object),
+            "unit_alignment_source_cache_signature_tgt": np.asarray(["src_sign"], dtype=object),
+            "unit_alignment_target_cache_signature_tgt": np.asarray(["tgt_sign"], dtype=object),
+            "unit_alignment_sidecar_signature_tgt": np.asarray(["sidecar_sign"], dtype=object),
+            "unit_alignment_unmatched_speech_ratio_tgt": np.asarray([0.1], dtype=np.float32),
+            "unit_alignment_mean_local_confidence_speech_tgt": np.asarray([0.7], dtype=np.float32),
+            "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.8], dtype=np.float32),
+            "unit_alignment_projection_fallback_ratio_tgt": np.asarray([0.25], dtype=np.float32),
+            "unit_alignment_projection_health_bucket_tgt": np.asarray(["clean"], dtype=object),
+            "unit_alignment_projection_gate_reason_tgt": np.asarray(["fallback_ratio"], dtype=object),
+        }
+        with self.assertRaisesRegex(RuntimeError, "projection_fallback_ratio_tgt > 0"):
+            dataset._merge_duration_v3_rhythm_targets(
+                item={"item_name": "cached_fallback_ratio"},
                 source_cache={},
                 paired_target_conditioning={},
                 sample=sample,

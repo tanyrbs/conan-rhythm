@@ -44,7 +44,8 @@ rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
 rhythm_v3_drop_edge_runs_for_g: 1
 rhythm_v3_min_boundary_confidence_for_g: 0.5
-rhythm_v3_gate_quality_strict: true  # intent marker for report policy; strict fail/allow-partial is enforced by debug_records CLI flags
+rhythm_v3_gate_quality_strict: true  # strict gate enforcement now baked into config validation
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # replace with scripts/rhythm_v3_debug_records.py output before training
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
 rhythm_v3_disable_local_residual: false
@@ -57,6 +58,7 @@ rhythm_response_window_right: 0
 rhythm_progress_bins: 4
 rhythm_streaming_mode: strict
 rhythm_v3_minimal_v1_profile: true
+rhythm_v3_strict_minimal_claim_profile: true
 rhythm_v3_simple_global_stats: true
 rhythm_v3_backbone: minimal_v1_global
 rhythm_v3_warp_mode: none
@@ -89,6 +91,7 @@ rhythm_v3_emit_silence_runs: true
 rhythm_v3_prefix_budget_pos: 24
 rhythm_v3_prefix_budget_neg: 24
 rhythm_v3_dynamic_budget_ratio: 0.15
+rhythm_v3_export_projector_telemetry: true
 rhythm_v3_min_prefix_budget: 12
 rhythm_v3_max_prefix_budget: 48
 # Maintained default keeps projector budget support on full committed prefix mass.
@@ -105,13 +108,17 @@ rhythm_v3_local_short_run_min_duration: 2.0
 rhythm_max_logstretch: 1.2
 rhythm_v3_local_rate_decay: 0.95
 rhythm_v3_analytic_gap_clip: 0.35
+rhythm_v3_use_src_gap_in_coarse_head: false
 # The minimal-V1 contract keeps the local head detached from the shared global term
 # and freezes the source-rate initialization; flip either flag only for explicit
 # ablations or falsification experiments.
 rhythm_v3_detach_global_term_in_local_head: true
 rhythm_v3_freeze_src_rate_init: true
+rhythm_v3_src_rate_init_mode: first_speech
+rhythm_v3_src_rate_init_value: 0.0
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
 # shaping remain non-minimal-only knobs and are intentionally omitted here.
+rhythm_v3_boundary_offset_decay: 0.60
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
 rhythm_allow_eos_tail_flush_fallback: false

@@ -393,6 +393,8 @@ class PromptDurationMemoryEncoder(nn.Module):
             torch.zeros_like(support_weight),
             support_weight,
         )
+        valid_count = valid_mask.sum(dim=1, keepdim=True).float().clamp_min(1.0)
+        speech_count = speech_mask.sum(dim=1, keepdim=True).float().clamp_min(1.0)
         if self.summary_pool_speech_only or self.strict_clean_global_support:
             residual_mask = torch.where(
                 zero_summary_rows.expand_as(effective_support_mask),
@@ -418,6 +420,10 @@ class PromptDurationMemoryEncoder(nn.Module):
             prompt_g_clean_count=effective_clean_count.detach(),
             prompt_g_support_weight=effective_support_weight.detach(),
             prompt_g_domain_valid=domain_valid.detach(),
+            prompt_g_support_ratio_vs_speech=(effective_support_count / speech_count).detach(),
+            prompt_g_support_ratio_vs_valid=(effective_support_count / valid_count).detach(),
+            prompt_g_clean_ratio_vs_speech=(effective_clean_count / speech_count).detach(),
+            prompt_g_clean_ratio_vs_valid=(effective_clean_count / valid_count).detach(),
         )
         if self.simple_global_stats and not self.emit_prompt_diagnostics:
             operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
@@ -515,6 +521,10 @@ class PromptDurationMemoryEncoder(nn.Module):
                     prompt_g_clean_count=prompt_evidence.prompt_g_clean_count,
                     prompt_g_support_weight=prompt_evidence.prompt_g_support_weight,
                     prompt_g_domain_valid=prompt_evidence.prompt_g_domain_valid,
+                    prompt_g_support_ratio_vs_speech=prompt_evidence.prompt_g_support_ratio_vs_speech,
+                    prompt_g_support_ratio_vs_valid=prompt_evidence.prompt_g_support_ratio_vs_valid,
+                    prompt_g_clean_ratio_vs_speech=prompt_evidence.prompt_g_clean_ratio_vs_speech,
+                    prompt_g_clean_ratio_vs_valid=prompt_evidence.prompt_g_clean_ratio_vs_valid,
                 ),
             )
         )

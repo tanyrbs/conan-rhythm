@@ -831,6 +831,26 @@ class ConanDurationAdapter(nn.Module):
                         else support_count
                     )
                 )
+                support_ratio_vs_speech = (
+                    ref_memory.prompt_g_support_ratio_vs_speech.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_support_ratio_vs_speech", None), torch.Tensor)
+                    else (support_count / speech_count.clamp_min(1.0))
+                )
+                support_ratio_vs_valid = (
+                    ref_memory.prompt_g_support_ratio_vs_valid.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_support_ratio_vs_valid", None), torch.Tensor)
+                    else (support_count / valid_count.clamp_min(1.0))
+                )
+                clean_ratio_vs_speech = (
+                    ref_memory.prompt_g_clean_ratio_vs_speech.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_clean_ratio_vs_speech", None), torch.Tensor)
+                    else (clean_count / speech_count.clamp_min(1.0))
+                )
+                clean_ratio_vs_valid = (
+                    ref_memory.prompt_g_clean_ratio_vs_valid.float()
+                    if isinstance(getattr(ref_memory, "prompt_g_clean_ratio_vs_valid", None), torch.Tensor)
+                    else (clean_count / valid_count.clamp_min(1.0))
+                )
                 if bool(getattr(self.module, "is_minimal_v1", False)):
                     min_ref_len = float(getattr(self.module, "min_prompt_ref_len_sec", 0.0))
                     max_ref_len = float(getattr(self.module, "max_prompt_ref_len_sec", float("inf")))
@@ -876,8 +896,10 @@ class ConanDurationAdapter(nn.Module):
                         float(min_prompt_speech_ratio),
                     ),
                     "prompt_speech_ratio": speech_ratio.detach(),
-                    "g_support_ratio_vs_speech": (support_count / speech_count.clamp_min(1.0)).detach(),
-                    "g_support_ratio_vs_valid": (support_count / valid_count.clamp_min(1.0)).detach(),
+                    "g_support_ratio_vs_speech": support_ratio_vs_speech.detach(),
+                    "g_support_ratio_vs_valid": support_ratio_vs_valid.detach(),
+                    "g_clean_ratio_vs_speech": clean_ratio_vs_speech.detach(),
+                    "g_clean_ratio_vs_valid": clean_ratio_vs_valid.detach(),
                     "g_valid": g_domain_valid.float().detach(),
                     "g_drop_edge_runs": support_count.new_full(
                         support_count.shape,
@@ -914,6 +936,10 @@ class ConanDurationAdapter(nn.Module):
             debug_bundle = {
                 "g_variant": self.module.g_variant,
                 "g_trim_ratio": float(getattr(self.module, "g_trim_ratio", 0.2)),
+                "prompt_g_support_ratio_vs_speech": support_ratio_vs_speech.detach(),
+                "prompt_g_support_ratio_vs_valid": support_ratio_vs_valid.detach(),
+                "prompt_g_clean_ratio_vs_speech": clean_ratio_vs_speech.detach(),
+                "prompt_g_clean_ratio_vs_valid": clean_ratio_vs_valid.detach(),
                 "g_ref": (
                     execution.g_ref.detach()
                     if isinstance(getattr(execution, "g_ref", None), torch.Tensor)
@@ -1164,6 +1190,20 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "projector_preclamp_exec", None), torch.Tensor)
                     else None
                 ),
+                "projector_preclamp_duration_exec": (
+                    execution.projector_preclamp_duration_exec.detach()
+                    if isinstance(getattr(execution, "projector_preclamp_duration_exec", None), torch.Tensor)
+                    else (
+                        execution.projector_preclamp_exec.detach()
+                        if isinstance(getattr(execution, "projector_preclamp_exec", None), torch.Tensor)
+                        else None
+                    )
+                ),
+                "projector_clamp_delta": (
+                    execution.projector_clamp_delta.detach()
+                    if isinstance(getattr(execution, "projector_clamp_delta", None), torch.Tensor)
+                    else None
+                ),
                 "projector_clamp_mass": (
                     execution.projector_clamp_mass.detach()
                     if isinstance(getattr(execution, "projector_clamp_mass", None), torch.Tensor)
@@ -1172,6 +1212,20 @@ class ConanDurationAdapter(nn.Module):
                 "projector_rounding_regret": (
                     execution.projector_rounding_regret.detach()
                     if isinstance(getattr(execution, "projector_rounding_regret", None), torch.Tensor)
+                    else None
+                ),
+                "projector_projection_regret": (
+                    execution.projector_projection_regret.detach()
+                    if isinstance(getattr(execution, "projector_projection_regret", None), torch.Tensor)
+                    else (
+                        execution.projector_rounding_regret.detach()
+                        if isinstance(getattr(execution, "projector_rounding_regret", None), torch.Tensor)
+                        else None
+                    )
+                ),
+                "projector_preclamp_prefix_cumsum": (
+                    execution.projector_preclamp_prefix_cumsum.detach()
+                    if isinstance(getattr(execution, "projector_preclamp_prefix_cumsum", None), torch.Tensor)
                     else None
                 ),
                 "source_prefix_cumsum": (
@@ -1245,6 +1299,11 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_open_tail_commit_violation_count"] = debug_bundle[
                 "open_tail_commit_violation_count"
             ]
+            ret["rhythm_debug_projector_preclamp_exec"] = debug_bundle["projector_preclamp_exec"]
+            ret["rhythm_debug_projector_preclamp_duration_exec"] = debug_bundle["projector_preclamp_duration_exec"]
+            ret["rhythm_debug_projector_clamp_delta"] = debug_bundle["projector_clamp_delta"]
+            ret["rhythm_debug_projector_projection_regret"] = debug_bundle["projector_projection_regret"]
+            ret["rhythm_debug_projector_preclamp_prefix_cumsum"] = debug_bundle["projector_preclamp_prefix_cumsum"]
             for key, value in g_debug_stats.items():
                 ret[f"rhythm_debug_{key}"] = value
             if isinstance(ret.get("rhythm_prompt_global_weight_present"), torch.Tensor):
@@ -1268,6 +1327,10 @@ class ConanDurationAdapter(nn.Module):
                 ret["rhythm_debug_budget_hit_neg"] = debug_bundle["budget_hit_neg"]
             if isinstance(debug_bundle.get("projector_budget_hit_mask"), torch.Tensor):
                 ret["rhythm_debug_budget_hit_mask"] = debug_bundle["projector_budget_hit_mask"]
+            ret["rhythm_debug_prompt_g_support_ratio_vs_speech"] = debug_bundle["prompt_g_support_ratio_vs_speech"]
+            ret["rhythm_debug_prompt_g_support_ratio_vs_valid"] = debug_bundle["prompt_g_support_ratio_vs_valid"]
+            ret["rhythm_debug_prompt_g_clean_ratio_vs_speech"] = debug_bundle["prompt_g_clean_ratio_vs_speech"]
+            ret["rhythm_debug_prompt_g_clean_ratio_vs_valid"] = debug_bundle["prompt_g_clean_ratio_vs_valid"]
 
     @staticmethod
     def _pad_tail_sequences(

@@ -32,6 +32,7 @@ _GATE1_MONOTONICITY_RATE_MIN = 0.95
 _REQUIRED_NEGATIVE_CONTROLS = ("source_only", "random_ref", "shuffled_ref")
 _GATE0_EXPLAINABILITY_SLOPE_MIN = 0.0
 _GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
+_GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN = 0.02
 _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
     "silence_leakage": 0.05,
     "prefix_discrepancy": 0.05,
@@ -178,6 +179,15 @@ def collect_gate_issues(frame) -> list[str]:
                 quality_issues.append(
                     f"analytic_negative_control_gap={analytic_neg_gap:.3f}<={_GATE1_NEGATIVE_CONTROL_GAP_MIN:.3f}"
                 )
+            analytic_margin = _mean_for_eval_mode(
+                frame, column="alignment_local_margin_p10", eval_mode="analytic"
+            )
+            if not np.isfinite(analytic_margin):
+                quality_issues.append("analytic_alignment_local_margin_p10=missing")
+            elif analytic_margin < _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN:
+                quality_issues.append(
+                    f"analytic_alignment_local_margin_p10={analytic_margin:.3f}<{_GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN:.3f}"
+                )
         if {"coarse_only", "learned"}.issubset(observed_modes):
             for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
                 if column not in frame.columns:
@@ -279,6 +289,7 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_explainability_slope = float("nan")
     analytic_negative_control_gap = float("nan")
     analytic_same_text_gap = float("nan")
+    analytic_alignment_local_margin_p10 = float("nan")
     analytic_tempo_monotonicity_rate = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
     coarse_only_runtime_metrics: dict[str, float] = {}
@@ -338,6 +349,11 @@ def build_gate_status(frame) -> dict[str, object]:
             column="same_text_gap",
             eval_mode="analytic",
         )
+        analytic_alignment_local_margin_p10 = _mean_for_eval_mode(
+            frame,
+            column="alignment_local_margin_p10",
+            eval_mode="analytic",
+        )
         analytic_tempo_monotonicity_rate = _mean_for_eval_mode(
             frame,
             column="tempo_monotonicity_rate",
@@ -367,6 +383,8 @@ def build_gate_status(frame) -> dict[str, object]:
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
         and np.isfinite(analytic_explainability_slope)
         and analytic_explainability_slope > _GATE0_EXPLAINABILITY_SLOPE_MIN
+        and np.isfinite(analytic_alignment_local_margin_p10)
+        and analytic_alignment_local_margin_p10 >= _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN
     )
     gate1_criteria_pass = (
         "analytic" in observed_modes
@@ -399,6 +417,7 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_explainability_slope": analytic_explainability_slope,
         "analytic_negative_control_gap": analytic_negative_control_gap,
         "analytic_same_text_gap": analytic_same_text_gap,
+        "analytic_alignment_local_margin_p10": analytic_alignment_local_margin_p10,
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
         "coarse_only_runtime_metrics": coarse_only_runtime_metrics,

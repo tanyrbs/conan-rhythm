@@ -819,6 +819,20 @@ def test_build_gate_status_lists_missing_controls_for_partial_negative_control_s
     assert status["missing_controls"] == ["random_ref", "shuffled_ref"]
 
 
+def test_collect_gate_issues_flags_low_alignment_local_margin():
+    row = _make_debug_records_cli_row(
+        eval_mode="analytic",
+        ref_bin="mid",
+        ref_condition="real",
+        alignment_local_margin_p10=0.01,
+    )
+    frame = pd.DataFrame([row])
+    issues = collect_gate_issues(frame)
+    assert any(issue.startswith("analytic_alignment_local_margin_p10") for issue in issues)
+    status = build_gate_status(frame)
+    assert status["gate0_pass"] is False
+
+
 def test_build_gate_status_treats_missing_ref_condition_as_missing_all_negative_controls():
     frame = pd.DataFrame(
         [
@@ -1075,6 +1089,50 @@ def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_pat
         "strict gate failure" in captured.err.lower()
         and "missing_negative_controls=random_ref|shuffled_ref" in captured.err
     )
+
+
+def test_debug_records_cli_strict_gates_fail_on_low_alignment_margin(tmp_path, monkeypatch, capsys):
+    import scripts.rhythm_v3_debug_records as cli
+
+    _patch_debug_records_cli_rows(
+        monkeypatch,
+        cli,
+        rows=[
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="mid",
+                ref_condition="real",
+                alignment_local_margin_p10=0.01,
+            )
+        ],
+    )
+
+    output = tmp_path / "summary.csv"
+    gate_status_path = tmp_path / "gate_status.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rhythm_v3_debug_records.py",
+            "--input",
+            "dummy_bundle.npz",
+            "--output",
+            str(output),
+            "--gate-status-json",
+            str(gate_status_path),
+            "--strict-gates",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    status = json.loads(gate_status_path.read_text(encoding="utf-8"))
+    assert status["gate0_pass"] is False
+    assert any("alignment_local_margin_p10" in issue for issue in status["warnings"])
+    assert "alignment_local_margin_p10" in captured.err
 
 
 def test_debug_records_cli_review_export_is_strict_by_default(tmp_path, monkeypatch):

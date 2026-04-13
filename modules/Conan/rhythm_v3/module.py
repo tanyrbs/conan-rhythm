@@ -217,6 +217,8 @@ def _resolve_duration_runtime_surface(
 def _enforce_minimal_v1_runtime_contract(
     *,
     minimal_v1_profile: bool,
+    strict_minimal_claim_profile: bool,
+    use_src_gap_in_coarse_head: bool,
     g_variant: str,
     rate_mode: str,
     simple_global_stats: bool,
@@ -236,8 +238,8 @@ def _enforce_minimal_v1_runtime_contract(
     if not minimal_v1_profile:
         return
     errors: list[str] = []
-    if str(g_variant).strip().lower() == "unit_norm":
-        errors.append("g_variant must not be unit_norm")
+    if strict_minimal_claim_profile and str(g_variant).strip().lower() == "unit_norm":
+        errors.append("g_variant must not be unit_norm when strict minimal claim profile is enabled")
     if str(rate_mode).strip().lower() != "simple_global":
         errors.append("rate_mode must be simple_global")
     if not bool(simple_global_stats):
@@ -266,6 +268,8 @@ def _enforce_minimal_v1_runtime_contract(
         errors.append("detach_global_term_in_local_head must be true")
     if not bool(freeze_src_rate_init):
         errors.append("freeze_src_rate_init must be true")
+    if bool(use_src_gap_in_coarse_head):
+        errors.append("use_src_gap_in_coarse_head must be false")
     if errors:
         raise ValueError(
             "rhythm_v3_minimal_v1_profile runtime contract violation: "
@@ -696,6 +700,18 @@ class MixedEffectsDurationModule(nn.Module):
                 unused_kwargs.pop("rhythm_v3_detach_global_term_in_local_head", detach_global_term_default),
             )
         )
+        self.use_src_gap_in_coarse_head = bool(
+            unused_kwargs.pop(
+                "use_src_gap_in_coarse_head",
+                unused_kwargs.pop("rhythm_v3_use_src_gap_in_coarse_head", False),
+            )
+        )
+        self.strict_minimal_claim_profile = bool(
+            unused_kwargs.pop(
+                "strict_minimal_claim_profile",
+                unused_kwargs.pop("rhythm_v3_strict_minimal_claim_profile", True),
+            )
+        )
         del unused_kwargs
         self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.streaming_mode = str(streaming_mode or "strict").strip().lower()
@@ -726,6 +742,8 @@ class MixedEffectsDurationModule(nn.Module):
         )
         _enforce_minimal_v1_runtime_contract(
             minimal_v1_profile=self.minimal_v1_profile,
+            strict_minimal_claim_profile=self.strict_minimal_claim_profile,
+            use_src_gap_in_coarse_head=self.use_src_gap_in_coarse_head,
             g_variant=self.g_variant,
             rate_mode=self.rate_mode,
             simple_global_stats=self.simple_global_stats,
@@ -822,6 +840,7 @@ class MixedEffectsDurationModule(nn.Module):
                     disable_coarse_bias=self.disable_coarse_bias,
                     detach_global_term_in_local_head=self.detach_global_term_in_local_head,
                     coarse_delta_scale=self.coarse_delta_scale,
+                    use_src_gap_in_coarse_head=self.use_src_gap_in_coarse_head,
                     local_residual_scale=self.local_residual_scale,
                     src_rate_init_mode=self.src_rate_init_mode,
                     src_rate_init_value=self.src_rate_init_value,

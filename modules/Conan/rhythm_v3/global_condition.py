@@ -243,6 +243,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             torch.zeros_like(support_weight),
             support_weight,
         )
+        valid_count = valid_mask.sum(dim=1, keepdim=True).float().clamp_min(1.0)
+        speech_count = speech_mask.sum(dim=1, keepdim=True).float().clamp_min(1.0)
 
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
@@ -267,6 +269,18 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                     prompt_g_clean_count=effective_clean_count.detach(),
                     prompt_g_support_weight=effective_support_weight.detach(),
                     prompt_g_domain_valid=prompt_domain_valid.detach(),
+                    prompt_g_support_ratio_vs_speech=(
+                        effective_support_count / speech_count
+                    ).detach(),
+                    prompt_g_support_ratio_vs_valid=(
+                        effective_support_count / valid_count
+                    ).detach(),
+                    prompt_g_clean_ratio_vs_speech=(
+                        effective_clean_count / speech_count
+                    ).detach(),
+                    prompt_g_clean_ratio_vs_valid=(
+                        effective_clean_count / valid_count
+                    ).detach(),
                 ),
             )
         )

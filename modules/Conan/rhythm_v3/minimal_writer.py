@@ -56,6 +56,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         detach_global_term_in_local_head: bool = False,
         coarse_delta_scale: float = 0.20,
         local_residual_scale: float = 0.35,
+        use_src_gap_in_coarse_head: bool = False,
         src_rate_init_mode: str = "first_speech",
         src_rate_init_value: float = 0.0,
         freeze_src_rate_init: bool = False,
@@ -104,8 +105,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             raise ValueError(
                 "MinimalStreamingDurationHeadV1G.src_rate_init_mode must be one of: learned, zero, first_speech."
             )
+        self.use_src_gap_in_coarse_head = bool(use_src_gap_in_coarse_head)
+        coarse_in_dim = self.query_dim + (2 if self.use_src_gap_in_coarse_head else 1)
         self.coarse_head = nn.Sequential(
-            nn.Linear(self.query_dim + 2, self.query_dim),
+            nn.Linear(coarse_in_dim, self.query_dim),
             nn.GELU(),
             nn.Linear(self.query_dim, 1),
         )
@@ -241,9 +244,12 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             self.analytic_gap_clip,
         )
         global_shift_analytic = analytic_gap * commit_valid_mask
-        g_src_utt = _masked_median_2d(local_rate_seq.float(), speech_mask)
-        delta_g_utt = (g_ref_col - g_src_utt).detach()
-        coarse_context = torch.cat([spk_ctx, g_ref_col, delta_g_utt], dim=-1)
+        if self.use_src_gap_in_coarse_head:
+            g_src_utt = _masked_median_2d(local_rate_seq.float(), speech_mask)
+            delta_g_utt = (g_ref_col - g_src_utt).detach()
+            coarse_context = torch.cat([spk_ctx, g_ref_col, delta_g_utt], dim=-1)
+        else:
+            coarse_context = torch.cat([spk_ctx, g_ref_col], dim=-1)
         coarse_scalar = self.coarse_delta_scale * torch.tanh(self.coarse_head(coarse_context).squeeze(-1))
         predicted_coarse = coarse_scalar.unsqueeze(1).expand_as(global_shift_analytic) * commit_valid_mask
         coarse_correction = predicted_coarse

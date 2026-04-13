@@ -406,7 +406,59 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_unit_n
     hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_g_variant"] = "unit_norm"
     hparams["rhythm_v3_unit_prior_path"] = str(ROOT / "tests" / "rhythm" / "fixtures" / "dummy_unit_prior.npz")
-    with pytest.raises(ValueError, match="rhythm_v3_minimal_v1_profile forbids rhythm_v3_g_variant=unit_norm"):
+    with pytest.raises(
+        ValueError,
+        match="rhythm_v3_minimal_v1_profile with strict minimal claim profile forbids rhythm_v3_g_variant=unit_norm",
+    ):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_allows_unit_norm_when_strict_claim_disabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_g_variant"] = "unit_norm"
+    hparams["rhythm_v3_unit_prior_path"] = str(ROOT / "tests" / "rhythm" / "fixtures" / "dummy_unit_prior.npz")
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_src_gap_in_coarse_head():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_use_src_gap_in_coarse_head"] = True
+    with pytest.raises(ValueError, match="rhythm_v3_use_src_gap_in_coarse_head=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_strict_gate_without_status_path():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    with pytest.raises(
+        ValueError,
+        match="rhythm_v3_gate_quality_strict requires rhythm_v3_required_gate_status_json",
+    ):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_strict_gate_with_missing_status_file(tmp_path):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(tmp_path / "gate_status.json")
+    with pytest.raises(ValueError, match="rhythm_v3_required_gate_status_json"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_strict_gate_without_debug_export(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text('{"gate0_pass": false, "gate1_pass": false, "gate2_pass": false}', encoding="utf-8")
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    hparams["rhythm_v3_debug_export"] = False
+    with pytest.raises(ValueError, match="rhythm_v3_debug_export=true"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1345,6 +1397,13 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_detach_global_term_in_local_head: true" in source
     assert "rhythm_v3_freeze_src_rate_init: true" in source
     assert "rhythm_v3_debug_export: true" in source
+    assert "rhythm_v3_strict_minimal_claim_profile: true" in source
+    assert "rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json" in source
+    assert "rhythm_v3_use_src_gap_in_coarse_head: false" in source
+    assert "rhythm_v3_boundary_offset_decay: 0.60" in source
+    assert "rhythm_v3_src_rate_init_mode: first_speech" in source
+    assert "rhythm_v3_src_rate_init_value: 0.0" in source
+    assert "rhythm_v3_export_projector_telemetry: true" in source
     assert "rhythm_prompt_dropout: 0.0" in source
     assert "rhythm_prompt_truncation: 0.0" in source
     assert "rhythm_v3_silence_coarse_weight: 0.0" in source

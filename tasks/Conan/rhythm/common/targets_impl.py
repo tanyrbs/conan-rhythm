@@ -1033,6 +1033,8 @@ def build_duration_v3_loss_targets(
     global_bias_tgt_support_count = None
     coarse_target_speech_conf_mean = None
     local_residual_tgt = None
+    local_residual_tgt_center = None
+    local_residual_tgt_abs_mean = None
     prefix_duration_tgt = None
     consistency_local_residual_tgt = None
     consistency_logstretch_tgt = None
@@ -1153,6 +1155,17 @@ def build_duration_v3_loss_targets(
         )
         prefix_duration_tgt = coarse_duration_tgt.detach()
         local_residual_tgt = (full_logstretch_tgt - coarse_logstretch_tgt) * committed_speech_mask.float()
+        if isinstance(local_residual_tgt, torch.Tensor):
+            committed_speech_float = committed_speech_mask.float()
+            local_residual_tgt_center = _masked_duration_v3_median(
+                local_residual_tgt.detach(),
+                committed_speech_float,
+                weight=unit_confidence_local_tgt,
+            ).detach()
+            local_residual_tgt_abs_mean = (
+                (local_residual_tgt.detach().abs() * committed_speech_float).sum(dim=1, keepdim=True)
+                / committed_speech_float.sum(dim=1, keepdim=True).clamp_min(1.0)
+            ).detach()
     if (
         bool(getattr(config, "minimal_v1_profile", False))
         and bool((committed_silence_mask > 0.5).any().item())
@@ -1258,6 +1271,8 @@ def build_duration_v3_loss_targets(
         global_bias_tgt_support_count=global_bias_tgt_support_count,
         coarse_target_speech_conf_mean=coarse_target_speech_conf_mean,
         local_residual_tgt=local_residual_tgt,
+        local_residual_tgt_center=local_residual_tgt_center,
+        local_residual_tgt_abs_mean=local_residual_tgt_abs_mean,
         prefix_duration_tgt=prefix_duration_tgt,
         prompt_basis_activation=prompt_targets["prompt_basis_activation"],
         prompt_random_target_tgt=prompt_targets["prompt_random_target_tgt"],

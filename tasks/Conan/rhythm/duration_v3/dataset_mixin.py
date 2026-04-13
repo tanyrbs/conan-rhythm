@@ -567,6 +567,38 @@ class DurationV3DatasetMixin:
                 "minimal_v1_profile cached paired-target supervision must carry non-empty "
                 f"unit_alignment_version_tgt ({context})."
             )
+        fallback_from_cont = self._extract_optional_float_scalar(
+            sample.get("unit_alignment_fallback_from_continuous_tgt")
+        )
+        if fallback_from_cont is not None and float(fallback_from_cont) > 0.0:
+            raise RuntimeError(
+                "minimal_v1_profile cached paired-target supervision forbids "
+                f"unit_alignment_fallback_from_continuous_tgt > 0 ({context})."
+            )
+        fallback_ratio = self._extract_optional_float_scalar(
+            sample.get("unit_alignment_projection_fallback_ratio_tgt")
+        )
+        if fallback_ratio is not None and float(fallback_ratio) > 0.0:
+            raise RuntimeError(
+                "minimal_v1_profile cached paired-target supervision forbids "
+                f"unit_alignment_projection_fallback_ratio_tgt > 0 ({context})."
+            )
+        health_bucket = str(
+            _extract_object_scalar(sample.get("unit_alignment_projection_health_bucket_tgt")) or ""
+        ).strip().lower()
+        if health_bucket not in {"", "clean"}:
+            raise RuntimeError(
+                "minimal_v1_profile cached paired-target supervision requires clean health bucket; "
+                f"got {health_bucket!r} ({context})."
+            )
+        fallback_reason = str(
+            _extract_object_scalar(sample.get("unit_alignment_fallback_reason_tgt")) or ""
+        ).strip()
+        if fallback_reason:
+            raise RuntimeError(
+                "minimal_v1_profile cached paired-target supervision forbids non-empty "
+                f"fallback_reason ({context}): {fallback_reason}"
+            )
         unmatched = self._extract_optional_float_scalar(sample.get("unit_alignment_unmatched_speech_ratio_tgt"))
         mean_local = self._extract_optional_float_scalar(sample.get("unit_alignment_mean_local_confidence_speech_tgt"))
         mean_coarse = self._extract_optional_float_scalar(sample.get("unit_alignment_mean_coarse_confidence_speech_tgt"))
@@ -868,6 +900,33 @@ class DurationV3DatasetMixin:
         if not self._use_duration_v3_simple_global_stats():
             return False
         return bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False))
+
+    def _validate_minimal_prompt_reference_domain(
+        self,
+        *,
+        speech_ratio_scalar: float | None,
+        prompt_ref_len_sec: float | None,
+        context: str,
+    ) -> None:
+        min_ratio = float(self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.0)
+        min_ref_sec = float(self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
+        max_ref_sec = float(self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
+        if speech_ratio_scalar is None or not np.isfinite(float(speech_ratio_scalar)):
+            raise RhythmDatasetPrefilterDrop(
+                f"minimal_v1 prompt conditioning rejects {context}: invalid speech_ratio"
+            )
+        if speech_ratio_scalar < min_ratio:
+            raise RhythmDatasetPrefilterDrop(
+                f"minimal_v1 prompt conditioning rejects {context}: speech_ratio={speech_ratio_scalar:.4f} < min={min_ratio:.4f}"
+            )
+        if prompt_ref_len_sec is None or not np.isfinite(float(prompt_ref_len_sec)):
+            raise RhythmDatasetPrefilterDrop(
+                f"minimal_v1 prompt conditioning rejects {context}: invalid ref_len_sec"
+            )
+        if prompt_ref_len_sec < min_ref_sec or prompt_ref_len_sec > max_ref_sec:
+            raise RhythmDatasetPrefilterDrop(
+                f"minimal_v1 prompt conditioning rejects {context}: ref_len_sec={prompt_ref_len_sec:.3f} outside [{min_ref_sec:.1f}, {max_ref_sec:.1f}]"
+            )
 
     def _coerce_prompt_sidecar(
         self,
@@ -1309,6 +1368,16 @@ class DurationV3DatasetMixin:
             source_cache=source_cache,
             prompt_item=prompt_item if isinstance(prompt_item, dict) else None,
         )
+        if self._strict_prompt_sidecars_required():
+            speech_ratio = float(np.asarray(conditioning["prompt_speech_ratio_scalar"], dtype=np.float32).reshape(-1)[0])
+            ref_len = None
+            if "prompt_ref_len_sec" in conditioning:
+                ref_len = float(np.asarray(conditioning["prompt_ref_len_sec"], dtype=np.float32).reshape(-1)[0])
+            self._validate_minimal_prompt_reference_domain(
+                speech_ratio_scalar=speech_ratio,
+                prompt_ref_len_sec=ref_len,
+                context=f"prompt conditioning for {item_name}",
+            )
         return conditioning
 
     @staticmethod

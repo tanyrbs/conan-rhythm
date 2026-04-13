@@ -748,24 +748,36 @@ class StreamingDurationProjector(nn.Module):
             if self.export_projector_telemetry
             else None
         )
+        preclamp_duration_exec = unit_duration_exec.float() * commit_mask.float()
+        preclamp_prefix_cumsum = (
+            torch.cumsum(preclamp_duration_exec, dim=1)
+            if self.export_projector_telemetry
+            else None
+        )
         source_prefix_cumsum = (
             torch.cumsum(source_duration_obs.float() * commit_mask.float(), dim=1)
             if self.export_projector_telemetry
             else None
         )
-        continuous_exec = unit_duration_exec.float() * commit_mask.float()
-        preclamp_rounded_exec = torch.clamp(torch.round(continuous_exec), min=1.0) * commit_mask.float()
-        projector_preclamp_exec = continuous_exec.detach() if self.export_projector_telemetry else None
+        preclamp_rounded_exec = torch.clamp(torch.round(preclamp_duration_exec), min=1.0) * commit_mask.float()
+        projector_preclamp_exec = (
+            preclamp_duration_exec.detach() if self.export_projector_telemetry else None
+        )
+        clamp_delta = (
+            (projected_duration_exec.float() - preclamp_duration_exec) * commit_mask.float()
+        )
+        projector_clamp_delta = clamp_delta.detach() if self.export_projector_telemetry else None
         projector_clamp_mass = (
             (projected_duration_exec.float() - preclamp_rounded_exec).abs().detach()
             if self.export_projector_telemetry
             else None
         )
         projector_rounding_regret = (
-            (projected_duration_exec.float() - continuous_exec).abs().detach()
+            (projected_duration_exec.float() - preclamp_duration_exec).abs().detach()
             if self.export_projector_telemetry
             else None
         )
+        projector_projection_regret = projector_rounding_regret
         materialized_duration_exec = self._materialize_projected_duration(
             unit_duration_exec=unit_duration_exec,
             projected_duration_exec=projected_duration_exec,
@@ -840,13 +852,19 @@ class StreamingDurationProjector(nn.Module):
             projector_budget_mode=self.budget_mode,
             projector_prefix_drift=prefix_unit_offset_next.detach(),
             projector_preclamp_exec=projector_preclamp_exec,
+            projector_preclamp_duration_exec=projector_preclamp_exec,
+            projector_clamp_delta=projector_clamp_delta,
             projector_clamp_mass=projector_clamp_mass,
             projector_rounding_regret=projector_rounding_regret,
+            projector_projection_regret=projector_rounding_regret,
             commit_closed_prefix_ok=commit_closed_prefix_ok.detach(),
             open_tail_commit_violation=open_tail_commit_violation.detach(),
             open_tail_commit_violation_count=open_tail_commit_violation_count.detach(),
             projected_prefix_cumsum=(
                 None if projected_prefix_cumsum is None else projected_prefix_cumsum.detach()
+            ),
+            projector_preclamp_prefix_cumsum=(
+                None if preclamp_prefix_cumsum is None else preclamp_prefix_cumsum.detach()
             ),
             source_prefix_cumsum=(
                 None if source_prefix_cumsum is None else source_prefix_cumsum.detach()

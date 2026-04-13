@@ -114,6 +114,8 @@ class DurationV3LossTargets:
     global_bias_tgt_support_count: Optional[torch.Tensor] = None
     coarse_target_speech_conf_mean: Optional[torch.Tensor] = None
     local_residual_tgt: Optional[torch.Tensor] = None
+    local_residual_tgt_center: Optional[torch.Tensor] = None
+    local_residual_tgt_abs_mean: Optional[torch.Tensor] = None
     prefix_duration_tgt: Optional[torch.Tensor] = None
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target_tgt: Optional[torch.Tensor] = None
@@ -414,6 +416,26 @@ def _build_duration_v3_diagnostic_metrics(
             diagnostics["rhythm_v3_local_residual_target_median_abs"] = zero
     else:
         diagnostics["rhythm_v3_local_residual_target_median_abs"] = zero
+    local_tgt_center = getattr(targets, "local_residual_tgt_center", None)
+    local_tgt_abs_mean = getattr(targets, "local_residual_tgt_abs_mean", None)
+    if isinstance(local_tgt_center, torch.Tensor):
+        diagnostics["rhythm_v3_local_residual_tgt_center_abs"] = (
+            local_tgt_center.float().abs().mean().detach()
+        )
+    else:
+        diagnostics["rhythm_v3_local_residual_tgt_center_abs"] = zero
+    if isinstance(local_tgt_abs_mean, torch.Tensor):
+        diagnostics["rhythm_v3_local_residual_tgt_abs_mean"] = (
+            local_tgt_abs_mean.float().mean().detach()
+        )
+    else:
+        diagnostics["rhythm_v3_local_residual_tgt_abs_mean"] = zero
+    if isinstance(local_mean, torch.Tensor) and isinstance(local_tgt_center, torch.Tensor):
+        diagnostics["rhythm_v3_local_residual_center_gap"] = (
+            (local_mean.reshape_as(local_tgt_center) - local_tgt_center.float()).abs().mean().detach()
+        )
+    else:
+        diagnostics["rhythm_v3_local_residual_center_gap"] = zero
     if isinstance(coarse_abs_mean, torch.Tensor) and isinstance(local_abs_mean, torch.Tensor):
         diagnostics["rhythm_v3_coarse_explained_ratio"] = (
             coarse_abs_mean / (coarse_abs_mean + local_abs_mean + 1.0e-6)
