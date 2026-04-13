@@ -196,7 +196,12 @@ class ConanDurationAdapter(nn.Module):
             local_residual_scale=float(hparams.get("rhythm_v3_local_residual_scale", 0.35) or 0.0),
             src_rate_init_mode=str(hparams.get("rhythm_v3_src_rate_init_mode", "auto") or "auto"),
             src_rate_init_value=float(hparams.get("rhythm_v3_src_rate_init_value", 0.0) or 0.0),
-            freeze_src_rate_init=bool(hparams.get("rhythm_v3_freeze_src_rate_init", False)),
+            freeze_src_rate_init=bool(
+                hparams.get(
+                    "rhythm_v3_freeze_src_rate_init",
+                    bool(hparams.get("rhythm_v3_minimal_v1_profile", False)),
+                )
+            ),
             debug_export=bool(hparams.get("rhythm_v3_debug_export", False)),
             export_projector_telemetry=bool(
                 hparams.get(
@@ -724,13 +729,9 @@ class ConanDurationAdapter(nn.Module):
             prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
             prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
             if isinstance(prompt_speech_mask, torch.Tensor):
+                prompt_evidence = getattr(ref_memory, "prompt", None) if ref_memory is not None else None
                 min_prompt_speech_ratio = float(
                     getattr(getattr(self.module, "prompt_memory_encoder", None), "min_speech_ratio", 0.0)
-                )
-                support_mask = build_global_rate_support_mask(
-                    speech_mask=prompt_speech_mask.float(),
-                    valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
-                    drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
                 )
                 speech_count = prompt_speech_mask.float().sum(dim=1, keepdim=True)
                 valid_count = (
@@ -738,18 +739,53 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(prompt_valid_mask, torch.Tensor)
                     else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
                 )
-                support_count = support_mask.float().sum(dim=1, keepdim=True)
                 speech_ratio = speech_count / valid_count.clamp_min(1.0)
+                support_mask = (
+                    prompt_evidence.prompt_g_support_mask.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_mask, torch.Tensor)
+                    else build_global_rate_support_mask(
+                        speech_mask=prompt_speech_mask.float(),
+                        valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
+                        drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
+                    ).float()
+                )
+                clean_mask = (
+                    prompt_evidence.prompt_g_clean_mask.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_clean_mask, torch.Tensor)
+                    else support_mask
+                )
+                support_count = (
+                    prompt_evidence.prompt_g_support_count.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_count, torch.Tensor)
+                    else support_mask.sum(dim=1, keepdim=True)
+                )
+                clean_count = (
+                    prompt_evidence.prompt_g_clean_count.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_clean_count, torch.Tensor)
+                    else clean_mask.sum(dim=1, keepdim=True)
+                )
+                support_weight = (
+                    prompt_evidence.prompt_g_support_weight.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_support_weight, torch.Tensor)
+                    else support_count
+                )
                 g_valid_support = (support_count > 0.5).float()
                 g_domain_valid = (
-                    g_valid_support > 0.5
-                ) & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
+                    prompt_evidence.prompt_g_domain_valid.float()
+                    if prompt_evidence is not None and isinstance(prompt_evidence.prompt_g_domain_valid, torch.Tensor)
+                    else (
+                        (g_valid_support > 0.5)
+                        & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
+                    ).float()
+                )
                 g_debug_stats = {
                     "g_support_count": support_count.detach(),
+                    "g_clean_count": clean_count.detach(),
+                    "g_support_weight": support_weight.detach(),
                     "g_speech_count": speech_count.detach(),
                     "g_valid_count": valid_count.detach(),
                     "g_valid_support": g_valid_support.detach(),
-                    "g_domain_valid": g_domain_valid.float().detach(),
+                    "g_domain_valid": g_domain_valid.detach(),
                     "g_min_speech_ratio": support_count.new_full(
                         support_count.shape,
                         float(min_prompt_speech_ratio),

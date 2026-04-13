@@ -233,6 +233,45 @@ class DataPipelinePerfTests(unittest.TestCase):
             self.assertEqual(sample["ref_item_id"], 1)
             self.assertEqual(dataset.raw_cache_calls, 3)
 
+    def test_fastspeech_dataset_strict_reference_sampler_rejects_same_text_only_candidates(self) -> None:
+        items = [
+            {
+                "item_name": "spk0_a",
+                "spk_id": 0,
+                "mel": torch.ones((4, 3)).numpy(),
+                "f0": torch.tensor([1, 2, 3, 4]).numpy(),
+                "ph_token": torch.tensor([11, 12], dtype=torch.long).numpy(),
+            },
+            {
+                "item_name": "spk0_b",
+                "spk_id": 0,
+                "mel": torch.ones((5, 3)).numpy(),
+                "f0": torch.tensor([1, 2, 3, 4, 5]).numpy(),
+                "ph_token": torch.tensor([11, 12], dtype=torch.long).numpy(),
+            },
+        ]
+        with mock.patch.dict(
+            "utils.commons.hparams.hparams",
+            {
+                "sort_by_len": False,
+                "max_frames": 16,
+                "ds_workers": 0,
+                "binary_data_dir": "",
+                "frames_multiple": 1,
+                "test_ids": [],
+                "min_frames": 0,
+                "use_spk_id": False,
+                "use_spk_embed": False,
+                "use_pitch_embed": True,
+                "max_input_tokens": 16,
+                "rhythm_v3_disallow_same_text_reference": True,
+            },
+            clear=True,
+        ):
+            dataset = _CountingRawCacheFastSpeechDataset(items)
+            with self.assertRaisesRegex(RuntimeError, "different-text reference candidate"):
+                dataset._sample_reference_local_index([0, 1], 0)
+
     def test_fastspeech_dataset_fallback_uses_item_id_for_remapped_manifest_sample(self) -> None:
         items = [
             {"item_name": "spk0_a", "spk_id": 0, "mel": torch.ones((4, 3)).numpy(), "f0": torch.tensor([10, 11, 12, 13]).numpy()},

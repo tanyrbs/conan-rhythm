@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
 from .silence_surface import build_silence_tau_surface_meta
 from .g_stats import (
-    build_global_rate_support_mask,
     compute_global_rate,
     normalize_falsification_eval_mode,
     normalize_global_rate_variant,
@@ -304,13 +303,18 @@ class PromptDurationMemoryEncoder(nn.Module):
         support_mask = support_stats.support_mask
         support_has_mass = support_stats.support_count > 0.0
         zero_summary_rows = ~support_has_mass
-        strict_clean_requested = isinstance(prompt_closed_mask, torch.Tensor) or (
-            isinstance(prompt_boundary_confidence, torch.Tensor)
+        missing_closed_sidecar = self.strict_clean_global_support and not isinstance(prompt_closed_mask, torch.Tensor)
+        missing_boundary_sidecar = (
+            self.strict_clean_global_support
             and self.min_boundary_confidence is not None
+            and not isinstance(prompt_boundary_confidence, torch.Tensor)
         )
-        if self.strict_clean_global_support and strict_clean_requested:
+        if missing_closed_sidecar or missing_boundary_sidecar:
+            zero_summary_rows = torch.ones_like(zero_summary_rows, dtype=torch.bool)
+        if self.strict_clean_global_support:
             zero_summary_rows = zero_summary_rows | (support_stats.clean_count <= 0.0)
         resolved_weight = prompt_global_weight.float() if isinstance(prompt_global_weight, torch.Tensor) else None
+        support_weight = support_stats.support_count
         if resolved_weight is not None:
             support_weight = torch.where(
                 support_mask,
@@ -318,53 +322,103 @@ class PromptDurationMemoryEncoder(nn.Module):
                 torch.zeros_like(resolved_weight),
             ).sum(dim=1, keepdim=True)
             zero_summary_rows = zero_summary_rows | (support_weight <= 0.0)
-        rate_speech_mask = speech_mask
-        resolved_support_mask = support_mask
         if bool(zero_summary_rows.any().item()):
             if self.strict_clean_global_support and self.training:
                 raise ValueError(
-                    "PromptDurationMemoryEncoder requires non-empty closed/boundary-clean support for g."
+                    "PromptDurationMemoryEncoder requires non-empty closed/boundary-clean support sidecars for g."
                 )
-            # Generic prompt-summary pooling remains lenient for all-silence prompts:
-            # use valid support only to avoid a hard failure, then zero the
-            # speech-only pooled summary when requested.
-            fallback_support = valid_mask.bool()
-            resolved_support_mask = torch.where(
-                zero_summary_rows.expand_as(support_mask),
-                fallback_support,
-                support_mask,
-            )
-            rate_speech_mask = torch.where(zero_summary_rows, valid_mask, speech_mask)
-            if resolved_weight is not None:
-                resolved_weight = torch.where(
-                    zero_summary_rows.expand_as(resolved_support_mask),
-                    resolved_support_mask.float(),
-                    resolved_weight,
-                )
-        global_rate = compute_global_rate(
-            log_dur=rate_logdur,
-            speech_mask=rate_speech_mask,
-            valid_mask=valid_mask,
-            variant=self.g_variant,
-            weight=resolved_weight,
-            trim_ratio=self.g_trim_ratio,
-            drop_edge_runs=self.g_drop_edge_runs,
-            unit_ids=prompt_content_units,
-            unit_prior=prompt_unit_log_prior,
-            support_mask=resolved_support_mask,
-            invalid_weight_behavior="fallback" if bool(zero_summary_rows.any().item()) else "raise",
+        global_rate = rate_logdur.new_zeros((rate_logdur.size(0), 1))
+        normal_rows = ~zero_summary_rows.squeeze(1)
+        lenient_rows = (
+            zero_summary_rows.squeeze(1)
+            & (not self.summary_pool_speech_only)
+            & (not self.strict_clean_global_support)
         )
+        if bool(normal_rows.any().item()):
+            row_rate = compute_global_rate(
+                log_dur=rate_logdur[normal_rows],
+                speech_mask=speech_mask[normal_rows],
+                valid_mask=valid_mask[normal_rows],
+                variant=self.g_variant,
+                weight=None if resolved_weight is None else resolved_weight[normal_rows],
+                trim_ratio=self.g_trim_ratio,
+                drop_edge_runs=self.g_drop_edge_runs,
+                unit_ids=prompt_content_units[normal_rows],
+                unit_prior=None if prompt_unit_log_prior is None else prompt_unit_log_prior[normal_rows],
+                support_mask=support_mask[normal_rows],
+                invalid_weight_behavior="raise",
+            )
+            global_rate[normal_rows] = row_rate
+        if bool(lenient_rows.any().item()):
+            lenient_weight = None
+            if resolved_weight is not None:
+                lenient_weight = valid_mask[lenient_rows].float()
+            row_rate = compute_global_rate(
+                log_dur=rate_logdur[lenient_rows],
+                speech_mask=valid_mask[lenient_rows],
+                valid_mask=valid_mask[lenient_rows],
+                variant=self.g_variant,
+                weight=lenient_weight,
+                trim_ratio=self.g_trim_ratio,
+                drop_edge_runs=0,
+                unit_ids=prompt_content_units[lenient_rows],
+                unit_prior=None if prompt_unit_log_prior is None else prompt_unit_log_prior[lenient_rows],
+                support_mask=valid_mask[lenient_rows].bool(),
+                invalid_weight_behavior="raise",
+            )
+            global_rate[lenient_rows] = row_rate
         if self.summary_pool_speech_only or self.strict_clean_global_support:
             global_rate = torch.where(zero_summary_rows, global_rate.new_zeros(global_rate.shape), global_rate)
+        clean_mask = support_stats.clean_mask
+        if not isinstance(clean_mask, torch.Tensor):
+            clean_mask = support_mask
+        clean_count = support_stats.clean_count
+        if not isinstance(clean_count, torch.Tensor):
+            clean_count = support_stats.support_count
+        domain_valid = (~zero_summary_rows).float()
+        effective_support_mask = torch.where(
+            zero_summary_rows.expand_as(support_mask),
+            torch.zeros_like(support_mask),
+            support_mask,
+        )
+        effective_clean_mask = torch.where(
+            zero_summary_rows.expand_as(clean_mask),
+            torch.zeros_like(clean_mask),
+            clean_mask,
+        )
+        effective_support_count = effective_support_mask.sum(dim=1, keepdim=True).float()
+        effective_clean_count = effective_clean_mask.sum(dim=1, keepdim=True).float()
+        effective_support_weight = torch.where(
+            zero_summary_rows,
+            torch.zeros_like(support_weight),
+            support_weight,
+        )
         if self.summary_pool_speech_only or self.strict_clean_global_support:
             residual_mask = torch.where(
-                zero_summary_rows.expand_as(resolved_support_mask),
-                torch.zeros_like(resolved_support_mask),
-                resolved_support_mask,
+                zero_summary_rows.expand_as(effective_support_mask),
+                torch.zeros_like(effective_support_mask),
+                effective_support_mask,
             )
         else:
-            residual_mask = resolved_support_mask
+            residual_mask = torch.where(
+                lenient_rows.unsqueeze(1),
+                valid_mask.bool(),
+                effective_support_mask,
+            )
+        residual_mask = residual_mask.float()
         ref_residual = (rate_logdur - global_rate) * residual_mask
+        prompt_evidence = PromptConditioningEvidence(
+            prompt_mask=valid_mask,
+            prompt_log_base=log_base,
+            prompt_log_duration=logdur,
+            prompt_log_residual=ref_residual,
+            prompt_g_support_mask=effective_support_mask.float(),
+            prompt_g_clean_mask=effective_clean_mask.float(),
+            prompt_g_support_count=effective_support_count.detach(),
+            prompt_g_clean_count=effective_clean_count.detach(),
+            prompt_g_support_weight=effective_support_weight.detach(),
+            prompt_g_domain_valid=domain_valid.detach(),
+        )
         if self.simple_global_stats and not self.emit_prompt_diagnostics:
             operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
             return validate_reference_duration_memory(
@@ -379,12 +433,7 @@ class PromptDurationMemoryEncoder(nn.Module):
                     ),
                     prompt_valid_mask=valid_mask,
                     prompt_speech_mask=speech_mask,
-                    prompt=PromptConditioningEvidence(
-                        prompt_mask=valid_mask,
-                        prompt_log_base=log_base,
-                        prompt_log_duration=logdur,
-                        prompt_log_residual=ref_residual,
-                    ),
+                    prompt=prompt_evidence,
                 )
             )
 
@@ -439,13 +488,33 @@ class PromptDurationMemoryEncoder(nn.Module):
                     role_coverage=role_coverage,
                 ),
                 prompt=PromptConditioningEvidence(
-                    prompt_mask=valid_mask,
-                    prompt_log_base=log_base,
-                    prompt_log_duration=logdur,
-                    prompt_log_residual=ref_residual,
+                    prompt_basis_activation=prompt_evidence.prompt_basis_activation,
+                    prompt_random_target=prompt_evidence.prompt_random_target,
+                    prompt_mask=prompt_evidence.prompt_mask,
+                    prompt_fit_mask=prompt_evidence.prompt_fit_mask,
+                    prompt_eval_mask=prompt_evidence.prompt_eval_mask,
+                    prompt_operator_fit=prompt_evidence.prompt_operator_fit,
+                    prompt_operator_cv_fit=prompt_evidence.prompt_operator_cv_fit,
+                    prompt_log_base=prompt_evidence.prompt_log_base,
+                    prompt_log_duration=prompt_evidence.prompt_log_duration,
+                    prompt_log_residual=prompt_evidence.prompt_log_residual,
+                    prompt_progress_fit=prompt_evidence.prompt_progress_fit,
+                    prompt_operator_support=prompt_evidence.prompt_operator_support,
+                    prompt_operator_condition_number=prompt_evidence.prompt_operator_condition_number,
+                    prompt_short_fallback=prompt_evidence.prompt_short_fallback,
+                    prompt_operator_coeff_norm=summary_state.norm(dim=-1, keepdim=True),
+                    prompt_detector_fit=prompt_evidence.prompt_detector_fit,
+                    prompt_detector_support=prompt_evidence.prompt_detector_support,
+                    prompt_detector_condition_number=prompt_evidence.prompt_detector_condition_number,
+                    prompt_detector_coeff_norm=prompt_evidence.prompt_detector_coeff_norm,
                     prompt_role_attn=attn,
                     prompt_role_fit=prompt_role_fit,
-                    prompt_operator_coeff_norm=summary_state.norm(dim=-1, keepdim=True),
+                    prompt_g_support_mask=prompt_evidence.prompt_g_support_mask,
+                    prompt_g_clean_mask=prompt_evidence.prompt_g_clean_mask,
+                    prompt_g_support_count=prompt_evidence.prompt_g_support_count,
+                    prompt_g_clean_count=prompt_evidence.prompt_g_clean_count,
+                    prompt_g_support_weight=prompt_evidence.prompt_g_support_weight,
+                    prompt_g_domain_valid=prompt_evidence.prompt_g_domain_valid,
                 ),
             )
         )

@@ -223,18 +223,35 @@ class BaseSpeechDataset(BaseDataset):
     def _sample_reference_local_index(self, candidates, index: int, *, source_sig=None) -> int:
         if len(candidates) <= 1:
             return index
-        if bool(
-            self.hparams.get(
-                "rhythm_v3_disallow_same_text_reference",
-                self.hparams.get("rhythm_disallow_same_text_reference", True),
-            )
-        ):
+        strict_same_text_guard = False
+        if "rhythm_v3_disallow_same_text_reference" in self.hparams:
+            strict_same_text_guard = bool(self.hparams.get("rhythm_v3_disallow_same_text_reference", False))
+        elif "rhythm_disallow_same_text_reference" in self.hparams:
+            strict_same_text_guard = bool(self.hparams.get("rhythm_disallow_same_text_reference", False))
+        if strict_same_text_guard:
             if source_sig is None:
                 source_sig = self._get_text_signature(index)
-            if source_sig is not None:
-                filtered = [cand for cand in candidates if int(cand) != int(index) and self._get_text_signature(int(cand)) != source_sig]
-                if filtered:
-                    candidates = filtered
+            if source_sig is None:
+                raise RuntimeError(
+                    "rhythm_v3 strict reference sampling requires comparable text signatures for the source item."
+                )
+            filtered = []
+            for cand in candidates:
+                cand = int(cand)
+                if cand == int(index):
+                    continue
+                cand_sig = self._get_text_signature(cand)
+                if cand_sig is None:
+                    raise RuntimeError(
+                        "rhythm_v3 strict reference sampling requires comparable text signatures for reference candidates."
+                    )
+                if cand_sig != source_sig:
+                    filtered.append(cand)
+            if not filtered:
+                raise RuntimeError(
+                    "rhythm_v3 strict reference sampling could not find a different-text reference candidate."
+                )
+            candidates = filtered
         ref_local = random.choice(candidates)
         if ref_local != index:
             return ref_local

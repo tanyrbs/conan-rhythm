@@ -100,11 +100,17 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                 "V1-G prompt conditioning prompt_ref_len_sec batch mismatch: "
                 f"got {tuple(ref_len.shape)} for batch_size={int(speech_ratio.size(0))}."
             )
+        missing_ref_len_rows = (
+            torch.ones_like(speech_ratio, dtype=torch.bool)
+            if not isinstance(ref_len, torch.Tensor)
+            else torch.zeros_like(speech_ratio, dtype=torch.bool)
+        )
         invalid_ref_len_rows = (
             ((~torch.isfinite(ref_len)) | (ref_len < self.min_ref_len_sec) | (ref_len > self.max_ref_len_sec))
             if isinstance(ref_len, torch.Tensor)
             else torch.zeros_like(speech_ratio, dtype=torch.bool)
         )
+        invalid_ref_len_rows = invalid_ref_len_rows | missing_ref_len_rows
         if self.training:
             if bool(no_speech_rows.any().item()):
                 raise ValueError("V1-G prompt conditioning requires at least one speech run.")
@@ -148,65 +154,87 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             min_boundary_confidence=self.min_boundary_confidence,
         )
         support_mask = support_stats.support_mask
-        strict_clean_requested = isinstance(prompt_closed_mask, torch.Tensor) or (
-            isinstance(prompt_boundary_confidence, torch.Tensor)
-            and self.min_boundary_confidence is not None
+        missing_closed_sidecar_rows = (
+            torch.ones_like(support_stats.support_count, dtype=torch.bool)
+            if not isinstance(prompt_closed_mask, torch.Tensor)
+            else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+        )
+        missing_boundary_sidecar_rows = (
+            torch.ones_like(support_stats.support_count, dtype=torch.bool)
+            if self.min_boundary_confidence is not None and not isinstance(prompt_boundary_confidence, torch.Tensor)
+            else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
         )
         invalid_clean_rows = (
             (support_stats.clean_count <= 0.0)
-            if strict_clean_requested
-            else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+            | missing_closed_sidecar_rows
+            | missing_boundary_sidecar_rows
         )
         invalid_support_rows = support_stats.support_count <= 0.0
+        support_weight = support_stats.support_count
         if isinstance(prompt_global_weight, torch.Tensor):
             support_mass = torch.where(
                 support_mask,
                 prompt_global_weight.float().clamp_min(0.0),
                 torch.zeros_like(prompt_global_weight.float()),
             ).sum(dim=1, keepdim=True)
+            support_weight = support_mass
             invalid_support_rows = invalid_support_rows | (support_mass <= 0.0)
         domain_invalid_rows = no_speech_rows | low_speech_ratio_rows | invalid_ref_len_rows
         invalid_rows = invalid_support_rows | invalid_clean_rows | domain_invalid_rows
-        resolved_support_mask = torch.where(
-            invalid_rows.expand_as(support_mask),
-            valid_mask.bool(),
-            support_mask,
-        )
-        resolved_speech_mask = torch.where(invalid_rows, valid_mask, speech_mask)
-        resolved_weight = None
-        if isinstance(prompt_global_weight, torch.Tensor):
-            prompt_global_weight = prompt_global_weight.float()
-            resolved_weight = torch.where(
-                invalid_rows.expand_as(prompt_global_weight),
-                resolved_support_mask.float(),
-                prompt_global_weight,
-            )
         if bool(invalid_rows.any().item()):
             if self.training:
                 raise ValueError(
                     "V1-G prompt conditioning requires non-empty closed/boundary-clean support for g."
                 )
-        global_rate = compute_global_rate(
-            log_dur=rate_logdur,
-            speech_mask=resolved_speech_mask,
-            valid_mask=valid_mask,
-            variant=self.g_variant,
-            weight=resolved_weight,
-            trim_ratio=self.g_trim_ratio,
-            drop_edge_runs=self.g_drop_edge_runs,
-            unit_ids=prompt_content_units,
-            unit_prior=prompt_unit_log_prior,
-            support_mask=resolved_support_mask,
-            invalid_weight_behavior="fallback" if bool(invalid_rows.any().item()) else "raise",
-        )
-        global_rate = torch.where(invalid_rows, global_rate.new_zeros(global_rate.shape), global_rate)
-        residual_mask = torch.where(
+        global_rate = rate_logdur.new_zeros((rate_logdur.size(0), 1))
+        valid_rows = ~invalid_rows.squeeze(1)
+        if bool(valid_rows.any().item()):
+            row_rate = compute_global_rate(
+                log_dur=rate_logdur[valid_rows],
+                speech_mask=speech_mask[valid_rows],
+                valid_mask=valid_mask[valid_rows],
+                variant=self.g_variant,
+                weight=(
+                    None
+                    if not isinstance(prompt_global_weight, torch.Tensor)
+                    else prompt_global_weight.float()[valid_rows]
+                ),
+                trim_ratio=self.g_trim_ratio,
+                drop_edge_runs=self.g_drop_edge_runs,
+                unit_ids=prompt_content_units[valid_rows],
+                unit_prior=None if prompt_unit_log_prior is None else prompt_unit_log_prior[valid_rows],
+                support_mask=support_mask[valid_rows],
+                invalid_weight_behavior="raise",
+            )
+            global_rate[valid_rows] = row_rate
+        effective_support_mask = torch.where(
             invalid_rows.expand_as(support_mask),
-            torch.zeros_like(support_mask, dtype=rate_logdur.dtype),
-            support_mask.float(),
+            torch.zeros_like(support_mask),
+            support_mask,
+        )
+        residual_mask = torch.where(
+            invalid_rows.expand_as(effective_support_mask),
+            torch.zeros_like(effective_support_mask, dtype=rate_logdur.dtype),
+            effective_support_mask.float(),
         )
         prompt_residual = (rate_logdur - global_rate) * residual_mask
         operator_coeff = global_rate.new_zeros((global_rate.size(0), self.operator_rank))
+        clean_mask = support_stats.clean_mask
+        if not isinstance(clean_mask, torch.Tensor):
+            clean_mask = support_mask
+        effective_clean_mask = torch.where(
+            invalid_rows.expand_as(clean_mask),
+            torch.zeros_like(clean_mask),
+            clean_mask,
+        )
+        effective_clean_count = effective_clean_mask.sum(dim=1, keepdim=True).float()
+        prompt_domain_valid = (~invalid_rows).float()
+        effective_support_count = effective_support_mask.sum(dim=1, keepdim=True).float()
+        effective_support_weight = torch.where(
+            invalid_rows,
+            torch.zeros_like(support_weight),
+            support_weight,
+        )
 
         return validate_reference_duration_memory(
             ReferenceDurationMemory(
@@ -225,6 +253,12 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                     prompt_log_base=log_base,
                     prompt_log_duration=logdur,
                     prompt_log_residual=prompt_residual,
+                    prompt_g_support_mask=effective_support_mask.float(),
+                    prompt_g_clean_mask=effective_clean_mask.float(),
+                    prompt_g_support_count=effective_support_count.detach(),
+                    prompt_g_clean_count=effective_clean_count.detach(),
+                    prompt_g_support_weight=effective_support_weight.detach(),
+                    prompt_g_domain_valid=prompt_domain_valid.detach(),
                 ),
             )
         )

@@ -149,9 +149,11 @@ fallback. When available, `prompt_closed_mask`,
 `prompt_boundary_confidence`, and `prompt_ref_len_sec` now also feed the
 maintained prompt-domain contract: minimal V1 expects speech-dominant
 3-8 second references, and the mainline `g` path uses closed/boundary-clean
-support rather than only speech-mask edge drop. The generic summary-pooling
-path still keeps a lenient all-silence zero-summary fallback for diagnostics,
-but maintained V1-G prompt conditioning remains the strict path.
+support rather than only speech-mask edge drop. In the maintained minimal
+path, missing clean-support sidecars now fail closed instead of silently
+widening support back to `valid_mask`. The generic summary-pooling path still
+keeps a lenient all-silence zero-summary fallback for diagnostics, but that
+behavior is now confined to the non-strict compatibility branch.
 
 ### 2.3 Canonical modules vs compatibility shims
 
@@ -680,7 +682,8 @@ minimal-V1 line:
    different-text rules are explicit rather than implicit
 2. writer checkpoint:
    `rhythm_v3_detach_global_term_in_local_head=true` remains the maintained
-   default, while `learned + no_detach` stays an ablation
+   default, `rhythm_v3_freeze_src_rate_init=true` remains the maintained
+   default, and `learned + no_detach` stays an ablation
 3. `g` checkpoint:
    runtime and audit both read the same speech-only / closed / boundary-clean
    support semantics instead of separate debug-only heuristics

@@ -4,6 +4,7 @@ import torch
 
 from modules.Conan.rhythm.supervision import build_source_rhythm_cache
 from modules.Conan.rhythm_v3.unit_frontend import DurationUnitFrontend, ProtocolDurationBaseline
+from modules.Conan.rhythm_v3.unitizer import StreamingRunLengthUnitizer
 
 
 def test_protocol_duration_baseline_table_prior_file_offsets_nominal_anchor(tmp_path):
@@ -117,6 +118,34 @@ def test_duration_unit_frontend_marks_short_open_runs_less_stable_than_long_seal
     )
     assert batch.source_run_stability.shape == batch.source_duration_obs.shape
     assert float(batch.source_run_stability[0, 0].item()) > float(batch.source_run_stability[0, 1].item())
+
+
+def test_streaming_unitizer_tensor_export_matches_python_export():
+    unitizer = StreamingRunLengthUnitizer(
+        silent_token=57,
+        separator_aware=True,
+        tail_open_units=2,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+    tokens = [1, 1, 57, 57, 2, 2, 57]
+    python_seq = unitizer.compress(tokens, mark_last_open=True)
+    tensor_seq = unitizer.compress_tensor(tokens, mark_last_open=True)
+    assert tensor_seq.to_python() == python_seq
+
+    frontend = DurationUnitFrontend(
+        vocab_size=64,
+        silent_token=57,
+        emit_silence_runs=True,
+        tail_open_units=2,
+        debounce_min_run_frames=2,
+    )
+    batch_from_python = frontend.base_frontend._batch_from_compressed([python_seq])
+    batch_from_tensor = frontend.base_frontend._batch_from_compressed([tensor_seq])
+    assert torch.equal(batch_from_python.content_units, batch_from_tensor.content_units)
+    assert torch.allclose(batch_from_python.dur_anchor_src, batch_from_tensor.dur_anchor_src)
+    assert torch.allclose(batch_from_python.silence_mask, batch_from_tensor.silence_mask)
+    assert torch.allclose(batch_from_python.run_stability, batch_from_tensor.run_stability)
 
 
 

@@ -11,6 +11,7 @@ from modules.Conan.rhythm_v3.contracts import (
     StructuredDurationOperatorMemory,
 )
 from modules.Conan.rhythm_v3.contracts import move_source_unit_batch
+from modules.Conan.rhythm_v3.global_condition import PromptGlobalConditionEncoderV1G
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from modules.Conan.rhythm_v3.summary_memory import PromptDurationMemoryEncoder
 from tasks.Conan.rhythm.loss_routing import (
@@ -493,6 +494,43 @@ def test_prompt_summary_strict_clean_global_support_uses_closed_boundary_clean_r
     assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
     assert torch.isfinite(memory.summary_state).all()
     assert torch.isfinite(memory.prompt_role_attn).all()
+    assert memory.prompt_g_support_mask is not None
+    assert memory.prompt_g_clean_mask is not None
+    assert memory.prompt_g_domain_valid is not None
+    assert torch.equal(
+        memory.prompt_g_support_mask[0].bool(),
+        torch.tensor([True, False, True, True, False]),
+    )
+    assert torch.count_nonzero(memory.prompt_g_support_mask[1]).item() == 0
+    assert torch.allclose(memory.prompt_g_domain_valid, torch.tensor([[1.0], [0.0]], dtype=torch.float32))
+
+
+def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empty():
+    encoder = PromptGlobalConditionEncoderV1G(
+        operator_rank=2,
+        min_speech_ratio=0.6,
+        min_ref_len_sec=3.0,
+        max_ref_len_sec=8.0,
+        drop_edge_runs_for_g=1,
+        min_boundary_confidence=0.8,
+    )
+    encoder.eval()
+    memory = encoder(
+        prompt_content_units=torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.long),
+        prompt_duration_obs=torch.tensor([[4.0, 8.0, 16.0, 32.0], [2.0, 3.0, 5.0, 7.0]], dtype=torch.float32),
+        prompt_mask=torch.ones((2, 4), dtype=torch.float32),
+        prompt_valid_mask=torch.ones((2, 4), dtype=torch.float32),
+        prompt_speech_mask=torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        prompt_closed_mask=torch.tensor([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        prompt_boundary_confidence=torch.tensor([[0.95, 0.90, 0.92, 0.88], [0.10, 0.10, 0.10, 0.10]], dtype=torch.float32),
+        prompt_ref_len_sec=torch.tensor([[5.0], [5.0]], dtype=torch.float32),
+        prompt_speech_ratio_scalar=torch.tensor([[1.0], [0.25]], dtype=torch.float32),
+    )
+    assert torch.isfinite(memory.global_rate).all()
+    assert torch.count_nonzero(memory.prompt_g_support_mask[1]).item() == 0
+    assert torch.count_nonzero(memory.prompt_log_residual[1]).item() == 0
+    assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
+    assert torch.allclose(memory.prompt_g_domain_valid, torch.tensor([[1.0], [0.0]], dtype=torch.float32))
 
 
 def test_prompt_summary_pool_speech_only_zeros_role_attention_on_silence():

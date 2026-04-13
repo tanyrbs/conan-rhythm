@@ -22,6 +22,32 @@ class CompressedUnitSequence:
 
 
 @dataclass
+class CompressedUnitSequenceTensor:
+    units: torch.Tensor
+    durations: torch.Tensor
+    silence_mask: torch.Tensor
+    sep_hint: torch.Tensor
+    open_run_mask: torch.Tensor
+    sealed_mask: torch.Tensor
+    boundary_confidence: torch.Tensor
+    run_stability: torch.Tensor
+    tail_buffer: torch.Tensor
+
+    def to_python(self) -> CompressedUnitSequence:
+        return CompressedUnitSequence(
+            units=self.units.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            durations=self.durations.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            silence_mask=self.silence_mask.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            sep_hint=self.sep_hint.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            open_run_mask=self.open_run_mask.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            sealed_mask=self.sealed_mask.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+            boundary_confidence=self.boundary_confidence.detach().to(device="cpu", dtype=torch.float32).reshape(-1).tolist(),
+            run_stability=self.run_stability.detach().to(device="cpu", dtype=torch.float32).reshape(-1).tolist(),
+            tail_buffer=self.tail_buffer.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist(),
+        )
+
+
+@dataclass
 class StreamingUnitizerRowState:
     units: torch.Tensor
     durations: torch.Tensor
@@ -436,6 +462,40 @@ def build_compressed_sequence(
     )
 
 
+def build_compressed_sequence_tensor(
+    token_sequence: Sequence[int],
+    *,
+    silent_token: int | None = None,
+    separator_aware: bool = False,
+    tail_open_units: int = 1,
+    mark_last_open: bool = True,
+    emit_silence_runs: bool = False,
+    debounce_min_run_frames: int = 1,
+    device: torch.device | None = None,
+) -> CompressedUnitSequenceTensor:
+    compressed = build_compressed_sequence(
+        token_sequence,
+        silent_token=silent_token,
+        separator_aware=separator_aware,
+        tail_open_units=tail_open_units,
+        mark_last_open=mark_last_open,
+        emit_silence_runs=emit_silence_runs,
+        debounce_min_run_frames=debounce_min_run_frames,
+    )
+    target_device = device if device is not None else torch.device("cpu")
+    return CompressedUnitSequenceTensor(
+        units=torch.tensor(compressed.units, dtype=torch.long, device=target_device),
+        durations=torch.tensor(compressed.durations, dtype=torch.long, device=target_device),
+        silence_mask=torch.tensor(compressed.silence_mask, dtype=torch.long, device=target_device),
+        sep_hint=torch.tensor(compressed.sep_hint, dtype=torch.long, device=target_device),
+        open_run_mask=torch.tensor(compressed.open_run_mask, dtype=torch.long, device=target_device),
+        sealed_mask=torch.tensor(compressed.sealed_mask, dtype=torch.long, device=target_device),
+        boundary_confidence=torch.tensor(compressed.boundary_confidence, dtype=torch.float32, device=target_device),
+        run_stability=torch.tensor(compressed.run_stability, dtype=torch.float32, device=target_device),
+        tail_buffer=torch.tensor(compressed.tail_buffer, dtype=torch.long, device=target_device),
+    )
+
+
 class StreamingRunLengthUnitizer:
     def __init__(
         self,
@@ -479,6 +539,17 @@ class StreamingRunLengthUnitizer:
 
     def compress(self, token_sequence: Sequence[int], *, mark_last_open: bool = True) -> CompressedUnitSequence:
         return build_compressed_sequence(
+            token_sequence,
+            silent_token=self.silent_token,
+            separator_aware=self.separator_aware,
+            tail_open_units=self.tail_open_units,
+            mark_last_open=mark_last_open,
+            emit_silence_runs=self.emit_silence_runs,
+            debounce_min_run_frames=self.debounce_min_run_frames,
+        )
+
+    def compress_tensor(self, token_sequence: Sequence[int], *, mark_last_open: bool = True) -> CompressedUnitSequenceTensor:
+        return build_compressed_sequence_tensor(
             token_sequence,
             silent_token=self.silent_token,
             separator_aware=self.separator_aware,
@@ -586,20 +657,35 @@ class StreamingRunLengthUnitizer:
         *,
         mark_last_open: bool = True,
     ) -> CompressedUnitSequence:
+        return self.export_compressed_sequence_tensor(
+            row_state,
+            mark_last_open=mark_last_open,
+        ).to_python()
+
+    def export_compressed_sequence_tensor(
+        self,
+        row_state: StreamingUnitizerRowState,
+        *,
+        mark_last_open: bool = True,
+    ) -> CompressedUnitSequenceTensor:
         units, durations, silence_mask, open_run_mask, sealed_mask, sep_hint, boundary_confidence, run_stability = self._export_row_tensors(
             row_state,
             mark_last_open=mark_last_open,
         )
-        tail_buffer = units[max(0, units.numel() - self.tail_open_units):].tolist() if mark_last_open else []
-        return CompressedUnitSequence(
-            units=units.tolist(),
-            durations=durations.tolist(),
-            silence_mask=silence_mask.tolist(),
-            sep_hint=sep_hint.tolist(),
-            open_run_mask=open_run_mask.tolist(),
-            sealed_mask=sealed_mask.tolist(),
-            boundary_confidence=boundary_confidence.tolist(),
-            run_stability=run_stability.tolist(),
+        tail_buffer = (
+            units[max(0, units.numel() - self.tail_open_units):].clone()
+            if mark_last_open and units.numel() > 0
+            else units.new_zeros((0,), dtype=torch.long)
+        )
+        return CompressedUnitSequenceTensor(
+            units=units,
+            durations=durations,
+            silence_mask=silence_mask,
+            sep_hint=sep_hint,
+            open_run_mask=open_run_mask,
+            sealed_mask=sealed_mask,
+            boundary_confidence=boundary_confidence,
+            run_stability=run_stability,
             tail_buffer=tail_buffer,
         )
 

@@ -440,6 +440,55 @@ class RhythmCacheContractTests(unittest.TestCase):
             )
         )
 
+    def test_minimal_v1_prompt_summary_conditioning_requires_closed_boundary_sidecars(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_rate_mode": "simple_global",
+                "rhythm_v3_simple_global_stats": True,
+                "rhythm_v3_emit_silence_runs": True,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_missing_clean_sidecars",
+            "content_units": np.asarray([1, 2, 3], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0, 3.0], dtype=np.float32),
+            "dur_sec": 4.5,
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "source_run_stability": np.asarray([1.0, 0.9, 0.8], dtype=np.float32),
+        }
+        with self.assertRaisesRegex(RuntimeError, "sealed_mask/prompt_closed_mask"):
+            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+
+    def test_minimal_v1_prompt_summary_conditioning_requires_prompt_ref_len_sidecar(self) -> None:
+        dataset = _DummyDataset(
+            {
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_anchor_mode": "source_observed",
+                "rhythm_v3_rate_mode": "simple_global",
+                "rhythm_v3_simple_global_stats": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "hop_size": 0,
+                "audio_sample_rate": 0,
+            }
+        )
+        prompt_item = {
+            "item_name": "prompt_missing_ref_len",
+            "content_units": np.asarray([1, 2, 3], dtype=np.int64),
+            "dur_anchor_src": np.asarray([3.0, 3.0, 3.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "source_run_stability": np.asarray([1.0, 0.9, 0.8], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "boundary_confidence": np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
+        }
+        with self.assertRaisesRegex(RuntimeError, "prompt_ref_len_sec/ref_len_sec/dur_sec"):
+            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+
     def test_prompt_summary_conditioning_rejects_prompt_weight_shape_mismatch_by_default(self) -> None:
         dataset = _DummyDataset(
             {

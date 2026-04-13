@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from .contracts import SourceUnitBatch
 from .unitizer import (
+    CompressedUnitSequenceTensor,
     StreamingRunLengthUnitizer,
     StreamingUnitizerRowState,
     StreamingUnitizerState,
@@ -94,15 +95,21 @@ class RhythmUnitFrontend:
             pending_separator=bool(row.pending_separator),
         )
 
+    @staticmethod
+    def _coerce_compressed_field(value, *, dtype: torch.dtype) -> torch.Tensor:
+        if isinstance(value, torch.Tensor):
+            return value.to(dtype=dtype)
+        return torch.tensor(value, dtype=dtype)
+
     def _batch_from_compressed(self, compressed_list: list, *, device: torch.device | None = None) -> RhythmUnitBatch:
-        unit_list = [torch.tensor(item.units, dtype=torch.long) for item in compressed_list]
-        dur_list = [torch.tensor(item.durations, dtype=torch.long) for item in compressed_list]
-        silence_list = [torch.tensor(item.silence_mask, dtype=torch.long) for item in compressed_list]
-        open_list = [torch.tensor(item.open_run_mask, dtype=torch.long) for item in compressed_list]
-        sealed_list = [torch.tensor(item.sealed_mask, dtype=torch.long) for item in compressed_list]
-        sep_list = [torch.tensor(item.sep_hint, dtype=torch.long) for item in compressed_list]
-        boundary_list = [torch.tensor(item.boundary_confidence, dtype=torch.float32) for item in compressed_list]
-        stability_list = [torch.tensor(item.run_stability, dtype=torch.float32) for item in compressed_list]
+        unit_list = [self._coerce_compressed_field(item.units, dtype=torch.long) for item in compressed_list]
+        dur_list = [self._coerce_compressed_field(item.durations, dtype=torch.long) for item in compressed_list]
+        silence_list = [self._coerce_compressed_field(item.silence_mask, dtype=torch.long) for item in compressed_list]
+        open_list = [self._coerce_compressed_field(item.open_run_mask, dtype=torch.long) for item in compressed_list]
+        sealed_list = [self._coerce_compressed_field(item.sealed_mask, dtype=torch.long) for item in compressed_list]
+        sep_list = [self._coerce_compressed_field(item.sep_hint, dtype=torch.long) for item in compressed_list]
+        boundary_list = [self._coerce_compressed_field(item.boundary_confidence, dtype=torch.float32) for item in compressed_list]
+        stability_list = [self._coerce_compressed_field(item.run_stability, dtype=torch.float32) for item in compressed_list]
         return self._batch_from_tensors(
             unit_list=unit_list,
             dur_list=dur_list,

@@ -209,6 +209,8 @@ def _enforce_minimal_v1_runtime_contract(
     source_residual_gain: float,
     short_gap_silence_scale: float,
     leading_silence_scale: float,
+    detach_global_term_in_local_head: bool,
+    freeze_src_rate_init: bool,
 ) -> None:
     if not minimal_v1_profile:
         return
@@ -237,6 +239,10 @@ def _enforce_minimal_v1_runtime_contract(
         errors.append("short_gap_silence_scale must stay at the constant-clip default (0.35)")
     if abs(float(leading_silence_scale) - 0.0) > 1.0e-6:
         errors.append("leading_silence_scale must stay at the constant-clip default (0.0)")
+    if not bool(detach_global_term_in_local_head):
+        errors.append("detach_global_term_in_local_head must be true")
+    if not bool(freeze_src_rate_init):
+        errors.append("freeze_src_rate_init must be true")
     if errors:
         raise ValueError(
             "rhythm_v3_minimal_v1_profile runtime contract violation: "
@@ -657,7 +663,7 @@ class MixedEffectsDurationModule(nn.Module):
         self.freeze_src_rate_init = bool(
             unused_kwargs.pop(
                 "freeze_src_rate_init",
-                unused_kwargs.pop("rhythm_v3_freeze_src_rate_init", False),
+                unused_kwargs.pop("rhythm_v3_freeze_src_rate_init", bool(self.minimal_v1_profile)),
             )
         )
         detach_global_term_default = bool(self.minimal_v1_profile)
@@ -709,6 +715,8 @@ class MixedEffectsDurationModule(nn.Module):
             source_residual_gain=self.source_residual_gain,
             short_gap_silence_scale=short_gap_silence_scale,
             leading_silence_scale=leading_silence_scale,
+            detach_global_term_in_local_head=self.detach_global_term_in_local_head,
+            freeze_src_rate_init=self.freeze_src_rate_init,
         )
         effective_window_right = int(response_window_right)
         if self.streaming_mode == "strict":

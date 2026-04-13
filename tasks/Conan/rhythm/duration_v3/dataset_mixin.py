@@ -826,14 +826,16 @@ class DurationV3DatasetMixin:
             truncation <= 0.0
             and dropout <= 0.0
             and isinstance(prompt_item, dict)
-            and prompt_item.get("dur_sec") is not None
         ):
-            try:
-                value = float(prompt_item.get("dur_sec"))
-                if np.isfinite(value) and value > 0.0:
-                    return value
-            except Exception:
-                pass
+            for key in ("prompt_ref_len_sec", "ref_len_sec", "dur_sec"):
+                if prompt_item.get(key) is None:
+                    continue
+                try:
+                    value = float(prompt_item.get(key))
+                    if np.isfinite(value) and value > 0.0:
+                        return value
+                except Exception:
+                    pass
         hop_size = float(self.hparams.get("hop_size", 0.0) or 0.0)
         sample_rate = float(self.hparams.get("audio_sample_rate", 0.0) or 0.0)
         if hop_size > 0.0 and sample_rate > 0.0:
@@ -842,6 +844,37 @@ class DurationV3DatasetMixin:
                 return total_frames * hop_size / sample_rate
         return None
 
+    def _strict_prompt_sidecars_required(self) -> bool:
+        if not self._use_duration_v3_dataset_contract():
+            return False
+        if not self._use_duration_v3_simple_global_stats():
+            return False
+        return bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False))
+
+    def _coerce_prompt_sidecar(
+        self,
+        *,
+        name: str,
+        value,
+        reference: np.ndarray,
+        default_value: float,
+        allow_shape_repair: bool = False,
+    ) -> np.ndarray:
+        if value is None:
+            return np.full_like(reference, float(default_value), dtype=np.float32)
+        sidecar = np.asarray(value, dtype=np.float32)
+        if sidecar.shape == reference.shape:
+            return sidecar.astype(np.float32, copy=False)
+        if not bool(allow_shape_repair):
+            raise RuntimeError(
+                f"{name} shape mismatch: {tuple(sidecar.shape)} vs {tuple(reference.shape)}. "
+                f"Set {_PROMPT_WEIGHT_REPAIR_FLAG}=true only for explicit debug repair."
+            )
+        repaired = np.full_like(reference, float(default_value), dtype=np.float32)
+        limit = min(int(repaired.size), int(sidecar.reshape(-1).shape[0]))
+        repaired.reshape(-1)[:limit] = sidecar.reshape(-1)[:limit]
+        return repaired
+
     def _attach_prompt_global_stats_sidecars(self, *, conditioning: dict, source_cache: dict, prompt_item=None) -> None:
         prompt_duration_obs = np.asarray(conditioning["prompt_duration_obs"], dtype=np.float32)
         prompt_valid_mask = np.asarray(
@@ -849,20 +882,40 @@ class DurationV3DatasetMixin:
             dtype=np.float32,
         )
         prompt_speech_mask = np.asarray(conditioning["prompt_speech_mask"], dtype=np.float32)
-        prompt_closed_mask = np.asarray(
-            conditioning.get("prompt_closed_mask", prompt_valid_mask),
-            dtype=np.float32,
-        )
-        prompt_boundary_confidence = np.asarray(
-            conditioning.get(
-                "prompt_boundary_confidence",
-                source_cache.get(
-                    "boundary_confidence",
-                    source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
-                ),
-            ),
-            dtype=np.float32,
-        )
+        strict_sidecars = self._strict_prompt_sidecars_required()
+        allow_shape_repair = self._allow_prompt_weight_shape_repair()
+        closed_source = conditioning.get("prompt_closed_mask")
+        if closed_source is None:
+            closed_source = source_cache.get("sealed_mask")
+        if strict_sidecars and closed_source is None:
+            raise RuntimeError(
+                "minimal_v1 prompt conditioning requires sealed_mask/prompt_closed_mask in prompt/reference cache."
+            )
+        prompt_closed_mask = self._coerce_prompt_sidecar(
+            name="prompt_closed_mask",
+            value=closed_source,
+            reference=prompt_duration_obs,
+            default_value=1.0,
+            allow_shape_repair=allow_shape_repair,
+        ) * prompt_valid_mask
+        boundary_source = conditioning.get("prompt_boundary_confidence")
+        if boundary_source is None:
+            boundary_source = source_cache.get("boundary_confidence")
+        if strict_sidecars and boundary_source is None:
+            raise RuntimeError(
+                "minimal_v1 prompt conditioning requires boundary_confidence/prompt_boundary_confidence in prompt/reference cache."
+            )
+        if boundary_source is None:
+            boundary_source = source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs))
+        prompt_boundary_confidence = self._coerce_prompt_sidecar(
+            name="prompt_boundary_confidence",
+            value=boundary_source,
+            reference=prompt_duration_obs,
+            default_value=0.0,
+            allow_shape_repair=allow_shape_repair,
+        ) * prompt_valid_mask
+        conditioning["prompt_closed_mask"] = prompt_closed_mask.astype(np.float32, copy=False)
+        conditioning["prompt_boundary_confidence"] = prompt_boundary_confidence.astype(np.float32, copy=False)
         min_boundary_confidence = self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
         if min_boundary_confidence is not None:
             min_boundary_confidence = float(min_boundary_confidence)
@@ -874,7 +927,7 @@ class DurationV3DatasetMixin:
             prompt_boundary_confidence=prompt_boundary_confidence,
             min_boundary_confidence=min_boundary_confidence,
             drop_edge_runs=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-            allow_shape_repair=self._allow_prompt_weight_shape_repair(),
+            allow_shape_repair=allow_shape_repair,
         )
         conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
         valid_mass = float(np.asarray(prompt_valid_mask, dtype=np.float32).sum(dtype=np.float64))
@@ -887,6 +940,11 @@ class DurationV3DatasetMixin:
             prompt_duration_obs=prompt_duration_obs,
             prompt_item=prompt_item,
         )
+        if strict_sidecars and prompt_ref_len_sec is None:
+            raise RuntimeError(
+                "minimal_v1 prompt conditioning requires prompt_ref_len_sec/ref_len_sec/dur_sec metadata "
+                "or hop_size+audio_sample_rate to resolve strict 3-8s reference gating."
+            )
         if prompt_ref_len_sec is not None:
             conditioning["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
         conditioning["g_trim_ratio"] = np.asarray(
@@ -1071,6 +1129,11 @@ class DurationV3DatasetMixin:
             )
             if prompt_ref_len_sec is not None:
                 augmented["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
+            elif self._strict_prompt_sidecars_required():
+                raise RuntimeError(
+                    "minimal_v1 prompt augmentation requires hop_size+audio_sample_rate to recompute "
+                    "prompt_ref_len_sec after truncation/dropout."
+                )
         return augmented
 
     def _build_reference_prompt_unit_conditioning(self, prompt_item, *, target_mode: str):
@@ -1102,6 +1165,8 @@ class DurationV3DatasetMixin:
                 "open_run_mask",
                 "sealed_mask",
                 "unit_log_prior",
+                "ref_len_sec",
+                "prompt_ref_len_sec",
             ):
                 if extra_key in prompt_item:
                     source_cache[extra_key] = prompt_item[extra_key]
@@ -1172,25 +1237,19 @@ class DurationV3DatasetMixin:
             silence_mask=source_cache.get("source_silence_mask"),
         )
         prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clip(0.0, 1.0))
-        prompt_closed_mask = np.asarray(
-            source_cache.get("sealed_mask", prompt_valid_mask),
-            dtype=np.float32,
-        ) * prompt_valid_mask
-        prompt_boundary_confidence = np.asarray(
-            source_cache.get(
-                "boundary_confidence",
-                source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
-            ),
-            dtype=np.float32,
-        ) * prompt_valid_mask
+        strict_sidecars = self._strict_prompt_sidecars_required()
+        prompt_closed_source = source_cache.get("sealed_mask")
+        if prompt_closed_source is None and not strict_sidecars:
+            prompt_closed_source = prompt_valid_mask
+        prompt_boundary_source = source_cache.get("boundary_confidence")
+        if prompt_boundary_source is None and not strict_sidecars:
+            prompt_boundary_source = source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs))
         conditioning = {
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
             "prompt_unit_mask": prompt_valid_mask,
             "prompt_valid_mask": prompt_valid_mask,
             "prompt_speech_mask": prompt_speech_mask,
-            "prompt_closed_mask": prompt_closed_mask,
-            "prompt_boundary_confidence": prompt_boundary_confidence,
             "prompt_source_boundary_cue": np.asarray(
                 source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs)),
                 dtype=np.float32,
@@ -1204,6 +1263,12 @@ class DurationV3DatasetMixin:
                 dtype=np.float32,
             ),
         }
+        if prompt_closed_source is not None:
+            conditioning["prompt_closed_mask"] = np.asarray(prompt_closed_source, dtype=np.float32) * prompt_valid_mask
+        if prompt_boundary_source is not None:
+            conditioning["prompt_boundary_confidence"] = (
+                np.asarray(prompt_boundary_source, dtype=np.float32) * prompt_valid_mask
+            )
         use_log_base_rate = not self._use_duration_v3_simple_global_stats()
         if use_log_base_rate and "unit_anchor_base" in source_cache:
             conditioning["prompt_unit_anchor_base"] = np.asarray(source_cache["unit_anchor_base"], dtype=np.float32)

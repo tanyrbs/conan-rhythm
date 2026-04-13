@@ -204,6 +204,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     if minimal_v1_profile:
         if "rhythm_v3_detach_global_term_in_local_head" not in hparams:
             hparams["rhythm_v3_detach_global_term_in_local_head"] = True
+        if "rhythm_v3_freeze_src_rate_init" not in hparams:
+            hparams["rhythm_v3_freeze_src_rate_init"] = True
         backbone_value = hparams.get("rhythm_v3_backbone")
         backbone_text = str(backbone_value or "").strip().lower()
         normalized_backbone_value = normalize_duration_v3_backbone_mode(backbone_value)
@@ -288,6 +290,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         if not _is_enabled_flag(hparams.get("rhythm_v3_detach_global_term_in_local_head", True)):
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_detach_global_term_in_local_head=true."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_freeze_src_rate_init", True)):
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_freeze_src_rate_init=true."
             )
         if str(hparams.get("rhythm_streaming_mode", "strict") or "strict").strip().lower() != "strict":
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_streaming_mode='strict'.")

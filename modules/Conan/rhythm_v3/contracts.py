@@ -120,6 +120,12 @@ class PromptConditioningEvidence:
     prompt_detector_coeff_norm: Optional[torch.Tensor] = None
     prompt_role_attn: Optional[torch.Tensor] = None
     prompt_role_fit: Optional[torch.Tensor] = None
+    prompt_g_support_mask: Optional[torch.Tensor] = None
+    prompt_g_clean_mask: Optional[torch.Tensor] = None
+    prompt_g_support_count: Optional[torch.Tensor] = None
+    prompt_g_clean_count: Optional[torch.Tensor] = None
+    prompt_g_support_weight: Optional[torch.Tensor] = None
+    prompt_g_domain_valid: Optional[torch.Tensor] = None
 
 @dataclass
 class ReferenceDurationMemory:
@@ -279,6 +285,30 @@ class ReferenceDurationMemory:
     @property
     def prompt_summary_fit(self) -> Optional[torch.Tensor]:
         return self.prompt_role_fit
+
+    @property
+    def prompt_g_support_mask(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_support_mask
+
+    @property
+    def prompt_g_clean_mask(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_clean_mask
+
+    @property
+    def prompt_g_support_count(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_support_count
+
+    @property
+    def prompt_g_clean_count(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_clean_count
+
+    @property
+    def prompt_g_support_weight(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_support_weight
+
+    @property
+    def prompt_g_domain_valid(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_domain_valid
 
 
 @dataclass
@@ -551,6 +581,12 @@ def move_prompt_conditioning_evidence(
         prompt_detector_coeff_norm=_move_tensor(prompt.prompt_detector_coeff_norm, device=device, dtype=dtype),
         prompt_role_attn=_move_tensor(prompt.prompt_role_attn, device=device, dtype=dtype),
         prompt_role_fit=_move_tensor(prompt.prompt_role_fit, device=device, dtype=dtype),
+        prompt_g_support_mask=_move_tensor(prompt.prompt_g_support_mask, device=device, dtype=dtype),
+        prompt_g_clean_mask=_move_tensor(prompt.prompt_g_clean_mask, device=device, dtype=dtype),
+        prompt_g_support_count=_move_tensor(prompt.prompt_g_support_count, device=device, dtype=dtype),
+        prompt_g_clean_count=_move_tensor(prompt.prompt_g_clean_count, device=device, dtype=dtype),
+        prompt_g_support_weight=_move_tensor(prompt.prompt_g_support_weight, device=device, dtype=dtype),
+        prompt_g_domain_valid=_move_tensor(prompt.prompt_g_domain_valid, device=device, dtype=dtype),
     )
 
 
@@ -596,6 +632,12 @@ def move_reference_duration_memory(
             memory.prompt.prompt_detector_coeff_norm if memory.prompt is not None else None,
             memory.prompt.prompt_role_attn if memory.prompt is not None else None,
             memory.prompt.prompt_role_fit if memory.prompt is not None else None,
+            memory.prompt.prompt_g_support_mask if memory.prompt is not None else None,
+            memory.prompt.prompt_g_clean_mask if memory.prompt is not None else None,
+            memory.prompt.prompt_g_support_count if memory.prompt is not None else None,
+            memory.prompt.prompt_g_clean_count if memory.prompt is not None else None,
+            memory.prompt.prompt_g_support_weight if memory.prompt is not None else None,
+            memory.prompt.prompt_g_domain_valid if memory.prompt is not None else None,
         )
     ):
         return memory
@@ -745,6 +787,12 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_detector_coeff_norm", prompt.prompt_detector_coeff_norm, dims=2)
     _check_batch("prompt_role_attn", prompt.prompt_role_attn, dims=3)
     _check_batch("prompt_role_fit", prompt.prompt_role_fit, dims=2)
+    _check_batch("prompt_g_support_mask", prompt.prompt_g_support_mask, dims=2)
+    _check_batch("prompt_g_clean_mask", prompt.prompt_g_clean_mask, dims=2)
+    _check_batch("prompt_g_support_count", prompt.prompt_g_support_count, dims=2)
+    _check_batch("prompt_g_clean_count", prompt.prompt_g_clean_count, dims=2)
+    _check_batch("prompt_g_support_weight", prompt.prompt_g_support_weight, dims=2)
+    _check_batch("prompt_g_domain_valid", prompt.prompt_g_domain_valid, dims=2)
 
     if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
         raise ValueError(
@@ -801,6 +849,8 @@ def validate_prompt_conditioning_evidence(
         ("prompt_detector_fit", prompt.prompt_detector_fit),
         ("prompt_random_target", prompt.prompt_random_target),
         ("prompt_role_fit", prompt.prompt_role_fit),
+        ("prompt_g_support_mask", prompt.prompt_g_support_mask),
+        ("prompt_g_clean_mask", prompt.prompt_g_clean_mask),
     ):
         if value is not None and prompt.prompt_mask is not None:
             if tuple(value.shape) != tuple(prompt.prompt_mask.shape):
@@ -822,6 +872,10 @@ def validate_prompt_conditioning_evidence(
         ("prompt_detector_support", prompt.prompt_detector_support),
         ("prompt_detector_condition_number", prompt.prompt_detector_condition_number),
         ("prompt_detector_coeff_norm", prompt.prompt_detector_coeff_norm),
+        ("prompt_g_support_count", prompt.prompt_g_support_count),
+        ("prompt_g_clean_count", prompt.prompt_g_clean_count),
+        ("prompt_g_support_weight", prompt.prompt_g_support_weight),
+        ("prompt_g_domain_valid", prompt.prompt_g_domain_valid),
     ):
         if value is not None and value.size(1) != 1:
             raise ValueError(
@@ -969,6 +1023,12 @@ def ensure_reference_duration_memory_batch(
                 prompt_detector_coeff_norm=_expand(memory.prompt.prompt_detector_coeff_norm),
                 prompt_role_attn=_expand(memory.prompt.prompt_role_attn),
                 prompt_role_fit=_expand(memory.prompt.prompt_role_fit),
+                prompt_g_support_mask=_expand(memory.prompt.prompt_g_support_mask),
+                prompt_g_clean_mask=_expand(memory.prompt.prompt_g_clean_mask),
+                prompt_g_support_count=_expand(memory.prompt.prompt_g_support_count),
+                prompt_g_clean_count=_expand(memory.prompt.prompt_g_clean_count),
+                prompt_g_support_weight=_expand(memory.prompt.prompt_g_support_weight),
+                prompt_g_domain_valid=_expand(memory.prompt.prompt_g_domain_valid),
             )
         ),
         summary_state=_expand(memory.summary_state),

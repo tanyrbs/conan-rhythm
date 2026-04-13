@@ -301,7 +301,9 @@ When prompt-side clean-support sidecars are present (`prompt_closed_mask`,
 `prompt_boundary_confidence`, `prompt_ref_len_sec`), the maintained mainline
 `g` path uses them for domain gating even though the generic review summary
 still reports the core speech-support counters as the stable cross-run audit
-surface.
+surface. Missing strict sidecars now fail closed in dataset/runtime contracts,
+and runtime debug reads the exported `prompt_g_*` evidence instead of
+recomputing a looser speech-only support mask.
 
 ### 5.4 Projector debug now distinguishes carry from boundary-side smoothing
 

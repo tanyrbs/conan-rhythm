@@ -368,6 +368,14 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_con
         validate_rhythm_training_hparams(_minimal_prompt_summary_v1_hparams())
 
 
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_trainable_src_rate_init():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_freeze_src_rate_init"] = False
+    with pytest.raises(ValueError, match="rhythm_v3_freeze_src_rate_init=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_accepts_minimal_v1_global_backbone_surface():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
