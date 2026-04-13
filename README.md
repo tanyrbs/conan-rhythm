@@ -26,7 +26,7 @@ Use:
 - `rhythm_v3_unit_prior_path: null`  (`unit_norm` only; build with `scripts/build_unit_log_prior.py`)
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
-- `rhythm_v3_gate_quality_strict: true`
+- `rhythm_v3_gate_quality_strict: true`  (intent marker; strict gate enforcement is driven by `scripts/rhythm_v3_debug_records.py`)
 - `rhythm_v3_eval_mode: learned`
 
 In that default path, the writer is:
@@ -182,8 +182,11 @@ For review/export, `unit_duration_proj_raw_tgt` is the explicit raw-projection
 alias and should be preferred when present. When `unit_duration_tgt` is cached
 for the maintained continuous path, keep `unit_duration_proj_raw_tgt`,
 `unit_alignment_mode_id_tgt`, `unit_alignment_kind_tgt`,
-`unit_alignment_source_tgt`, and `unit_alignment_version_tgt` alongside it so
-the target surface remains provenance-clean. Training still consumes
+`unit_alignment_source_tgt`, `unit_alignment_version_tgt`,
+`unit_alignment_source_cache_signature_tgt`,
+`unit_alignment_target_cache_signature_tgt`, and
+`unit_alignment_sidecar_signature_tgt` alongside it so the target surface
+remains provenance-clean. Training still consumes
 decomposed surfaces such as `global_shift_tgt`, `coarse_logstretch_tgt`,
 `local_residual_tgt`, and the clipped coarse-derived silence target rather than
 treating the raw projection surface as the final supervision object.
@@ -218,15 +221,19 @@ implicit default.
 `continuous_viterbi_v1` is a hard-path aligner: it exports Viterbi/source-run
 occupancy plus heuristic confidence/provenance, not posterior expected
 occupancy. Treat posterior expected-duration surfaces as unavailable until
-`continuous_fwdbwd_v1` exists.
+`continuous_fwdbwd_v1` exists. When `target_frame_weight` sidecars are present,
+the maintained path can also exclude frames below
+`rhythm_v3_alignment_min_dp_weight` before DP instead of letting low-weight
+observations silently steer the path search.
 
 The maintained config also carries explicit alignment-quality thresholds
 (`rhythm_v3_alignment_unmatched_speech_ratio_max`,
 `rhythm_v3_alignment_mean_local_confidence_speech_min`,
 `rhythm_v3_alignment_mean_coarse_confidence_speech_min`) and a
-`rhythm_v3_gate_quality_strict: true` intent marker so the canonical recipe is
-documented as fail-hard on bad supervision / incomplete falsification evidence,
-not just warning-driven.
+`rhythm_v3_gate_quality_strict: true` intent marker. Actual fail-hard behavior
+is enforced by `scripts/rhythm_v3_debug_records.py` when `--strict-gates` is
+used, or automatically when `--review-dir` / `--gate-status-json` is requested
+without `--allow-partial-gates`.
 
 The legacy filename `egs/conan_emformer_rhythm_v2_minimal_v1.yaml` is now only a
 compatibility alias that inherits the maintained `rhythm_v3` contract; it is no
@@ -236,7 +243,8 @@ If you move from `raw_median` / `weighted_median` / `trimmed_mean` to
 `rhythm_v3_g_variant: unit_norm`, treat that as a data-contract change rather
 than a pure knob flip: the maintained repo now expects a reproducible unit prior
 bundle under `rhythm_v3_unit_prior_path`, and the recommended way to build it
-is `scripts/build_unit_log_prior.py`.
+is `scripts/build_unit_log_prior.py`. That bundle now carries prior-policy and
+frontend provenance metadata, not just raw prior values.
 
 Required public inputs:
 

@@ -18,7 +18,7 @@ class FastSpeech2OrigDataset(FastSpeechDataset):
         sample = super().__getitem__(index)
         item = sample.get('_raw_item')
         if item is None:
-            item = self._get_item(index)
+            item = self._get_raw_item_cached(self._require_sample_local_item_id(sample))
         hparams = self.hparams
         mel = sample['mel']
         T = mel.shape[0]

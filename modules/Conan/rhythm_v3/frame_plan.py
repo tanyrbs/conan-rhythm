@@ -151,20 +151,30 @@ def build_frame_plan(
 
     for batch_idx in range(slot_duration_exec.size(0)):
         src_cursor = 0
-        src_total = int(src_anchor[batch_idx].sum().item())
+        row_slot_duration = slot_duration_exec[batch_idx].detach().cpu().tolist()
+        row_slot_unit_index = slot_unit_index[batch_idx].detach().cpu().tolist()
+        row_slot_is_blank = slot_is_blank[batch_idx].detach().cpu().tolist()
+        row_src_anchor = src_anchor[batch_idx].detach().cpu().tolist()
+        src_total = int(sum(row_src_anchor))
         frame_src_index = []
         frame_blank = []
         frame_slot_index = []
         frame_unit_index = []
         frame_phase_features = []
         valid_len = 0
-        active_slot_indices = torch.nonzero(slot_active_mask[batch_idx], as_tuple=False).flatten().tolist()
+        active_slot_indices = (
+            torch.nonzero(slot_active_mask[batch_idx], as_tuple=False)
+            .reshape(-1)
+            .detach()
+            .cpu()
+            .tolist()
+        )
         for slot_idx in active_slot_indices:
-            duration = int(slot_duration_exec[batch_idx, slot_idx].item())
-            unit_idx = int(slot_unit_index[batch_idx, slot_idx].item())
-            is_blank = int(slot_is_blank[batch_idx, slot_idx].item()) > 0
+            duration = int(row_slot_duration[slot_idx])
+            unit_idx = int(row_slot_unit_index[slot_idx])
+            is_blank = int(row_slot_is_blank[slot_idx]) > 0
             if not is_blank:
-                src_len = int(src_anchor[batch_idx, unit_idx].item()) if unit_idx < src_anchor.size(1) else 0
+                src_len = int(row_src_anchor[unit_idx]) if unit_idx < len(row_src_anchor) else 0
                 src_start = src_cursor
                 src_end = min(src_cursor + max(src_len, 0), src_total)
                 src_cursor = src_end

@@ -146,7 +146,7 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         self.assertEqual(result["alignment_mode"], "continuous_viterbi_v1")
         self.assertEqual(result["alignment_source"], "run_state_viterbi")
         self.assertEqual(result["alignment_version"], "2026-04-13")
-        self.assertEqual(result["posterior_kind"], "none")
+        self.assertEqual(result["posterior_kind"], "viterbi_margin_only")
         self.assertEqual(result["confidence_kind"], "heuristic_v1")
         self.assertEqual(result["confidence_formula_version"], "heuristic_margin_cost_type_v1")
         self.assertEqual(result["source_progress_kind"], "anchor_duration_cdf")
@@ -172,6 +172,14 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         np.testing.assert_array_equal(
             result["target_valid_observation_index"],
             np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            result["target_valid_observation_index_pre_dp_filter"],
+            np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            result["target_dp_weight_pruned_index"],
+            np.asarray([], dtype=np.int64),
         )
         np.testing.assert_allclose(
             result["projected"],
@@ -205,6 +213,14 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             result["expected_frame_support"],
             np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
         )
+        np.testing.assert_allclose(
+            result["alignment_min_dp_weight"],
+            np.asarray([0.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            result["run_skip_flag"],
+            np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        )
         self.assertEqual(tuple(result["confidence_cost_term"].shape), (3,))
         self.assertEqual(tuple(result["confidence_margin_term"].shape), (3,))
         self.assertEqual(tuple(result["confidence_type_term"].shape), (3,))
@@ -220,6 +236,72 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
         )
         self.assertTrue(np.all(result["source_frame_weight_sum"] > 0.0))
+
+    def test_continuous_viterbi_alignment_prunes_low_weight_frames_before_dp(self) -> None:
+        result = project_target_runs_onto_source(
+            source_units=np.asarray([11, 12], dtype=np.int64),
+            source_durations=np.asarray([2.0, 2.0], dtype=np.float32),
+            source_silence_mask=np.asarray([0.0, 0.0], dtype=np.float32),
+            target_units=np.asarray([11, 12], dtype=np.int64),
+            target_durations=np.asarray([1.0, 1.0], dtype=np.float32),
+            target_valid_mask=np.asarray([1.0, 1.0], dtype=np.float32),
+            target_speech_mask=np.asarray([1.0, 1.0], dtype=np.float32),
+            use_continuous_alignment=True,
+            source_frame_states=np.asarray(
+                [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            source_frame_to_run=np.asarray([0, 0, 1, 1], dtype=np.int64),
+            target_frame_states=np.asarray(
+                [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            target_frame_speech_prob=np.ones((4,), dtype=np.float32),
+            target_frame_valid=np.ones((4,), dtype=np.float32),
+            target_frame_weight=np.asarray([1.0, 0.1, 1.0, 1.0], dtype=np.float32),
+            continuous_aligner_kwargs={
+                "min_dp_weight": 0.5,
+            },
+        )
+
+        np.testing.assert_allclose(
+            result["alignment_min_dp_weight"],
+            np.asarray([0.5], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            result["target_valid_observation_index_pre_dp_filter"],
+            np.asarray([0, 1, 2, 3], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            result["target_dp_weight_pruned_index"],
+            np.asarray([1], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            result["target_valid_observation_index"],
+            np.asarray([0, 2, 3], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            result["assigned_source"],
+            np.asarray([0, 1, 1], dtype=np.int64),
+        )
+        np.testing.assert_allclose(
+            result["projected"],
+            np.asarray([1.0, 2.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            result["run_skip_flag"],
+            np.asarray([0.0, 0.0], dtype=np.float32),
+        )
 
     def test_continuous_viterbi_skip_source_audit_mode_exports_zero_coverage_for_skipped_runs(self) -> None:
         result = project_target_runs_onto_source(
@@ -270,6 +352,8 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.asarray(result["coverage_fraction"], dtype=np.float32)[1]), 0.0, places=6)
         self.assertAlmostEqual(float(np.asarray(result["confidence_local"], dtype=np.float32)[1]), 0.0, places=6)
         self.assertAlmostEqual(float(np.asarray(result["confidence_coarse"], dtype=np.float32)[1]), 0.0, places=6)
+        self.assertAlmostEqual(float(np.asarray(result["skipped_source_speech_ratio"], dtype=np.float32)), 0.25, places=6)
+        self.assertAlmostEqual(float(np.asarray(result["unmatched_speech_ratio"], dtype=np.float32)), 0.25, places=6)
 
     def test_anchor_aware_band_prior_prefers_long_anchor_run_later_than_uniform_index_prior(self) -> None:
         aligner = ContinuousRunAligner(

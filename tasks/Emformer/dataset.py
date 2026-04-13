@@ -15,7 +15,7 @@ class EmformerDataset(FastSpeechDataset):
         sample = super(EmformerDataset, self).__getitem__(index)
         item = sample.get('_raw_item')
         if item is None:
-            item = self._get_item(index)
+            item = self._get_raw_item_cached(self._require_sample_local_item_id(sample))
         final_mel_length = min(item['mel'].shape[0], hparams['max_frames'])
 
         sample["content"] = torch.as_tensor(item['hubert'][:final_mel_length], dtype=torch.long)

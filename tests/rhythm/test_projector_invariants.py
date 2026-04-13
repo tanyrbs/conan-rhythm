@@ -71,6 +71,80 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
         assert torch.allclose(boundary_hit, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
         assert torch.allclose(boundary_decay, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
 
+    def test_duration_v3_prefix_projection_none_boundary_matches_zero_boundary_inputs(self):
+        kwargs = dict(
+            unit_duration_exec=torch.tensor([[2.6, 0.2, 4.7, 3.6]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 5.0, 4.0, 3.0]], dtype=torch.float32),
+            commit_mask=torch.ones((1, 4), dtype=torch.float32),
+            speech_commit_mask=torch.tensor([[1.0, 0.0, 0.0, 1.0]], dtype=torch.float32),
+            coarse_only_commit_mask=torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
+            residual_prev=torch.tensor([[0.4]], dtype=torch.float32),
+            prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+            committed_units_prev=None,
+            cached_duration_exec_prev=None,
+            budget_pos=1,
+            budget_neg=1,
+            boundary_carry_decay=0.5,
+            boundary_reset_thresh=0.5,
+        )
+        none_outputs = StreamingDurationV3Projector._project_duration_prefix(
+            **kwargs,
+            source_boundary_cue=None,
+            phrase_final_mask=None,
+        )
+        zero_outputs = StreamingDurationV3Projector._project_duration_prefix(
+            **kwargs,
+            source_boundary_cue=torch.zeros((1, 4), dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 4), dtype=torch.float32),
+        )
+
+        for none_tensor, zero_tensor in zip(none_outputs, zero_outputs):
+            assert torch.allclose(none_tensor, zero_tensor)
+        assert torch.allclose(zero_outputs[3], torch.zeros((1, 4), dtype=torch.float32))
+        assert torch.allclose(zero_outputs[4], torch.zeros((1, 4), dtype=torch.float32))
+
+    def test_duration_v3_prefix_projection_mixed_rows_match_per_row_reference(self):
+        kwargs = dict(
+            unit_duration_exec=torch.tensor([[2.6, 2.6], [2.6, 2.6]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 2.0], [2.0, 2.0]], dtype=torch.float32),
+            commit_mask=torch.ones((2, 2), dtype=torch.float32),
+            speech_commit_mask=torch.ones((2, 2), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            residual_prev=torch.zeros((2, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.zeros((2, 1), dtype=torch.float32),
+            committed_units_prev=torch.zeros((2,), dtype=torch.long),
+            cached_duration_exec_prev=None,
+            budget_pos=24,
+            budget_neg=24,
+            boundary_carry_decay=0.0,
+            boundary_reset_thresh=0.5,
+        )
+        batched = StreamingDurationV3Projector._project_duration_prefix(
+            **kwargs,
+            source_boundary_cue=torch.tensor([[1.0, 0.0], [0.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((2, 2), dtype=torch.float32),
+        )
+        row_with_boundary = StreamingDurationV3Projector._project_duration_prefix(
+            **{
+                key: (value[:1] if isinstance(value, torch.Tensor) and value.size(0) == 2 else value)
+                for key, value in kwargs.items()
+            },
+            source_boundary_cue=torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 2), dtype=torch.float32),
+        )
+        row_without_boundary = StreamingDurationV3Projector._project_duration_prefix(
+            **{
+                key: (value[1:] if isinstance(value, torch.Tensor) and value.size(0) == 2 else value)
+                for key, value in kwargs.items()
+            },
+            source_boundary_cue=torch.zeros((1, 2), dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 2), dtype=torch.float32),
+        )
+
+        expected = tuple(torch.cat([left, right], dim=0) for left, right in zip(row_with_boundary, row_without_boundary))
+        for batched_tensor, expected_tensor in zip(batched, expected):
+            assert torch.allclose(batched_tensor, expected_tensor)
+
     def test_duration_v3_budget_mode_support_mass_changes_dynamic_budget(self):
         source = torch.tensor([[4.0, 6.0, 5.0]], dtype=torch.float32)
         speech = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)

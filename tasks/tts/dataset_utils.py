@@ -37,6 +37,7 @@ class BaseSpeechDataset(BaseDataset):
         self._pair_entries = None
         self._pair_group_to_indices = None
         self._text_signature_cache = {}
+        self._raw_item_cache = {}
         self._maybe_enable_pair_manifest()
 
     def _open_indexed_ds_if_needed(self):
@@ -136,6 +137,49 @@ class BaseSpeechDataset(BaseDataset):
         self._open_indexed_ds_if_needed()
         return self.indexed_ds[global_idx]
 
+    @staticmethod
+    def _clone_cached_raw_item(item):
+        return dict(item) if isinstance(item, dict) else item
+
+    def _get_raw_item_cached(self, local_idx: int):
+        local_idx = int(local_idx)
+        cache = self._raw_item_cache
+        item = cache.get(local_idx)
+        if item is None:
+            item = self._get_item(local_idx)
+            cache[local_idx] = item
+        return self._clone_cached_raw_item(item)
+
+    @staticmethod
+    def _coerce_optional_local_item_id(value) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() <= 0:
+                return None
+            value = value.reshape(-1)[0].item()
+        elif isinstance(value, np.ndarray):
+            if value.size <= 0:
+                return None
+            scalar = value.reshape(-1)[0]
+            value = scalar.item() if hasattr(scalar, "item") else scalar
+        elif isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            value = value[0]
+        local_idx = int(value)
+        return local_idx if local_idx >= 0 else None
+
+    def _require_sample_local_item_id(self, sample) -> int:
+        local_idx = self._coerce_optional_local_item_id(sample.get("item_id"))
+        if local_idx is None:
+            raise RuntimeError(
+                "Dataset received no _raw_item from the upstream sample and no explicit item_id. "
+                "Refusing to fall back to the dataset index because pair-manifest/filter/remap datasets "
+                "can make the ordinal index differ from the source local item id."
+            )
+        return local_idx
+
     def _resolve_pair_entry(self, index):
         if self._pair_entries is None:
             return None
@@ -171,10 +215,12 @@ class BaseSpeechDataset(BaseDataset):
     def _get_text_signature(self, local_idx: int):
         local_idx = int(local_idx)
         if local_idx not in self._text_signature_cache:
-            self._text_signature_cache[local_idx] = self._extract_text_signature(self._get_item(local_idx))
+            self._text_signature_cache[local_idx] = self._extract_text_signature(
+                self._get_raw_item_cached(local_idx)
+            )
         return self._text_signature_cache[local_idx]
 
-    def _sample_reference_local_index(self, candidates, index: int) -> int:
+    def _sample_reference_local_index(self, candidates, index: int, *, source_sig=None) -> int:
         if len(candidates) <= 1:
             return index
         if bool(
@@ -183,7 +229,8 @@ class BaseSpeechDataset(BaseDataset):
                 self.hparams.get("rhythm_disallow_same_text_reference", True),
             )
         ):
-            source_sig = self._get_text_signature(index)
+            if source_sig is None:
+                source_sig = self._get_text_signature(index)
             if source_sig is not None:
                 filtered = [cand for cand in candidates if int(cand) != int(index) and self._get_text_signature(int(cand)) != source_sig]
                 if filtered:
@@ -217,7 +264,7 @@ class BaseSpeechDataset(BaseDataset):
                     bucket.append(local_idx)
         else:
             for local_idx in np.random.permutation(len(self.avail_idxs)):
-                sid = int(self._get_item(local_idx)['spk_id'])
+                sid = int(self._get_raw_item_cached(local_idx)['spk_id'])
                 bucket = self.spk2indices[sid]
                 if len(bucket) < max_per_spk:
                     bucket.append(local_idx)
@@ -228,7 +275,9 @@ class BaseSpeechDataset(BaseDataset):
         self._build_speaker_map()
         pair_entry = self._resolve_pair_entry(index)
         item_local = int(pair_entry["src_local"]) if pair_entry is not None else int(index)
-        item = self._get_item(item_local)
+        item = self._get_raw_item_cached(item_local)
+        source_sig = self._extract_text_signature(item)
+        self._text_signature_cache[int(item_local)] = source_sig
         hparams = self.hparams
 
         spec = self._mel_to_tensor(item['mel'], max_frames=hparams['max_frames'])
@@ -239,27 +288,34 @@ class BaseSpeechDataset(BaseDataset):
             paired_target_local = pair_entry.get("target_local")
         else:
             cand_locals = self.spk2indices[spk_id]
-            ref_local = self._sample_reference_local_index(cand_locals, item_local)
+            ref_local = self._sample_reference_local_index(
+                cand_locals,
+                item_local,
+                source_sig=source_sig,
+            )
             paired_target_local = None
-        ref_item = item if ref_local == item_local else self._get_item(ref_local)
+        ref_item = item if ref_local == item_local else self._get_raw_item_cached(ref_local)
         ref_spec = self._mel_to_tensor(ref_item['mel'], max_frames=hparams['max_frames'])
         paired_target_item = None
         if paired_target_local is not None:
             paired_target_local = int(paired_target_local)
-            paired_target_item = item if paired_target_local == item_local else self._get_item(paired_target_local)
+            paired_target_item = (
+                item if paired_target_local == item_local else self._get_raw_item_cached(paired_target_local)
+            )
 
         sample = {
             'id': index,
             'item_name': item['item_name'],
+            'item_id': item_local,
             'mel': spec,
             'mel_nonpadding': spec.abs().sum(-1) > 0,
             'ref_mel': ref_spec,
             'ref_item_id': ref_local,
+            'paired_target_item_id': (-1 if paired_target_local is None else int(paired_target_local)),
             '_raw_item': item,
             '_raw_ref_item': ref_item,
         }
         if paired_target_item is not None:
-            sample['paired_target_item_id'] = paired_target_local
             sample['_raw_paired_target_item'] = paired_target_item
         if pair_entry is not None:
             sample['rhythm_pair_group_id'] = torch.tensor([int(pair_entry["group_id"])], dtype=torch.long)
@@ -337,7 +393,7 @@ class FastSpeechDataset(BaseSpeechDataset):
         sample = super().__getitem__(index)
         item = sample.get('_raw_item')
         if item is None:
-            item = self._get_item(index)
+            item = self._get_raw_item_cached(self._require_sample_local_item_id(sample))
         hparams = self.hparams
 
         if 'f0' in item:
@@ -372,7 +428,7 @@ class FastSpeechWordDataset(FastSpeechDataset):
         sample = super().__getitem__(index)
         item = sample.get('_raw_item')
         if item is None:
-            item = self._get_item(index)
+            item = self._get_raw_item_cached(self._require_sample_local_item_id(sample))
         max_frames = sample['mel'].shape[0]
         if 'word' in item:
             sample['words'] = item['word']

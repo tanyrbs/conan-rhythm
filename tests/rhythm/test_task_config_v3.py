@@ -392,6 +392,14 @@ def test_validate_rhythm_training_hparams_rejects_invalid_budget_mode():
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_discrete_alignment_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_alignment_mode"] = "discrete"
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_mode"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_negative_short_alignment_aliases():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
@@ -433,6 +441,31 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_alignm
     hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_align_allow_source_skip"] = True
     with pytest.raises(ValueError, match="rhythm_v3_alignment_allow_source_skip=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_noncanonical_short_gap_silence_scale():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_short_gap_silence_scale"] = 0.5
+    with pytest.raises(ValueError, match="rhythm_v3_short_gap_silence_scale=0.35"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_noncanonical_leading_silence_scale():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_leading_silence_scale"] = 0.1
+    with pytest.raises(ValueError, match="rhythm_v3_leading_silence_scale=0.0"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize("key", ["rhythm_v3_alignment_min_dp_weight", "rhythm_v3_align_min_dp_weight"])
+def test_validate_rhythm_training_hparams_rejects_negative_alignment_min_dp_weight(key):
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams[key] = -0.1
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_min_dp_weight"):
         validate_rhythm_training_hparams(hparams)
 
 

@@ -378,6 +378,7 @@ class PromptDurationMemoryEncoder(nn.Module):
             drop_edge_runs=self.g_drop_edge_runs,
             unit_ids=prompt_content_units,
             unit_prior=prompt_unit_log_prior,
+            support_mask=support_mask,
         )
         if self.summary_pool_speech_only:
             global_rate = torch.where(support_has_mass, global_rate, torch.zeros_like(global_rate))

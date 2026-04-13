@@ -207,6 +207,30 @@ def _enforce_minimal_v1_runtime_contract(
         )
 
 
+def _assert_minimal_reference_memory(
+    *,
+    minimal_v1_profile: bool,
+    ref_memory: ReferenceDurationMemory,
+    context: str,
+) -> None:
+    if not minimal_v1_profile:
+        return
+    violations: list[str] = []
+    if ref_memory.summary_state is not None:
+        violations.append("summary_state")
+    if ref_memory.progress is not None:
+        violations.append("progress")
+    if ref_memory.detector is not None:
+        violations.append("detector")
+    if ref_memory.role is not None:
+        violations.append("role")
+    if violations:
+        raise RuntimeError(
+            "rhythm_v3_minimal_v1_profile forbids non-minimal reference memory fields "
+            f"at {context}: {', '.join(violations)}."
+        )
+
+
 class DurationBackbone(nn.Module):
     backbone_mode = "global_only"
     warp_mode = "none"
@@ -744,6 +768,11 @@ class MixedEffectsDurationModule(nn.Module):
     ) -> ReferenceDurationMemory:
         if self.backbone_mode == "prompt_summary":
             if isinstance(ref_conditioning, ReferenceDurationMemory):
+                _assert_minimal_reference_memory(
+                    minimal_v1_profile=self.minimal_v1_profile,
+                    ref_memory=ref_conditioning,
+                    context="build_reference_conditioning",
+                )
                 return ref_conditioning
             if not isinstance(ref_conditioning, dict):
                 raise ValueError("rhythm_v3 prompt_summary/unit_run backbone requires explicit prompt-unit conditioning.")
@@ -1160,6 +1189,11 @@ class MixedEffectsDurationModule(nn.Module):
         batch_size = int(source_batch.content_units.size(0))
         ref_memory = validate_reference_duration_memory(ref_memory)
         ref_memory = ensure_reference_duration_memory_batch(ref_memory, batch_size=batch_size)
+        _assert_minimal_reference_memory(
+            minimal_v1_profile=self.minimal_v1_profile,
+            ref_memory=ref_memory,
+            context="forward",
+        )
         state = self._resolve_runtime_state(
             state=state,
             batch_size=batch_size,

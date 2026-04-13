@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -25,6 +26,7 @@ def test_streaming_inference_extracts_prompt_units_for_v3_by_default():
     assert "rhythm_ref_conditioning = self._extract_prompt_unit_conditioning(" in source
     assert "prepared_spk_embed=prepared_spk_embed" in source
     assert "ref_source_id=inp.get(\"ref_wav\")" in source
+    assert "ref_cache_id=effective_ref_cache_id" in source
     assert '"prompt_content_units"' in source
     assert '"prompt_duration_obs"' in source
     assert '"prompt_unit_mask"' in source
@@ -36,8 +38,40 @@ def test_streaming_inference_extracts_prompt_units_for_v3_by_default():
 def test_streaming_inference_prompt_cache_key_prefers_file_backed_fast_path():
     source = (ROOT / "inference" / "Conan.py").read_text(encoding="utf-8")
     assert "ref_source_id: str | None = None" in source
+    assert "ref_cache_id: str | None = None" in source
     assert "os.path.isfile(ref_path)" in source
     assert "os.stat(ref_path)" in source
+
+
+def test_streaming_inference_prompt_cache_key_prefers_explicit_ref_cache_id(monkeypatch):
+    monkeypatch.setattr(conan_module.os.path, "isfile", lambda _path: True)
+    monkeypatch.setattr(
+        conan_module.os,
+        "stat",
+        lambda _path: SimpleNamespace(st_mtime=1.0, st_mtime_ns=10, st_size=123),
+    )
+    mel_a = torch.randn(1, 4, 8)
+    mel_b = torch.randn(1, 6, 8)
+    key_a = StreamingVoiceConversion._make_prompt_conditioning_cache_key(
+        mel_a,
+        frontend_signature="sig",
+        ref_source_id="ref_a.wav",
+        ref_cache_id="shared-ref",
+    )
+    key_b = StreamingVoiceConversion._make_prompt_conditioning_cache_key(
+        mel_b,
+        frontend_signature="sig",
+        ref_source_id="ref_b.wav",
+        ref_cache_id="shared-ref",
+    )
+    key_c = StreamingVoiceConversion._make_prompt_conditioning_cache_key(
+        mel_b,
+        frontend_signature="sig",
+        ref_source_id="ref_b.wav",
+        ref_cache_id="other-ref",
+    )
+    assert key_a == key_b
+    assert key_a != key_c
 
 
 def test_streaming_inference_reports_content_history_windowing_metadata():
@@ -46,6 +80,10 @@ def test_streaming_inference_reports_content_history_windowing_metadata():
     assert '"content_history_left_context_tokens"' in source
     assert '"rhythm_prefix_budget_abs_p95"' in source
     assert '"rhythm_boundary_decay_applied_rate"' in source
+    assert '"prompt_global_weight_present"' in source
+    assert '"prompt_unit_log_prior_present"' in source
+    assert '"rhythm_v3_g_variant"' in source
+    assert '"rhythm_eos_tail_flush_severity"' in source
 
 
 def test_streaming_inference_uses_incremental_rhythm_frontend_cache_updates():
@@ -178,6 +216,11 @@ def test_streaming_inference_frontend_signature_includes_global_stat_knobs(monke
         lambda *args, **kwargs: SimpleNamespace(to_metadata=lambda: {}),
     )
     monkeypatch.setattr(conan_module, "build_streaming_latency_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        conan_module,
+        "build_duration_v3_frontend_signature",
+        lambda *args, **kwargs: repr(sorted(kwargs.items())),
+    )
 
     base_hparams = {
         "work_dir": str(ROOT),
@@ -209,3 +252,129 @@ def test_streaming_inference_frontend_signature_includes_global_stat_knobs(monke
         }
     )
     assert raw.rhythm_v3_frontend_signature != unit_norm.rhythm_v3_frontend_signature
+
+
+def test_streaming_inference_infer_once_reports_prompt_sidecars_and_eos_severity(monkeypatch):
+    svc = StreamingVoiceConversion.__new__(StreamingVoiceConversion)
+    svc.device = torch.device("cpu")
+    svc.hparams = {
+        "hop_size": 160,
+        "audio_sample_rate": 16000,
+        "right_context": 0,
+        "chunk_size": 2,
+        "style": False,
+        "rhythm_allow_eos_tail_flush_fallback": True,
+        "rhythm_v3_g_variant": "weighted_median",
+    }
+    svc.vocoder = SimpleNamespace(
+        reset_stream=lambda: None,
+        spec2wav=lambda arr: np.zeros(int(arr.shape[0]), dtype=np.float32),
+    )
+    svc.vocoder_left_context_frames = 0
+    svc.vocoder_left_context_source = "none"
+    svc.vocoder_native_streaming_capable = False
+    svc._vocoder_warm_zero = lambda: None
+    svc._wav_to_mel = lambda _path: np.zeros((4, 80), dtype=np.float32)
+    svc._prepare_spk_embed = lambda ref_mel_batch, spk_embed=None: torch.zeros((1, 1, 4), dtype=torch.float32)
+    svc._resolve_content_window_left_tokens = lambda: 0
+    svc._compute_content_window_start = lambda **kwargs: 0
+    svc._render_vocoder_chunk = lambda mel_chunk, mel_context_buffer=None: np.zeros(
+        int(mel_chunk.shape[0]), dtype=np.float32
+    )
+    svc._resolve_committed_token_frontier_from_cache = lambda **kwargs: None
+    svc.get_streaming_runtime_metadata = lambda duration_seconds=None: {"runtime_base": duration_seconds}
+    svc.last_rhythm_debug_bundle = None
+    svc.runtime_metadata = {}
+    svc.last_inference_metadata = {}
+
+    captured = {}
+
+    def fake_extract_prompt_unit_conditioning(
+        ref_mel_batch,
+        prepared_spk_embed=None,
+        ref_source_id=None,
+        ref_cache_id=None,
+    ):
+        captured["ref_source_id"] = ref_source_id
+        captured["ref_cache_id"] = ref_cache_id
+        return {
+            "prompt_global_weight_present": torch.ones((1, 1), dtype=torch.float32),
+            "prompt_unit_log_prior_present": torch.zeros((1, 1), dtype=torch.float32),
+        }
+
+    svc._extract_prompt_unit_conditioning = fake_extract_prompt_unit_conditioning
+
+    class _DummyFrontend:
+        def step_content_tensor(self, new_codes, state=None, content_lengths=None, mark_last_open=True):
+            return new_codes, state
+
+    class _DummyEmformerInner:
+        def infer(self, chunk, lengths, state):
+            return torch.zeros((1, chunk.size(1)), dtype=torch.long), None, state
+
+    class _DummyModel:
+        rhythm_enabled = True
+        rhythm_enable_v2 = False
+        rhythm_enable_v3 = True
+        rhythm_minimal_style_only = False
+        rhythm_unit_frontend = None
+
+        def __call__(
+            self,
+            content,
+            spk_embed,
+            target,
+            ref,
+            f0,
+            uv,
+            infer,
+            global_steps,
+            content_lengths,
+            rhythm_state,
+            rhythm_ref_conditioning,
+            rhythm_source_cache,
+            decoder_cache,
+        ):
+            return {
+                "mel_out": torch.zeros((1, 3, 80), dtype=torch.float32),
+                "rhythm_ref_conditioning": rhythm_ref_conditioning,
+                "rhythm_state_next": rhythm_state,
+                "decoder_cache": decoder_cache,
+            }
+
+    svc.model = _DummyModel()
+    svc.emformer = SimpleNamespace(
+        emformer=_DummyEmformerInner(),
+        mode="unit",
+        proj=lambda x: x,
+        proj1=lambda x: x,
+    )
+
+    monkeypatch.setattr(conan_module, "resolve_chunk_frames", lambda _hp: 2)
+    monkeypatch.setattr(conan_module, "resolve_mel_frame_ms", lambda _hp: 10.0)
+    monkeypatch.setattr(conan_module, "PrefixCodeBuffer", lambda total_capacity: SimpleNamespace(append=lambda x: x))
+    monkeypatch.setattr(
+        conan_module,
+        "RollingMelContextBuffer",
+        lambda left_context_frames: SimpleNamespace(left_context_frames=left_context_frames),
+    )
+    monkeypatch.setattr(
+        conan_module,
+        "extract_incremental_committed_mel",
+        lambda out, prev_committed_len, batch_index=0: (
+            out["mel_out"][0].new_zeros((0, out["mel_out"][0].shape[-1])),
+            0,
+        ),
+    )
+
+    _, _, metadata = svc.infer_once(
+        {"src_wav": "src.wav", "ref_wav": "ref.wav"},
+        return_metadata=True,
+        ref_cache_id="manual-ref-id",
+    )
+    assert captured == {"ref_source_id": "ref.wav", "ref_cache_id": "manual-ref-id"}
+    assert metadata["prompt_global_weight_present"] is True
+    assert metadata["prompt_unit_log_prior_present"] is False
+    assert metadata["rhythm_v3_g_variant"] == "weighted_median"
+    assert metadata["rhythm_uncommitted_eos_tail_frames"] == 3
+    assert metadata["rhythm_eos_tail_flush_severity"] == "warning"

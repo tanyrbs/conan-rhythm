@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
+import json
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import numpy as np
@@ -119,6 +122,24 @@ def _collect_frontend_meta(record) -> dict[str, object]:
     return meta
 
 
+def _payload_sha1(payload: dict[str, object]) -> str:
+    hasher = hashlib.sha1()
+    for key in sorted(payload.keys()):
+        value = payload[key]
+        hasher.update(str(key).encode("utf-8"))
+        if isinstance(value, np.ndarray):
+            arr = np.asarray(value)
+            hasher.update(str(arr.dtype).encode("utf-8"))
+            hasher.update(str(tuple(int(dim) for dim in arr.shape)).encode("utf-8"))
+            if arr.dtype == object:
+                hasher.update(json.dumps(arr.reshape(-1).tolist(), ensure_ascii=True).encode("utf-8"))
+            else:
+                hasher.update(np.ascontiguousarray(arr).view(np.uint8).tobytes())
+        else:
+            hasher.update(repr(value).encode("utf-8"))
+    return hasher.hexdigest()
+
+
 def _build_prior(
     inputs: list[str],
     *,
@@ -128,9 +149,11 @@ def _build_prior(
     exclude_open_runs: bool,
     only_sealed_runs: bool,
     drop_edge_runs: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, dict[str, object]]:
+    min_run_stability: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, dict[str, object], dict[str, int]]:
     buckets: dict[int, list[float]] = defaultdict(list)
     all_values: list[float] = []
+    accepted_run_count = 0
     frontend_meta_values = {
         "frontend_meta_signature": set(),
         "silent_token": set(),
@@ -189,7 +212,18 @@ def _build_prior(
                             f"sealed={int(sealed_mask.shape[0])} duration={int(duration.shape[0])}"
                         )
                     valid &= sealed_mask > 0.5
+            if float(min_run_stability) > 0.0:
+                run_stability = _as_array(record.get("source_run_stability"), dtype=np.float32)
+                if run_stability is not None:
+                    run_stability = run_stability.reshape(-1)
+                    if run_stability.shape[0] != duration.shape[0]:
+                        raise ValueError(
+                            "source_run_stability length mismatch in record: "
+                            f"stability={int(run_stability.shape[0])} duration={int(duration.shape[0])}"
+                        )
+                    valid &= run_stability >= float(min_run_stability)
             valid = _drop_edge_valid_mask(valid, drop_edge_runs=drop_edge_runs)
+            accepted_run_count += int(np.count_nonzero(valid))
             for unit_id, value in zip(units[valid], duration[valid]):
                 log_value = float(np.log(max(float(value), 1.0e-4)))
                 buckets[int(unit_id)].append(log_value)
@@ -229,7 +263,17 @@ def _build_prior(
         "debounce_min_run_frames": _collapse_scalar(frontend_meta_values["debounce_min_run_frames"]),
         "phrase_boundary_threshold": _collapse_scalar(frontend_meta_values["phrase_boundary_threshold"]),
     }
-    return prior, counts, is_default, backoff_weight, global_default, frontend_meta
+    return (
+        prior,
+        counts,
+        is_default,
+        backoff_weight,
+        global_default,
+        frontend_meta,
+        {
+            "accepted_run_count": int(accepted_run_count),
+        },
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -288,12 +332,18 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Drop the first/last N eligible speech runs per record before aggregation. Default: 0.",
     )
+    parser.add_argument(
+        "--min-run-stability",
+        type=float,
+        default=0.0,
+        help="Drop runs with source_run_stability below this threshold when that field is present. Default: 0.0.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    prior, counts, is_default, backoff_weight, global_default, frontend_meta = _build_prior(
+    prior, counts, is_default, backoff_weight, global_default, frontend_meta, prior_stats = _build_prior(
         args.inputs,
         min_count=int(args.min_count),
         default_policy=str(args.default_prior),
@@ -301,46 +351,64 @@ def main() -> None:
         exclude_open_runs=bool(args.exclude_open_runs),
         only_sealed_runs=bool(args.only_sealed_runs),
         drop_edge_runs=int(args.drop_edge_runs),
+        min_run_stability=float(max(0.0, args.min_run_stability)),
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        output,
-        unit_log_prior=prior.astype(np.float32, copy=False),
-        unit_count=counts.astype(np.int64, copy=False),
-        unit_log_prior_is_default=is_default.astype(np.int64, copy=False),
-        unit_prior_backoff_weight=backoff_weight.astype(np.float32, copy=False),
-        global_speech_log_prior=np.asarray([float(global_default)], dtype=np.float32),
-        unit_prior_min_count=np.asarray([int(max(1, args.min_count))], dtype=np.int64),
-        unit_prior_default_value=np.asarray([float(global_default)], dtype=np.float32),
-        unit_prior_default_policy=np.asarray([str(args.default_prior)], dtype=object),
-        unit_prior_global_backoff=np.asarray([str(args.global_backoff)], dtype=object),
-        unit_prior_default_count=np.asarray([int(is_default.sum())], dtype=np.int64),
-        unit_prior_observed_count=np.asarray([int((counts > 0).sum())], dtype=np.int64),
-        unit_prior_low_count_count=np.asarray(
+    input_manifest = list(
+        dict.fromkeys(str(path.resolve()) for path in _iter_input_files(args.inputs))
+    )
+    input_manifest_sha1 = hashlib.sha1(
+        "\n".join(sorted(input_manifest)).encode("utf-8")
+    ).hexdigest()
+    build_cmd = " ".join(str(part) for part in sys.argv)
+    special_token_policy = "exclude_silence_runs_keep_special_backoff"
+    payload = {
+        "unit_log_prior": prior.astype(np.float32, copy=False),
+        "unit_count": counts.astype(np.int64, copy=False),
+        "unit_log_prior_is_default": is_default.astype(np.int64, copy=False),
+        "unit_prior_backoff_weight": backoff_weight.astype(np.float32, copy=False),
+        "global_speech_log_prior": np.asarray([float(global_default)], dtype=np.float32),
+        "unit_prior_min_count": np.asarray([int(max(1, args.min_count))], dtype=np.int64),
+        "unit_prior_default_value": np.asarray([float(global_default)], dtype=np.float32),
+        "unit_prior_default_policy": np.asarray([str(args.default_prior)], dtype=object),
+        "unit_prior_global_backoff": np.asarray([str(args.global_backoff)], dtype=object),
+        "unit_prior_default_count": np.asarray([int(is_default.sum())], dtype=np.int64),
+        "unit_prior_observed_count": np.asarray([int((counts > 0).sum())], dtype=np.int64),
+        "unit_prior_low_count_count": np.asarray(
             [int(((counts > 0) & (counts < max(1, args.min_count))).sum())],
             dtype=np.int64,
         ),
-        unit_prior_filter_exclude_open_runs=np.asarray([bool(args.exclude_open_runs)], dtype=np.bool_),
-        unit_prior_filter_only_sealed_runs=np.asarray([bool(args.only_sealed_runs)], dtype=np.bool_),
-        unit_prior_filter_drop_edge_runs=np.asarray([int(max(0, args.drop_edge_runs))], dtype=np.int64),
-        unit_prior_source=np.asarray([str(args.source)], dtype=object),
-        unit_prior_version=np.asarray([str(args.version)], dtype=object),
-        unit_prior_vocab_size=np.asarray([int(prior.shape[0])], dtype=np.int64),
-        unit_prior_frontend_signature=np.asarray([str(frontend_meta["frontend_meta_signature"])], dtype=object),
-        unit_prior_silent_token=np.asarray([frontend_meta["silent_token"]], dtype=object),
-        unit_prior_separator_aware=np.asarray([frontend_meta["separator_aware"]], dtype=object),
-        unit_prior_tail_open_units=np.asarray([frontend_meta["tail_open_units"]], dtype=object),
-        unit_prior_emit_silence_runs=np.asarray([frontend_meta["emit_silence_runs"]], dtype=object),
-        unit_prior_debounce_min_run_frames=np.asarray([frontend_meta["debounce_min_run_frames"]], dtype=object),
-        unit_prior_phrase_boundary_threshold=np.asarray([frontend_meta["phrase_boundary_threshold"]], dtype=object),
-    )
+        "unit_prior_filter_exclude_open_runs": np.asarray([bool(args.exclude_open_runs)], dtype=np.bool_),
+        "unit_prior_filter_only_sealed_runs": np.asarray([bool(args.only_sealed_runs)], dtype=np.bool_),
+        "unit_prior_filter_drop_edge_runs": np.asarray([int(max(0, args.drop_edge_runs))], dtype=np.int64),
+        "unit_prior_filter_min_run_stability": np.asarray([float(max(0.0, args.min_run_stability))], dtype=np.float32),
+        "unit_prior_source": np.asarray([str(args.source)], dtype=object),
+        "unit_prior_version": np.asarray([str(args.version)], dtype=object),
+        "unit_prior_vocab_size": np.asarray([int(prior.shape[0])], dtype=np.int64),
+        "unit_prior_frontend_signature": np.asarray([str(frontend_meta["frontend_meta_signature"])], dtype=object),
+        "unit_prior_silent_token": np.asarray([frontend_meta["silent_token"]], dtype=object),
+        "unit_prior_separator_aware": np.asarray([frontend_meta["separator_aware"]], dtype=object),
+        "unit_prior_tail_open_units": np.asarray([frontend_meta["tail_open_units"]], dtype=object),
+        "unit_prior_emit_silence_runs": np.asarray([frontend_meta["emit_silence_runs"]], dtype=object),
+        "unit_prior_debounce_min_run_frames": np.asarray([frontend_meta["debounce_min_run_frames"]], dtype=object),
+        "unit_prior_phrase_boundary_threshold": np.asarray([frontend_meta["phrase_boundary_threshold"]], dtype=object),
+        "unit_prior_input_count": np.asarray([int(len(input_manifest))], dtype=np.int64),
+        "unit_prior_input_manifest_sha1": np.asarray([input_manifest_sha1], dtype=object),
+        "unit_prior_build_cmd": np.asarray([build_cmd], dtype=object),
+        "unit_prior_special_token_policy": np.asarray([special_token_policy], dtype=object),
+        "unit_prior_accepted_run_count": np.asarray([int(prior_stats["accepted_run_count"])], dtype=np.int64),
+    }
+    payload["unit_prior_sha1"] = np.asarray([_payload_sha1(payload)], dtype=object)
+    np.savez(output, **payload)
     print(
         f"[build_unit_log_prior] wrote vocab_size={int(prior.shape[0])} "
         f"observed_units={int((counts > 0).sum())} "
         f"default_units={int(is_default.sum())} "
+        f"accepted_runs={int(prior_stats['accepted_run_count'])} "
         f"global_default={float(global_default):.6f} "
         f"backoff={args.global_backoff} "
+        f"sha1={str(np.asarray(payload['unit_prior_sha1'], dtype=object).reshape(-1)[0])} "
         f"frontend_signature={frontend_meta['frontend_meta_signature']} -> {output}"
     )
 

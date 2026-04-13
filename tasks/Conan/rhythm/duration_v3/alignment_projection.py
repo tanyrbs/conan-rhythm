@@ -208,6 +208,7 @@ class ContinuousRunAligner:
         bad_cost_threshold: float = 1.2,
         allow_source_skip: bool = False,
         skip_penalty: float = 1.0,
+        min_dp_weight: float = 0.0,
     ) -> None:
         self.lambda_emb = float(lambda_emb)
         self.lambda_type = float(lambda_type)
@@ -218,6 +219,7 @@ class ContinuousRunAligner:
         self.bad_cost_threshold = float(max(0.0, bad_cost_threshold))
         self.allow_source_skip = bool(allow_source_skip)
         self.skip_penalty = float(max(0.0, skip_penalty))
+        self.min_dp_weight = float(max(0.0, min_dp_weight))
 
     def _resolve_band_width(self, *, num_source: int) -> int:
         if self.band_width is not None:
@@ -768,10 +770,21 @@ class ContinuousRunAligner:
             (assigned_local_cost > np.float32(self.bad_cost_threshold))
             | (~source_is_speech[assigned_run])
         )
-        unmatched_speech_ratio = (
+        unmatched_target_speech_ratio = (
             np.float32(float(np.count_nonzero(unmatched)) / float(max(1, np.count_nonzero(speech_frame))))
             if bool(np.any(speech_frame))
             else np.float32(0.0)
+        )
+        skipped_source_speech_ratio = (
+            np.float32(
+                float(np.count_nonzero(source_is_speech & (run_occ_viterbi <= 0.0)))
+                / float(max(1, np.count_nonzero(source_is_speech)))
+            )
+            if bool(np.any(source_is_speech))
+            else np.float32(0.0)
+        )
+        unmatched_speech_ratio = np.float32(
+            max(float(unmatched_target_speech_ratio), float(skipped_source_speech_ratio))
         )
         mean_local_confidence_speech = (
             np.float32(np.mean(confidence_local[source_is_speech], dtype=np.float32))
@@ -787,6 +800,7 @@ class ContinuousRunAligner:
         return {
             "run_occ_viterbi": run_occ_viterbi.astype(np.float32),
             "run_occ_weighted": run_occ_weighted.astype(np.float32),
+            "run_skip_flag": (run_occ_viterbi <= 0.0).astype(np.float32, copy=False),
             "run_margin": run_margin.astype(np.float32),
             "run_mean_cost": run_mean_cost.astype(np.float32),
             "run_type_agree": run_type_agree.astype(np.float32),
@@ -803,6 +817,8 @@ class ContinuousRunAligner:
             "run_confidence_coarse_final": confidence_coarse.astype(np.float32),
             "run_confidence_local": confidence_local.astype(np.float32),
             "run_confidence_coarse": confidence_coarse.astype(np.float32),
+            "unmatched_target_speech_ratio": unmatched_target_speech_ratio,
+            "skipped_source_speech_ratio": skipped_source_speech_ratio,
             "unmatched_speech_ratio": unmatched_speech_ratio,
             "mean_local_confidence_speech": mean_local_confidence_speech,
             "mean_coarse_confidence_speech": mean_coarse_confidence_speech,
@@ -845,13 +861,12 @@ class ContinuousRunAligner:
                 f"{target_frame_valid.shape[0]} vs {num_target_frames}"
             )
         valid_frame = target_frame_valid > 0.5
-        target_valid_index = np.nonzero(valid_frame)[0].astype(np.int64)
-        if target_valid_index.size <= 0:
+        base_valid_index = np.nonzero(valid_frame)[0].astype(np.int64)
+        if base_valid_index.size <= 0:
             raise RuntimeError("continuous aligner requires at least one valid target frame.")
 
-        target_frame_states_valid = target_frame_states[valid_frame]
         if target_frame_speech_prob is None:
-            target_frame_speech_prob_valid = np.ones((target_valid_index.size,), dtype=np.float32)
+            target_frame_speech_prob = np.ones((num_target_frames,), dtype=np.float32)
         else:
             target_frame_speech_prob = as_float32_1d(target_frame_speech_prob)
             if target_frame_speech_prob.shape[0] != num_target_frames:
@@ -859,10 +874,9 @@ class ContinuousRunAligner:
                     "target_frame_speech_prob/target_frame_states length mismatch: "
                     f"{target_frame_speech_prob.shape[0]} vs {num_target_frames}"
                 )
-            target_frame_speech_prob_valid = target_frame_speech_prob[valid_frame].astype(np.float32, copy=False)
         has_target_frame_weight = target_frame_weight is not None
         if target_frame_weight is None:
-            target_frame_weight_valid = np.ones((target_valid_index.size,), dtype=np.float32)
+            target_frame_weight = np.ones((num_target_frames,), dtype=np.float32)
         else:
             target_frame_weight = as_float32_1d(target_frame_weight)
             if target_frame_weight.shape[0] != num_target_frames:
@@ -870,7 +884,21 @@ class ContinuousRunAligner:
                     "target_frame_weight/target_frame_states length mismatch: "
                     f"{target_frame_weight.shape[0]} vs {num_target_frames}"
                 )
-            target_frame_weight_valid = target_frame_weight[valid_frame].astype(np.float32, copy=False)
+        low_weight_pruned = np.zeros((num_target_frames,), dtype=bool)
+        if has_target_frame_weight and self.min_dp_weight > 0.0:
+            low_weight_pruned = valid_frame & (
+                target_frame_weight.astype(np.float32, copy=False) < np.float32(self.min_dp_weight)
+            )
+            valid_frame = valid_frame & (~low_weight_pruned)
+        target_valid_index = np.nonzero(valid_frame)[0].astype(np.int64)
+        if target_valid_index.size <= 0:
+            raise RuntimeError(
+                "continuous aligner requires at least one valid target frame after DP-weight filtering."
+            )
+
+        target_frame_states_valid = target_frame_states[valid_frame]
+        target_frame_speech_prob_valid = target_frame_speech_prob[valid_frame].astype(np.float32, copy=False)
+        target_frame_weight_valid = target_frame_weight[valid_frame].astype(np.float32, copy=False)
         if target_frame_unit_hint is None:
             target_frame_unit_hint_valid = None
         else:
@@ -933,12 +961,14 @@ class ContinuousRunAligner:
                 "alignment_mode": _ALIGNMENT_MODE_CONTINUOUS_VITERBI_V1,
                 "alignment_source": "run_state_viterbi",
                 "alignment_version": CONTINUOUS_ALIGNER_VERSION,
-                "posterior_kind": "none",
+                "posterior_kind": "viterbi_margin_only",
                 "confidence_kind": "heuristic_v1",
                 "confidence_formula_version": "heuristic_margin_cost_type_v1",
                 "assigned_source": assigned_run.astype(np.int64),
                 "assigned_cost": assigned_local_cost.astype(np.float32),
                 "target_valid_observation_index": target_valid_index.astype(np.int64),
+                "target_valid_observation_index_pre_dp_filter": base_valid_index.astype(np.int64),
+                "target_dp_weight_pruned_index": np.nonzero(low_weight_pruned)[0].astype(np.int64),
                 "source_frame_count": source_frame_count.astype(np.float32),
                 "source_frame_weight_sum": source_frame_weight_sum.astype(np.float32),
                 "source_run_proto": source_run_proto.astype(np.float32),
@@ -954,6 +984,7 @@ class ContinuousRunAligner:
                 "alignment_lambda_unit": np.asarray([self.lambda_unit], dtype=np.float32),
                 "alignment_band_ratio": np.asarray([self.band_ratio], dtype=np.float32),
                 "alignment_bad_cost_threshold": np.asarray([self.bad_cost_threshold], dtype=np.float32),
+                "alignment_min_dp_weight": np.asarray([self.min_dp_weight], dtype=np.float32),
                 "alignment_band_width": np.asarray(
                     [-1 if self.band_width is None else int(self.band_width)],
                     dtype=np.int64,
@@ -1317,10 +1348,15 @@ def project_target_runs_onto_source(
     confidence_margin_term = np.zeros((num_source_runs,), dtype=np.float32)
     confidence_type_term = np.zeros((num_source_runs,), dtype=np.float32)
     confidence_match_term = np.zeros((num_source_runs,), dtype=np.float32)
+    run_skip_flag = np.zeros((num_source_runs,), dtype=np.float32)
 
     if "run_occ_viterbi" in alignment:
         projected[src_run_index] = np.asarray(alignment["run_occ_viterbi"], dtype=np.float32)
         projected_weighted[src_run_index] = np.asarray(alignment["run_occ_weighted"], dtype=np.float32)
+        run_skip_flag[src_run_index] = np.asarray(
+            alignment.get("run_skip_flag", np.zeros((src_run_index.size,), dtype=np.float32)),
+            dtype=np.float32,
+        )
         aligned_target[src_run_index] = np.asarray(alignment["run_occ_viterbi"], dtype=np.float32)
         coverage[src_run_index] = (
             np.asarray(alignment["run_occ_viterbi"], dtype=np.float32) > 0.0
@@ -1468,6 +1504,7 @@ def project_target_runs_onto_source(
             if speech_run_count > 0
             else 0.0
         )
+        run_skip_flag = ((~source_is_silence) & (aligned_target <= 0.0)).astype(np.float32, copy=False)
 
     source_is_silence = source_silence_mask > 0.5
     confidence_local[source_is_silence] = 0.0
@@ -1494,9 +1531,16 @@ def project_target_runs_onto_source(
         "confidence_margin_term": confidence_margin_term.astype(np.float32),
         "confidence_type_term": confidence_type_term.astype(np.float32),
         "confidence_match_term": confidence_match_term.astype(np.float32),
+        "run_skip_flag": run_skip_flag.astype(np.float32),
         "coverage": coverage.astype(np.float32),
         "match_rate": match_rate.astype(np.float32),
         "mean_cost": mean_cost.astype(np.float32),
+        "unmatched_target_speech_ratio": np.float32(
+            alignment.get("unmatched_target_speech_ratio", unmatched_speech_ratio)
+        ),
+        "skipped_source_speech_ratio": np.float32(
+            alignment.get("skipped_source_speech_ratio", unmatched_speech_ratio)
+        ),
         "unmatched_speech_ratio": np.float32(unmatched_speech_ratio),
         "mean_local_confidence_speech": np.float32(mean_local_confidence_speech),
         "mean_coarse_confidence_speech": np.float32(mean_coarse_confidence_speech),
@@ -1520,6 +1564,14 @@ def project_target_runs_onto_source(
             alignment.get("target_valid_observation_index", tgt_run_index),
             dtype=np.int64,
         ),
+        "target_valid_observation_index_pre_dp_filter": np.asarray(
+            alignment.get("target_valid_observation_index_pre_dp_filter", alignment.get("target_valid_observation_index", tgt_run_index)),
+            dtype=np.int64,
+        ),
+        "target_dp_weight_pruned_index": np.asarray(
+            alignment.get("target_dp_weight_pruned_index", np.zeros((0,), dtype=np.int64)),
+            dtype=np.int64,
+        ),
         "run_occ_hard": np.asarray(
             alignment.get("run_occ_hard", alignment.get("run_occ_viterbi", projected[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32))),
             dtype=np.float32,
@@ -1528,7 +1580,7 @@ def project_target_runs_onto_source(
             alignment.get("run_occ_weighted", projected_weighted[src_run_index] if src_run_index.size > 0 else np.zeros((0,), dtype=np.float32)),
             dtype=np.float32,
         ),
-        "posterior_kind": str(alignment.get("posterior_kind", "none") or "none"),
+        "posterior_kind": str(alignment.get("posterior_kind", "viterbi_margin_only") or "viterbi_margin_only"),
         "run_occ_expected": np.asarray(
             alignment.get(
                 "run_occ_expected",
@@ -1542,16 +1594,31 @@ def project_target_runs_onto_source(
         "run_occ_expected_is_hard_proxy": np.asarray(
             alignment.get(
                 "run_occ_expected_is_hard_proxy",
-                np.asarray([1], dtype=np.int64) if str(alignment.get("posterior_kind", "none") or "none") == "none" else np.asarray([0], dtype=np.int64),
+                (
+                    np.asarray([1], dtype=np.int64)
+                    if str(alignment.get("posterior_kind", "viterbi_margin_only") or "viterbi_margin_only").strip().lower()
+                    in {"none", "viterbi_margin_only"}
+                    else np.asarray([0], dtype=np.int64)
+                ),
             ),
             dtype=np.int64,
         ),
         "run_occ_expected_semantics": str(
             alignment.get(
                 "run_occ_expected_semantics",
-                "hard_viterbi_proxy" if str(alignment.get("posterior_kind", "none") or "none") == "none" else "",
+                (
+                    "hard_viterbi_proxy"
+                    if str(alignment.get("posterior_kind", "viterbi_margin_only") or "viterbi_margin_only").strip().lower()
+                    in {"none", "viterbi_margin_only"}
+                    else ""
+                ),
             )
-            or ("hard_viterbi_proxy" if str(alignment.get("posterior_kind", "none") or "none") == "none" else "")
+            or (
+                "hard_viterbi_proxy"
+                if str(alignment.get("posterior_kind", "viterbi_margin_only") or "viterbi_margin_only").strip().lower()
+                in {"none", "viterbi_margin_only"}
+                else ""
+            )
         ),
         "run_entropy": np.asarray(
             alignment.get("run_entropy", np.zeros((src_run_index.size,), dtype=np.float32)),
@@ -1617,6 +1684,10 @@ def project_target_runs_onto_source(
         ),
         "alignment_bad_cost_threshold": np.asarray(
             alignment.get("alignment_bad_cost_threshold", np.asarray([np.nan], dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "alignment_min_dp_weight": np.asarray(
+            alignment.get("alignment_min_dp_weight", np.asarray([0.0], dtype=np.float32)),
             dtype=np.float32,
         ),
         "alignment_allow_source_skip": np.asarray(

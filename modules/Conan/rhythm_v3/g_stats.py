@@ -14,9 +14,12 @@ _VALID_EVAL_MODES = {"analytic", "coarse_only", "learned"}
 class GlobalRateSupportStats:
     support_mask: torch.Tensor
     support_count: torch.Tensor
+    support_seed_count: torch.Tensor
     speech_count: torch.Tensor
     valid_count: torch.Tensor
     speech_ratio: torch.Tensor
+    support_fraction: torch.Tensor
+    edge_runs_dropped: torch.Tensor
     domain_valid: torch.Tensor
     clean_mask: torch.Tensor | None = None
     clean_count: torch.Tensor | None = None
@@ -135,11 +138,32 @@ def _build_single_support_mask(
     boundary_confidence: torch.Tensor | None = None,
     min_boundary_confidence: float | None = None,
 ) -> torch.Tensor:
+    _, support = _build_single_support_surface(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        drop_edge_runs=drop_edge_runs,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
+    )
+    return support
+
+
+def _build_single_support_surface(
+    *,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None,
+    drop_edge_runs: int,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    min_boundary_confidence: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     speech = speech_mask.bool()
     valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
     speech_valid = speech & valid
     if not bool(speech_valid.any().item()):
-        return torch.zeros_like(speech_valid, dtype=torch.bool)
+        empty = torch.zeros_like(speech_valid, dtype=torch.bool)
+        return empty, empty
     clean_seed = _build_boundary_clean_seed(
         speech_valid=speech_valid,
         closed_mask=closed_mask,
@@ -149,8 +173,28 @@ def _build_single_support_mask(
     support_seed = clean_seed if bool(clean_seed.any().item()) else speech_valid
     support = _drop_edge_support_1d(support_seed, drop_edge_runs=drop_edge_runs)
     if bool(support.any().item()):
-        return support
-    return support_seed
+        return support_seed, support
+    return support_seed, support_seed
+
+
+def _resolve_support_mask_input(
+    *,
+    log_dur: torch.Tensor,
+    support_mask: torch.Tensor | None,
+    support_stats: GlobalRateSupportStats | None,
+) -> torch.Tensor | None:
+    if support_mask is not None and support_stats is not None:
+        raise ValueError("Pass at most one of support_mask or support_stats.")
+    resolved = support_stats.support_mask if support_stats is not None else support_mask
+    if resolved is None:
+        return None
+    resolved = resolved.bool().to(device=log_dur.device)
+    expected_shape = tuple(log_dur.shape)
+    if tuple(resolved.shape) != expected_shape:
+        raise ValueError(
+            f"support_mask shape mismatch: expected {expected_shape}, got {tuple(resolved.shape)}"
+        )
+    return resolved
 
 
 def build_global_rate_support_mask(
@@ -221,20 +265,46 @@ def summarize_global_rate_support(
         boundary_confidence=boundary_confidence,
         min_boundary_confidence=min_boundary_confidence,
     )
-    support_mask = build_global_rate_support_mask(
-        speech_mask=speech_mask,
-        valid_mask=valid_mask,
-        drop_edge_runs=drop_edge_runs,
-        closed_mask=closed_mask,
-        boundary_confidence=boundary_confidence,
-        min_boundary_confidence=min_boundary_confidence,
-    )
+    if speech_mask.ndim == 1:
+        support_seed_mask, support_mask = _build_single_support_surface(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=drop_edge_runs,
+            closed_mask=closed_mask,
+            boundary_confidence=boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
+        )
+    elif speech_mask.ndim == 2:
+        support_seed_mask = torch.zeros_like(speech_mask, dtype=torch.bool)
+        support_mask = torch.zeros_like(speech_mask, dtype=torch.bool)
+        batch_size = int(speech_mask.size(0))
+        for batch_idx in range(batch_size):
+            seed_row, support_row = _build_single_support_surface(
+                speech_mask=speech_mask[batch_idx],
+                valid_mask=None if valid_mask is None else valid_mask[batch_idx],
+                drop_edge_runs=drop_edge_runs,
+                closed_mask=None if closed_mask is None else closed_mask[batch_idx],
+                boundary_confidence=(
+                    None if boundary_confidence is None else boundary_confidence[batch_idx]
+                ),
+                min_boundary_confidence=min_boundary_confidence,
+            )
+            support_seed_mask[batch_idx] = seed_row
+            support_mask[batch_idx] = support_row
+    else:
+        raise ValueError(
+            "summarize_global_rate_support expects rank-1 or rank-2 speech_mask, "
+            f"got {tuple(speech_mask.shape)}"
+        )
     reduce_dim = 0 if speech_mask.ndim == 1 else 1
     support_count = support_mask.sum(dim=reduce_dim, keepdim=True).float()
+    support_seed_count = support_seed_mask.sum(dim=reduce_dim, keepdim=True).float()
     speech_count = (speech & valid).sum(dim=reduce_dim, keepdim=True).float()
     valid_count = valid.sum(dim=reduce_dim, keepdim=True).float()
     clean_count = clean_mask.sum(dim=reduce_dim, keepdim=True).float()
     speech_ratio = speech_count / valid_count.clamp_min(1.0)
+    support_fraction = support_count / speech_count.clamp_min(1.0)
+    edge_runs_dropped = (support_seed_count - support_count).clamp_min(0.0)
     domain_valid = (
         (support_count >= float(max(1, int(min_speech_runs))))
         & (speech_ratio >= float(max(0.0, min(1.0, min_speech_ratio))) - 1.0e-6)
@@ -242,9 +312,12 @@ def summarize_global_rate_support(
     return GlobalRateSupportStats(
         support_mask=support_mask,
         support_count=support_count,
+        support_seed_count=support_seed_count,
         speech_count=speech_count,
         valid_count=valid_count,
         speech_ratio=speech_ratio,
+        support_fraction=support_fraction,
+        edge_runs_dropped=edge_runs_dropped,
         domain_valid=domain_valid,
         clean_mask=clean_mask,
         clean_count=clean_count,
@@ -511,15 +584,23 @@ def compute_global_rate_1d(
     unit_count: torch.Tensor | None = None,
     unit_prior_min_count: int | None = None,
     unit_prior_global_backoff: float | torch.Tensor | None = None,
+    support_mask: torch.Tensor | None = None,
+    support_stats: GlobalRateSupportStats | None = None,
 ) -> torch.Tensor:
-    support_mask = build_global_rate_support_mask(
-        speech_mask=speech_mask,
-        valid_mask=valid_mask,
-        drop_edge_runs=drop_edge_runs,
-        closed_mask=closed_mask,
-        boundary_confidence=boundary_confidence,
-        min_boundary_confidence=min_boundary_confidence,
+    support_mask = _resolve_support_mask_input(
+        log_dur=log_dur,
+        support_mask=support_mask,
+        support_stats=support_stats,
     )
+    if support_mask is None:
+        support_mask = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=drop_edge_runs,
+            closed_mask=closed_mask,
+            boundary_confidence=boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
+        )
     return _compute_single_global_rate(
         log_dur=log_dur.float(),
         mask=support_mask,
@@ -553,6 +634,8 @@ def compute_global_rate_batch(
     unit_count: torch.Tensor | None = None,
     unit_prior_min_count: int | None = None,
     unit_prior_global_backoff: float | torch.Tensor | None = None,
+    support_mask: torch.Tensor | None = None,
+    support_stats: GlobalRateSupportStats | None = None,
 ) -> torch.Tensor:
     variant = normalize_global_rate_variant(variant)
     log_dur = log_dur.float()
@@ -574,17 +657,25 @@ def compute_global_rate_batch(
             unit_count=unit_count,
             unit_prior_min_count=unit_prior_min_count,
             unit_prior_global_backoff=unit_prior_global_backoff,
+            support_mask=support_mask,
+            support_stats=support_stats,
         )
     if log_dur.ndim != 2:
         raise ValueError(f"compute_global_rate expects rank-1 or rank-2 log_dur, got {tuple(log_dur.shape)}")
-    support = build_global_rate_support_mask(
-        speech_mask=speech_mask,
-        valid_mask=valid_mask,
-        drop_edge_runs=drop_edge_runs,
-        closed_mask=closed_mask,
-        boundary_confidence=boundary_confidence,
-        min_boundary_confidence=min_boundary_confidence,
+    support = _resolve_support_mask_input(
+        log_dur=log_dur,
+        support_mask=support_mask,
+        support_stats=support_stats,
     )
+    if support is None:
+        support = build_global_rate_support_mask(
+            speech_mask=speech_mask,
+            valid_mask=valid_mask,
+            drop_edge_runs=drop_edge_runs,
+            closed_mask=closed_mask,
+            boundary_confidence=boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
+        )
     resolved_unit_prior = None
     if variant == "unit_norm":
         resolved_unit_prior = _resolve_unit_prior(
@@ -599,11 +690,15 @@ def compute_global_rate_batch(
     if variant == "raw_median" and weight is None and unit_prior is None:
         return masked_true_median_batch(log_dur, support)
     if variant == "weighted_median":
-        resolved_weight = torch.ones_like(log_dur) if weight is None else weight.float()
+        if weight is None:
+            return masked_true_median_batch(log_dur, support)
+        resolved_weight = weight.float()
         return masked_weighted_median_batch(log_dur, support, resolved_weight)
     if variant == "unit_norm":
         normalized = log_dur - resolved_unit_prior.float()
-        resolved_weight = torch.ones_like(normalized) if weight is None else weight.float()
+        if weight is None:
+            return masked_true_median_batch(normalized, support)
+        resolved_weight = weight.float()
         return masked_weighted_median_batch(normalized, support, resolved_weight)
     if variant == "trimmed_mean" and _normalize_drop_edge_runs(drop_edge_runs) <= 0:
         support_count = support.sum(dim=1, keepdim=True)
@@ -667,6 +762,8 @@ def compute_global_rate(
     unit_count: torch.Tensor | None = None,
     unit_prior_min_count: int | None = None,
     unit_prior_global_backoff: float | torch.Tensor | None = None,
+    support_mask: torch.Tensor | None = None,
+    support_stats: GlobalRateSupportStats | None = None,
 ) -> torch.Tensor:
     return compute_global_rate_batch(
         log_dur=log_dur,
@@ -685,6 +782,8 @@ def compute_global_rate(
         unit_count=unit_count,
         unit_prior_min_count=unit_prior_min_count,
         unit_prior_global_backoff=unit_prior_global_backoff,
+        support_mask=support_mask,
+        support_stats=support_stats,
     )
 
 

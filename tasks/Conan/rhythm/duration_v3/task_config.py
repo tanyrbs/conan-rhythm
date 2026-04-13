@@ -79,6 +79,19 @@ def normalize_duration_v3_rate_mode(value) -> str:
     return normalized
 
 
+def normalize_duration_v3_alignment_mode(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "auto"}:
+        return "continuous_viterbi_v1"
+    aliases = {
+        "precomputed": "continuous_precomputed",
+        "continuous": "continuous_viterbi_v1",
+        "viterbi": "continuous_viterbi_v1",
+        "run_state_viterbi": "continuous_viterbi_v1",
+    }
+    return aliases.get(normalized, normalized)
+
+
 def resolve_duration_v3_rate_mode(hparams) -> str:
     explicit = normalize_duration_v3_rate_mode(hparams.get("rhythm_v3_rate_mode", ""))
     if explicit:
@@ -222,6 +235,14 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_use_continuous_alignment=true "
                 "unless unit_duration_tgt is already explicitly cached with continuous provenance."
             )
+        alignment_mode = normalize_duration_v3_alignment_mode(
+            hparams.get("rhythm_v3_alignment_mode", "continuous_viterbi_v1")
+        )
+        if alignment_mode not in {"continuous_precomputed", "continuous_viterbi_v1"}:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_mode to be "
+                "continuous_precomputed or continuous_viterbi_v1."
+            )
         if not _is_enabled_flag(hparams.get("rhythm_v3_simple_global_stats", True)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_simple_global_stats=true.")
         if rate_mode != "simple_global":
@@ -247,6 +268,14 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError("rhythm_v3_minimal_v1_profile requires lambda_rhythm_base=0.")
         if float(hparams.get("rhythm_v3_silence_coarse_weight", 0.0) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_silence_coarse_weight=0.")
+        if abs(float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35) or 0.35) - 0.35) > 1.0e-6:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_short_gap_silence_scale=0.35."
+            )
+        if abs(float(hparams.get("rhythm_v3_leading_silence_scale", 0.0) or 0.0) - 0.0) > 1.0e-6:
+            raise ValueError(
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_leading_silence_scale=0.0."
+            )
         if int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0) < 1:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_drop_edge_runs_for_g >= 1.")
         if _is_enabled_flag(hparams.get("rhythm_v3_alignment_soft_repair", False)):
@@ -379,6 +408,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         ("rhythm_v3_alignment_lambda_band", "rhythm_v3_align_lambda_band"),
         ("rhythm_v3_alignment_lambda_unit", "rhythm_v3_align_lambda_unit"),
         ("rhythm_v3_alignment_bad_cost_threshold", "rhythm_v3_align_bad_cost_threshold"),
+        ("rhythm_v3_alignment_min_dp_weight", "rhythm_v3_align_min_dp_weight"),
         ("rhythm_v3_alignment_skip_penalty", "rhythm_v3_align_skip_penalty"),
     ):
         value = _get_hparam_alias(hparams, key, alias, None)

@@ -587,50 +587,6 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_v3_source_rate_init"] = self.module.duration_head.src_rate_init.detach().reshape(1)
         if execution.frame_plan is not None:
             ret["rhythm_frame_plan"] = execution.frame_plan
-        g_debug_stats = {}
-        prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
-        prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
-        if isinstance(prompt_speech_mask, torch.Tensor):
-            min_prompt_speech_ratio = float(
-                getattr(getattr(self.module, "prompt_memory_encoder", None), "min_speech_ratio", 0.0)
-            )
-            support_mask = build_global_rate_support_mask(
-                speech_mask=prompt_speech_mask.float(),
-                valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
-                drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
-            )
-            speech_count = prompt_speech_mask.float().sum(dim=1, keepdim=True)
-            valid_count = (
-                prompt_valid_mask.float().sum(dim=1, keepdim=True)
-                if isinstance(prompt_valid_mask, torch.Tensor)
-                else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
-            )
-            support_count = support_mask.float().sum(dim=1, keepdim=True)
-            speech_ratio = speech_count / valid_count.clamp_min(1.0)
-            g_valid_support = (support_count > 0.5).float()
-            g_domain_valid = (
-                g_valid_support > 0.5
-            ) & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
-            g_debug_stats = {
-                "g_support_count": support_count.detach(),
-                "g_speech_count": speech_count.detach(),
-                "g_valid_count": valid_count.detach(),
-                "g_valid_support": g_valid_support.detach(),
-                "g_domain_valid": g_domain_valid.float().detach(),
-                "g_min_speech_ratio": support_count.new_full(
-                    support_count.shape,
-                    float(min_prompt_speech_ratio),
-                ),
-                "prompt_speech_ratio": speech_ratio.detach(),
-                "g_support_ratio_vs_speech": (support_count / speech_count.clamp_min(1.0)).detach(),
-                "g_support_ratio_vs_valid": (support_count / valid_count.clamp_min(1.0)).detach(),
-                "g_valid": g_domain_valid.float().detach(),
-                "g_drop_edge_runs": support_count.new_full(
-                    support_count.shape,
-                    float(int(getattr(self.module, "g_drop_edge_runs", 0))),
-                ),
-                "g_strict_speech_only": support_count.new_ones(support_count.shape),
-            }
         if isinstance(ref_conditioning_meta, Mapping):
             if isinstance(ref_conditioning_meta.get("prompt_global_weight_present"), torch.Tensor):
                 ret["rhythm_prompt_global_weight_present"] = ref_conditioning_meta["prompt_global_weight_present"].detach()
@@ -651,6 +607,50 @@ class ConanDurationAdapter(nn.Module):
             if isinstance(ref_conditioning_meta.get("prompt_unit_prior_vocab_size"), torch.Tensor):
                 ret["rhythm_prompt_unit_prior_vocab_size"] = ref_conditioning_meta["prompt_unit_prior_vocab_size"].detach()
         if self.module.debug_export:
+            g_debug_stats = {}
+            prompt_speech_mask = getattr(ref_memory, "prompt_speech_mask", None) if ref_memory is not None else None
+            prompt_valid_mask = getattr(ref_memory, "prompt_valid_mask", None) if ref_memory is not None else None
+            if isinstance(prompt_speech_mask, torch.Tensor):
+                min_prompt_speech_ratio = float(
+                    getattr(getattr(self.module, "prompt_memory_encoder", None), "min_speech_ratio", 0.0)
+                )
+                support_mask = build_global_rate_support_mask(
+                    speech_mask=prompt_speech_mask.float(),
+                    valid_mask=prompt_valid_mask.float() if isinstance(prompt_valid_mask, torch.Tensor) else None,
+                    drop_edge_runs=int(getattr(self.module, "g_drop_edge_runs", 0)),
+                )
+                speech_count = prompt_speech_mask.float().sum(dim=1, keepdim=True)
+                valid_count = (
+                    prompt_valid_mask.float().sum(dim=1, keepdim=True)
+                    if isinstance(prompt_valid_mask, torch.Tensor)
+                    else prompt_speech_mask.new_full((prompt_speech_mask.size(0), 1), float(prompt_speech_mask.size(1)))
+                )
+                support_count = support_mask.float().sum(dim=1, keepdim=True)
+                speech_ratio = speech_count / valid_count.clamp_min(1.0)
+                g_valid_support = (support_count > 0.5).float()
+                g_domain_valid = (
+                    g_valid_support > 0.5
+                ) & (speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
+                g_debug_stats = {
+                    "g_support_count": support_count.detach(),
+                    "g_speech_count": speech_count.detach(),
+                    "g_valid_count": valid_count.detach(),
+                    "g_valid_support": g_valid_support.detach(),
+                    "g_domain_valid": g_domain_valid.float().detach(),
+                    "g_min_speech_ratio": support_count.new_full(
+                        support_count.shape,
+                        float(min_prompt_speech_ratio),
+                    ),
+                    "prompt_speech_ratio": speech_ratio.detach(),
+                    "g_support_ratio_vs_speech": (support_count / speech_count.clamp_min(1.0)).detach(),
+                    "g_support_ratio_vs_valid": (support_count / valid_count.clamp_min(1.0)).detach(),
+                    "g_valid": g_domain_valid.float().detach(),
+                    "g_drop_edge_runs": support_count.new_full(
+                        support_count.shape,
+                        float(int(getattr(self.module, "g_drop_edge_runs", 0))),
+                    ),
+                    "g_strict_speech_only": support_count.new_ones(support_count.shape),
+                }
             coarse_correction_used = (
                 execution.coarse_correction.detach()
                 if isinstance(getattr(execution, "coarse_correction", None), torch.Tensor)
@@ -788,6 +788,21 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "unit_residual_gate_stability", None), torch.Tensor)
                     else None
                 ),
+                "residual_gate_cold": (
+                    execution.unit_residual_cold_gate.detach()
+                    if isinstance(getattr(execution, "unit_residual_cold_gate", None), torch.Tensor)
+                    else None
+                ),
+                "residual_gate_short": (
+                    execution.unit_residual_short_gate.detach()
+                    if isinstance(getattr(execution, "unit_residual_short_gate", None), torch.Tensor)
+                    else None
+                ),
+                "residual_gate_stability": (
+                    execution.unit_residual_gate_stability.detach()
+                    if isinstance(getattr(execution, "unit_residual_gate_stability", None), torch.Tensor)
+                    else None
+                ),
                 "unit_runtime_stability": (
                     execution.unit_runtime_stability.detach()
                     if isinstance(getattr(execution, "unit_runtime_stability", None), torch.Tensor)
@@ -909,6 +924,9 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_unit_residual_cold_gate"] = debug_bundle["unit_residual_cold_gate"]
             ret["rhythm_debug_unit_residual_short_gate"] = debug_bundle["unit_residual_short_gate"]
             ret["rhythm_debug_unit_residual_gate_stability"] = debug_bundle["unit_residual_gate_stability"]
+            ret["rhythm_debug_residual_gate_cold"] = debug_bundle["residual_gate_cold"]
+            ret["rhythm_debug_residual_gate_short"] = debug_bundle["residual_gate_short"]
+            ret["rhythm_debug_residual_gate_stability"] = debug_bundle["residual_gate_stability"]
             ret["rhythm_debug_unit_runtime_stability"] = debug_bundle["unit_runtime_stability"]
             ret["rhythm_debug_residual_gate_mean"] = debug_bundle["residual_gate_mean"]
             ret["rhythm_debug_detach_global_term_in_local_head"] = debug_bundle["detach_global_term_in_local_head"]

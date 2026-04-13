@@ -45,7 +45,7 @@ rhythm_v3_eval_mode: learned
 rhythm_v3_g_variant: raw_median
 rhythm_v3_g_trim_ratio: 0.2
 rhythm_v3_drop_edge_runs_for_g: 1
-rhythm_v3_gate_quality_strict: true
+rhythm_v3_gate_quality_strict: true  # intent marker for report policy; strict fail/allow-partial is enforced by debug_records CLI flags
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
 rhythm_v3_disable_local_residual: false
@@ -161,6 +161,7 @@ rhythm_v3_alignment_lambda_band: 0.2
 rhythm_v3_alignment_lambda_unit: 0.0
 rhythm_v3_alignment_band_ratio: 0.08
 rhythm_v3_alignment_bad_cost_threshold: 1.2
+rhythm_v3_alignment_min_dp_weight: 0.20
 rhythm_v3_alignment_unmatched_speech_ratio_max: 0.15
 rhythm_v3_alignment_mean_local_confidence_speech_min: 0.55
 rhythm_v3_alignment_mean_coarse_confidence_speech_min: 0.60

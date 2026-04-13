@@ -22,12 +22,14 @@ from utils.plot.rhythm_v3_viz import load_debug_records, record_summary
 from utils.plot.rhythm_v3_viz import (
     build_monotonicity_table,
     build_prefix_silence_review_table,
+    build_ref_crop_table,
     save_review_figure_bundle,
     save_validation_gate_bundle,
 )
 
 
 _GATE1_MONOTONICITY_RATE_MIN = 0.95
+_REQUIRED_NEGATIVE_CONTROLS = ("source_only", "random_ref", "shuffled_ref")
 _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
     "silence_leakage": 0.05,
     "prefix_discrepancy": 0.05,
@@ -196,8 +198,13 @@ def collect_gate_issues(frame) -> list[str]:
             for value in frame["ref_condition"].dropna().tolist()
             if str(value).strip() and str(value).strip().lower() != "nan"
         }
-        if not ref_conditions.intersection({"source_only", "random_ref", "shuffled_ref"}):
-            quality_issues.append("negative_control_reference=missing")
+        missing_controls = [
+            control
+            for control in _REQUIRED_NEGATIVE_CONTROLS
+            if control not in ref_conditions
+        ]
+        if missing_controls:
+            quality_issues.append("missing_negative_controls=" + "|".join(missing_controls))
     return quality_issues
 
 
@@ -211,7 +218,7 @@ def build_gate_status(frame) -> dict[str, object]:
             "gate0_pass": False,
             "gate1_pass": False,
             "gate2_pass": False,
-            "missing_controls": ["negative_control_reference"],
+            "missing_controls": list(_REQUIRED_NEGATIVE_CONTROLS),
             "missing_eval_modes": ["analytic", "coarse_only", "learned"],
             "incomplete_triplets": 0,
             "continuous_alignment_coverage": float("nan"),
@@ -256,13 +263,18 @@ def build_gate_status(frame) -> dict[str, object]:
     for issue in issues:
         if issue.startswith("missing_eval_modes="):
             missing_eval_modes = [part for part in issue.split("=", 1)[1].split("|") if part]
-        elif issue.startswith("negative_control_reference="):
-            missing_controls.append("negative_control_reference")
+        elif issue.startswith("missing_negative_controls="):
+            missing_controls.extend(
+                [part for part in issue.split("=", 1)[1].split("|") if part]
+            )
+        elif issue == "ref_condition=missing":
+            missing_controls.extend(list(_REQUIRED_NEGATIVE_CONTROLS))
         elif issue.startswith("incomplete_real_triplets="):
             try:
                 incomplete_triplets = int(issue.split("=", 1)[1])
             except Exception:
                 incomplete_triplets = 0
+    missing_controls = list(dict.fromkeys(missing_controls))
     observed_modes = {
         str(mode).strip()
         for mode in frame.get("eval_mode", []).dropna().tolist()
@@ -289,19 +301,21 @@ def build_gate_status(frame) -> dict[str, object]:
         and np.isfinite(continuous_alignment_coverage)
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
     )
-    gate1_pass = (
+    gate1_criteria_pass = (
         "analytic" in observed_modes
         and incomplete_triplets == 0
-        and "negative_control_reference" not in missing_controls
+        and not missing_controls
         and np.isfinite(analytic_tempo_monotonicity_rate)
         and analytic_tempo_monotonicity_rate >= _GATE1_MONOTONICITY_RATE_MIN
     )
-    gate2_pass = (
+    gate1_pass = gate0_pass and gate1_criteria_pass
+    gate2_criteria_pass = (
         {"coarse_only", "learned"}.issubset(observed_modes)
         and np.isfinite(unmatched_speech_ratio_p95)
         and unmatched_speech_ratio_p95 <= 0.15
         and not learned_runtime_regressions
     )
+    gate2_pass = gate1_pass and gate2_criteria_pass
     return {
         "gate0_pass": bool(gate0_pass),
         "gate1_pass": bool(gate1_pass),
@@ -448,6 +462,31 @@ def main() -> None:
     )
     if pd is not None:
         summary_df = pd.DataFrame(rows)
+        ref_crop_df = build_ref_crop_table(
+            records,
+            g_variant=args.g_variant,
+            g_trim_ratio=args.g_trim_ratio,
+            drop_edge_runs=args.drop_edge_runs,
+        )
+        if not ref_crop_df.empty and {"sample_id", "eval_mode"}.issubset(summary_df.columns):
+            crop_cols = [
+                "sample_id",
+                "eval_mode",
+                "pair_id",
+                "g_crop",
+                "g_full",
+                "g_crop_abs_err",
+                "has_crop_comparison",
+            ]
+            available_crop_cols = [column for column in crop_cols if column in ref_crop_df.columns]
+            merge_keys_crop = [key for key in ("sample_id", "eval_mode", "pair_id") if key in available_crop_cols and key in summary_df.columns]
+            value_cols_crop = [column for column in available_crop_cols if column not in merge_keys_crop]
+            if merge_keys_crop and value_cols_crop:
+                summary_df = summary_df.drop(columns=value_cols_crop, errors="ignore").merge(
+                    ref_crop_df[merge_keys_crop + value_cols_crop].drop_duplicates(subset=merge_keys_crop),
+                    on=merge_keys_crop,
+                    how="left",
+                )
         prefix_silence_df = build_prefix_silence_review_table(records)
         if not prefix_silence_df.empty and {"sample_id", "eval_mode"}.issubset(summary_df.columns):
             keep_cols = [

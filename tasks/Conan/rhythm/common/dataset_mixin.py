@@ -436,6 +436,52 @@ class CommonRhythmDatasetMixin:
         return copied
 
     @staticmethod
+    def _coerce_optional_local_item_id(value) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.numel() <= 0:
+                return None
+            value = value.reshape(-1)[0].item()
+        elif isinstance(value, np.ndarray):
+            if value.size <= 0:
+                return None
+            scalar = value.reshape(-1)[0]
+            value = scalar.item() if hasattr(scalar, "item") else scalar
+        elif isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            value = value[0]
+        local_idx = int(value)
+        return local_idx if local_idx >= 0 else None
+
+    @staticmethod
+    def _clone_cached_raw_item(item):
+        return dict(item) if isinstance(item, dict) else item
+
+    def _get_raw_item_cached(self, local_idx: int):
+        local_idx = int(local_idx)
+        cache = getattr(self, "_rhythm_raw_item_cache", None)
+        if cache is None:
+            cache = {}
+            self._rhythm_raw_item_cache = cache
+        item = cache.get(local_idx)
+        if item is None:
+            item = self._get_item(local_idx)
+            cache[local_idx] = item
+        return self._clone_cached_raw_item(item)
+
+    def _require_source_local_item_id(self, sample: dict) -> int:
+        local_idx = self._coerce_optional_local_item_id(sample.get("item_id"))
+        if local_idx is None:
+            raise RuntimeError(
+                "Rhythm dataset received no _raw_item from the upstream sample and no explicit item_id. "
+                "Refusing to fall back to the dataset index because pair-manifest/filter/remap datasets can "
+                "make the ordinal index differ from the source local item id."
+            )
+        return local_idx
+
+    @staticmethod
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
         return {f"{prefix}{key}": value for key, value in cache.items()}
 
@@ -647,12 +693,13 @@ class CommonRhythmDatasetMixin:
         )
 
     def _resolve_reference_rhythm_item(self, *, sample, item, target_mode: str):
-        if "ref_item_id" not in sample or self._should_use_self_rhythm_reference(item, target_mode=target_mode):
+        ref_local = self._coerce_optional_local_item_id(sample.get("ref_item_id"))
+        if ref_local is None or self._should_use_self_rhythm_reference(item, target_mode=target_mode):
             sample.pop("_raw_ref_item", None)
             return None
         raw_ref_item = sample.pop("_raw_ref_item", None)
         if raw_ref_item is None:
-            raw_ref_item = self._get_item(int(sample["ref_item_id"]))
+            raw_ref_item = self._get_raw_item_cached(ref_local)
         return self._materialize_rhythm_cache_compat(
             raw_ref_item,
             item_name=str(raw_ref_item.get("item_name", "<unknown-ref-item>")),
@@ -660,12 +707,13 @@ class CommonRhythmDatasetMixin:
 
     def _resolve_paired_target_rhythm_item(self, *, sample, item, target_mode: str):
         del item, target_mode
-        if "paired_target_item_id" not in sample:
+        paired_target_local = self._coerce_optional_local_item_id(sample.get("paired_target_item_id"))
+        if paired_target_local is None:
             sample.pop("_raw_paired_target_item", None)
             return None
         raw_paired_target_item = sample.pop("_raw_paired_target_item", None)
         if raw_paired_target_item is None:
-            raw_paired_target_item = self._get_item(int(sample["paired_target_item_id"]))
+            raw_paired_target_item = self._get_raw_item_cached(paired_target_local)
         return self._materialize_rhythm_cache_compat(
             raw_paired_target_item,
             item_name=str(raw_paired_target_item.get("item_name", "<unknown-paired-target-item>")),
@@ -738,7 +786,7 @@ class CommonRhythmDatasetMixin:
         sample = super().__getitem__(index)
         raw_item = sample.pop("_raw_item", None)
         if raw_item is None:
-            raw_item = self._get_item(index)
+            raw_item = self._get_raw_item_cached(self._require_source_local_item_id(sample))
         item_name = str(raw_item.get("item_name", "<unknown-item>"))
         item = self._materialize_rhythm_cache_compat(raw_item, item_name=item_name)
         target_mode = self._resolve_rhythm_target_mode()

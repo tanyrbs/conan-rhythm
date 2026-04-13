@@ -125,7 +125,8 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         silence_mask: torch.Tensor | None = None,
         run_stability: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor | str]:
-        del log_base
+        if log_base is not None:
+            raise ValueError("MinimalStreamingDurationHeadV1G requires log_base=None.")
         if any(isinstance(value, torch.Tensor) for value in (summary_state, role_value, role_var, role_coverage)):
             raise ValueError("MinimalStreamingDurationHeadV1G forbids summary/role conditioning inputs.")
         if not isinstance(silence_mask, torch.Tensor):

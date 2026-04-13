@@ -97,6 +97,7 @@ def build_duration_v3_frontend_signature(
             "min_count": bundle.get("unit_prior_min_count"),
             "default_policy": bundle.get("unit_prior_default_policy"),
             "global_backoff": bundle.get("unit_prior_global_backoff"),
+            "sha1": bundle.get("unit_prior_sha1"),
             "emit_silence_runs": bundle.get("unit_prior_emit_silence_runs"),
             "debounce_min_run_frames": bundle.get("unit_prior_debounce_min_run_frames"),
             "silent_token": bundle.get("unit_prior_silent_token"),
@@ -106,6 +107,8 @@ def build_duration_v3_frontend_signature(
             "filter_exclude_open_runs": bundle.get("unit_prior_filter_exclude_open_runs"),
             "filter_only_sealed_runs": bundle.get("unit_prior_filter_only_sealed_runs"),
             "filter_drop_edge_runs": bundle.get("unit_prior_filter_drop_edge_runs"),
+            "filter_min_run_stability": bundle.get("unit_prior_filter_min_run_stability"),
+            "special_token_policy": bundle.get("unit_prior_special_token_policy"),
         }
     signature = {
         "cache_meta": normalized,
@@ -365,6 +368,13 @@ def _normalize_unit_prior_bundle(
         filter_exclude_open_runs = _extract_bool_meta(payload.get("unit_prior_filter_exclude_open_runs"))
         filter_only_sealed_runs = _extract_bool_meta(payload.get("unit_prior_filter_only_sealed_runs"))
         filter_drop_edge_runs = _extract_int_meta(payload.get("unit_prior_filter_drop_edge_runs"))
+        filter_min_run_stability = _extract_float_meta(payload.get("unit_prior_filter_min_run_stability"))
+        prior_sha1 = _extract_scalar_meta(payload.get("unit_prior_sha1"))
+        prior_build_cmd = _extract_scalar_meta(payload.get("unit_prior_build_cmd"))
+        prior_input_manifest_sha1 = _extract_scalar_meta(payload.get("unit_prior_input_manifest_sha1"))
+        prior_input_count = _extract_int_meta(payload.get("unit_prior_input_count"))
+        special_token_policy = _extract_scalar_meta(payload.get("unit_prior_special_token_policy"))
+        accepted_run_count = _extract_int_meta(payload.get("unit_prior_accepted_run_count"))
     else:
         prior = _coerce_unit_prior_array(payload)
         source = _extract_scalar_meta(default_source)
@@ -385,6 +395,13 @@ def _normalize_unit_prior_bundle(
         filter_exclude_open_runs = None
         filter_only_sealed_runs = None
         filter_drop_edge_runs = None
+        filter_min_run_stability = None
+        prior_sha1 = None
+        prior_build_cmd = None
+        prior_input_manifest_sha1 = None
+        prior_input_count = None
+        special_token_policy = None
+        accepted_run_count = None
     default_value = _resolve_unit_prior_default_value(
         payload if isinstance(payload, Mapping) else {},
         prior,
@@ -435,6 +452,13 @@ def _normalize_unit_prior_bundle(
         "unit_prior_filter_exclude_open_runs": filter_exclude_open_runs,
         "unit_prior_filter_only_sealed_runs": filter_only_sealed_runs,
         "unit_prior_filter_drop_edge_runs": filter_drop_edge_runs,
+        "unit_prior_filter_min_run_stability": filter_min_run_stability,
+        "unit_prior_sha1": prior_sha1,
+        "unit_prior_build_cmd": prior_build_cmd,
+        "unit_prior_input_manifest_sha1": prior_input_manifest_sha1,
+        "unit_prior_input_count": prior_input_count,
+        "unit_prior_special_token_policy": special_token_policy,
+        "unit_prior_accepted_run_count": accepted_run_count,
     }
 
 
@@ -583,8 +607,15 @@ def attach_unit_log_prior_to_source_cache(
         "unit_prior_filter_exclude_open_runs": _extract_bool_meta(bundle.get("unit_prior_filter_exclude_open_runs")),
         "unit_prior_filter_only_sealed_runs": _extract_bool_meta(bundle.get("unit_prior_filter_only_sealed_runs")),
         "unit_prior_filter_drop_edge_runs": _extract_int_meta(bundle.get("unit_prior_filter_drop_edge_runs")),
+        "unit_prior_filter_min_run_stability": _extract_float_meta(bundle.get("unit_prior_filter_min_run_stability")),
         "unit_prior_path_mtime_ns": _extract_int_meta(bundle.get("unit_prior_path_mtime_ns")),
         "unit_prior_path_size": _extract_int_meta(bundle.get("unit_prior_path_size")),
+        "unit_prior_sha1": _extract_scalar_meta(bundle.get("unit_prior_sha1")),
+        "unit_prior_build_cmd": _extract_scalar_meta(bundle.get("unit_prior_build_cmd")),
+        "unit_prior_input_manifest_sha1": _extract_scalar_meta(bundle.get("unit_prior_input_manifest_sha1")),
+        "unit_prior_input_count": _extract_int_meta(bundle.get("unit_prior_input_count")),
+        "unit_prior_special_token_policy": _extract_scalar_meta(bundle.get("unit_prior_special_token_policy")),
+        "unit_prior_accepted_run_count": _extract_int_meta(bundle.get("unit_prior_accepted_run_count")),
         "frontend_meta_signature": cache_signature,
         "silent_token": (None if cache_meta is None else cache_meta.get("silent_token")),
         "separator_aware": (None if cache_meta is None else bool(cache_meta.get("separator_aware", False))),

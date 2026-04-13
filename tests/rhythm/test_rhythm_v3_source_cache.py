@@ -177,6 +177,13 @@ def test_attach_unit_log_prior_to_source_cache_records_cache_side_provenance():
             "unit_prior_silent_token": np.asarray([57], dtype=object),
             "unit_prior_emit_silence_runs": np.asarray([True], dtype=object),
             "unit_prior_debounce_min_run_frames": np.asarray([2], dtype=object),
+            "unit_prior_filter_min_run_stability": np.asarray([0.4], dtype=np.float32),
+            "unit_prior_sha1": np.asarray(["abc123"], dtype=object),
+            "unit_prior_build_cmd": np.asarray(["python scripts/build_unit_log_prior.py"], dtype=object),
+            "unit_prior_input_manifest_sha1": np.asarray(["manifest123"], dtype=object),
+            "unit_prior_input_count": np.asarray([8], dtype=np.int64),
+            "unit_prior_special_token_policy": np.asarray(["exclude_silence_runs_keep_special_backoff"], dtype=object),
+            "unit_prior_accepted_run_count": np.asarray([6], dtype=np.int64),
         },
         overwrite=True,
     )
@@ -186,6 +193,13 @@ def test_attach_unit_log_prior_to_source_cache_records_cache_side_provenance():
     assert meta["emit_silence_runs"] is True
     assert meta["debounce_min_run_frames"] == 2
     assert meta["unit_prior_frontend_signature"] == meta["frontend_meta_signature"]
+    assert meta["unit_prior_filter_min_run_stability"] == pytest.approx(0.4)
+    assert meta["unit_prior_sha1"] == "abc123"
+    assert meta["unit_prior_build_cmd"] == "python scripts/build_unit_log_prior.py"
+    assert meta["unit_prior_input_manifest_sha1"] == "manifest123"
+    assert meta["unit_prior_input_count"] == 8
+    assert meta["unit_prior_special_token_policy"] == "exclude_silence_runs_keep_special_backoff"
+    assert meta["unit_prior_accepted_run_count"] == 6
 
 
 def test_build_source_rhythm_cache_v3_can_attach_prior_from_path(tmp_path):
@@ -256,6 +270,13 @@ def test_load_unit_log_prior_bundle_reads_npz_metadata(tmp_path):
         unit_prior_min_count=np.asarray([7], dtype=np.int64),
         unit_prior_default_policy=np.asarray(["global_median"], dtype=object),
         unit_log_prior_is_default=np.asarray([1, 0, 0], dtype=np.int64),
+        unit_prior_filter_min_run_stability=np.asarray([0.35], dtype=np.float32),
+        unit_prior_sha1=np.asarray(["deadbeef"], dtype=object),
+        unit_prior_build_cmd=np.asarray(["python scripts/build_unit_log_prior.py --input demo"], dtype=object),
+        unit_prior_input_manifest_sha1=np.asarray(["manifest"], dtype=object),
+        unit_prior_input_count=np.asarray([3], dtype=np.int64),
+        unit_prior_special_token_policy=np.asarray(["exclude_silence_runs_keep_special_backoff"], dtype=object),
+        unit_prior_accepted_run_count=np.asarray([2], dtype=np.int64),
     )
     bundle = load_unit_log_prior_bundle(str(prior_path))
     assert np.allclose(bundle["unit_log_prior"], np.asarray([0.0, 0.2, 0.4], dtype=np.float32))
@@ -266,6 +287,13 @@ def test_load_unit_log_prior_bundle_reads_npz_metadata(tmp_path):
     assert bundle["unit_prior_default_policy"] == "global_median"
     assert bundle["unit_prior_default_value"] == pytest.approx(0.31)
     assert np.array_equal(bundle["unit_log_prior_is_default"], np.asarray([True, False, False]))
+    assert bundle["unit_prior_filter_min_run_stability"] == pytest.approx(0.35)
+    assert bundle["unit_prior_sha1"] == "deadbeef"
+    assert bundle["unit_prior_build_cmd"] == "python scripts/build_unit_log_prior.py --input demo"
+    assert bundle["unit_prior_input_manifest_sha1"] == "manifest"
+    assert bundle["unit_prior_input_count"] == 3
+    assert bundle["unit_prior_special_token_policy"] == "exclude_silence_runs_keep_special_backoff"
+    assert bundle["unit_prior_accepted_run_count"] == 2
 
 
 def test_load_unit_log_prior_bundle_reloads_when_path_stat_changes(tmp_path):
@@ -374,6 +402,9 @@ def test_build_duration_v3_frontend_signature_binds_prior_bundle_metadata(tmp_pa
         unit_prior_silent_token=np.asarray([57], dtype=np.int64),
         unit_prior_filter_only_sealed_runs=np.asarray([True], dtype=np.bool_),
         unit_prior_filter_drop_edge_runs=np.asarray([1], dtype=np.int64),
+        unit_prior_filter_min_run_stability=np.asarray([0.45], dtype=np.float32),
+        unit_prior_sha1=np.asarray(["deadbeef"], dtype=object),
+        unit_prior_special_token_policy=np.asarray(["exclude_silence_runs_keep_special_backoff"], dtype=object),
     )
 
     signature = build_duration_v3_frontend_signature(
@@ -392,6 +423,9 @@ def test_build_duration_v3_frontend_signature_binds_prior_bundle_metadata(tmp_pa
     assert '"default_policy":"global_median"' in signature
     assert '"global_backoff":"linear"' in signature
     assert '"filter_only_sealed_runs":true' in signature
+    assert '"filter_min_run_stability":' in signature
+    assert '"sha1":"deadbeef"' in signature
+    assert '"special_token_policy":"exclude_silence_runs_keep_special_backoff"' in signature
 
 
 def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
@@ -405,6 +439,7 @@ def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
             "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
             "open_run_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
             "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "source_run_stability": np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
             DURATION_V3_CACHE_META_KEY: {
                 "cache_version": 3,
                 "silent_token": 57,
@@ -433,6 +468,8 @@ def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
             "--global-backoff",
             "linear",
             "--exclude-open-runs",
+            "--min-run-stability",
+            "0.5",
         ],
         check=True,
         cwd=str(repo_root),
@@ -449,10 +486,17 @@ def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
         assert bundle["unit_prior_default_policy"].reshape(-1)[0] == "global_median"
         assert bundle["unit_prior_global_backoff"].reshape(-1)[0] == "linear"
         assert bool(bundle["unit_prior_filter_exclude_open_runs"].reshape(-1)[0])
+        assert bundle["unit_prior_filter_min_run_stability"].reshape(-1)[0] == pytest.approx(0.5)
         assert bundle["unit_prior_frontend_signature"].reshape(-1)[0] != "missing"
         assert int(bundle["unit_prior_silent_token"].reshape(-1)[0]) == 57
         assert bool(bundle["unit_prior_emit_silence_runs"].reshape(-1)[0])
         assert int(bundle["unit_prior_debounce_min_run_frames"].reshape(-1)[0]) == 2
+        assert bundle["unit_prior_special_token_policy"].reshape(-1)[0] == "exclude_silence_runs_keep_special_backoff"
+        assert int(bundle["unit_prior_input_count"].reshape(-1)[0]) == 1
+        assert int(bundle["unit_prior_accepted_run_count"].reshape(-1)[0]) == 3
+        assert len(str(bundle["unit_prior_input_manifest_sha1"].reshape(-1)[0])) == 40
+        assert len(str(bundle["unit_prior_sha1"].reshape(-1)[0])) == 40
+        assert "build_unit_log_prior.py" in str(bundle["unit_prior_build_cmd"].reshape(-1)[0])
         expected_global = np.log(9.0)
         assert bundle["global_speech_log_prior"].reshape(-1)[0] == pytest.approx(expected_global)
         assert bundle["unit_prior_observed_count"].reshape(-1)[0] == 2
@@ -462,3 +506,56 @@ def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
         expected_backoff = 0.5 * np.log(100.0) + 0.5 * expected_global
         assert prior[2] == pytest.approx(expected_backoff)
         assert np.array_equal(is_default, np.asarray([1, 0, 1], dtype=np.int64))
+
+
+def test_build_unit_log_prior_script_filters_low_stability_runs(tmp_path):
+    input_path = tmp_path / "source_cache.pt"
+    output_path = tmp_path / "unit_prior_filtered.npz"
+    repo_root = Path(__file__).resolve().parents[2]
+    torch.save(
+        {
+            "content_units": np.asarray([1, 1, 2], dtype=np.int64),
+            "dur_anchor_src": np.asarray([1.0, 9.0, 100.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "open_run_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "source_run_stability": np.asarray([0.2, 0.9, 0.9], dtype=np.float32),
+            DURATION_V3_CACHE_META_KEY: {
+                "cache_version": 3,
+                "silent_token": 57,
+                "separator_aware": True,
+                "tail_open_units": 1,
+                "emit_silence_runs": True,
+                "debounce_min_run_frames": 2,
+                "phrase_boundary_threshold": 0.55,
+            },
+        },
+        input_path,
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_unit_log_prior.py",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--min-count",
+            "1",
+            "--min-run-stability",
+            "0.5",
+        ],
+        check=True,
+        cwd=str(repo_root),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(repo_root) + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""),
+        },
+    )
+
+    with np.load(output_path, allow_pickle=True) as bundle:
+        assert bundle["unit_prior_filter_min_run_stability"].reshape(-1)[0] == pytest.approx(0.5)
+        assert int(bundle["unit_prior_accepted_run_count"].reshape(-1)[0]) == 2
+        assert int(bundle["unit_prior_observed_count"].reshape(-1)[0]) == 2
+        assert bundle["unit_log_prior"][1] == pytest.approx(np.log(9.0))

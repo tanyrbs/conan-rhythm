@@ -361,17 +361,24 @@ class StreamingVoiceConversion:
         *,
         frontend_signature: str,
         ref_source_id: str | None = None,
+        ref_cache_id: str | None = None,
     ) -> str:
         digest = hashlib.sha1()
         digest.update(str(frontend_signature).encode("utf-8"))
+        if ref_cache_id:
+            digest.update(b"ref_cache_id:")
+            digest.update(str(ref_cache_id).encode("utf-8"))
+            return digest.hexdigest()
         if ref_source_id:
             ref_path = os.path.abspath(str(ref_source_id))
             if os.path.isfile(ref_path):
+                digest.update(b"ref_source_path:")
                 stat = os.stat(ref_path)
                 digest.update(ref_path.encode("utf-8"))
                 digest.update(str(int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1.0e9)))).encode("utf-8"))
                 digest.update(str(int(stat.st_size)).encode("utf-8"))
                 return digest.hexdigest()
+        digest.update(b"ref_mel_sha1:")
         ref_cpu = ref_mel_batch.detach().to(device="cpu", dtype=torch.float32).contiguous()
         array = ref_cpu.numpy()
         digest.update(str(tuple(array.shape)).encode("utf-8"))
@@ -408,6 +415,7 @@ class StreamingVoiceConversion:
         ref_mel_batch: torch.Tensor,
         prepared_spk_embed: torch.Tensor | None = None,
         ref_source_id: str | None = None,
+        ref_cache_id: str | None = None,
     ) -> Dict[str, torch.Tensor]:
         cache_key = None
         if self._prompt_conditioning_cache_size > 0:
@@ -415,6 +423,7 @@ class StreamingVoiceConversion:
                 ref_mel_batch,
                 frontend_signature=self.rhythm_v3_frontend_signature,
                 ref_source_id=ref_source_id,
+                ref_cache_id=ref_cache_id,
             )
             cached = self._prompt_conditioning_cache.get(cache_key)
             if cached is not None:
@@ -603,6 +612,7 @@ class StreamingVoiceConversion:
         spk_embed=None,
         return_metadata: bool = False,
         return_debug_bundle: bool = False,
+        ref_cache_id: str | None = None,
     ):
         if hasattr(self.vocoder, "reset_stream"):
             self.vocoder.reset_stream()
@@ -650,6 +660,10 @@ class StreamingVoiceConversion:
                 True,
             )
         )
+        prompt_sidecar_global_weight_present = False
+        prompt_sidecar_unit_log_prior_present = False
+        g_variant = normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median"))
+        effective_ref_cache_id = ref_cache_id if ref_cache_id is not None else inp.get("ref_cache_id")
 
         ref_mel_batch = ref_mel.unsqueeze(0)
         with torch.no_grad():
@@ -667,6 +681,19 @@ class StreamingVoiceConversion:
                         ref_mel_batch,
                         prepared_spk_embed=prepared_spk_embed,
                         ref_source_id=inp.get("ref_wav"),
+                        ref_cache_id=effective_ref_cache_id,
+                    )
+                    prompt_sidecar_global_weight_present = bool(
+                        torch.as_tensor(
+                            rhythm_ref_conditioning.get("prompt_global_weight_present", 0.0),
+                            dtype=torch.float32,
+                        ).reshape(-1)[:1].gt(0.5).any().item()
+                    )
+                    prompt_sidecar_unit_log_prior_present = bool(
+                        torch.as_tensor(
+                            rhythm_ref_conditioning.get("prompt_unit_log_prior_present", 0.0),
+                            dtype=torch.float32,
+                        ).reshape(-1)[:1].gt(0.5).any().item()
                     )
                 else:
                     rhythm_ref_conditioning = self.model.prepare_rhythm_reference(
@@ -941,6 +968,9 @@ class StreamingVoiceConversion:
             last_projector_prefix_offset = final_debug_bundle.get("prefix_unit_offset")
         if last_projector_boundary_decay is None and isinstance(final_debug_bundle, dict):
             last_projector_boundary_decay = final_debug_bundle.get("projector_boundary_decay_applied")
+        eos_tail_flush_severity = "none"
+        if unresolved_eos_tail_frames > 0:
+            eos_tail_flush_severity = "warning" if allow_eos_tail_flush_fallback else "error"
         self.last_inference_metadata.update(
             {
                 "source_total_frames": int(total_frames),
@@ -957,6 +987,10 @@ class StreamingVoiceConversion:
                 "rhythm_final_tail_is_not_strictly_committed_only": bool(unresolved_eos_tail_frames > 0),
                 "rhythm_uncommitted_eos_tail_frames": int(unresolved_eos_tail_frames),
                 "rhythm_allow_eos_tail_flush_fallback": bool(allow_eos_tail_flush_fallback),
+                "rhythm_eos_tail_flush_severity": str(eos_tail_flush_severity),
+                "prompt_global_weight_present": bool(prompt_sidecar_global_weight_present),
+                "prompt_unit_log_prior_present": bool(prompt_sidecar_unit_log_prior_present),
+                "rhythm_v3_g_variant": str(g_variant),
                 "rhythm_prefix_budget_abs_p95": self._summarize_prefix_budget_abs_p95(last_projector_prefix_offset),
                 "rhythm_boundary_decay_applied_rate": self._summarize_boundary_decay_applied_rate(last_projector_boundary_decay),
                 "content_history_windowing_enabled": True,

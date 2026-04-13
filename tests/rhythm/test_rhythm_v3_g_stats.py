@@ -254,6 +254,80 @@ def test_summarize_global_rate_support_reports_clean_count():
 
     assert torch.equal(summary.clean_mask, torch.tensor([[True, False, False]]))
     assert torch.allclose(summary.clean_count, torch.tensor([[1.0]]))
+    assert torch.allclose(summary.support_seed_count, torch.tensor([[1.0]]))
+    assert torch.allclose(summary.support_fraction, torch.tensor([[0.5]]))
+    assert torch.allclose(summary.edge_runs_dropped, torch.tensor([[0.0]]))
+
+
+def test_summarize_global_rate_support_reports_edge_drop_from_support_seed():
+    speech_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
+
+    summary = summarize_global_rate_support(
+        speech_mask=speech_mask,
+        drop_edge_runs=1,
+    )
+
+    assert torch.equal(summary.support_mask, torch.tensor([[False, True, True, False]]))
+    assert torch.allclose(summary.support_seed_count, torch.tensor([[4.0]]))
+    assert torch.allclose(summary.support_count, torch.tensor([[2.0]]))
+    assert torch.allclose(summary.support_fraction, torch.tensor([[0.5]]))
+    assert torch.allclose(summary.edge_runs_dropped, torch.tensor([[2.0]]))
+
+
+def test_compute_global_rate_accepts_reused_support_mask_for_weighted_median():
+    log_dur = torch.log(torch.tensor([[2.0, 4.0, 8.0, 16.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.tensor([[1.0, 10.0, 1.0, 1.0]], dtype=torch.float32)
+    support = build_global_rate_support_mask(
+        speech_mask=speech_mask,
+        drop_edge_runs=1,
+    )
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="weighted_median",
+        support_mask=support,
+    )
+
+    assert torch.allclose(g, torch.log(torch.tensor([[4.0]], dtype=torch.float32)))
+
+
+def test_compute_global_rate_accepts_support_stats_for_unit_norm():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0, 16.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    unit_ids = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    unit_prior = torch.log(torch.tensor([2.0, 4.0, 8.0], dtype=torch.float32))
+    support_stats = summarize_global_rate_support(
+        speech_mask=speech_mask,
+        drop_edge_runs=1,
+    )
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        unit_ids=unit_ids,
+        unit_prior=unit_prior,
+        variant="unit_norm",
+        support_stats=support_stats,
+    )
+
+    assert torch.allclose(g, torch.log(torch.tensor([[2.0]], dtype=torch.float32)))
+
+
+def test_compute_global_rate_rejects_conflicting_support_inputs():
+    log_dur = torch.log(torch.tensor([[4.0, 8.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    support_stats = summarize_global_rate_support(speech_mask=speech_mask)
+
+    with pytest.raises(ValueError, match="at most one of support_mask or support_stats"):
+        compute_global_rate(
+            log_dur=log_dur,
+            speech_mask=speech_mask,
+            support_mask=support_stats.support_mask,
+            support_stats=support_stats,
+        )
 
 
 def test_compute_global_rate_unit_norm_accepts_default_filled_run_prior():

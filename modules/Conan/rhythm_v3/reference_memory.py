@@ -503,6 +503,7 @@ class PromptConditionedOperatorEstimator(nn.Module):
             drop_edge_runs=self.g_drop_edge_runs,
             unit_ids=prompt_content_units,
             unit_prior=prompt_unit_log_prior,
+            support_mask=support_mask,
         )
         global_rate = self._support_shrink(
             global_rate,

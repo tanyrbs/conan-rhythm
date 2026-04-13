@@ -64,6 +64,43 @@ def _project_row_recurrence_script(
     return projected, boundary_hit, boundary_decay, carry, prefix_offset
 
 
+@torch.jit.script
+def _project_row_recurrence_no_boundary_script(
+    row_exec: torch.Tensor,
+    row_source_rounded: torch.Tensor,
+    row_speech: torch.Tensor,
+    row_coarse: torch.Tensor,
+    carry_init: torch.Tensor,
+    prefix_offset_init: torch.Tensor,
+    row_budget_pos: int,
+    row_budget_neg: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_units = int(row_exec.numel())
+    projected = torch.zeros_like(row_exec)
+    carry = carry_init.reshape(1)
+    prefix_offset = prefix_offset_init.reshape(1)
+    for offset in range(num_units):
+        is_speech = bool(row_speech[offset] > 0.5)
+        is_coarse_only = bool(row_coarse[offset] > 0.5)
+        anchor = torch.clamp_min(row_source_rounded[offset], 1.0)
+        if (not is_speech) and (not is_coarse_only):
+            projected[offset] = anchor
+            continue
+
+        total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
+        frames = torch.floor(total + 0.5)
+        frames = torch.clamp_min(frames, 1.0)
+        lower = torch.ceil(anchor - (float(row_budget_neg) + prefix_offset[0]))
+        lower = torch.clamp_min(lower, 1.0)
+        upper = torch.floor(anchor + (float(row_budget_pos) - prefix_offset[0]))
+        upper = torch.maximum(upper, lower)
+        frames = torch.minimum(torch.maximum(frames, lower), upper)
+        projected[offset] = frames
+        prefix_offset[0] = prefix_offset[0] + (frames - anchor)
+        carry[0] = total - frames
+    return projected, carry, prefix_offset
+
+
 class StreamingDurationProjector(nn.Module):
     def __init__(
         self,
@@ -274,6 +311,9 @@ class StreamingDurationProjector(nn.Module):
         projected = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_hit = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_decay_applied = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        source_anchor_rounded = torch.round(source_duration_obs.detach().float().clamp_min(0.0)).to(
+            device=unit_duration_exec.device
+        )
         residual_next = residual_prev.float().reshape(batch_size).detach().clone().to(device=unit_duration_exec.device)
         prefix_offset_next = (
             prefix_unit_offset_prev.float().reshape(batch_size).detach().clone().to(device=unit_duration_exec.device)
@@ -336,60 +376,79 @@ class StreamingDurationProjector(nn.Module):
                     cached_prev[:, :cached_width],
                     projected[:, :cached_width],
                 )
-        active_rows = torch.nonzero(committed_len_tensor > prev_prefix, as_tuple=False).reshape(-1)
-        for batch_idx_tensor in active_rows:
-            batch_idx = int(batch_idx_tensor.item())
-            row_committed_len = int(committed_len_tensor[batch_idx].item())
-            row_budget_pos = int(budget_pos_values[batch_idx].item())
-            row_budget_neg = int(budget_neg_values[batch_idx].item())
-            start_unit = int(prev_prefix[batch_idx].item())
-            carry = float(residual_next[batch_idx].item())
-            prefix_offset = float(prefix_offset_next[batch_idx].item())
+        active_rows = (
+            torch.nonzero(committed_len_tensor > prev_prefix, as_tuple=False)
+            .reshape(-1)
+            .detach()
+            .cpu()
+            .tolist()
+        )
+        committed_len_values = committed_len_tensor.detach().cpu().tolist()
+        budget_pos_values_cpu = torch.round(budget_pos_values.detach()).long().cpu().tolist()
+        budget_neg_values_cpu = torch.round(budget_neg_values.detach()).long().cpu().tolist()
+        prev_prefix_values = prev_prefix.detach().cpu().tolist()
+        residual_values = residual_next.detach().cpu().tolist()
+        prefix_offset_values = prefix_offset_next.detach().cpu().tolist()
+        has_boundary_inputs = isinstance(source_boundary_cue, torch.Tensor) or isinstance(phrase_final_mask, torch.Tensor)
+        for batch_idx in active_rows:
+            row_committed_len = int(committed_len_values[batch_idx])
+            row_budget_pos = int(budget_pos_values_cpu[batch_idx])
+            row_budget_neg = int(budget_neg_values_cpu[batch_idx])
+            start_unit = int(prev_prefix_values[batch_idx])
+            carry = float(residual_values[batch_idx])
+            prefix_offset = float(prefix_offset_values[batch_idx])
             row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final = (
                 StreamingDurationProjector._extract_projection_row_torch(
                     batch_idx=batch_idx,
                     start_unit=start_unit,
                     committed_len=row_committed_len,
                     unit_duration_exec=unit_duration_exec,
-                    source_duration_obs=source_duration_obs,
+                    source_anchor_rounded=source_anchor_rounded,
                     speech_commit_mask=speech_commit_mask,
                     coarse_only_commit_mask=coarse_only_commit_mask,
                     source_boundary_cue=source_boundary_cue,
                     phrase_final_mask=phrase_final_mask,
                 )
             )
-            (
-                row_projected,
-                row_boundary_hit,
-                row_boundary_decay,
-                carry_tensor,
-                prefix_offset_tensor,
-            ) = _project_row_recurrence_script(
-                row_exec=row_exec,
-                row_source_rounded=row_source_rounded,
-                row_speech=row_speech.float(),
-                row_coarse=(
-                    row_coarse.float()
-                    if isinstance(row_coarse, torch.Tensor)
-                    else torch.zeros_like(row_exec)
-                ),
-                row_boundary=(
-                    row_boundary
-                    if isinstance(row_boundary, torch.Tensor)
-                    else torch.zeros_like(row_exec)
-                ),
-                row_phrase_final=(
-                    row_phrase_final.float()
-                    if isinstance(row_phrase_final, torch.Tensor)
-                    else torch.zeros_like(row_exec)
-                ),
-                carry_init=row_exec.new_tensor([carry]),
-                prefix_offset_init=row_exec.new_tensor([prefix_offset]),
-                row_budget_pos=row_budget_pos,
-                row_budget_neg=row_budget_neg,
-                boundary_carry_decay=boundary_carry_decay,
-                boundary_reset_thresh=boundary_reset_thresh,
-            )
+            row_coarse_float = row_coarse.float() if isinstance(row_coarse, torch.Tensor) else torch.zeros_like(row_exec)
+            if not has_boundary_inputs:
+                row_projected, carry_tensor, prefix_offset_tensor = _project_row_recurrence_no_boundary_script(
+                    row_exec=row_exec,
+                    row_source_rounded=row_source_rounded,
+                    row_speech=row_speech.float(),
+                    row_coarse=row_coarse_float,
+                    carry_init=row_exec.new_tensor([carry]),
+                    prefix_offset_init=row_exec.new_tensor([prefix_offset]),
+                    row_budget_pos=row_budget_pos,
+                    row_budget_neg=row_budget_neg,
+                )
+                row_boundary_hit = torch.zeros_like(row_exec)
+                row_boundary_decay = torch.zeros_like(row_exec)
+            else:
+                (
+                    row_projected,
+                    row_boundary_hit,
+                    row_boundary_decay,
+                    carry_tensor,
+                    prefix_offset_tensor,
+                ) = _project_row_recurrence_script(
+                    row_exec=row_exec,
+                    row_source_rounded=row_source_rounded,
+                    row_speech=row_speech.float(),
+                    row_coarse=row_coarse_float,
+                    row_boundary=(row_boundary if isinstance(row_boundary, torch.Tensor) else torch.zeros_like(row_exec)),
+                    row_phrase_final=(
+                        row_phrase_final.float()
+                        if isinstance(row_phrase_final, torch.Tensor)
+                        else torch.zeros_like(row_exec)
+                    ),
+                    carry_init=row_exec.new_tensor([carry]),
+                    prefix_offset_init=row_exec.new_tensor([prefix_offset]),
+                    row_budget_pos=row_budget_pos,
+                    row_budget_neg=row_budget_neg,
+                    boundary_carry_decay=boundary_carry_decay,
+                    boundary_reset_thresh=boundary_reset_thresh,
+                )
             projected[batch_idx, start_unit:row_committed_len] = row_projected.to(
                 device=projected.device,
                 dtype=projected.dtype,
@@ -425,7 +484,7 @@ class StreamingDurationProjector(nn.Module):
         start_unit: int,
         committed_len: int,
         unit_duration_exec: torch.Tensor,
-        source_duration_obs: torch.Tensor,
+        source_anchor_rounded: torch.Tensor,
         speech_commit_mask: torch.Tensor,
         coarse_only_commit_mask: torch.Tensor | None,
         source_boundary_cue: torch.Tensor | None,
@@ -433,8 +492,7 @@ class StreamingDurationProjector(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         row_slice = slice(int(start_unit), int(committed_len))
         row_exec = unit_duration_exec[batch_idx, row_slice].detach().float()
-        row_source = source_duration_obs[batch_idx, row_slice].detach().float().clamp_min(0.0)
-        row_source_rounded = torch.round(row_source)
+        row_source_rounded = source_anchor_rounded[batch_idx, row_slice]
         row_speech = speech_commit_mask[batch_idx, row_slice].detach().float() > 0.5
         row_coarse = (
             (coarse_only_commit_mask[batch_idx, row_slice].detach().float() > 0.5)
@@ -486,41 +544,63 @@ class StreamingDurationProjector(nn.Module):
             else torch.zeros((commit_mask.size(0),), dtype=torch.long, device=commit_mask.device)
         )
         committed_units = commit_mask.sum(dim=1).long()
-        active_rows = torch.nonzero(committed_units > prev_committed_units, as_tuple=False).reshape(-1)
-        for batch_idx_tensor in active_rows:
-            batch_idx = int(batch_idx_tensor.item())
-            counter = int(round(float(since_last_boundary[batch_idx, 0].item())))
-            end_unit = int(committed_units[batch_idx].item())
-            start_unit = int(min(int(prev_committed_units[batch_idx].item()), end_unit))
+        active_rows = (
+            torch.nonzero(committed_units > prev_committed_units, as_tuple=False)
+            .reshape(-1)
+            .detach()
+            .cpu()
+            .tolist()
+        )
+        committed_unit_values = committed_units.detach().cpu().tolist()
+        prev_committed_values = prev_committed_units.detach().cpu().tolist()
+        since_last_boundary_values = since_last_boundary[:, 0].detach().cpu().tolist()
+        for batch_idx in active_rows:
+            counter = int(round(float(since_last_boundary_values[batch_idx])))
+            end_unit = int(committed_unit_values[batch_idx])
+            start_unit = int(min(int(prev_committed_values[batch_idx]), end_unit))
             span = max(0, end_unit - start_unit)
             if span <= 0:
                 since_last_boundary[batch_idx, 0] = float(counter)
                 continue
             if isinstance(boundary_hit, torch.Tensor):
-                row_hits = boundary_hit[batch_idx, start_unit:end_unit].detach().float() > 0.5
-                row_hits_idx = torch.nonzero(row_hits, as_tuple=False)
-                if int(row_hits_idx.numel()) > 0:
-                    last_hit = int(row_hits_idx[-1, 0].item())
+                row_hits = (
+                    boundary_hit[batch_idx, start_unit:end_unit].detach().cpu().reshape(-1).tolist()
+                )
+                if any(float(hit) > 0.5 for hit in row_hits):
+                    last_hit = max(
+                        idx for idx, hit in enumerate(row_hits) if float(hit) > 0.5
+                    )
                     counter = int(span - 1 - last_hit)
                 else:
                     counter += int(span)
             else:
                 row_boundary_hit = None
                 if isinstance(source_boundary_cue, torch.Tensor):
-                    row_boundary_hit = source_boundary_cue[batch_idx, start_unit:end_unit].detach().float() >= float(
-                        boundary_reset_thresh
+                    row_boundary_hit = (
+                        source_boundary_cue[batch_idx, start_unit:end_unit]
+                        .detach()
+                        .cpu()
+                        .reshape(-1)
+                        .tolist()
                     )
+                    row_boundary_hit = [float(value) >= float(boundary_reset_thresh) for value in row_boundary_hit]
                 if isinstance(phrase_final_mask, torch.Tensor):
-                    row_phrase_final = phrase_final_mask[batch_idx, start_unit:end_unit].detach().float() > 0.5
+                    row_phrase_final = [
+                        float(value) > 0.5
+                        for value in phrase_final_mask[batch_idx, start_unit:end_unit]
+                        .detach()
+                        .cpu()
+                        .reshape(-1)
+                        .tolist()
+                    ]
                     row_boundary_hit = (
                         row_phrase_final
                         if row_boundary_hit is None
-                        else (row_boundary_hit | row_phrase_final)
+                        else [left or right for left, right in zip(row_boundary_hit, row_phrase_final)]
                     )
-                if isinstance(row_boundary_hit, torch.Tensor):
-                    row_hits_idx = torch.nonzero(row_boundary_hit, as_tuple=False)
-                    if int(row_hits_idx.numel()) > 0:
-                        last_hit = int(row_hits_idx[-1, 0].item())
+                if isinstance(row_boundary_hit, list):
+                    if any(row_boundary_hit):
+                        last_hit = max(idx for idx, hit in enumerate(row_boundary_hit) if bool(hit))
                         counter = int(span - 1 - last_hit)
                     else:
                         counter += int(span)

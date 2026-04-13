@@ -42,7 +42,7 @@ Operationally, the maintained default means:
 - `rhythm_v3_g_variant: raw_median`
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
-- `rhythm_v3_gate_quality_strict: true`
+- `rhythm_v3_gate_quality_strict: true`  (intent marker; CLI export controls strict fail/allow-partial behavior)
 - `rhythm_v3_eval_mode: learned`
 - speech-only prompt global-rate estimation
 - speech = coarse + local
@@ -78,7 +78,9 @@ shows a real reason.
 For `unit_norm`, also wire a reproducible prior bundle through
 `rhythm_v3_unit_prior_path`; the maintained repo now ships
 `scripts/build_unit_log_prior.py` so `unit_norm` is no longer just a consumer
-interface with no official producer.
+interface with no official producer. The maintained prior bundle now carries
+policy + frontend provenance metadata in addition to the prior values
+themselves.
 
 One practical note: the maintained config file still ships with
 `rhythm_v3_eval_mode=learned` because that is the runtime default surface. For
@@ -213,7 +215,10 @@ surface as the final supervision object.
 If you cache `unit_duration_tgt` for the maintained continuous path, also cache
 `unit_duration_proj_raw_tgt`, `unit_alignment_mode_id_tgt`,
 `unit_alignment_kind_tgt`, `unit_alignment_source_tgt`, and
-`unit_alignment_version_tgt` so later review/export can distinguish
+`unit_alignment_version_tgt`, plus
+`unit_alignment_source_cache_signature_tgt`,
+`unit_alignment_target_cache_signature_tgt`, and
+`unit_alignment_sidecar_signature_tgt` so later review/export can distinguish
 `continuous_precomputed` from `continuous_viterbi_v1` instead of treating the
 sample as opaque legacy supervision.
 
