@@ -151,6 +151,26 @@ def test_streaming_unitizer_tensor_export_matches_python_export():
     assert torch.allclose(batch_from_python.run_stability, batch_from_tensor.run_stability)
 
 
+def test_streaming_unitizer_step_token_lists_accepts_tensor_chunks_without_python_rewrap():
+    unitizer = StreamingRunLengthUnitizer(
+        silent_token=57,
+        separator_aware=True,
+        tail_open_units=2,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+    state = unitizer.init_state(batch_size=1)
+    results, next_state = unitizer.step_token_lists(
+        [torch.tensor([1, 1, 57, 57, 2], dtype=torch.long)],
+        state,
+        mark_last_open=True,
+    )
+    expected = unitizer.compress([1, 1, 57, 57, 2], mark_last_open=True)
+    assert results[0] == expected
+    exported = unitizer.export_compressed_sequence_tensor(next_state.rows[0], mark_last_open=True)
+    assert exported.to_python() == expected
+
+
 
 def test_shared_source_cache_builder_debounces_short_silence_flicker_in_offline_path():
     cache = build_source_rhythm_cache(

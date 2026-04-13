@@ -579,6 +579,16 @@ class StreamingRunLengthUnitizer:
             pending_separator=bool(row.pending_separator),
         )
 
+    @staticmethod
+    def _to_long_chunk_tensor(
+        token_chunk: Sequence[int] | torch.Tensor,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if isinstance(token_chunk, torch.Tensor):
+            return token_chunk.detach().to(device=device, dtype=torch.long).reshape(-1)
+        return torch.tensor(list(token_chunk), dtype=torch.long, device=device)
+
     def init_state(self, batch_size: int, device: torch.device | None = None) -> StreamingUnitizerState:
         return StreamingUnitizerState(rows=[self._empty_row_state(device) for _ in range(int(batch_size))])
 
@@ -850,7 +860,7 @@ class StreamingRunLengthUnitizer:
         next_rows: list[StreamingUnitizerRowState] = []
         for idx, token_chunk in enumerate(batch_tokens):
             row_state = state.rows[idx] if idx < len(state.rows) else self._empty_row_state()
-            chunk_tensor = torch.tensor(list(token_chunk), dtype=torch.long, device=row_state.units.device)
+            chunk_tensor = self._to_long_chunk_tensor(token_chunk, device=row_state.units.device)
             next_row = self.step_chunk_tensor(chunk_tensor, row_state)
             next_rows.append(next_row)
             results.append(self._export_row(next_row, mark_last_open=mark_last_open))
