@@ -620,76 +620,21 @@ class StreamingRunLengthUnitizer:
         *,
         mark_last_open: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if mark_last_open:
-            units = row_state.units.detach().to(dtype=torch.long)
-            durations = row_state.durations.detach().to(dtype=torch.long)
-            silence_mask = row_state.silence_mask.detach().to(dtype=torch.long)
-            sep_hint = row_state.sep_hint.detach().to(dtype=torch.long)
-            open_run_mask = torch.zeros_like(units, dtype=torch.long, device=units.device)
-            if open_run_mask.numel() > 0:
-                keep_open_from = max(0, open_run_mask.numel() - self.tail_open_units)
-                open_run_mask[keep_open_from:] = 1
-            sealed_mask = (1 - open_run_mask).clamp_min(0)
-            boundary_confidence = _estimate_boundary_confidence_tensor(durations, sep_hint, open_run_mask)
-            run_stability = _estimate_run_stability_tensor(
-                durations,
-                silence_mask,
-                open_run_mask,
-                sep_hint=sep_hint,
-                boundary_confidence=boundary_confidence,
-                min_speech_frames=self.debounce_min_run_frames,
-                min_silence_frames=self.debounce_min_run_frames,
-            )
-            return (
+        units = row_state.units.detach().to(dtype=torch.long)
+        durations = row_state.durations.detach().to(dtype=torch.long)
+        silence_mask = row_state.silence_mask.detach().to(dtype=torch.long)
+        sep_hint = row_state.sep_hint.detach().to(dtype=torch.long)
+        if not mark_last_open:
+            units, durations, silence_mask, sep_hint = _debounce_tail_tensors(
                 units,
                 durations,
                 silence_mask,
-                open_run_mask,
-                sealed_mask,
                 sep_hint,
-                boundary_confidence,
-                run_stability,
-            )
-        units_list = _cpu_int64_list(row_state.units)
-        durations_list = _cpu_int64_list(row_state.durations)
-        silence_list = _cpu_int64_list(row_state.silence_mask)
-        sep_list = _cpu_int64_list(row_state.sep_hint)
-        open_tail = min(len(units_list), self.tail_open_units if mark_last_open else 0)
-        sealed_limit = max(0, len(units_list) - open_tail)
-        if sealed_limit > 0:
-            prefix_units = units_list[:sealed_limit]
-            prefix_durations = durations_list[:sealed_limit]
-            prefix_silence = silence_list[:sealed_limit]
-            prefix_sep = sep_list[:sealed_limit]
-            prefix_units, prefix_durations, prefix_silence, prefix_sep = _stabilize_run_lists(
-                prefix_units,
-                prefix_durations,
-                prefix_silence,
-                prefix_sep,
+                mutable_start=0,
                 min_speech_frames=self.debounce_min_run_frames,
                 min_silence_frames=self.debounce_min_run_frames,
-                max_micro_silence_frames=1,
             )
-            units_list = prefix_units + units_list[sealed_limit:]
-            durations_list = prefix_durations + durations_list[sealed_limit:]
-            silence_list = prefix_silence + silence_list[sealed_limit:]
-            sep_list = prefix_sep + sep_list[sealed_limit:]
-        elif not mark_last_open:
-            units_list, durations_list, silence_list, sep_list = _stabilize_run_lists(
-                units_list,
-                durations_list,
-                silence_list,
-                sep_list,
-                min_speech_frames=self.debounce_min_run_frames,
-                min_silence_frames=self.debounce_min_run_frames,
-                max_micro_silence_frames=1,
-            )
-        device = row_state.units.device if row_state.units.numel() > 0 else row_state.durations.device
-        units = torch.tensor(units_list, dtype=torch.long, device=device)
-        durations = torch.tensor(durations_list, dtype=torch.long, device=device)
-        silence_mask = torch.tensor(silence_list, dtype=torch.long, device=device)
-        sep_hint = torch.tensor(sep_list, dtype=torch.long, device=device)
-        open_run_mask = torch.zeros_like(units, dtype=torch.long, device=device)
+        open_run_mask = torch.zeros_like(units, dtype=torch.long, device=units.device)
         if mark_last_open and open_run_mask.numel() > 0:
             keep_open_from = max(0, open_run_mask.numel() - self.tail_open_units)
             open_run_mask[keep_open_from:] = 1

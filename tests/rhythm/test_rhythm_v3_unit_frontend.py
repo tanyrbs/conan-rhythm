@@ -169,6 +169,9 @@ def test_streaming_unitizer_step_token_lists_accepts_tensor_chunks_without_pytho
     assert results[0] == expected
     exported = unitizer.export_compressed_sequence_tensor(next_state.rows[0], mark_last_open=True)
     assert exported.to_python() == expected
+    exported_closed = unitizer.export_compressed_sequence_tensor(next_state.rows[0], mark_last_open=False)
+    expected_closed = unitizer.compress([1, 1, 57, 57, 2], mark_last_open=False)
+    assert exported_closed.to_python() == expected_closed
 
 
 
