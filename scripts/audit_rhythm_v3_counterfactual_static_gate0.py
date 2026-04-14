@@ -504,6 +504,9 @@ def _compute_pair_row(
         sample[key] = _prompt_tensor(key, value)
 
     batch = ds.collater([sample])
+    src_rate_init_mode = str(
+        ds.hparams.get("rhythm_v3_src_rate_init_mode", "first_speech") or "first_speech"
+    ).strip().lower()
     metadata = {
         "sample_id": f"{split}:{fetch_index}",
         "pair_id": int(pair_entry.get("group_id", fetch_index)),
@@ -519,6 +522,7 @@ def _compute_pair_row(
         "same_text_target": same_text_target,
         "same_speaker_reference": same_speaker_reference,
         "same_speaker_target": same_speaker_target,
+        "src_rate_init_mode": str(src_rate_init_mode),
     }
     record = build_debug_records_from_batch(sample=batch, metadata=metadata)[0]
     derived = derive_record(record)
@@ -540,7 +544,6 @@ def _compute_pair_row(
     )
     src_prefix_min_support = int(ds.hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3)
     local_rate_decay = float(ds.hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95)
-    src_rate_init_mode = str(ds.hparams.get("rhythm_v3_src_rate_init_mode", "first_speech") or "first_speech").strip().lower()
     min_boundary_confidence = ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
     if min_boundary_confidence is not None:
         min_boundary_confidence = float(min_boundary_confidence)
@@ -584,6 +587,29 @@ def _compute_pair_row(
         min_boundary_confidence=min_boundary_confidence,
         return_status=True,
     )
+    source_support_stats = summarize_global_rate_support(
+        speech_mask=torch.as_tensor(speech_mask, dtype=torch.float32),
+        valid_mask=torch.as_tensor(source_valid_mask, dtype=torch.float32),
+        duration_obs=torch.as_tensor(record.source_duration_obs, dtype=torch.float32),
+        drop_edge_runs=int(drop_edge_runs),
+        min_speech_ratio=0.0,
+        min_speech_runs=max(1, int(src_prefix_min_support)),
+        closed_mask=(
+            torch.as_tensor(record.sealed_mask, dtype=torch.float32)
+            if record.sealed_mask is not None
+            else None
+        ),
+        boundary_confidence=(
+            torch.as_tensor(record.source_boundary_cue, dtype=torch.float32)
+            if record.source_boundary_cue is not None
+            else None
+        ),
+        min_boundary_confidence=min_boundary_confidence,
+    )
+    source_support_mask = source_support_stats.support_mask.detach().cpu().numpy().reshape(-1).astype(bool)
+    source_support_count = float(source_support_stats.support_count.reshape(-1)[0].item())
+    source_clean_count = float(source_support_stats.clean_count.reshape(-1)[0].item())
+    source_support_domain_valid = float(source_support_stats.domain_valid.reshape(-1)[0].item())
     g_src_utt, g_src_status = compute_source_global_rate_for_analysis(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=speech_mask,
@@ -603,7 +629,7 @@ def _compute_pair_row(
         min_boundary_confidence=min_boundary_confidence,
         return_status=True,
     )
-    if source_rate_seq is None:
+    if record.source_rate_seq is None:
         observed_log = torch.log(
             torch.as_tensor(record.source_duration_obs, dtype=torch.float32).reshape(1, -1).clamp_min(1.0e-4)
         ) * torch.as_tensor(source_valid_mask, dtype=torch.float32).reshape(1, -1)
@@ -660,8 +686,14 @@ def _compute_pair_row(
     g_src_prefix_mean = float("nan")
     g_src_prefix_final = float("nan")
     if source_rate_seq is not None and bool(np.any(speech_valid)):
-        g_src_prefix_mean = float(np.nanmean(source_rate_seq[speech_valid]))
-        speech_idx = np.flatnonzero(speech_valid)
+        prefix_keep = speech_valid[: source_rate_seq.shape[0]]
+        if source_support_mask.shape[0] > 0:
+            prefix_keep = prefix_keep & source_support_mask[: prefix_keep.shape[0]]
+        if bool(np.any(prefix_keep)):
+            g_src_prefix_mean = float(np.nanmean(source_rate_seq[: prefix_keep.shape[0]][prefix_keep]))
+        speech_idx = np.flatnonzero(
+            prefix_keep if bool(np.any(prefix_keep)) else speech_valid[: source_rate_seq.shape[0]]
+        )
         if speech_idx.size > 0:
             g_src_prefix_final = float(source_rate_seq[int(speech_idx[-1])])
     delta_g_ref_minus_src_prefix = (
@@ -717,6 +749,9 @@ def _compute_pair_row(
         target_logstretch = target_logstretch[:width]
         source_rate_seq = source_rate_seq[:width]
         speech_valid = speech_valid[:width]
+        stat_valid = speech_valid.copy()
+        if source_support_mask.shape[0] > 0:
+            stat_valid = stat_valid & source_support_mask[:width]
         confidence = None
         if record.unit_confidence_coarse_tgt is not None:
             confidence = np.asarray(record.unit_confidence_coarse_tgt, dtype=np.float32).reshape(-1)[:width]
@@ -730,8 +765,8 @@ def _compute_pair_row(
                 analytic_gap_clip,
             ).astype(np.float32)
             analytic_saturation_rate = float(
-                np.mean(np.abs(analytic_shift_preclip[speech_valid]) >= (analytic_gap_clip - 1.0e-6))
-            )
+                np.mean(np.abs(analytic_shift_preclip[stat_valid]) >= (analytic_gap_clip - 1.0e-6))
+            ) if bool(np.any(stat_valid)) else float("nan")
         else:
             analytic_shift_runtime = analytic_shift_preclip
             analytic_saturation_rate = 0.0
@@ -740,12 +775,12 @@ def _compute_pair_row(
         speech_total_ratio_star, speech_total_logratio_star = _speech_total_logratio(
             source_duration_obs=None if source_duration_obs is None else source_duration_obs[:width],
             target_duration_obs=None if target_duration_obs is None else target_duration_obs[:width],
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
         )
         beta0_runtime_fit, beta1_runtime_fit = _fit_affine_on_speech_np(
             analytic_shift_runtime,
             target_logstretch,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             weight=confidence,
         )
         if np.isfinite(beta0_runtime_fit) and np.isfinite(beta1_runtime_fit):
@@ -754,62 +789,62 @@ def _compute_pair_row(
             )
             c_star_runtime_affine = _weighted_speech_stat(
                 residual_runtime_affine,
-                speech_valid=speech_valid,
+                speech_valid=stat_valid,
                 confidence=confidence,
             )
             cmean_sp_star_runtime_affine = _weighted_speech_mean_stat(
                 residual_runtime_affine,
-                speech_valid=speech_valid,
+                speech_valid=stat_valid,
                 confidence=confidence,
             )
         abar_sp_star = _weighted_speech_stat(
             analytic_shift_preclip,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         abar_sp_star_runtime = _weighted_speech_stat(
             analytic_shift_runtime,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         amean_sp_star = _weighted_speech_mean_stat(
             analytic_shift_preclip,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         amean_sp_star_runtime = _weighted_speech_mean_stat(
             analytic_shift_runtime,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         c_star = _weighted_speech_stat(
             residual,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         c_star_runtime = _weighted_speech_stat(
             residual_runtime,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         cmean_sp_star = _weighted_speech_mean_stat(
             residual,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         cmean_sp_star_runtime = _weighted_speech_mean_stat(
             residual_runtime,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         zbar_sp_star = _weighted_speech_stat(
             target_logstretch,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
         zmean_sp_star = _weighted_speech_mean_stat(
             target_logstretch,
-            speech_valid=speech_valid,
+            speech_valid=stat_valid,
             confidence=confidence,
         )
 
@@ -826,10 +861,16 @@ def _compute_pair_row(
     support_seed_count = float(support_stats.support_seed_count.reshape(-1)[0].item())
     clean_count = float(support_stats.clean_count.reshape(-1)[0].item())
     support_domain_valid = float(support_stats.domain_valid.reshape(-1)[0].item())
+    source_g_domain_valid = int(
+        np.isfinite(g_src_utt)
+        and source_clean_count > 0.5
+        and source_support_domain_valid > 0.5
+    )
     g_domain_valid = int(
         support_count > 0.5
         and clean_count > 0.5
         and support_domain_valid > 0.5
+        and source_g_domain_valid > 0
         and speech_ratio_valid
         and ref_len_valid
     )
@@ -895,10 +936,14 @@ def _compute_pair_row(
         "analytic_saturation_rate": float(analytic_saturation_rate),
         "support_seed_count": support_seed_count,
         "support_count": support_count,
+        "source_support_count": float(source_support_count),
         "clean_count": clean_count,
+        "source_clean_count": float(source_clean_count),
         "support_fraction": float(support_stats.support_fraction.reshape(-1)[0].item()),
         "edge_runs_dropped": float(support_stats.edge_runs_dropped.reshape(-1)[0].item()),
         "support_domain_valid": support_domain_valid,
+        "source_support_domain_valid": float(source_support_domain_valid),
+        "source_g_domain_valid": int(source_g_domain_valid),
         "g_domain_valid": int(g_domain_valid),
         "prompt_ref_len_sec": float(prompt_ref_len_sec),
         "prompt_speech_ratio": float(prompt_speech_ratio),
@@ -1024,6 +1069,7 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "finite_pairs_analytic": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["abar_sp_star"])))),
         "finite_pairs_residual": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["c_star"])))),
         "g_domain_valid_items": int(sum(1 for row in frame if int(row["g_domain_valid"]) > 0)),
+        "source_g_domain_valid_items": int(sum(1 for row in frame if int(row.get("source_g_domain_valid", 0)) > 0)),
         "same_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) > 0)),
         "cross_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) == 0)),
         "clean_total_claim_items": len(clean_total_claim_rows),
@@ -1031,7 +1077,13 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "protocol_misaligned_items": len(hostile_protocol_rows),
         "valid_protocol_misaligned_items": len(valid_hostile_protocol_rows),
         "mean_support_count": float(np.mean([float(row["support_count"]) for row in frame])),
+        "mean_source_support_count": float(
+            np.nanmean(np.asarray([row.get("source_support_count", float("nan")) for row in frame], dtype=np.float32))
+        ),
         "mean_clean_count": float(np.mean([float(row["clean_count"]) for row in frame])),
+        "mean_source_clean_count": float(
+            np.nanmean(np.asarray([row.get("source_clean_count", float("nan")) for row in frame], dtype=np.float32))
+        ),
         "mean_prompt_speech_ratio": float(np.nanmean(np.asarray([row["prompt_speech_ratio"] for row in frame], dtype=np.float32))),
         "overall_total_signal_spearman": float(overall_total["spearman"]),
         "overall_total_signal_robust_slope": float(overall_total["robust_slope"]),

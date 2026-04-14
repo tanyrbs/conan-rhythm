@@ -706,6 +706,9 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_src_prefix_stat_mode"] = str(
             getattr(self.module, "src_prefix_stat_mode", "ema")
         )
+        ret["rhythm_v3_src_rate_init_mode"] = str(
+            getattr(self.module, "src_rate_init_mode", "first_speech")
+        )
         ret["rhythm_v3_src_prefix_min_support"] = float(
             getattr(self.module, "src_prefix_min_support", 3)
         )

@@ -68,6 +68,16 @@ class DurationV3TaskRuntimeSupportMixin:
             simple_global_stats=simple_global_stats,
             rate_mode=rate_mode,
             minimal_v1_profile=minimal_v1_profile,
+            g_variant=str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower(),
+            g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+            src_prefix_stat_mode=str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema"),
+            src_prefix_min_support=int(hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3),
+            g_drop_edge_runs=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+            min_boundary_confidence_for_g=(
+                None
+                if hparams.get("rhythm_v3_min_boundary_confidence_for_g", None) is None
+                else float(hparams.get("rhythm_v3_min_boundary_confidence_for_g"))
+            ),
         )
 
 

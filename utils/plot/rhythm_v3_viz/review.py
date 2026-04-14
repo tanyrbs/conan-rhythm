@@ -845,6 +845,14 @@ def build_ref_crop_table(
                     source_duration_obs=prompt_duration,
                     source_speech_mask=prompt_speech,
                     source_valid_mask=prompt_valid,
+                    source_weight=(
+                        _safe_array(getattr(record, "prompt_global_weight", None), dtype=np.float32)
+                        if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                        else None
+                    ),
+                    source_closed_mask=getattr(record, "prompt_closed_mask", None),
+                    source_boundary_confidence=getattr(record, "prompt_boundary_confidence", None),
+                    min_boundary_confidence=min_boundary_confidence,
                     g_variant=g_variant,
                     g_trim_ratio=g_trim_ratio,
                     drop_edge_runs=drop_edge_runs,
@@ -866,6 +874,9 @@ def build_ref_crop_table(
                 if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
                 else None
             ),
+            source_closed_mask=getattr(record, "sealed_mask", None),
+            source_boundary_confidence=getattr(record, "source_boundary_cue", None),
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,

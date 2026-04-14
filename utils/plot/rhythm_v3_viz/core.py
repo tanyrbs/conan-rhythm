@@ -9,6 +9,7 @@ import torch
 
 from modules.Conan.rhythm_v3.math_utils import (
     build_causal_source_prefix_rate_seq,
+    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
 )
 
@@ -338,6 +339,7 @@ class RhythmV3DebugRecord:
     unit_alignment_posterior_values_debug: Optional[np.ndarray] = None
     global_rate: Optional[float] = None
     source_rate_seq: Optional[np.ndarray] = None
+    source_rate_init_value: Optional[np.ndarray] = None
     global_shift_analytic: Optional[np.ndarray] = None
     global_bias_scalar: Optional[float] = None
     coarse_logstretch: Optional[np.ndarray] = None
@@ -576,6 +578,12 @@ def build_debug_record(
                 _maybe_set_meta(meta, meta_key, scalar)
         if model_output.get("rhythm_v3_g_trim_ratio") is not None:
             _maybe_set_meta(meta, "g_trim_ratio", _as_object_scalar(model_output.get("rhythm_v3_g_trim_ratio")))
+        if model_output.get("rhythm_v3_src_rate_init_mode") is not None:
+            _maybe_set_meta(
+                meta,
+                "src_rate_init_mode",
+                _as_object_scalar(model_output.get("rhythm_v3_src_rate_init_mode")),
+            )
 
     return RhythmV3DebugRecord(
         item_name=None if item_name is None else str(item_name),
@@ -716,6 +724,9 @@ def build_debug_record(
             _extract_attr_or_key(execution, "source_rate_seq", batch_index)
             if _extract_attr_or_key(execution, "source_rate_seq", batch_index) is not None
             else _extract_attr_or_key(execution, "g_src_prefix", batch_index)
+        ),
+        source_rate_init_value=_as_optional_vector(
+            _extract_attr_or_key(model_output, "rhythm_v3_source_rate_init", batch_index)
         ),
         global_shift_analytic=_as_optional_vector(_extract_attr_or_key(execution, "global_shift_analytic", batch_index)),
         global_bias_scalar=(
@@ -888,6 +899,10 @@ def derive_record(
         src_prefix_stat_mode = normalize_src_prefix_stat_mode(
             meta.get("src_prefix_stat_mode", meta.get("rhythm_v3_src_prefix_stat_mode", "ema"))
         )
+        src_rate_init_mode = str(
+            meta.get("src_rate_init_mode", meta.get("rhythm_v3_src_rate_init_mode", "first_speech"))
+            or "first_speech"
+        ).strip().lower()
         min_boundary_confidence = meta.get(
             "min_boundary_confidence_for_g",
             meta.get("rhythm_v3_min_boundary_confidence_for_g"),
@@ -906,11 +921,23 @@ def derive_record(
         prefix_weight_t = None
         if stability_np is not None and g_variant_meta in {"weighted_median", "softclean_wmed", "softclean_wtmean"}:
             prefix_weight_t = torch.from_numpy(stability_np) * speech
+        default_init_rate = None
+        if src_rate_init_mode == "zero":
+            default_init_rate = obs.new_zeros((1, 1))
+        elif src_rate_init_mode == "first_speech":
+            default_init_rate = first_valid_speech_init(obs.float(), speech.float())
+        elif record.source_rate_init_value is not None:
+            init_np = np.asarray(record.source_rate_init_value, dtype=np.float32).reshape(-1)
+            if init_np.size > 0 and np.isfinite(float(init_np[0])):
+                default_init_rate = torch.as_tensor(
+                    init_np[:1].reshape(1, 1),
+                    dtype=torch.float32,
+                )
         source_rate_seq_t, _ = build_causal_source_prefix_rate_seq(
             observed_log=obs,
             speech_mask=speech,
             init_rate=None,
-            default_init_rate=None,
+            default_init_rate=default_init_rate,
             stat_mode=src_prefix_stat_mode,
             decay=float(local_rate_decay),
             variant=g_variant_meta,

@@ -18,26 +18,27 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414_followup/gate0_weighted_report.json`
-- `tmp/gate_reaudit_20260414_followup/gate1_weighted_summary.json`
-- `tmp/gate_reaudit_20260414_followup/gate1_raw_clip06_summary.json`
+- `tmp/gate_reaudit_20260414_gate0_final/gate0_weighted_report.json`
+- `tmp/gate_reaudit_20260414_gate0_final/gate0_raw_report.json`
+- `tmp/gate_reaudit_20260414_gate0_final/gate0_trimmed_report.json`
+- `tmp/gate_reaudit_20260414_gate0_final/gate1_weighted_summary.json`
 - supporting comparison artifacts:
-  - `tmp/gate_reaudit_20260414_runtime_fixed/`
+  - `tmp/gate_reaudit_20260414_followup/`
   - `tmp/gate_reaudit_20260414_deep/`
   - `tmp/gate1_runtime_probe/`
 
 Current verdict on the local quick-ARCTIC surface:
 
 - prompt-domain support is repaired on the rebuilt cache surface
-- Gate 0 still fails even after the local clean slice is reconstructed via
-  `reference_mode=target_as_ref`
-- Gate 1 is no longer a blanket failure:
-  `weighted_median + exact_global_family` now passes the local analytic slice
-  end-to-end
-- Gate 2 and Gate 3 remain blocked
+- Gate 0 now passes on the strongest fixed local contract after the final
+  source-support / init-parity repair
+- Gate 1 also passes on that same strongest fixed contract:
+  `weighted_median + exact_global_family`
+- Gate 2 and Gate 3 were not rerun in this pass
 
-So this validation stack should currently be read as a **stop surface**, not as
-evidence that the repository is ready for new official training.
+So this validation stack should currently be read as a repaired
+**zero-train gate surface**, not as evidence that the repository is ready for
+new official training.
 
 ## 1. What we validate first
 
@@ -106,6 +107,9 @@ The maintained debug/summary surface now includes both:
   `prompt_global_weight_present`, actual `prompt_global_weight`, and
   `prompt_unit_log_prior_present`, and
   `prompt_unit_prior_vocab_size`
+- source-prefix reconstruction sidecars such as
+  `rhythm_v3_source_rate_init` and `rhythm_v3_src_rate_init_mode`, so offline
+  audit can replay the same init contract as runtime
 - writer / projector observability such as
   `rhythm_debug_detach_global_term_in_local_head`,
   `projector_preclamp_exec`,
@@ -232,6 +236,10 @@ Gate-0 is also now tied to the maintained runtime support surface:
 
 - static `g` review uses the same clean-support builder as runtime when
   `closed_mask` / `boundary_confidence` sidecars are present
+- Gate-0 validity now also requires source-side support/domain validity, not
+  just prompt-side validity
+- Gate-0 y-side speech summaries are now computed on the same source-support
+  surface used to define `delta_g`
 - prompt speech-ratio auditing is duration-weighted, matching dataset/runtime
 - strict gate fails on low alignment confidence means and low
   `alignment_local_margin_p10`, not just on missing metadata
@@ -252,6 +260,11 @@ Gate-0 is also now tied to the maintained runtime support surface:
 - current local falsification also defaults Gate0 to
   `reference_mode=target_as_ref`, so the clean local total slice is now
   available by default
+- current local falsification now also relies on runtime init parity for
+  `source_rate_seq` reconstruction instead of allowing zero-init drift
+- training target construction now carries the same `g` / prefix contract
+  fields used by Gate0 and Gate1, avoiding silent fallback to default
+  `g_variant` / `ema` target settings
 
 Gate-1 is now tied to the same runtime `g` contract:
 

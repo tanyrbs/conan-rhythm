@@ -109,6 +109,12 @@ class DurationV3TargetBuildConfig:
     simple_global_stats: bool = False
     rate_mode: str = "log_base"
     minimal_v1_profile: bool = False
+    g_variant: str = "raw_median"
+    g_trim_ratio: float = 0.2
+    src_prefix_stat_mode: str = "ema"
+    src_prefix_min_support: int = 3
+    g_drop_edge_runs: int = 0
+    min_boundary_confidence_for_g: float | None = None
 
     @property
     def lambda_mem(self) -> float:

@@ -1,129 +1,120 @@
 # rhythm_v3 falsification log
 
-## 2026-04-14 deep follow-up rerun
+## 2026-04-14 final Gate0 contract-repair rerun
 
 ### Scope
 
 - maintained `rhythm_v3` minimal-V1 only
 - local quick-ARCTIC only
-- zero-train Gate0 / Gate1 rerun after deeper contract cleanup
+- zero-train Gate0 / Gate1 rerun after the deeper Gate0 contract review
+- no new gradient training run in this pass
 
-### What was fixed in this pass
+### Hidden contract bugs fixed in this pass
 
-- Gate1 prompt tempo display now reuses prompt-side weighting:
-  `prompt_global_weight`
-- Gate1 source tempo readouts now reuses source-side weighting:
-  `source_run_stability`
-- Gate0 audit defaults to the clean locally-constructed slice:
-  `reference_mode=target_as_ref`
-- Gate0 gained two missing diagnostics:
-  - speech-total duration log-ratio
-  - affine runtime residual
-- debug/review records now carry prompt-side weight sidecars needed by weighted
-  prompt tempo reconstruction
-- training target construction now reuses
-  `build_causal_source_prefix_rate_seq(...)` instead of hardcoding EMA-only
-  prefix targets
+This pass found three additional bugs that materially affected Gate0:
+
+1. Gate0 static audit was not fully isomorphic on `x / y / valid`.
+
+- `delta_g` was source-side and support-filtered
+- the y-side speech summaries were not consistently restricted to the same
+  source-support surface
+- validity also did not require source-side support/domain validity
+
+2. Training-side target construction was not carrying the intended `g` and
+   prefix contract.
+
+- target builder config could silently fall back to defaults such as
+  `raw_median`, `ema`, `drop_edge_runs=0`, and no boundary threshold
+
+3. Offline source prefix reconstruction had init drift.
+
+- review/audit paths could reconstruct `source_rate_seq` with implicit zero
+  init instead of the runtime init contract such as
+  `src_rate_init_mode=first_speech`
+
+These are now fixed.
 
 ### What changed in the reading
 
-Two earlier explanations are now substantially narrowed:
+Two older readings are no longer current after this repair pass:
 
-1. "Gate1 is all fail"
+1. "Gate0 still fails cleanly on the local clean slice"
 
-This is no longer true locally.
+This is no longer true on the repaired audit surface.
 
-For `weighted_median + exact_global_family`, the analytic Gate1 probe now passes:
+For the clean exact slice
+`reference_mode=target_as_ref` and `src_prefix_stat_mode=exact_global_family`,
+the valid total slope is now positive on:
 
-- preclip: `4/4`
-- continuous: `4/4`
-- projected: `4/4`
+- `weighted_median`: `8/8` cells
+- `raw_median`: `7/8` cells
+- `trimmed_mean`: `7/8` cells
 
-2. "Gate0 only fails because the protocol slice is dirty"
+Strongest weighted cell:
 
-This is also no longer enough.
+- candidate token: `63`
+- `drop_edge_runs_for_g=1`
+- `g_domain_valid_items=28`
+- `source_g_domain_valid_items=28`
+- `valid_total_signal_robust_slope=0.4796`
+- `valid_total_mean_signal_robust_slope=0.0282`
+- `valid_total_logratio_signal_robust_slope=0.1723`
+- `valid_analytic_signal_robust_slope=0.1452`
+- `valid_analytic_runtime_mean_signal_robust_slope=0.0000`
+- `valid_residual_signal_robust_slope=0.2022`
+- `valid_residual_runtime_mean_signal_robust_slope=0.0129`
+- `valid_residual_runtime_affine_signal_robust_slope=0.0350`
+- `mean_analytic_saturation_rate=0.7757`
 
-The audit now runs the clean local slice by default and still fails:
+So the old "Gate0 is inherently flat" reading was substantially a contract
+bug, not a clean falsification result.
 
-- `clean_total_claim_items = 64`
-- `valid_clean_total_claim_items = 63`
-- `valid total median slope = 0.0000`
-- `valid total mean slope = -0.0216`
-- `valid total duration-logratio slope = 0.0124`
+2. "Gate1 might have regressed once Gate0 was repaired"
 
-So the stronger current reading is:
+This is also not true locally.
 
-- protocol dirtiness was a real contamination factor
-- after cleaning it up locally, the maintained total-control claim still does
-  not recover
+For `weighted_median + exact_global_family`, Gate1 still passes:
 
-### Clean-slice Gate0 reading
+- preclip monotonicity: `4/4`
+- continuous monotonicity: `4/4`
+- projected monotonicity: `4/4`
 
-Strongest current local clean-slice result:
+Per-source projected slopes remain strictly ordered:
 
-- variant: `weighted_median`
-- prefix mode: `exact_global_family`
-- candidate token: `57`
-- `drop_edge_runs_for_g = 1`
+- `aba_train_arctic_a0022`: `-0.0398`
+- `asi_train_arctic_a0027`: `-0.1223`
+- `bdl_train_arctic_a0022`: `-0.0486`
+- `slt_train_arctic_a0020`: `-0.0866`
 
-Key diagnostics:
+### Current conclusion after the final rerun
 
-| Metric | Value |
-| --- | ---: |
-| valid analytic median slope | `0.1672` |
-| valid analytic runtime mean slope | `0.0000` |
-| valid residual mean slope | `-0.1636` |
-| valid residual runtime mean slope | `-0.0216` |
-| valid residual runtime affine slope | `0.0100` |
-| mean analytic saturation | `1.0000` |
+The strongest current local reading is now:
 
-Interpretation:
+- Gate0 and Gate1 both survive on the repaired weighted local surface
+- the earlier Gate0-fail conclusion was contaminated by real source-side
+  audit/runtime drift
+- the training target path also had real contract drift and is now fixed
+- runtime saturation still exists, so this is not a claim that every variant
+  or every broader V1 surface is solved
 
-- there is still analytic signal before runtime saturation
-- the runtime-aligned analytic surface remains heavily flattened
-- the affine residual view weakens the old "residual is strongly anti-global"
-  story, so part of the residual negativity was decomposition-baked
-- even after this cleanup, total evidence is still too weak to pass Gate0
+The maintained local claim should therefore now be phrased as:
 
-### Gate1 reading
+- on the repaired local surface, the strongest fixed contract is
+  `weighted_median + exact_global_family + target_as_ref`
+- that contract now survives Gate0 and Gate1 zero-train falsification
+- Gate2 and Gate3 remain pending because this pass did not rerun training
 
-Current strongest local Gate1 result:
+## 2026-04-14 deep follow-up rerun
 
-- variant: `weighted_median`
-- prefix mode: `exact_global_family`
-- projected pass: `4/4`
+This section is retained as history only. It is superseded by the final
+contract-repair rerun above.
 
-Additional runtime probe:
+### Historical reading
 
-- variant: `raw_median`
-- prefix mode: `exact_global_family`
-- `analytic_gap_clip=0.6`
-- projected pass: `3/4`
-
-Interpretation:
-
-- runtime clip still matters
-- `weighted_median` is stronger than `raw_median` on this local surface
-- Gate1 is no longer the main blocker on the strongest fixed surface
-
-### Current conclusion
-
-The maintained conclusion after the deeper follow-up rerun is:
-
-- keep Gate 2 blocked
-- keep Gate 3 blocked
-- keep formal training blocked on this local surface
-- stop using "support collapse" as the primary explanation
-- stop using "Gate1 all fail" as the primary explanation
-- use the sharper local reading instead:
-  the strongest remaining blocker is Gate0 total control, not Gate1 ordering
-
-The project should now describe the local falsification state as:
-
-- the analytic runtime path can be made locally operational on the strongest
-  fixed variant
-- the maintained single-scalar raw-duration line still does not establish a
-  strong enough total-target claim on the cleaner Gate0 slice
+- this pass correctly found that Gate1 ordering drift was real
+- this pass also correctly introduced cleaner runtime-aligned diagnostics
+- but its remaining "Gate0 still fails" conclusion was later weakened by the
+  source-side support/validity mismatch and init-drift bugs fixed above
 
 ## Retained script surface
 
