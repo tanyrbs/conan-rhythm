@@ -1,220 +1,175 @@
 # rhythm_v3 local status snapshot (2026-04-14)
 
-This document records the latest maintained local rerun after the Gate1
-direction fix, source-boundary contract cleanup, prefix-final audit cleanup,
-and zero-train gate rerun.
+This is the latest local zero-train falsification snapshot after the deeper
+contract cleanup pass.
 
 ## 1. Scope
 
 - maintained `rhythm_v3` minimal-V1 path only
 - local quick-ARCTIC configs only
-- zero-train falsification only
+- zero-train Gate0 / Gate1 reruns only
 - local execution is still CPU-only in this workspace:
   the host machine has `GTX 1050 Ti`, but the repo `.venv` currently ships
-  `torch 2.5.1+cpu`, so no CUDA path was available for this rerun
-- frozen falsification family for this pass:
+  `torch 2.5.1+cpu`, so no CUDA path was available
+- frozen family used in the latest reruns:
   - `raw_median`
   - `weighted_median`
   - `trimmed_mean`
-- Gate 2 / Gate 3 training still blocked
 
-## 2. What changed in this round
+## 2. What changed in the latest follow-up
 
-- Gate1 case selection labels are corrected:
-  smallest `g_ref` is now treated as `fast`, largest as `slow`
-- Gate1 monotonicity direction is corrected:
-  higher `prompt_g_ref` means slower speech, so `tempo_out` must decrease, not
-  increase
-- runtime, review, and Gate1 tempo readout now use the same prompt/source-side
-  `g` contract, including:
-  - `closed_mask`
-  - `boundary_confidence`
-  - `min_boundary_confidence_for_g`
-- source-prefix baseline gained explicit modes:
-  - `ema`
-  - `family_hybrid`
-  - `exact_global_family`
-- this falsification rerun uses `rhythm_v3_src_prefix_stat_mode=exact_global_family`
-  for Gate0 and Gate1
-- source-side runtime now prefers `boundary_confidence` when available and only
-  falls back to `source_boundary_cue`
-- Gate0 static audit now reports:
-  - protocol slices: `clean_total_claim` vs
-    `cross_text_prompt_vs_cross_speaker_target`
-  - median-based and mean-based total/analytic/residual views
-  - runtime-clipped analytic/residual views aligned with writer clip contract
-  - final-prefix audit fields:
-    `g_src_prefix_final` and `delta_g_ref_minus_src_prefix_final`
-- Gate1 analytic probe now:
-  - selects slow/mid/fast by runtime-equivalent `prompt_g_ref`
-  - sorts monotonicity by `prompt_g_ref`, not display-only `prompt_tempo_ref`
-  - reports `tempo_out_preclip`, `tempo_out_continuous`,
-    `tempo_out_projected`
-  - reports continuous count/logstretch readouts in parallel with discrete
-    `tempo_out`
-- silent counterfactual probe now uses the same `prompt_g_ref` contract as the
-  analytic probe and no longer counts zero-range collapse as a pass
+- Gate1 prompt ordering and monotonicity remain fixed on runtime-equivalent
+  `prompt_g_ref`
+- Gate1 tempo readout now also reuses weighted prompt/source contracts:
+  - prompt-side `prompt_global_weight`
+  - source-side `source_run_stability`
+- debug/review records now carry prompt-side weight sidecars needed for
+  weighted prompt tempo reconstruction
+- Gate0 default protocol now audits the clean local slice first:
+  `reference_mode=target_as_ref`
+- Gate0 now reports two extra diagnostics that were missing before:
+  - speech-total duration log-ratio
+  - affine runtime residual view
+- training target construction no longer hardcodes an EMA-only prefix path;
+  it now reuses `build_causal_source_prefix_rate_seq(...)`, so the target
+  builder can follow the same prefix-stat family as runtime
+- source-side weighted `g_src` analysis remains aligned across runtime,
+  review, and Gate0 audit
 
 ## 3. Current artifacts
 
-Current rerun artifacts live in:
+Latest follow-up artifacts live in:
 
-- `tmp/gate_reaudit_20260414_runtime_fixed/`
+- `tmp/gate_reaudit_20260414_followup/`
 
 Primary files:
 
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_raw/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_weighted/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_trimmed/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_raw/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_weighted/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_trimmed/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_silent_raw/summary.json`
+- `tmp/gate_reaudit_20260414_followup/gate0_weighted_report.json`
+- `tmp/gate_reaudit_20260414_followup/gate0_weighted_rows.csv`
+- `tmp/gate_reaudit_20260414_followup/gate1_weighted_summary.json`
+- `tmp/gate_reaudit_20260414_followup/gate1_weighted_rows.csv`
+- `tmp/gate_reaudit_20260414_followup/gate1_raw_clip06_summary.json`
+- `tmp/gate_reaudit_20260414_followup/gate1_raw_clip06_rows.csv`
 
-## 4. Frontend/data-contract check
+Earlier supporting artifacts still matter for comparison:
 
-Latest preflight and boundary audit still support the same conclusion as the
-previous repaired surface:
+- `tmp/gate_reaudit_20260414_runtime_fixed/`
+- `tmp/gate_reaudit_20260414_deep/`
+- `tmp/gate1_runtime_probe/`
 
-- prompt/source silence sidecars are present even when raw `silent_token`
-  evidence is absent
-- boundary support is restored on the local quick surface
-- Gate0 valid prompt-domain rows remain `63/64`
-
-Interpretation:
-
-- the old "support collapses before `g` exists" story is no longer the main
-  blocker on this local surface
-- the current failure is downstream of support recovery
-
-## 5. Gate verdict
+## 4. Gate verdict
 
 | Gate | Verdict | Why |
 | --- | --- | --- |
-| Gate 0 | fail | prompt-domain validity is restored, but this local surface exposes only the hostile protocol slice, and total explainability stays flat or slightly negative there |
-| Gate 1 | mixed / still not promotable | the old all-fail reading was contaminated by a sign bug; after correction, `weighted_median` passes all 4 local triplets end-to-end, while `raw_median` and `trimmed_mean` still collapse on part of the slice |
-| Gate 2 | blocked | Gate 0 / Gate 1 still fail |
+| Gate 0 | fail | the clean local slice is now available, but total signal is still flat on median totals and only weakly positive on the new duration-logratio view |
+| Gate 1 | pass on the strongest fixed variant, still not universal | `weighted_median + exact_global_family` now passes all 4 local analytic triplets end-to-end; `raw_median` still needs clip help and still does not fully generalize |
+| Gate 2 | blocked | Gate 0 still fails |
 | Gate 3 | blocked | Gate 2 not admissible |
 
-## 6. Gate0 static audit
+## 5. Gate0 clean-slice audit
 
-The cleaned Gate0 result is more precise than the earlier rebuilt2 report:
+The most important change is that Gate0 is no longer forced to judge only the
+hostile manifest slice. The current default rerun uses the locally constructed
+clean slice:
 
-- `g_domain_valid_items = 63/64`
-- `mean_support_count = 4.8281`
-- `valid_zero_total_median_items = 42/63`
-- `clean_total_claim_items = 0/64`
-- `protocol_misaligned_items = 64/64`
+- `reference_mode=target_as_ref`
+- `clean_total_claim_items = 64`
+- `valid_clean_total_claim_items = 63`
 
-So this local surface currently provides no clean total-claim slice. Gate0 can
-only judge the hostile slice
-`cross_text_prompt_vs_cross_speaker_target`.
+For the strongest current local variant
+`weighted_median + exact_global_family`, candidate token `57`,
+`drop_edge_runs_for_g = 1`, the clean-slice summary is:
 
-| Variant | total median slope | total mean slope | analytic median slope | analytic runtime mean slope | residual runtime mean slope | mean saturation |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `raw_median` | `0.0000` | `-0.0253` | `0.8418` | `0.0415` | `-0.2082` | `0.7891` |
-| `weighted_median` | `0.0000` | `-0.0253` | `0.7019` | `0.0612` | `-0.2070` | `0.7741` |
-| `trimmed_mean` | `-0.0000` | `-0.0351` | `0.9757` | `0.0369` | `-0.2545` | `0.8340` |
-
-Interpretation:
-
-- unclipped analytic signal is still positively aligned with `delta_g`
-- after runtime clip alignment, analytic mean slope shrinks toward zero
-- runtime residual mean slope stays negative
-- the exact-family prefix baseline does not rescue total signal on this surface
-- because `clean_total_claim` is absent locally, this is enough to fail the
-  maintained engineering claim, but it is not a terminal theory-proof against
-  every single-scalar mixed-cue hypothesis
-
-## 7. Gate1 analytic runtime probe
-
-All Gate1 runs below use:
-
-- `prompt_g_ref`-ordered slow/mid/fast triplets
-- `rhythm_v3_src_prefix_stat_mode=exact_global_family`
-- analytic-only runtime mode
-
-| Variant | preclip pass | continuous pass | projected pass | mean preclip slope | mean projected slope | mean projected range | mean saturation |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `raw_median` | `4/4` | `2/4` | `2/4` | `-0.1322` | `-0.0290` | `0.0333` | `0.8067` |
-| `weighted_median` | `4/4` | `4/4` | `4/4` | `-0.1721` | `-0.0743` | `0.1233` | `0.6597` |
-| `trimmed_mean` | `4/4` | `3/4` | `2/4` | `-0.2438` | `-0.0726` | `0.0646` | `0.7990` |
-
-Additional continuous readouts confirm the failure is not a pure metric artifact:
-
-- projected exec-ratio slope stays positive on average:
-  - `raw_median`: `0.1680`
-  - `weighted_median`: `0.3192`
-  - `trimmed_mean`: `0.1251`
-- projected exec-logstretch slope also stays positive on average:
-  - `raw_median`: `0.1502`
-  - `weighted_median`: `0.2925`
-  - `trimmed_mean`: `0.1391`
+| Metric | Value |
+| --- | ---: |
+| valid total median slope | `0.0000` |
+| valid total mean slope | `-0.0216` |
+| valid total duration-logratio slope | `0.0124` |
+| valid analytic median slope | `0.1672` |
+| valid analytic runtime mean slope | `0.0000` |
+| valid residual mean slope | `-0.1636` |
+| valid residual runtime mean slope | `-0.0216` |
+| valid residual runtime affine slope | `0.0100` |
+| mean analytic saturation | `1.0000` |
 
 Interpretation:
 
-- the previous "Gate1 all fail" conclusion was wrong:
-  the sign expectation in the probe was reversed
-- negative `prompt_g_ref -> tempo_out` slope is the correct direction because
-  `tempo_out = exp(-g)`
-- after correcting the direction, all three variants are monotone before clip;
-  the main remaining failure is downstream flattening
-- `weighted_median` is the strongest local candidate on this slice:
-  it survives `preclip`, `continuous`, and `projected` readouts on all 4 cases
-- `raw_median` and `trimmed_mean` still lose dynamic range between
-  `continuous` and `projected`, so the execution surface is still eating a
-  meaningful part of the cue
-- Gate1 therefore no longer justifies "analytic chain is dead"; it now supports
-  the narrower reading that runtime flattening and variant choice matter
+- the earlier protocol objection was real and is now addressed locally
+- even on the clean slice, the old median-total reading still does not move
+- the new duration-logratio view is slightly positive, so the correct reading
+  is no longer "strictly zero everywhere"
+- that positive total view is still far too weak to promote the maintained
+  single-scalar total-control claim
+- unclipped analytic signal is real
+- runtime-aligned analytic signal is still flattened almost completely because
+  the runtime surface is saturated
+- the affine residual view reduces the apparent negative residual story, which
+  means part of the old residual negativity was indeed decomposition-baked
+  rather than purely empirical
 
-## 8. Silent counterfactual regression check
+Bottom line:
 
-The silent counterfactual probe was rerun only for `raw_median` to verify the
-new `prompt_g_ref` contract on the sibling script surface.
+- Gate0 is now cleaner than before
+- Gate0 still fails
+- the remaining failure no longer looks like a simple audit-bug artifact
 
-Result:
+## 6. Gate1 analytic runtime probe
 
-- `src_prefix_stat_mode = exact_global_family`
-- with corrected direction and range gating, `2/4` sources pass
-  `prompt_g_ref -> tempo_out`
-- `aba_train_arctic_a0022` and `bdl_train_arctic_a0022` pass with the expected
-  negative slope
-- `asi_train_arctic_a0020` and `slt_train_arctic_a0019` still collapse to
-  zero-range outputs and now correctly fail instead of being counted as trivial
-  monotone passes
+For `weighted_median + exact_global_family`, the latest rerun is now fully
+passing on the local 4-case analytic probe:
 
-Interpretation:
+| Variant | preclip pass | continuous pass | projected pass |
+| --- | ---: | ---: | ---: |
+| `weighted_median` | `4/4` | `4/4` | `4/4` |
 
-- the old selector/sorter drift was a real bug
-- after fixing it, the remaining silent-counterfactual failure mode is mostly
-  zero-range collapse, not sign inversion
+Per-source projected slopes/ranges:
 
-## 9. Current reading
+| Source | projected slope | projected range |
+| --- | ---: | ---: |
+| `aba_train_arctic_a0022` | `-0.0398` | `0.0500` |
+| `asi_train_arctic_a0027` | `-0.1223` | `0.2500` |
+| `bdl_train_arctic_a0022` | `-0.0486` | `0.0833` |
+| `slt_train_arctic_a0020` | `-0.0866` | `0.1097` |
 
-The cleaned local reading is:
+This confirms:
 
-- support collapse is no longer the main failure mode
-- the maintained single-scalar raw-duration chain still fails Gate0 on this
-  local surface
-- the exact-family source prefix baseline improves contract cleanliness but does
-  not recover Gate0 total signal
-- Gate1 is no longer a blanket failure:
-  `weighted_median` now passes the local 4-case analytic probe end-to-end after
-  the direction fix
-- the remaining Gate1 weakness is concentrated in runtime flattening and
-  variant fragility, not in a universally wrong-signed analytic chain
+- Gate1 is no longer the main blocker on the strongest fixed variant
+- the remaining generalization problem is variant/runtime fragility, not a
+  blanket "analytic chain is dead" reading
 
-So the maintained conclusion is:
+An additional raw probe with more permissive clip confirms the runtime-surface
+story:
+
+| Variant | config | projected pass |
+| --- | --- | ---: |
+| `raw_median` | `exact_global_family + analytic_gap_clip=0.6` | `3/4` |
+
+That probe helps interpret the surface:
+
+- widening clip helps `raw_median`
+- it still does not fully solve the runtime failure set
+- `weighted_median` remains the strongest current local candidate
+
+## 7. Current reading
+
+The latest local reading is now sharper:
+
+- support collapse is not the main blocker
+- Gate1 evaluation drift was real and is now largely fixed
+- weighted prompt/source tempo readouts are now aligned with the actual `g`
+  contract
+- the clean local Gate0 slice now exists and still fails
+- the remaining Gate0 blocker is not just protocol dirtiness
+- the strongest current failure mode is:
+  single-scalar `g` can still drive an analytic direction on this surface, but
+  it is not strong enough to establish a robust total-target claim
+
+So the maintained conclusion for this local surface is:
 
 - keep Gate 2 blocked
 - keep Gate 3 blocked
-- do not start formal training on this local surface
-- do not promote the whole frozen family as a valid maintained V1 main control
-  on this surface just because `weighted_median` passes one small local slice
-- keep the claim narrow:
-  the maintained line is still engineering-failed here because Gate0 stays
-  flat and Gate1 is not robust across the frozen family, while clean
-  total-signal theory falsification remains unavailable locally because
-  `clean_total_claim` rows are absent
-
-The project remains in zero-train falsification mode.
+- do not promote the maintained V1 total-control claim
+- keep the narrower claim:
+  `weighted_median + exact_global_family` can pass the local analytic runtime
+  probe, but the maintained single-scalar raw-duration line still fails the
+  cleaner Gate0 total audit

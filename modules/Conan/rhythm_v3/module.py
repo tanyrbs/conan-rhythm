@@ -1397,6 +1397,16 @@ class MixedEffectsDurationModule(nn.Module):
         if self.g_variant == "unit_norm" and not isinstance(unit_prior, torch.Tensor):
             return None
         boundary_confidence = self._resolve_source_boundary_confidence(source_batch)
+        source_weight = None
+        if (
+            self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            and isinstance(getattr(source_batch, "source_run_stability", None), torch.Tensor)
+        ):
+            source_weight = (
+                source_batch.source_run_stability.float().clamp(0.0, 1.0)
+                * speech_mask.float()
+                * valid_mask.float()
+            )
         support_mask = build_global_rate_support_mask(
             speech_mask=speech_mask,
             valid_mask=valid_mask,
@@ -1418,6 +1428,7 @@ class MixedEffectsDurationModule(nn.Module):
                 trim_ratio=self.g_trim_ratio,
                 drop_edge_runs=self.g_drop_edge_runs,
                 support_mask=support_mask,
+                weight=source_weight,
                 unit_ids=source_batch.content_units,
                 unit_prior=unit_prior if isinstance(unit_prior, torch.Tensor) else None,
             )

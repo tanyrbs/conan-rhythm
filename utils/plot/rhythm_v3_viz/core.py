@@ -299,6 +299,9 @@ class RhythmV3DebugRecord:
     prompt_duration_obs: Optional[np.ndarray] = None
     prompt_valid_mask: Optional[np.ndarray] = None
     prompt_speech_mask: Optional[np.ndarray] = None
+    prompt_closed_mask: Optional[np.ndarray] = None
+    prompt_boundary_confidence: Optional[np.ndarray] = None
+    prompt_global_weight: Optional[np.ndarray] = None
     prompt_log_duration: Optional[np.ndarray] = None
     prompt_log_residual: Optional[np.ndarray] = None
     unit_duration_tgt: Optional[np.ndarray] = None
@@ -628,6 +631,11 @@ def build_debug_record(
             else _extract_mapping_value(sample, "prompt_unit_mask", batch_index),
         ),
         prompt_speech_mask=_as_optional_vector(_extract_mapping_value(sample, "prompt_speech_mask", batch_index)),
+        prompt_closed_mask=_as_optional_vector(_extract_mapping_value(sample, "prompt_closed_mask", batch_index)),
+        prompt_boundary_confidence=_as_optional_vector(
+            _extract_mapping_value(sample, "prompt_boundary_confidence", batch_index)
+        ),
+        prompt_global_weight=_as_optional_vector(_extract_mapping_value(sample, "prompt_global_weight", batch_index)),
         prompt_log_duration=_as_optional_vector(_extract_attr_or_key(ref_memory, "prompt_log_duration", batch_index)),
         prompt_log_residual=_as_optional_vector(_extract_attr_or_key(ref_memory, "prompt_log_residual", batch_index)),
         unit_duration_tgt=_as_optional_vector(_extract_mapping_value(sample, "unit_duration_tgt", batch_index)),
@@ -1025,6 +1033,12 @@ def record_summary(
     speech_valid = derived.speech_mask > 0.5
     silence_valid = derived.silence_mask > 0.5
     source_valid_mask = _ensure_1d_mask(record.unit_mask, record.source_duration_obs)
+    analysis_source_weight = (
+        np.asarray(record.source_run_stability, dtype=np.float32).reshape(-1)
+        if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+        and record.source_run_stability is not None
+        else None
+    )
     target_weight = record.unit_confidence_tgt
     if target_weight is None:
         target_weight = record.unit_confidence_coarse_tgt
@@ -1048,6 +1062,7 @@ def record_summary(
             source_duration_obs=record.prompt_duration_obs,
             source_speech_mask=prompt_speech_for_g,
             source_valid_mask=record.prompt_valid_mask,
+            source_weight=record.prompt_global_weight,
             source_closed_mask=record.prompt_closed_mask,
             source_boundary_confidence=record.prompt_boundary_confidence,
             min_boundary_confidence=min_boundary_confidence,
@@ -1065,6 +1080,7 @@ def record_summary(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
         min_boundary_confidence=min_boundary_confidence,
@@ -1102,6 +1118,7 @@ def record_summary(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
         min_boundary_confidence=min_boundary_confidence,
@@ -1118,6 +1135,7 @@ def record_summary(
         source_duration_obs=continuous_duration,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
         min_boundary_confidence=min_boundary_confidence,
@@ -1130,6 +1148,7 @@ def record_summary(
         source_duration_obs=record.unit_duration_exec,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
         min_boundary_confidence=min_boundary_confidence,
@@ -1201,6 +1220,9 @@ def record_summary(
                 source_duration_obs=preclip_duration,
                 source_speech_mask=derived.speech_mask[:width],
                 source_valid_mask=valid_prefix_mask,
+                source_weight=(
+                    None if analysis_source_weight is None else analysis_source_weight[:width]
+                ),
                 source_closed_mask=(
                     None
                     if record.sealed_mask is None

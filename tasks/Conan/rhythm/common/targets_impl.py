@@ -7,7 +7,11 @@ from typing import Callable, Optional
 import torch
 
 from modules.Conan.rhythm_v3.g_stats import masked_true_median_batch, masked_weighted_median_batch
-from modules.Conan.rhythm_v3.math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
+from modules.Conan.rhythm_v3.math_utils import (
+    apply_analytic_gap_clip,
+    build_causal_local_rate_seq,
+    build_causal_source_prefix_rate_seq,
+)
 from modules.Conan.rhythm_v3.silence_surface import build_silence_tau_surface
 from .losses_impl import DurationV3LossTargets, RhythmLossTargets
 
@@ -1064,12 +1068,43 @@ def build_duration_v3_loss_targets(
             if isinstance(log_rate_base, torch.Tensor)
             else log_anchor * unit_mask.float()
         )
-        local_rate_seq_tgt, _ = build_causal_local_rate_seq(
+        g_variant_tgt = str(getattr(config, "g_variant", "raw_median") or "raw_median")
+        prefix_weight_tgt = None
+        if (
+            g_variant_tgt in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            and isinstance(getattr(unit_batch, "source_run_stability", None), torch.Tensor)
+        ):
+            prefix_weight_tgt = (
+                getattr(unit_batch, "source_run_stability").float().clamp(0.0, 1.0)
+                * committed_speech_mask.float()
+            )
+        boundary_confidence_tgt = (
+            getattr(unit_batch, "source_boundary_cue", None).float() * unit_mask.float()
+            if isinstance(getattr(unit_batch, "source_boundary_cue", None), torch.Tensor)
+            else None
+        )
+        local_rate_seq_tgt, _ = build_causal_source_prefix_rate_seq(
             observed_log=observed_log_anchor,
             speech_mask=committed_speech_mask.float(),
             init_rate=init_local_rate,
             default_init_rate=default_init_rate,
+            stat_mode=str(getattr(config, "src_prefix_stat_mode", "ema") or "ema"),
             decay=float(config.local_rate_decay),
+            variant=g_variant_tgt,
+            trim_ratio=float(getattr(config, "g_trim_ratio", 0.2) or 0.2),
+            min_support=int(getattr(config, "src_prefix_min_support", 3) or 3),
+            weight=prefix_weight_tgt,
+            valid_mask=unit_mask.float(),
+            closed_mask=committed_mask.float(),
+            boundary_confidence=boundary_confidence_tgt,
+            min_boundary_confidence=getattr(config, "min_boundary_confidence_for_g", None),
+            drop_edge_runs=int(getattr(config, "g_drop_edge_runs", 0) or 0),
+            min_speech_ratio=0.0,
+            unit_ids=(
+                getattr(unit_batch, "content_units", None).long()
+                if isinstance(getattr(unit_batch, "content_units", None), torch.Tensor)
+                else None
+            ),
         )
         analytic_gap_tgt = apply_analytic_gap_clip(
             prompt_targets["global_rate"].float().detach() - local_rate_seq_tgt,

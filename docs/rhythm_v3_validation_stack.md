@@ -18,22 +18,22 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_raw/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_weighted/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_trimmed/report.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_raw/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_weighted/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_trimmed/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_silent_raw/summary.json`
+- `tmp/gate_reaudit_20260414_followup/gate0_weighted_report.json`
+- `tmp/gate_reaudit_20260414_followup/gate1_weighted_summary.json`
+- `tmp/gate_reaudit_20260414_followup/gate1_raw_clip06_summary.json`
+- supporting comparison artifacts:
+  - `tmp/gate_reaudit_20260414_runtime_fixed/`
+  - `tmp/gate_reaudit_20260414_deep/`
+  - `tmp/gate1_runtime_probe/`
 
 Current verdict on the local quick-ARCTIC surface:
 
 - prompt-domain support is repaired on the rebuilt cache surface
-- Gate 0 still fails, but the current local surface exposes only the hostile
-  protocol slice; total mean/median remain flat there
-- Gate 1 is no longer a blanket failure after the direction fix:
-  `weighted_median` passes the local analytic slice end-to-end, while
-  `raw_median` and `trimmed_mean` still partially collapse
+- Gate 0 still fails even after the local clean slice is reconstructed via
+  `reference_mode=target_as_ref`
+- Gate 1 is no longer a blanket failure:
+  `weighted_median + exact_global_family` now passes the local analytic slice
+  end-to-end
 - Gate 2 and Gate 3 remain blocked
 
 So this validation stack should currently be read as a **stop surface**, not as
@@ -103,7 +103,8 @@ The maintained debug/summary surface now includes both:
   `alignment_mean_local_confidence_speech`, and
   `alignment_mean_coarse_confidence_speech`
 - prompt-side audit sidecars such as `g_trim_ratio`,
-  `prompt_global_weight_present`, `prompt_unit_log_prior_present`, and
+  `prompt_global_weight_present`, actual `prompt_global_weight`, and
+  `prompt_unit_log_prior_present`, and
   `prompt_unit_prior_vocab_size`
 - writer / projector observability such as
   `rhythm_debug_detach_global_term_in_local_head`,
@@ -243,9 +244,14 @@ Gate-0 is also now tied to the maintained runtime support surface:
   - `clean_total_claim` vs
     `cross_text_prompt_vs_cross_speaker_target`
   - median-based and mean-based totals
+  - speech-total duration log-ratio
   - runtime-clipped analytic/residual views aligned with writer clip
+  - affine runtime residual diagnostics
 - current falsification runs fix `rhythm_v3_src_prefix_stat_mode=exact_global_family`
   for Gate0 / Gate1 to remove the old EMA-only prefix mismatch
+- current local falsification also defaults Gate0 to
+  `reference_mode=target_as_ref`, so the clean local total slice is now
+  available by default
 
 Gate-1 is now tied to the same runtime `g` contract:
 
@@ -254,6 +260,8 @@ Gate-1 is now tied to the same runtime `g` contract:
   `prompt_tempo_ref`
 - higher `prompt_g_ref` is now explicitly interpreted as slower speech, so
   `tempo_out` is expected to decrease
+- prompt/source tempo readouts now reuse weighted prompt/source contracts when
+  `g_variant` is weighted or softclean
 - Gate-1 reports layered readouts:
   - `tempo_out_preclip`
   - `tempo_out_continuous`

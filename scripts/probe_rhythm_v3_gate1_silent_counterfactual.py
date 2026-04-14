@@ -289,6 +289,7 @@ def _conditioning_tempo(ds: ConanDataset, conditioning: dict[str, Any]) -> float
         source_duration_obs=conditioning.get("prompt_duration_obs"),
         source_speech_mask=conditioning.get("prompt_speech_mask"),
         source_valid_mask=conditioning.get("prompt_valid_mask"),
+        source_weight=conditioning.get("prompt_global_weight"),
         source_unit_ids=conditioning.get("prompt_content_units"),
         source_closed_mask=conditioning.get("prompt_closed_mask"),
         source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),

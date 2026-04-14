@@ -861,6 +861,11 @@ def build_ref_crop_table(
             source_duration_obs=source_duration,
             source_speech_mask=source_speech,
             source_valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None and source_valid is None else source_valid,
+            source_weight=(
+                _safe_array(record.source_run_stability, dtype=np.float32)
+                if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                else None
+            ),
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1410,10 +1415,21 @@ def build_monotonicity_table(
             continue
         derived = derive_record(record)
         eval_mode = _as_str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", "")))
+        source_weight = (
+            _safe_array(record.source_run_stability, dtype=np.float32)
+            if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            else None
+        )
+        prompt_weight = (
+            _safe_array(getattr(record, "prompt_global_weight", None), dtype=np.float32)
+            if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            else None
+        )
         tempo_src = compute_speech_tempo_for_analysis(
             source_duration_obs=record.source_duration_obs,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_weight=source_weight,
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
             min_boundary_confidence=min_boundary_confidence,
@@ -1426,6 +1442,7 @@ def build_monotonicity_table(
             source_duration_obs=record.unit_duration_exec,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_weight=source_weight,
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
             min_boundary_confidence=min_boundary_confidence,
@@ -1442,6 +1459,7 @@ def build_monotonicity_table(
                 else (None if bool(require_explicit_speech_mask) else derived.prompt_speech_mask)
             ),
             source_valid_mask=record.prompt_valid_mask,
+            source_weight=prompt_weight,
             source_closed_mask=record.prompt_closed_mask,
             source_boundary_confidence=record.prompt_boundary_confidence,
             min_boundary_confidence=min_boundary_confidence,
@@ -1464,6 +1482,11 @@ def build_monotonicity_table(
             source_duration_obs=record.source_duration_obs,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_weight=(
+                _safe_array(record.source_run_stability, dtype=np.float32)
+                if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                else None
+            ),
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
             min_boundary_confidence=min_boundary_confidence,
