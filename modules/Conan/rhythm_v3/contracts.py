@@ -22,6 +22,7 @@ class SourceUnitBatch:
     unit_rate_log_base: Optional[torch.Tensor] = None
     source_silence_mask: Optional[torch.Tensor] = None
     source_boundary_cue: Optional[torch.Tensor] = None
+    boundary_confidence: Optional[torch.Tensor] = None
     source_run_stability: Optional[torch.Tensor] = None
     phrase_group_index: Optional[torch.Tensor] = None
     phrase_group_pos: Optional[torch.Tensor] = None
@@ -41,6 +42,7 @@ DURATION_V3_SOURCE_CACHE_OPTIONAL_KEYS = (
     "unit_rate_log_base",
     "source_silence_mask",
     "source_boundary_cue",
+    "boundary_confidence",
     "source_run_stability",
     "phrase_group_index",
     "phrase_group_pos",
@@ -545,6 +547,7 @@ def move_source_unit_batch(
             batch.sep_mask,
             batch.source_silence_mask,
             batch.source_boundary_cue,
+            batch.boundary_confidence,
             batch.source_run_stability,
             batch.phrase_group_index,
             batch.phrase_group_pos,
@@ -562,6 +565,7 @@ def move_source_unit_batch(
         sep_mask=_move_tensor(batch.sep_mask, device=device),
         source_silence_mask=_move_tensor(batch.source_silence_mask, device=device),
         source_boundary_cue=_move_tensor(batch.source_boundary_cue, device=device),
+        boundary_confidence=_move_tensor(batch.boundary_confidence, device=device),
         source_run_stability=_move_tensor(batch.source_run_stability, device=device),
         phrase_group_index=_move_tensor(batch.phrase_group_index, device=device),
         phrase_group_pos=_move_tensor(batch.phrase_group_pos, device=device),

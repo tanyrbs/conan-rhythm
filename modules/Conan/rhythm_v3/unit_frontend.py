@@ -856,6 +856,11 @@ class DurationUnitFrontend(nn.Module):
             unit_rate_log_base=resolved_rate_log_base,
             source_silence_mask=base_batch.silence_mask.float() * unit_mask,
             source_boundary_cue=resolved_boundary,
+            boundary_confidence=(
+                base_batch.boundary_confidence.float() * unit_mask
+                if isinstance(getattr(base_batch, "boundary_confidence", None), torch.Tensor)
+                else None
+            ),
             source_run_stability=(
                 source_run_stability.float() * unit_mask
                 if isinstance(source_run_stability, torch.Tensor)
@@ -958,6 +963,7 @@ class DurationUnitFrontend(nn.Module):
         unit_rate_log_base: torch.Tensor | None = None,
         source_silence_mask: torch.Tensor | None = None,
         source_boundary_cue: torch.Tensor | None = None,
+        boundary_confidence: torch.Tensor | None = None,
         source_run_stability: torch.Tensor | None = None,
         phrase_group_index: torch.Tensor | None = None,
         phrase_group_pos: torch.Tensor | None = None,
@@ -973,6 +979,7 @@ class DurationUnitFrontend(nn.Module):
             unit_rate_log_base=unit_rate_log_base,
             source_silence_mask=source_silence_mask,
             source_boundary_cue=source_boundary_cue,
+            boundary_confidence=boundary_confidence,
             source_run_stability=source_run_stability,
             phrase_group_index=phrase_group_index,
             phrase_group_pos=phrase_group_pos,
@@ -985,6 +992,7 @@ class DurationUnitFrontend(nn.Module):
             silence_mask=source_silence_mask,
             sealed_mask=sealed_mask,
             sep_hint=sep_mask,
+            boundary_confidence=boundary_confidence,
             run_stability=source_run_stability,
         )
         batch = self._convert_batch(

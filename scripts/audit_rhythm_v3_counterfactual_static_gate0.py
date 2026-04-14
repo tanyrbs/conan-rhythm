@@ -278,10 +278,12 @@ def _compute_pair_row(
             "g_ref_status": "sample_fetch_error",
             "g_src_utt": float("nan"),
             "g_src_prefix_mean": float("nan"),
+            "g_src_prefix_final": float("nan"),
             "g_src_status": "sample_fetch_error",
             "delta_g": float("nan"),
             "delta_g_ref_minus_src_utt": float("nan"),
             "delta_g_ref_minus_src_prefix": float("nan"),
+            "delta_g_ref_minus_src_prefix_final": float("nan"),
             "abar_sp_star": float("nan"),
             "abar_sp_star_runtime": float("nan"),
             "c_star": float("nan"),
@@ -347,10 +349,12 @@ def _compute_pair_row(
             "g_ref_status": f"conditioning_error:{type(exc).__name__}",
             "g_src_utt": float("nan"),
             "g_src_prefix_mean": float("nan"),
+            "g_src_prefix_final": float("nan"),
             "g_src_status": "conditioning_error",
             "delta_g": float("nan"),
             "delta_g_ref_minus_src_utt": float("nan"),
             "delta_g_ref_minus_src_prefix": float("nan"),
+            "delta_g_ref_minus_src_prefix_final": float("nan"),
             "abar_sp_star": float("nan"),
             "abar_sp_star_runtime": float("nan"),
             "c_star": float("nan"),
@@ -521,11 +525,20 @@ def _compute_pair_row(
     source_rate_seq = source_rate_seq_t[0].detach().cpu().numpy().astype(np.float32)
     delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
     g_src_prefix_mean = float("nan")
+    g_src_prefix_final = float("nan")
     if source_rate_seq is not None and bool(np.any(speech_valid)):
         g_src_prefix_mean = float(np.nanmean(source_rate_seq[speech_valid]))
+        speech_idx = np.flatnonzero(speech_valid)
+        if speech_idx.size > 0:
+            g_src_prefix_final = float(source_rate_seq[int(speech_idx[-1])])
     delta_g_ref_minus_src_prefix = (
         float(g_ref - g_src_prefix_mean)
         if np.isfinite(g_ref) and np.isfinite(g_src_prefix_mean)
+        else float("nan")
+    )
+    delta_g_ref_minus_src_prefix_final = (
+        float(g_ref - g_src_prefix_final)
+        if np.isfinite(g_ref) and np.isfinite(g_src_prefix_final)
         else float("nan")
     )
 
@@ -681,10 +694,12 @@ def _compute_pair_row(
         "g_ref_status": str(g_ref_status),
         "g_src_utt": float(g_src_utt),
         "g_src_prefix_mean": float(g_src_prefix_mean),
+        "g_src_prefix_final": float(g_src_prefix_final),
         "g_src_status": str(g_src_status),
         "delta_g": float(delta_g),
         "delta_g_ref_minus_src_utt": float(delta_g),
         "delta_g_ref_minus_src_prefix": float(delta_g_ref_minus_src_prefix),
+        "delta_g_ref_minus_src_prefix_final": float(delta_g_ref_minus_src_prefix_final),
         "abar_sp_star": float(abar_sp_star),
         "abar_sp_star_runtime": float(abar_sp_star_runtime),
         "amean_sp_star": float(amean_sp_star),
@@ -789,11 +804,11 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     valid_residual_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star_runtime")
     overall_residual_runtime_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star_runtime")
     valid_residual_runtime_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star_runtime")
-    valid_prefix_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="zbar_sp_star")
-    valid_prefix_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="abar_sp_star")
-    valid_prefix_analytic_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="abar_sp_star_runtime")
-    valid_prefix_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="c_star")
-    valid_prefix_residual_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="c_star_runtime")
+    valid_prefix_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix_final", y_key="zbar_sp_star")
+    valid_prefix_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix_final", y_key="abar_sp_star")
+    valid_prefix_analytic_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix_final", y_key="abar_sp_star_runtime")
+    valid_prefix_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix_final", y_key="c_star")
+    valid_prefix_residual_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix_final", y_key="c_star_runtime")
     return {
         "candidate_token": int(frame[0]["candidate_token"]),
         "drop_edge_runs_for_g": int(frame[0]["drop_edge_runs_for_g"]),

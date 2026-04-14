@@ -94,8 +94,8 @@ def build_auto_gate1_cases(ds: ConanDataset) -> list[dict[str, Any]]:
         if len(distinct_rows) < 3:
             continue
 
-        slow = distinct_rows[0]
-        fast = distinct_rows[-1]
+        fast = distinct_rows[0]
+        slow = distinct_rows[-1]
         midpoint = 0.5 * (float(slow["g_ref"]) + float(fast["g_ref"]))
         mid_candidates = distinct_rows[1:-1]
         mid = _pick_midpoint_item(mid_candidates, target_tempo=midpoint)

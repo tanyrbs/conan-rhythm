@@ -1005,6 +1005,13 @@ def record_summary(
 
     derived = derive_record(record, local_rate_decay=local_rate_decay, silence_tau=silence_tau)
     meta = dict(record.metadata or {})
+    min_boundary_confidence = meta.get(
+        "min_boundary_confidence_for_g",
+        meta.get("rhythm_v3_min_boundary_confidence_for_g"),
+    )
+    min_boundary_confidence = (
+        None if min_boundary_confidence is None else float(min_boundary_confidence)
+    )
     prompt_total = 0.0 if record.prompt_duration_obs is None else float(np.sum(record.prompt_duration_obs))
     prompt_speech = (
         0.0
@@ -1041,6 +1048,9 @@ def record_summary(
             source_duration_obs=record.prompt_duration_obs,
             source_speech_mask=prompt_speech_for_g,
             source_valid_mask=record.prompt_valid_mask,
+            source_closed_mask=record.prompt_closed_mask,
+            source_boundary_confidence=record.prompt_boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1055,6 +1065,9 @@ def record_summary(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_closed_mask=record.sealed_mask,
+        source_boundary_confidence=record.source_boundary_cue,
+        min_boundary_confidence=min_boundary_confidence,
         g_variant=g_variant,
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
@@ -1063,12 +1076,21 @@ def record_summary(
         return_status=True,
     )
     g_src_prefix_mean = float("nan")
+    g_src_prefix_final = float("nan")
     if derived.source_rate_seq is not None and bool(np.any(speech_valid)):
         g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
+        speech_idx = np.flatnonzero(speech_valid)
+        if speech_idx.size > 0:
+            g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
     delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
     delta_g_ref_minus_src_prefix = (
         float(g_ref - g_src_prefix_mean)
         if np.isfinite(g_ref) and np.isfinite(g_src_prefix_mean)
+        else float("nan")
+    )
+    delta_g_ref_minus_src_prefix_final = (
+        float(g_ref - g_src_prefix_final)
+        if np.isfinite(g_ref) and np.isfinite(g_src_prefix_final)
         else float("nan")
     )
     c_star = np.nan if derived.oracle_bias is None else float(derived.oracle_bias)
@@ -1080,6 +1102,9 @@ def record_summary(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_closed_mask=record.sealed_mask,
+        source_boundary_confidence=record.source_boundary_cue,
+        min_boundary_confidence=min_boundary_confidence,
         g_variant=g_variant,
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
@@ -1093,6 +1118,9 @@ def record_summary(
         source_duration_obs=continuous_duration,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_closed_mask=record.sealed_mask,
+        source_boundary_confidence=record.source_boundary_cue,
+        min_boundary_confidence=min_boundary_confidence,
         g_variant=g_variant,
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
@@ -1102,6 +1130,9 @@ def record_summary(
         source_duration_obs=record.unit_duration_exec,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
+        source_closed_mask=record.sealed_mask,
+        source_boundary_confidence=record.source_boundary_cue,
+        min_boundary_confidence=min_boundary_confidence,
         g_variant=g_variant,
         g_trim_ratio=g_trim_ratio,
         drop_edge_runs=drop_edge_runs,
@@ -1170,6 +1201,17 @@ def record_summary(
                 source_duration_obs=preclip_duration,
                 source_speech_mask=derived.speech_mask[:width],
                 source_valid_mask=valid_prefix_mask,
+                source_closed_mask=(
+                    None
+                    if record.sealed_mask is None
+                    else np.asarray(record.sealed_mask, dtype=np.float32).reshape(-1)[:width]
+                ),
+                source_boundary_confidence=(
+                    None
+                    if record.source_boundary_cue is None
+                    else np.asarray(record.source_boundary_cue, dtype=np.float32).reshape(-1)[:width]
+                ),
+                min_boundary_confidence=min_boundary_confidence,
                 g_variant=g_variant,
                 g_trim_ratio=g_trim_ratio,
                 drop_edge_runs=drop_edge_runs,
@@ -1364,13 +1406,20 @@ def record_summary(
         "g_src_utt": g_src_utt,
         "g_src_compute_status": g_src_compute_status,
         "g_src_prefix_mean": g_src_prefix_mean,
+        "g_src_prefix_final": g_src_prefix_final,
         "delta_g": delta_g,
         "delta_g_ref_minus_src_utt": delta_g,
         "delta_g_ref_minus_src_prefix": delta_g_ref_minus_src_prefix,
+        "delta_g_ref_minus_src_prefix_final": delta_g_ref_minus_src_prefix_final,
         "delta_g_ref_minus_src_utt_neg": (-delta_g if np.isfinite(delta_g) else float("nan")),
         "delta_g_ref_minus_src_prefix_neg": (
             -delta_g_ref_minus_src_prefix
             if np.isfinite(delta_g_ref_minus_src_prefix)
+            else float("nan")
+        ),
+        "delta_g_ref_minus_src_prefix_final_neg": (
+            -delta_g_ref_minus_src_prefix_final
+            if np.isfinite(delta_g_ref_minus_src_prefix_final)
             else float("nan")
         ),
         "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,

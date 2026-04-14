@@ -284,12 +284,18 @@ def _build_probe_sample(
     return sample, conditioning, raw_ref_item, ref_item
 
 
-def _conditioning_tempo(conditioning: dict[str, Any]) -> float:
+def _conditioning_tempo(ds: ConanDataset, conditioning: dict[str, Any]) -> float:
     return compute_speech_tempo_for_analysis(
         source_duration_obs=conditioning.get("prompt_duration_obs"),
         source_speech_mask=conditioning.get("prompt_speech_mask"),
         source_valid_mask=conditioning.get("prompt_valid_mask"),
         source_unit_ids=conditioning.get("prompt_content_units"),
+        source_closed_mask=conditioning.get("prompt_closed_mask"),
+        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
+        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
+        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
+        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
     )
 
 
@@ -411,7 +417,7 @@ def _run_condition(
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
-            "prompt_tempo_ref": _conditioning_tempo(conditioning),
+            "prompt_tempo_ref": _conditioning_tempo(ds, conditioning),
             "prompt_g_ref": float(prompt_g_ref),
             "prompt_g_status": str(prompt_g_status),
             "prompt_total_units": int(np.asarray(conditioning["prompt_duration_obs"]).reshape(-1).shape[0]),
@@ -449,7 +455,12 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     all_real_rows = [row for row in rows if row["ref_condition"] in {"slow", "mid", "fast"}]
     real_rows = [row for row in all_real_rows if _row_domain_valid(row)]
 
-    def _ordered_control_summary(value_key: str, *, flip_sign: bool = False) -> dict[str, Any]:
+    def _ordered_control_summary(
+        value_key: str,
+        *,
+        flip_sign: bool = False,
+        direction: str = "increasing",
+    ) -> dict[str, Any]:
         ordered_rows = sorted(
             real_rows,
             key=lambda row: -float(row[value_key]) if flip_sign else float(row[value_key]),
@@ -458,7 +469,11 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         y_values = [float(row["tempo_out"]) for row in ordered_rows]
         monotone = len(ordered_rows) >= 3
         for left, right in zip(y_values, y_values[1:]):
-            if not (np.isfinite(left) and np.isfinite(right) and right >= (left - 1.0e-6)):
+            if direction == "decreasing":
+                ok = np.isfinite(left) and np.isfinite(right) and right <= (left + 1.0e-6)
+            else:
+                ok = np.isfinite(left) and np.isfinite(right) and right >= (left - 1.0e-6)
+            if not ok:
                 monotone = False
                 break
         slope = float("nan")
@@ -467,20 +482,36 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             y = np.asarray(y_values, dtype=np.float32)
             if np.all(np.isfinite(x)) and np.all(np.isfinite(y)) and float(np.max(x) - np.min(x)) > 1.0e-6:
                 slope = float(np.polyfit(x, y, deg=1)[0])
+        real_range = float("nan")
+        if y_values:
+            y = np.asarray(y_values, dtype=np.float32)
+            if np.all(np.isfinite(y)):
+                real_range = float(np.max(y) - np.min(y))
+        slope_ok = np.isfinite(slope) and (
+            slope < 0.0 if direction == "decreasing" else slope > 0.0
+        )
         return {
             "sorted_ref_conditions": [str(row["ref_condition"]) for row in ordered_rows],
             "x_sorted": x_values,
             "tempo_out_sorted": y_values,
             "monotone": bool(monotone),
+            "pass": bool(
+                monotone
+                and slope_ok
+                and np.isfinite(real_range)
+                and real_range >= float(DEFAULT_MIN_REAL_RANGE)
+            ),
             "transfer_slope": slope,
+            "real_tempo_range": real_range,
+            "direction": direction,
         }
 
-    prompt_control = _ordered_control_summary("prompt_g_ref", flip_sign=False)
-    delta_g_control = _ordered_control_summary("delta_g", flip_sign=False)
-    anti_control = _ordered_control_summary("delta_g", flip_sign=True)
+    prompt_control = _ordered_control_summary("prompt_g_ref", flip_sign=False, direction="decreasing")
+    delta_g_control = _ordered_control_summary("delta_g", flip_sign=False, direction="decreasing")
+    anti_control = _ordered_control_summary("delta_g", flip_sign=True, direction="increasing")
     tempo_ref = list(prompt_control["x_sorted"])
     tempo_out = list(prompt_control["tempo_out_sorted"])
-    monotone = bool(prompt_control["monotone"])
+    monotone = bool(prompt_control["pass"])
     slope = float(prompt_control["transfer_slope"])
     controls = {
         row["ref_condition"]: float(row["tempo_out"])
@@ -528,12 +559,12 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "delta_g_sorted_ref_conditions": delta_g_control["sorted_ref_conditions"],
         "delta_g_sorted": delta_g_control["x_sorted"],
         "tempo_out_by_delta_g": delta_g_control["tempo_out_sorted"],
-        "monotone_by_delta_g": bool(delta_g_control["monotone"]),
+        "monotone_by_delta_g": bool(delta_g_control["pass"]),
         "delta_g_transfer_slope": float(delta_g_control["transfer_slope"]),
         "anti_control_sorted_ref_conditions": anti_control["sorted_ref_conditions"],
         "neg_delta_g_sorted": anti_control["x_sorted"],
         "tempo_out_by_neg_delta_g": anti_control["tempo_out_sorted"],
-        "monotone_by_neg_delta_g": bool(anti_control["monotone"]),
+        "monotone_by_neg_delta_g": bool(anti_control["pass"]),
         "neg_delta_g_transfer_slope": float(anti_control["transfer_slope"]),
         "real_tempo_range": real_range,
         "max_gap_vs_source_only": _max_gap_to_control("source_only"),

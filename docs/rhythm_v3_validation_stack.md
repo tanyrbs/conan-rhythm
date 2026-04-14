@@ -18,21 +18,22 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414_runtime_clean/gate0_raw/report.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate0_weighted/report.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate0_trimmed/report.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate1_raw/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate1_weighted/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate1_trimmed/summary.json`
-- `tmp/gate_reaudit_20260414_runtime_clean/gate1_silent_raw/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_raw/report.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_weighted/report.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate0_trimmed/report.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_raw/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_weighted/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_trimmed/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_fixed/gate1_silent_raw/summary.json`
 
 Current verdict on the local quick-ARCTIC surface:
 
 - prompt-domain support is repaired on the rebuilt cache surface
 - Gate 0 still fails, but the current local surface exposes only the hostile
   protocol slice; total mean/median remain flat there
-- Gate 1 now fails under `prompt_g_ref` ordering and `exact_global_family`
-  prefix baseline already at the `preclip` layer
+- Gate 1 is no longer a blanket failure after the direction fix:
+  `weighted_median` passes the local analytic slice end-to-end, while
+  `raw_median` and `trimmed_mean` still partially collapse
 - Gate 2 and Gate 3 remain blocked
 
 So this validation stack should currently be read as a **stop surface**, not as
@@ -251,6 +252,8 @@ Gate-1 is now tied to the same runtime `g` contract:
 - probe-case selection uses runtime-equivalent `prompt_g_ref`
 - monotonicity ordering uses `prompt_g_ref`, not display-only
   `prompt_tempo_ref`
+- higher `prompt_g_ref` is now explicitly interpreted as slower speech, so
+  `tempo_out` is expected to decrease
 - Gate-1 reports layered readouts:
   - `tempo_out_preclip`
   - `tempo_out_continuous`
@@ -258,6 +261,8 @@ Gate-1 is now tied to the same runtime `g` contract:
 - Gate-1 also reports continuous count/logstretch readouts in parallel with the
   discrete tempo readout so projector/readout collapse can be separated from
   earlier writer failure
+- silent counterfactual Gate-1 now also rejects zero-range collapse instead of
+  treating it as a trivial monotone pass
 
 ## 4. Review util entry points
 

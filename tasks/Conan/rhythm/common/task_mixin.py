@@ -241,6 +241,7 @@ class CommonRhythmTaskMixin:
                 "source_silence_mask": sample.get(f"{prefix}source_silence_mask"),
                 "source_run_stability": sample.get(f"{prefix}source_run_stability"),
                 "source_boundary_cue": sample.get(f"{prefix}source_boundary_cue"),
+                "boundary_confidence": sample.get(f"{prefix}boundary_confidence"),
                 "phrase_group_index": sample.get(f"{prefix}phrase_group_index"),
                 "phrase_group_pos": sample.get(f"{prefix}phrase_group_pos"),
                 "phrase_final_mask": sample.get(f"{prefix}phrase_final_mask"),

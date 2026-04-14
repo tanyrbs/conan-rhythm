@@ -1,6 +1,6 @@
 # rhythm_v3 falsification log
 
-## 2026-04-14 runtime-clean rerun
+## 2026-04-14 runtime-fixed rerun
 
 ### Scope
 
@@ -14,19 +14,29 @@
 
 ### Protocol cleanup in this pass
 
+- Gate1 case selection labels are fixed:
+  smallest `g_ref` is `fast`, largest is `slow`
+- Gate1 monotonicity direction is fixed:
+  `prompt_g_ref -> tempo_out` must be decreasing
 - Gate1 case selection and monotonicity ordering now use runtime-equivalent
   `prompt_g_ref`, not display-only `prompt_tempo_ref`
 - Gate0 source-prefix audit now uses the shared source-prefix contract, and this
   rerun fixes the prefix mode at `exact_global_family`
+- tempo reconstruction now passes:
+  `closed_mask`, `boundary_confidence`, and
+  `min_boundary_confidence_for_g`
 - Gate0 now reports:
   - hostile vs clean protocol slices
   - mean-based and median-based totals
   - runtime-clipped analytic/residual views
+- source-side runtime now prefers true `boundary_confidence` over
+  `source_boundary_cue` when available
 - Gate1 now reports three runtime layers:
   - `tempo_out_preclip`
   - `tempo_out_continuous`
   - `tempo_out_projected`
-- silent counterfactual probe now uses the same `prompt_g_ref` ordering
+- silent counterfactual probe now uses the same `prompt_g_ref` ordering and
+  rejects zero-range collapse as a pass
 
 ### What is no longer a valid explanation
 
@@ -79,13 +89,13 @@ surface provides no `clean_total_claim` rows.
 
 ### Current Gate1 result
 
-Summary from `tmp/gate_reaudit_20260414_runtime_clean/gate1_*/summary.json`:
+Summary from `tmp/gate_reaudit_20260414_runtime_fixed/gate1_*/summary.json`:
 
 | Variant | preclip pass | continuous pass | projected pass | mean preclip slope | mean projected slope | mean projected range |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `raw_median` | `0/4` | `0/4` | `0/4` | `-0.1322` | `-0.0290` | `0.0333` |
-| `weighted_median` | `0/4` | `0/4` | `0/4` | `-0.1721` | `-0.0743` | `0.1233` |
-| `trimmed_mean` | `0/4` | `0/4` | `0/4` | `-0.2438` | `-0.0726` | `0.0646` |
+| `raw_median` | `4/4` | `2/4` | `2/4` | `-0.1322` | `-0.0290` | `0.0333` |
+| `weighted_median` | `4/4` | `4/4` | `4/4` | `-0.1721` | `-0.0743` | `0.1233` |
+| `trimmed_mean` | `4/4` | `3/4` | `2/4` | `-0.2438` | `-0.0726` | `0.0646` |
 
 Supporting telemetry:
 
@@ -101,42 +111,45 @@ Supporting telemetry:
 
 Reading:
 
-- Gate1 is not failing only because of projector quantization
-- `preclip` already fails, so the analytic operational cue is wrong-signed or
-  collapsed before projection
-- projector and discrete readout still compress the signal further, but they
-  are downstream amplifiers of an earlier failure
+- the old "Gate1 all fail" reading was contaminated by an evaluation bug
+- negative slope is expected here, not positive slope
+- once the direction is corrected, all variants show the expected `preclip`
+  monotonicity and `weighted_median` survives all the way through projection
+- the remaining failure is concentrated in runtime flattening:
+  `raw_median` and `trimmed_mean` still collapse on part of the local slice
 
 ### Silent counterfactual regression
 
-Summary from `tmp/gate_reaudit_20260414_runtime_clean/gate1_silent_raw/summary.json`:
+Summary from `tmp/gate_reaudit_20260414_runtime_fixed/gate1_silent_raw/summary.json`:
 
-- the script now uses the same `prompt_g_ref` contract
-- two sources remain anti-monotone
-- two sources collapse to zero-range outputs
-- `monotone_by_neg_delta_g` passes on all four sources
+- the script now uses the same `prompt_g_ref` contract and the correct
+  decreasing direction
+- `2/4` sources pass after range gating
+- `2/4` sources still collapse to zero-range outputs and correctly fail
 
 Reading:
 
-- the old Gate1 helper mismatch is no longer the best explanation
-- the remaining failure is consistent with sign inversion or collapse
+- the old Gate1 helper mismatch was real and materially contaminated the prior
+  conclusion
+- the remaining failure is now better described as partial collapse, not sign
+  inversion
 
 ### Current conclusion
 
-The maintained conclusion after this runtime-clean rerun is:
+The maintained conclusion after this runtime-fixed rerun is:
 
 - keep Gate 2 blocked
 - keep Gate 3 blocked
 - keep formal training blocked on this local surface
 - stop describing the failure as support-domain collapse
 - state the narrower conclusion:
-  the maintained single-scalar raw-duration mainline fails under a sharper
-  runtime-aligned protocol
+  Gate0 still rejects the maintained line on this surface, while Gate1 is now a
+  mixed result rather than a blanket failure
 
 The important caveat is also fixed in writing:
 
 - this local rerun does not provide a clean total-claim slice
-- so it is strong evidence against the maintained line, not a universal proof
+- so it is still evidence against the maintained line, not a universal proof
   that every single-scalar mixed global cue is dead
 
 ### Retained script surface

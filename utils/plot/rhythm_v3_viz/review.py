@@ -580,6 +580,9 @@ def compute_speech_tempo_for_analysis(
     source_duration_obs: Any | None = None,
     source_speech_mask: Any,
     source_valid_mask: Any | None = None,
+    source_closed_mask: Any | None = None,
+    source_boundary_confidence: Any | None = None,
+    min_boundary_confidence: float | None = None,
     g_variant: str = "raw_median",
     source_weight: Any | None = None,
     source_unit_ids: Any | None = None,
@@ -592,6 +595,9 @@ def compute_speech_tempo_for_analysis(
         source_duration_obs=source_duration_obs,
         source_speech_mask=source_speech_mask,
         source_valid_mask=source_valid_mask,
+        source_closed_mask=source_closed_mask,
+        source_boundary_confidence=source_boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
         g_variant=g_variant,
         source_weight=source_weight,
         source_unit_ids=source_unit_ids,
@@ -862,10 +868,14 @@ def build_ref_crop_table(
             return_status=True,
         )
         g_src_prefix_mean = float("nan")
+        g_src_prefix_final = float("nan")
         if derived.source_rate_seq is not None and derived.speech_mask is not None:
             speech_valid = derived.speech_mask > 0.5
             if bool(np.any(speech_valid)):
                 g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
+                speech_idx = np.flatnonzero(speech_valid)
+                if speech_idx.size > 0:
+                    g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
         ref_len_sec = _as_float(
             _meta(record, "ref_len_sec", default=None),
             default=(
@@ -943,6 +953,11 @@ def build_ref_crop_table(
             if np.isfinite(g_ref) and np.isfinite(g_src_prefix_mean)
             else float("nan")
         )
+        delta_g_ref_minus_src_prefix_final = (
+            float(g_ref - g_src_prefix_final)
+            if np.isfinite(g_ref) and np.isfinite(g_src_prefix_final)
+            else float("nan")
+        )
         gate0_drop_reason = _resolve_gate0_drop_reason(
             g_ref=g_ref,
             g_src=g_src,
@@ -982,13 +997,20 @@ def build_ref_crop_table(
                 "g_src_compute_status": g_src_compute_status,
                 "g_src_utt": g_src,
                 "g_src_prefix_mean": g_src_prefix_mean,
+                "g_src_prefix_final": g_src_prefix_final,
                 "delta_g": delta_g,
                 "delta_g_ref_minus_src_utt": delta_g,
                 "delta_g_ref_minus_src_prefix": delta_g_ref_minus_src_prefix,
+                "delta_g_ref_minus_src_prefix_final": delta_g_ref_minus_src_prefix_final,
                 "delta_g_ref_minus_src_utt_neg": (-delta_g if np.isfinite(delta_g) else float("nan")),
                 "delta_g_ref_minus_src_prefix_neg": (
                     -delta_g_ref_minus_src_prefix
                     if np.isfinite(delta_g_ref_minus_src_prefix)
+                    else float("nan")
+                ),
+                "delta_g_ref_minus_src_prefix_final_neg": (
+                    -delta_g_ref_minus_src_prefix_final
+                    if np.isfinite(delta_g_ref_minus_src_prefix_final)
                     else float("nan")
                 ),
                 "c_star": c_star,
@@ -1392,6 +1414,9 @@ def build_monotonicity_table(
             source_duration_obs=record.source_duration_obs,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_closed_mask=record.sealed_mask,
+            source_boundary_confidence=record.source_boundary_cue,
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1401,6 +1426,9 @@ def build_monotonicity_table(
             source_duration_obs=record.unit_duration_exec,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_closed_mask=record.sealed_mask,
+            source_boundary_confidence=record.source_boundary_cue,
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1414,6 +1442,9 @@ def build_monotonicity_table(
                 else (None if bool(require_explicit_speech_mask) else derived.prompt_speech_mask)
             ),
             source_valid_mask=record.prompt_valid_mask,
+            source_closed_mask=record.prompt_closed_mask,
+            source_boundary_confidence=record.prompt_boundary_confidence,
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1421,14 +1452,21 @@ def build_monotonicity_table(
         )
         g_ref = float("nan") if _record_prompt_domain_invalid(record) else float(derived.global_rate) if derived.global_rate is not None else float("nan")
         g_src_prefix_mean = float("nan")
+        g_src_prefix_final = float("nan")
         if derived.source_rate_seq is not None and derived.speech_mask is not None:
             speech_valid = derived.speech_mask > 0.5
             if bool(np.any(speech_valid)):
                 g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
+                speech_idx = np.flatnonzero(speech_valid)
+                if speech_idx.size > 0:
+                    g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
         g_src_utt = compute_source_global_rate_for_analysis(
             source_duration_obs=record.source_duration_obs,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
+            source_closed_mask=record.sealed_mask,
+            source_boundary_confidence=record.source_boundary_cue,
+            min_boundary_confidence=min_boundary_confidence,
             g_variant=g_variant,
             g_trim_ratio=g_trim_ratio,
             drop_edge_runs=drop_edge_runs,
@@ -1443,6 +1481,7 @@ def build_monotonicity_table(
             "g_ref": g_ref,
             "g_src_utt": g_src_utt,
             "g_src_prefix_mean": g_src_prefix_mean,
+            "g_src_prefix_final": g_src_prefix_final,
             "g_domain_valid": _as_float(
                 meta.get("g_domain_valid", 1.0 if np.isfinite(g_ref) else float("nan"))
             ),
@@ -1501,6 +1540,11 @@ def build_monotonicity_table(
                 if np.isfinite(payload["g_ref"]) and np.isfinite(payload["g_src_prefix_mean"])
                 else float("nan")
             )
+            delta_g_prefix_final = (
+                float(payload["g_ref"] - payload["g_src_prefix_final"])
+                if np.isfinite(payload["g_ref"]) and np.isfinite(payload["g_src_prefix_final"])
+                else float("nan")
+            )
             rows.append(
                 {
                     "src_id": src_id,
@@ -1518,12 +1562,17 @@ def build_monotonicity_table(
                     "g_ref": payload["g_ref"],
                     "g_src_utt": payload["g_src_utt"],
                     "g_src_prefix_mean": payload["g_src_prefix_mean"],
+                    "g_src_prefix_final": payload["g_src_prefix_final"],
                     "g_domain_valid": payload["g_domain_valid"],
                     "delta_g": delta_g,
                     "delta_g_ref_minus_src_utt": delta_g,
                     "delta_g_ref_minus_src_prefix": delta_g_prefix,
+                    "delta_g_ref_minus_src_prefix_final": delta_g_prefix_final,
                     "delta_g_ref_minus_src_utt_neg": (-delta_g if np.isfinite(delta_g) else float("nan")),
                     "delta_g_ref_minus_src_prefix_neg": (-delta_g_prefix if np.isfinite(delta_g_prefix) else float("nan")),
+                    "delta_g_ref_minus_src_prefix_final_neg": (
+                        -delta_g_prefix_final if np.isfinite(delta_g_prefix_final) else float("nan")
+                    ),
                     "eval_mode": eval_mode,
                     "triplet_id": f"{src_id}|{eval_mode}|{ref_condition}|{pair_id}",
                     "ref_condition": ref_condition,

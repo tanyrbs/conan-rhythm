@@ -1359,6 +1359,18 @@ class MixedEffectsDurationModule(nn.Module):
         prefix_mean = (prefix_sum / prefix_den).detach()
         return (raw_source_residual - prefix_mean) * speech_commit_mask.float()
 
+    @staticmethod
+    def _resolve_source_boundary_confidence(
+        source_batch: SourceUnitBatch,
+    ) -> torch.Tensor | None:
+        boundary_confidence = getattr(source_batch, "boundary_confidence", None)
+        if isinstance(boundary_confidence, torch.Tensor):
+            return boundary_confidence.float()
+        source_boundary_cue = getattr(source_batch, "source_boundary_cue", None)
+        if isinstance(source_boundary_cue, torch.Tensor):
+            return source_boundary_cue.float()
+        return None
+
     def _compute_source_global_rate(
         self,
         *,
@@ -1384,6 +1396,7 @@ class MixedEffectsDurationModule(nn.Module):
         unit_prior = getattr(source_batch, "unit_log_prior", None)
         if self.g_variant == "unit_norm" and not isinstance(unit_prior, torch.Tensor):
             return None
+        boundary_confidence = self._resolve_source_boundary_confidence(source_batch)
         support_mask = build_global_rate_support_mask(
             speech_mask=speech_mask,
             valid_mask=valid_mask,
@@ -1393,11 +1406,7 @@ class MixedEffectsDurationModule(nn.Module):
                 if isinstance(getattr(source_batch, "sealed_mask", None), torch.Tensor)
                 else None
             ),
-            boundary_confidence=(
-                source_batch.source_boundary_cue.float()
-                if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
-                else None
-            ),
+            boundary_confidence=boundary_confidence,
             min_boundary_confidence=self.min_boundary_confidence_for_g,
         )
         try:
@@ -1475,6 +1484,7 @@ class MixedEffectsDurationModule(nn.Module):
                 * speech_commit_mask.float()
                 * valid_mask
             )
+        boundary_confidence = self._resolve_source_boundary_confidence(source_batch)
         source_rate_seq, source_rate_final = build_causal_source_prefix_rate_seq(
             observed_log=observed_log,
             speech_mask=speech_commit_mask.float() * valid_mask,
@@ -1493,8 +1503,8 @@ class MixedEffectsDurationModule(nn.Module):
                 else None
             ),
             boundary_confidence=(
-                source_batch.source_boundary_cue.float() * valid_mask
-                if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+                boundary_confidence * valid_mask
+                if isinstance(boundary_confidence, torch.Tensor)
                 else None
             ),
             min_boundary_confidence=self.min_boundary_confidence_for_g,
