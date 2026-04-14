@@ -495,6 +495,11 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["g_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_valid_support"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_domain_valid"], torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_no_speech"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_low_speech_ratio"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_ref_len"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_support"], torch.zeros((1, 1), dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_clean"], torch.zeros((1, 1), dtype=torch.float32))
     assert torch.allclose(debug["g_edge_runs_dropped"], torch.tensor([[0.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_min_speech_ratio"], torch.tensor([[0.6]], dtype=torch.float32))
@@ -699,6 +704,7 @@ def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
     debug = ret["rhythm_v3_debug"]
     assert torch.allclose(debug["g_ref_len_valid"], torch.tensor([[0.0]], dtype=torch.float32))
     assert torch.allclose(debug["g_domain_valid"], torch.tensor([[0.0]], dtype=torch.float32))
+    assert torch.allclose(debug["prompt_g_invalid_ref_len"], torch.tensor([[1.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_prompt_domain_valid"], torch.tensor([[0.0]], dtype=torch.float32))
     assert ret["rhythm_domain_invalid_any"] == 1.0
     assert ret["rhythm_render_skipped_invalid_prompt"] == 1.0

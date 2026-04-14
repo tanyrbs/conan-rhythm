@@ -150,6 +150,38 @@ def _extract_attr_or_key(obj: Any, name: str, batch_index: int) -> Any:
     return _slice_batch_value(value, batch_index)
 
 
+def _extract_prompt_domain_valid_scalar(ref_memory: Any, batch_index: int) -> float | None:
+    value = _extract_attr_or_key(ref_memory, "prompt_g_domain_valid", batch_index)
+    if value is None:
+        return None
+    arr = np.asarray(_to_numpy(value), dtype=np.float32).reshape(-1)
+    if arr.size <= 0:
+        return None
+    return float(arr[0])
+
+
+def _resolve_debug_global_rate(
+    *,
+    ref_memory: Any,
+    execution: Any,
+    batch_index: int,
+) -> float | None:
+    prompt_domain_valid = _extract_prompt_domain_valid_scalar(ref_memory, batch_index)
+    if prompt_domain_valid is not None and np.isfinite(prompt_domain_valid) and prompt_domain_valid <= 0.5:
+        return float("nan")
+    for value in (
+        _extract_attr_or_key(execution, "g_ref", batch_index),
+        _extract_attr_or_key(ref_memory, "global_rate", batch_index),
+    ):
+        if value is None:
+            continue
+        arr = np.asarray(_to_numpy(value)).reshape(-1)
+        if arr.size <= 0:
+            continue
+        return float(arr[0])
+    return None
+
+
 def _ensure_1d_mask(mask: Optional[np.ndarray], reference: Optional[np.ndarray]) -> Optional[np.ndarray]:
     if reference is None:
         return _as_optional_vector(mask)
@@ -304,7 +336,11 @@ class RhythmV3DebugRecord:
     global_bias_scalar: Optional[float] = None
     coarse_logstretch: Optional[np.ndarray] = None
     coarse_correction: Optional[np.ndarray] = None
+    coarse_correction_pred: Optional[np.ndarray] = None
     local_residual: Optional[np.ndarray] = None
+    local_residual_pred: Optional[np.ndarray] = None
+    speech_pred: Optional[np.ndarray] = None
+    silence_pred: Optional[np.ndarray] = None
     unit_logstretch: Optional[np.ndarray] = None
     unit_logstretch_raw: Optional[np.ndarray] = None
     unit_duration_exec: Optional[np.ndarray] = None
@@ -317,6 +353,9 @@ class RhythmV3DebugRecord:
     projector_budget_hit_mask: Optional[np.ndarray] = None
     projector_boundary_hit: Optional[np.ndarray] = None
     projector_boundary_decay_applied: Optional[np.ndarray] = None
+    coarse_scalar_raw: Optional[np.ndarray] = None
+    global_term_before_local: Optional[np.ndarray] = None
+    residual_gate_mean: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -507,9 +546,19 @@ def build_debug_record(
             ("rhythm_debug_prompt_speech_ratio", "prompt_speech_ratio"),
             ("rhythm_debug_g_drop_edge_runs", "g_drop_edge_runs"),
             ("rhythm_debug_g_strict_speech_only", "g_strict_speech_only"),
+            ("rhythm_debug_prompt_g_speech_ratio_weighted", "prompt_g_speech_ratio_weighted"),
+            ("rhythm_debug_prompt_g_speech_ratio_count", "prompt_g_speech_ratio_count"),
+            ("rhythm_debug_prompt_g_invalid_no_speech", "prompt_g_invalid_no_speech"),
+            ("rhythm_debug_prompt_g_invalid_low_speech_ratio", "prompt_g_invalid_low_speech_ratio"),
+            ("rhythm_debug_prompt_g_invalid_ref_len", "prompt_g_invalid_ref_len"),
+            ("rhythm_debug_prompt_g_invalid_support", "prompt_g_invalid_support"),
+            ("rhythm_debug_prompt_g_invalid_clean", "prompt_g_invalid_clean"),
+            ("rhythm_debug_prompt_g_invalid_missing_closed", "prompt_g_invalid_missing_closed"),
+            ("rhythm_debug_prompt_g_invalid_missing_boundary", "prompt_g_invalid_missing_boundary"),
             ("rhythm_debug_prompt_global_weight_present", "prompt_global_weight_present"),
             ("rhythm_debug_prompt_unit_log_prior_present", "prompt_unit_log_prior_present"),
             ("rhythm_debug_prompt_unit_prior_vocab_size", "prompt_unit_prior_vocab_size"),
+            ("rhythm_debug_detach_global_term_in_local_head", "detach_global_term_in_local_head"),
         ):
             value = model_output.get(key)
             scalar = _as_object_scalar(_to_numpy(value) if value is not None else None)
@@ -643,21 +692,10 @@ def build_debug_record(
         unit_alignment_posterior_values_debug=_as_optional_vector(
             _extract_mapping_value(sample, "unit_alignment_posterior_values_debug", batch_index)
         ),
-        global_rate=(
-            None
-            if (
-                _extract_attr_or_key(ref_memory, "global_rate", batch_index) is None
-                and _extract_attr_or_key(execution, "g_ref", batch_index) is None
-            )
-            else float(
-                np.asarray(
-                    _to_numpy(
-                        _extract_attr_or_key(ref_memory, "global_rate", batch_index)
-                        if _extract_attr_or_key(ref_memory, "global_rate", batch_index) is not None
-                        else _extract_attr_or_key(execution, "g_ref", batch_index)
-                    )
-                ).reshape(-1)[0]
-            )
+        global_rate=_resolve_debug_global_rate(
+            ref_memory=ref_memory,
+            execution=execution,
+            batch_index=batch_index,
         ),
         source_rate_seq=_as_optional_vector(
             _extract_attr_or_key(execution, "source_rate_seq", batch_index)
@@ -672,7 +710,11 @@ def build_debug_record(
         ),
         coarse_logstretch=_as_optional_vector(_extract_attr_or_key(execution, "coarse_logstretch", batch_index)),
         coarse_correction=_as_optional_vector(_extract_attr_or_key(execution, "coarse_correction", batch_index)),
+        coarse_correction_pred=_as_optional_vector(_extract_attr_or_key(execution, "coarse_correction_pred", batch_index)),
         local_residual=_as_optional_vector(_extract_attr_or_key(execution, "local_residual", batch_index)),
+        local_residual_pred=_as_optional_vector(_extract_attr_or_key(execution, "local_residual_pred", batch_index)),
+        speech_pred=_as_optional_vector(_extract_attr_or_key(execution, "speech_pred", batch_index)),
+        silence_pred=_as_optional_vector(_extract_attr_or_key(execution, "silence_pred", batch_index)),
         unit_logstretch=_as_optional_vector(_extract_attr_or_key(execution, "unit_logstretch", batch_index)),
         unit_logstretch_raw=_as_optional_vector(_extract_attr_or_key(execution, "unit_logstretch_raw", batch_index)),
         unit_duration_exec=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_exec", batch_index)),
@@ -709,6 +751,13 @@ def build_debug_record(
         projector_boundary_decay_applied=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_boundary_decay_applied", batch_index)
         ),
+        coarse_scalar_raw=_as_optional_vector(_extract_attr_or_key(execution, "coarse_scalar_raw", batch_index)),
+        global_term_before_local=_as_optional_vector(
+            _extract_attr_or_key(execution, "global_term_before_local", batch_index)
+            if _extract_attr_or_key(execution, "global_term_before_local", batch_index) is not None
+            else _extract_attr_or_key(execution, "unit_global_term_before_local", batch_index)
+        ),
+        residual_gate_mean=_as_optional_vector(_extract_attr_or_key(execution, "residual_gate_mean", batch_index)),
     )
 
 
@@ -771,6 +820,13 @@ def derive_record(
         prompt_speech_mask = np.clip(prompt_speech_mask, 0.0, 1.0) * np.clip(prompt_valid_mask, 0.0, 1.0)
 
     global_rate = record.global_rate
+    meta = dict(record.metadata or {})
+    prompt_domain_valid = _as_float(
+        meta.get("g_domain_valid", meta.get("g_valid", float("nan"))),
+        default=float("nan"),
+    )
+    if np.isfinite(prompt_domain_valid) and prompt_domain_valid <= 0.5:
+        global_rate = float("nan")
     if global_rate is None and prompt_logdur is not None and prompt_speech_mask is not None:
         valid = prompt_speech_mask > 0.5
         if np.any(valid):
@@ -818,7 +874,9 @@ def derive_record(
 
     prediction_logstretch = record.unit_logstretch
     prediction_bias = record.global_bias_scalar
-    prediction_local = record.local_residual
+    prediction_local = record.local_residual_pred
+    if prediction_local is None:
+        prediction_local = record.local_residual
     return RhythmV3DerivedRecord(
         speech_mask=speech_mask.astype(np.float32),
         silence_mask=silence_mask.astype(np.float32),
@@ -856,7 +914,14 @@ def record_summary(
         _resolve_gate0_drop_reason,
         weighted_median,
     )
-    from tasks.Conan.rhythm.duration_v3.metrics import cumulative_drift, silence_leakage
+    from tasks.Conan.rhythm.duration_v3.metrics import (
+        cumulative_drift,
+        local_silence_delta_share,
+        residual_bias_share,
+        residual_target_stats,
+        silence_leakage,
+        speech_weighted_mae,
+    )
 
     derived = derive_record(record, local_rate_decay=local_rate_decay, silence_tau=silence_tau)
     meta = dict(record.metadata or {})
@@ -921,6 +986,11 @@ def record_summary(
     if derived.source_rate_seq is not None and bool(np.any(speech_valid)):
         g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
     delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
+    delta_g_ref_minus_src_prefix = (
+        float(g_ref - g_src_prefix_mean)
+        if np.isfinite(g_ref) and np.isfinite(g_src_prefix_mean)
+        else float("nan")
+    )
     c_star = np.nan if derived.oracle_bias is None else float(derived.oracle_bias)
     zbar_sp_star = float("nan")
     if derived.target_logstretch is not None and bool(np.any(speech_valid)):
@@ -955,11 +1025,62 @@ def record_summary(
         coarse_bias_abs_mean = float(np.mean(np.abs(coarse_arr[speech_valid])))
     elif record.global_bias_scalar is not None:
         coarse_bias_abs_mean = float(abs(record.global_bias_scalar))
+    prediction_local = (
+        np.asarray(record.local_residual_pred, dtype=np.float32).reshape(-1)
+        if record.local_residual_pred is not None
+        else (
+            np.asarray(record.local_residual, dtype=np.float32).reshape(-1)
+            if record.local_residual is not None
+            else None
+        )
+    )
     local_residual_abs_mean = (
-        float(np.mean(np.abs(record.local_residual.reshape(-1)[speech_valid])))
-        if record.local_residual is not None and bool(np.any(speech_valid))
+        float(np.mean(np.abs(prediction_local[speech_valid])))
+        if prediction_local is not None and bool(np.any(speech_valid))
         else np.nan
     )
+    coarse_scalar_raw = _as_float(
+        record.coarse_scalar_raw,
+        default=(np.nan if derived.prediction_bias is None else float(derived.prediction_bias)),
+    )
+    residual_gate_mean = _as_float(record.residual_gate_mean, default=np.nan)
+    global_term_before_local = _as_optional_vector(record.global_term_before_local, dtype=np.float32)
+    if global_term_before_local is None and derived.analytic_shift is not None:
+        global_term_before_local = derived.analytic_shift.astype(np.float32, copy=True)
+        if derived.prediction_bias is not None:
+            global_term_before_local = global_term_before_local + float(derived.prediction_bias)
+    residual_stats = {
+        "spearman": float("nan"),
+        "robust_slope": float("nan"),
+        "r2_like": float("nan"),
+        "count": 0.0,
+    }
+    if prediction_local is not None and derived.oracle_local is not None:
+        residual_stats = residual_target_stats(
+            prediction_local,
+            derived.oracle_local,
+            derived.speech_mask,
+        )
+    residual_bias_ratio = float("nan")
+    if prediction_local is not None and np.isfinite(coarse_scalar_raw):
+        residual_bias_ratio = float(
+            residual_bias_share(prediction_local, derived.speech_mask, [coarse_scalar_raw]).item()
+        )
+    local_delta_share = float("nan")
+    if prediction_local is not None:
+        if global_term_before_local is not None and derived.prediction_logstretch is not None:
+            local_delta_share = float(
+                local_silence_delta_share(
+                    derived.prediction_logstretch,
+                    global_term_before_local,
+                    derived.speech_mask,
+                    derived.silence_mask,
+                ).item()
+            )
+        else:
+            local_delta_share = float(
+                silence_leakage(prediction_local, derived.speech_mask, derived.silence_mask).item()
+            )
     correction_delta = None
     if derived.prediction_logstretch is not None and derived.analytic_shift is not None:
         correction_delta = derived.prediction_logstretch - derived.analytic_shift
@@ -1068,6 +1189,14 @@ def record_summary(
         "g_src_compute_status": g_src_compute_status,
         "g_src_prefix_mean": g_src_prefix_mean,
         "delta_g": delta_g,
+        "delta_g_ref_minus_src_utt": delta_g,
+        "delta_g_ref_minus_src_prefix": delta_g_ref_minus_src_prefix,
+        "delta_g_ref_minus_src_utt_neg": (-delta_g if np.isfinite(delta_g) else float("nan")),
+        "delta_g_ref_minus_src_prefix_neg": (
+            -delta_g_ref_minus_src_prefix
+            if np.isfinite(delta_g_ref_minus_src_prefix)
+            else float("nan")
+        ),
         "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
         "gate0_drop_reason": gate0_drop_reason,
         "g_support_count": _as_float(meta.get("g_support_count"), default=prompt_domain_stats["g_support_count"]),
@@ -1083,6 +1212,30 @@ def record_summary(
         "g_trim_ratio": _as_float(meta.get("g_trim_ratio"), default=np.nan),
         "g_min_speech_ratio": prompt_domain_stats["g_min_speech_ratio"],
         "prompt_speech_ratio": prompt_domain_stats["prompt_speech_ratio"],
+        "prompt_g_speech_ratio_weighted": _as_float(
+            meta.get("prompt_g_speech_ratio_weighted"),
+            default=prompt_domain_stats["prompt_speech_ratio"],
+        ),
+        "prompt_g_speech_ratio_count": _as_float(
+            meta.get("prompt_g_speech_ratio_count"),
+            default=np.nan,
+        ),
+        "prompt_g_invalid_no_speech": _as_float(meta.get("prompt_g_invalid_no_speech"), default=np.nan),
+        "prompt_g_invalid_low_speech_ratio": _as_float(
+            meta.get("prompt_g_invalid_low_speech_ratio"),
+            default=np.nan,
+        ),
+        "prompt_g_invalid_ref_len": _as_float(meta.get("prompt_g_invalid_ref_len"), default=np.nan),
+        "prompt_g_invalid_support": _as_float(meta.get("prompt_g_invalid_support"), default=np.nan),
+        "prompt_g_invalid_clean": _as_float(meta.get("prompt_g_invalid_clean"), default=np.nan),
+        "prompt_g_invalid_missing_closed": _as_float(
+            meta.get("prompt_g_invalid_missing_closed"),
+            default=np.nan,
+        ),
+        "prompt_g_invalid_missing_boundary": _as_float(
+            meta.get("prompt_g_invalid_missing_boundary"),
+            default=np.nan,
+        ),
         "prompt_speech_mask_explicit": 1.0 if prompt_speech_explicit is not None else 0.0,
         "prompt_global_weight_present": _as_float(meta.get("prompt_global_weight_present"), default=np.nan),
         "prompt_unit_log_prior_present": _as_float(meta.get("prompt_unit_log_prior_present"), default=np.nan),
@@ -1112,7 +1265,23 @@ def record_summary(
         "lexical_mismatch": lexical_mismatch,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,
+        "coarse_scalar_raw": coarse_scalar_raw,
+        "coarse_target_abs_err": (
+            float(abs(float(derived.prediction_bias) - float(c_star)))
+            if derived.prediction_bias is not None and np.isfinite(c_star)
+            else np.nan
+        ),
         "local_residual_abs_mean": local_residual_abs_mean,
+        "residual_gate_mean": residual_gate_mean,
+        "detach_global_term_in_local_head": _as_float(
+            meta.get("detach_global_term_in_local_head"),
+            default=np.nan,
+        ),
+        "residual_target_corr": residual_stats["spearman"],
+        "residual_target_slope": residual_stats["robust_slope"],
+        "residual_target_count": residual_stats["count"],
+        "residual_bias_share": residual_bias_ratio,
+        "local_silence_delta_share": local_delta_share,
         "silence_leakage": leakage,
         "prefix_discrepancy": float(meta.get("prefix_discrepancy")) if meta.get("prefix_discrepancy") is not None else np.nan,
         "budget_hit_pos_rate": budget_hit_pos_rate,
@@ -1184,9 +1353,18 @@ def record_summary(
     if derived.target_logstretch is not None and derived.prediction_logstretch is not None:
         diff = derived.prediction_logstretch - derived.target_logstretch
         summary["speech_mae"] = float(np.mean(np.abs(diff[speech_valid]))) if np.any(speech_valid) else np.nan
+        summary["speech_weighted_mae"] = float(
+            speech_weighted_mae(
+                derived.prediction_logstretch,
+                derived.target_logstretch,
+                derived.speech_mask,
+                target_weight,
+            ).item()
+        )
         summary["silence_mae"] = float(np.mean(np.abs(diff[silence_valid]))) if np.any(silence_valid) else np.nan
     else:
         summary["speech_mae"] = np.nan
+        summary["speech_weighted_mae"] = np.nan
         summary["silence_mae"] = np.nan
     return summary
 

@@ -25,18 +25,23 @@ from utils.plot.rhythm_v3_viz import (
     build_ref_crop_table,
     save_review_figure_bundle,
     save_validation_gate_bundle,
+    summarize_falsification_ladder,
 )
 
 
 _GATE1_MONOTONICITY_RATE_MIN = 0.95
 _REQUIRED_NEGATIVE_CONTROLS = ("source_only", "random_ref", "shuffled_ref")
-_GATE0_EXPLAINABILITY_SLOPE_MIN = 0.0
+_GATE0_SIGNAL_SLOPE_MIN = 0.0
 _GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
 _GATE1_SAME_TEXT_GAP_MAX = 0.10
+_GATE1_TRANSFER_SLOPE_MIN = 0.10
+_GATE1_TIE_RATE_MAX = 0.05
+_GATE1_INVALID_G_RATE_MAX = 0.0
+_GATE1_ANTI_MONO_RATE_MAX = 0.10
 _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN = 0.02
 _ALIGNMENT_MEAN_LOCAL_CONF_MIN = 0.55
 _ALIGNMENT_MEAN_COARSE_CONF_MIN = 0.60
-_GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
+_GATE2_RUNTIME_LIMITS = {
     "silence_leakage": 0.05,
     "prefix_discrepancy": 0.05,
     "budget_hit_rate": 0.05,
@@ -44,6 +49,15 @@ _GATE2_RUNTIME_DEGRADATION_TOLERANCES = {
 }
 _GATE2_MONOTONICITY_DROP_TOL = 0.01
 _GATE2_TRANSFER_SLOPE_DROP_TOL = 0.05
+_GATE2_SPEECH_GAIN_MIN = 0.0
+_GATE3_RUNTIME_DEGRADATION_TOLERANCES = dict(_GATE2_RUNTIME_LIMITS)
+_GATE3_MONOTONICITY_DROP_TOL = 0.01
+_GATE3_TRANSFER_SLOPE_DROP_TOL = 0.05
+_GATE3_SPEECH_GAIN_MIN = 0.0
+_GATE3_RESIDUAL_CORR_MIN = 0.10
+_GATE3_COARSE_CORR_DROP_TOL = 0.05
+_GATE3_RESIDUAL_BIAS_SHARE_MAX = 0.25
+_GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX = 0.02
 
 
 def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
@@ -60,6 +74,63 @@ def _max_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
     mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
     values = pd.to_numeric(frame.loc[mode_mask, column], errors="coerce").to_numpy(dtype=np.float32)
     return float(np.nanmax(values)) if values.size > 0 and np.isfinite(values).any() else float("nan")
+
+
+def _corr_for_eval_mode(frame, *, x_col: str, y_col: str, eval_mode: str) -> float:
+    if any(column not in frame.columns for column in (x_col, y_col, "eval_mode")):
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    subset = frame.loc[mode_mask, [x_col, y_col]].copy()
+    if subset.empty:
+        return float("nan")
+    subset[x_col] = pd.to_numeric(subset[x_col], errors="coerce")
+    subset[y_col] = pd.to_numeric(subset[y_col], errors="coerce")
+    subset = subset.dropna()
+    if int(subset.shape[0]) <= 1:
+        return float("nan")
+    return float(subset[x_col].corr(subset[y_col], method="spearman"))
+
+
+def _resolve_monotonicity_column(frame) -> str:
+    if hasattr(frame, "columns") and "tempo_monotonicity_rate" in frame.columns:
+        return "tempo_monotonicity_rate"
+    return "monotonicity_rate"
+
+
+def _resolve_speech_metric_column(frame) -> str:
+    if hasattr(frame, "columns") and "speech_weighted_mae" in frame.columns:
+        return "speech_weighted_mae"
+    return "speech_mae"
+
+
+def _resolve_gate0_signal_column(frame) -> str:
+    if hasattr(frame, "columns") and "signal_explainability_slope" in frame.columns:
+        return "signal_explainability_slope"
+    return "explainability_slope"
+
+
+def _resolve_gate0_decomp_column(frame) -> str:
+    if hasattr(frame, "columns") and "coarse_residual_slope" in frame.columns:
+        return "coarse_residual_slope"
+    return "explainability_slope"
+
+
+def _invalid_g_rate_for_eval_mode(frame, *, eval_mode: str) -> float:
+    if "invalid_g_rate" in getattr(frame, "columns", []):
+        value = _mean_for_eval_mode(frame, column="invalid_g_rate", eval_mode=eval_mode)
+        if np.isfinite(value):
+            return value
+    domain_column = "g_domain_valid" if "g_domain_valid" in getattr(frame, "columns", []) else "g_valid"
+    if domain_column not in getattr(frame, "columns", []) or "eval_mode" not in getattr(frame, "columns", []):
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    values = pd.to_numeric(frame.loc[mode_mask, domain_column], errors="coerce").to_numpy(dtype=np.float32)
+    if values.size <= 0 or not np.isfinite(values).any():
+        return float("nan")
+    finite = values[np.isfinite(values)]
+    if finite.size <= 0:
+        return float("nan")
+    return float(np.mean(finite < 0.5))
 
 
 def _collect_missing_metadata_issues(frame) -> list[str]:
@@ -186,12 +257,13 @@ def collect_gate_issues(frame) -> list[str]:
                 quality_issues.append(
                     f"analytic_tempo_monotonicity_rate={analytic_mono:.3f}<{_GATE1_MONOTONICITY_RATE_MIN:.3f}"
                 )
-            analytic_slope = _mean_for_eval_mode(frame, column="explainability_slope", eval_mode="analytic")
+            signal_column = _resolve_gate0_signal_column(frame)
+            analytic_slope = _mean_for_eval_mode(frame, column=signal_column, eval_mode="analytic")
             if not np.isfinite(analytic_slope):
-                quality_issues.append("analytic_explainability_slope=missing")
-            elif analytic_slope <= _GATE0_EXPLAINABILITY_SLOPE_MIN:
+                quality_issues.append("analytic_signal_explainability_slope=missing")
+            elif analytic_slope <= _GATE0_SIGNAL_SLOPE_MIN:
                 quality_issues.append(
-                    f"analytic_explainability_slope={analytic_slope:.3f}<={_GATE0_EXPLAINABILITY_SLOPE_MIN:.3f}"
+                    f"analytic_signal_explainability_slope={analytic_slope:.3f}<={_GATE0_SIGNAL_SLOPE_MIN:.3f}"
                 )
             analytic_neg_gap = _mean_for_eval_mode(frame, column="negative_control_gap", eval_mode="analytic")
             if not np.isfinite(analytic_neg_gap):
@@ -215,8 +287,67 @@ def collect_gate_issues(frame) -> list[str]:
                 quality_issues.append(
                     f"analytic_alignment_local_margin_p10={analytic_margin:.3f}<{_GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN:.3f}"
                 )
+            analytic_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="analytic")
+            if not np.isfinite(analytic_transfer):
+                quality_issues.append("analytic_tempo_transfer_slope=missing")
+            elif analytic_transfer < _GATE1_TRANSFER_SLOPE_MIN:
+                quality_issues.append(
+                    f"analytic_tempo_transfer_slope={analytic_transfer:.3f}<{_GATE1_TRANSFER_SLOPE_MIN:.3f}"
+                )
+            analytic_tie_rate = _mean_for_eval_mode(frame, column="tempo_tie_rate", eval_mode="analytic")
+            if not np.isfinite(analytic_tie_rate):
+                quality_issues.append("analytic_tempo_tie_rate=missing")
+            elif analytic_tie_rate > _GATE1_TIE_RATE_MAX:
+                quality_issues.append(
+                    f"analytic_tempo_tie_rate={analytic_tie_rate:.3f}>{_GATE1_TIE_RATE_MAX:.3f}"
+                )
+            analytic_anti_mono_rate = _mean_for_eval_mode(frame, column="anti_monotonicity_rate", eval_mode="analytic")
+            if np.isfinite(analytic_anti_mono_rate) and analytic_anti_mono_rate > _GATE1_ANTI_MONO_RATE_MAX:
+                quality_issues.append(
+                    f"analytic_anti_monotonicity_rate={analytic_anti_mono_rate:.3f}>{_GATE1_ANTI_MONO_RATE_MAX:.3f}"
+                )
+            analytic_invalid_g_rate = _invalid_g_rate_for_eval_mode(frame, eval_mode="analytic")
+            if not np.isfinite(analytic_invalid_g_rate):
+                quality_issues.append("analytic_invalid_g_rate=missing")
+            elif analytic_invalid_g_rate > _GATE1_INVALID_G_RATE_MAX:
+                quality_issues.append(
+                    f"analytic_invalid_g_rate={analytic_invalid_g_rate:.3f}>{_GATE1_INVALID_G_RATE_MAX:.3f}"
+                )
+        mono_column = _resolve_monotonicity_column(frame)
+        speech_metric_column = _resolve_speech_metric_column(frame)
+        if "coarse_only" in observed_modes:
+            for column, limit in _GATE2_RUNTIME_LIMITS.items():
+                if column not in frame.columns:
+                    continue
+                coarse_mean = _mean_for_eval_mode(frame, column=column, eval_mode="coarse_only")
+                if np.isfinite(coarse_mean) and coarse_mean > float(limit):
+                    quality_issues.append(
+                        f"coarse_only_{column}_limit={coarse_mean:.3f}>{float(limit):.3f}"
+                    )
+            coarse_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="coarse_only")
+            if "analytic" in observed_modes and np.isfinite(analytic_mono) and np.isfinite(coarse_mono):
+                if coarse_mono < (analytic_mono - _GATE2_MONOTONICITY_DROP_TOL):
+                    quality_issues.append(
+                        f"coarse_only_monotonicity_rate_regression={coarse_mono:.3f}<{analytic_mono:.3f}-{_GATE2_MONOTONICITY_DROP_TOL:.3f}"
+                    )
+            analytic_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="analytic")
+            coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
+            if np.isfinite(analytic_transfer) and np.isfinite(coarse_transfer):
+                if coarse_transfer < (analytic_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+                    quality_issues.append(
+                        f"coarse_only_tempo_transfer_slope_regression={coarse_transfer:.3f}<{analytic_transfer:.3f}-{_GATE2_TRANSFER_SLOPE_DROP_TOL:.3f}"
+                    )
+            if speech_metric_column in frame.columns:
+                analytic_speech = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="analytic")
+                coarse_speech = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="coarse_only")
+                if np.isfinite(analytic_speech) and np.isfinite(coarse_speech):
+                    gain = analytic_speech - coarse_speech
+                    if gain <= _GATE2_SPEECH_GAIN_MIN:
+                        quality_issues.append(
+                            f"coarse_only_{speech_metric_column}_gain={gain:.3f}<={_GATE2_SPEECH_GAIN_MIN:.3f}"
+                        )
         if {"coarse_only", "learned"}.issubset(observed_modes):
-            for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
+            for column, tolerance in _GATE3_RUNTIME_DEGRADATION_TOLERANCES.items():
                 if column not in frame.columns:
                     quality_issues.append(f"{column}=missing")
                     continue
@@ -229,22 +360,67 @@ def collect_gate_issues(frame) -> list[str]:
                     quality_issues.append(
                         f"learned_{column}_regression={learned_mean:.3f}>{coarse_mean:.3f}+{float(tolerance):.3f}"
                     )
-            coarse_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="coarse_only")
-            learned_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="learned")
+            coarse_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="coarse_only")
+            learned_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="learned")
             if not np.isfinite(coarse_mono) or not np.isfinite(learned_mono):
                 quality_issues.append("monotonicity_rate_mode_mean=missing")
-            elif learned_mono < (coarse_mono - _GATE2_MONOTONICITY_DROP_TOL):
+            elif learned_mono < (coarse_mono - _GATE3_MONOTONICITY_DROP_TOL):
                 quality_issues.append(
-                    f"learned_monotonicity_rate_regression={learned_mono:.3f}<{coarse_mono:.3f}-{_GATE2_MONOTONICITY_DROP_TOL:.3f}"
+                    f"learned_monotonicity_rate_regression={learned_mono:.3f}<{coarse_mono:.3f}-{_GATE3_MONOTONICITY_DROP_TOL:.3f}"
                 )
             coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
             learned_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="learned")
             if not np.isfinite(coarse_transfer) or not np.isfinite(learned_transfer):
                 quality_issues.append("tempo_transfer_slope_mode_mean=missing")
-            elif learned_transfer < (coarse_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+            elif learned_transfer < (coarse_transfer - _GATE3_TRANSFER_SLOPE_DROP_TOL):
                 quality_issues.append(
-                    f"learned_tempo_transfer_slope_regression={learned_transfer:.3f}<{coarse_transfer:.3f}-{_GATE2_TRANSFER_SLOPE_DROP_TOL:.3f}"
+                    f"learned_tempo_transfer_slope_regression={learned_transfer:.3f}<{coarse_transfer:.3f}-{_GATE3_TRANSFER_SLOPE_DROP_TOL:.3f}"
                 )
+            if speech_metric_column in frame.columns:
+                coarse_speech = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="coarse_only")
+                learned_speech = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="learned")
+                if np.isfinite(coarse_speech) and np.isfinite(learned_speech):
+                    gain = coarse_speech - learned_speech
+                    if gain <= _GATE3_SPEECH_GAIN_MIN:
+                        quality_issues.append(
+                            f"learned_{speech_metric_column}_gain={gain:.3f}<={_GATE3_SPEECH_GAIN_MIN:.3f}"
+                        )
+            learned_residual_corr = _mean_for_eval_mode(frame, column="residual_target_corr", eval_mode="learned")
+            if np.isfinite(learned_residual_corr) and learned_residual_corr < _GATE3_RESIDUAL_CORR_MIN:
+                quality_issues.append(
+                    f"learned_residual_target_corr={learned_residual_corr:.3f}<{_GATE3_RESIDUAL_CORR_MIN:.3f}"
+                )
+            learned_residual_bias_share = _mean_for_eval_mode(frame, column="residual_bias_share", eval_mode="learned")
+            if np.isfinite(learned_residual_bias_share) and learned_residual_bias_share > _GATE3_RESIDUAL_BIAS_SHARE_MAX:
+                quality_issues.append(
+                    f"learned_residual_bias_share={learned_residual_bias_share:.3f}>{_GATE3_RESIDUAL_BIAS_SHARE_MAX:.3f}"
+                )
+            learned_local_silence_delta_share = _mean_for_eval_mode(
+                frame,
+                column="local_silence_delta_share",
+                eval_mode="learned",
+            )
+            if np.isfinite(learned_local_silence_delta_share) and learned_local_silence_delta_share > _GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX:
+                quality_issues.append(
+                    f"learned_local_silence_delta_share={learned_local_silence_delta_share:.3f}>{_GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX:.3f}"
+                )
+            coarse_corr = _corr_for_eval_mode(
+                frame,
+                x_col="oracle_bias",
+                y_col="predicted_bias",
+                eval_mode="coarse_only",
+            )
+            learned_corr = _corr_for_eval_mode(
+                frame,
+                x_col="oracle_bias",
+                y_col="predicted_bias",
+                eval_mode="learned",
+            )
+            if np.isfinite(coarse_corr) and np.isfinite(learned_corr):
+                if learned_corr < (coarse_corr - _GATE3_COARSE_CORR_DROP_TOL):
+                    quality_issues.append(
+                        f"learned_coarse_target_corr_drop={learned_corr:.3f}<{coarse_corr:.3f}-{_GATE3_COARSE_CORR_DROP_TOL:.3f}"
+                    )
     if {"src_id", "eval_mode", "ref_bin"}.issubset(frame.columns):
         triplet_frame = frame.copy()
         if "ref_condition" in triplet_frame.columns:
@@ -289,24 +465,40 @@ def build_gate_status(frame) -> dict[str, object]:
             "gate0_pass": False,
             "gate1_pass": False,
             "gate2_pass": False,
+            "gate3_pass": False,
             "missing_controls": list(_REQUIRED_NEGATIVE_CONTROLS),
             "missing_eval_modes": ["analytic", "coarse_only", "learned"],
             "incomplete_triplets": 0,
             "continuous_alignment_coverage": float("nan"),
             "g_domain_valid_mean": float("nan"),
             "gate0_drop_rate": float("nan"),
+            "analytic_signal_explainability_slope": float("nan"),
             "analytic_explainability_slope": float("nan"),
+            "analytic_coarse_residual_slope": float("nan"),
             "analytic_negative_control_gap": float("nan"),
             "analytic_same_text_gap": float("nan"),
             "analytic_same_text_gap_max": float("nan"),
             "analytic_tempo_monotonicity_rate": float("nan"),
+            "analytic_tempo_transfer_slope": float("nan"),
+            "analytic_tempo_tie_rate": float("nan"),
+            "analytic_invalid_g_rate": float("nan"),
+            "analytic_anti_monotonicity_rate": float("nan"),
             "alignment_mean_local_confidence_speech": float("nan"),
             "alignment_mean_coarse_confidence_speech": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
             "coarse_only_runtime_metrics": {},
+            "coarse_only_runtime_limit_violations": [],
+            "coarse_only_control_regressions": [],
+            "coarse_only_speech_metric": float("nan"),
+            "coarse_only_coarse_target_corr": float("nan"),
             "learned_runtime_metrics": {},
             "learned_runtime_regressions": [],
             "learned_control_regressions": [],
+            "learned_speech_metric": float("nan"),
+            "learned_coarse_target_corr": float("nan"),
+            "learned_residual_target_corr": float("nan"),
+            "learned_residual_bias_share": float("nan"),
+            "learned_local_silence_delta_share": float("nan"),
             "warnings": ["summary_rows=empty"],
         }
     issues = collect_gate_issues(frame)
@@ -316,19 +508,29 @@ def build_gate_status(frame) -> dict[str, object]:
     continuous_alignment_coverage = float("nan")
     g_domain_valid_mean = float("nan")
     gate0_drop_rate = float("nan")
+    analytic_signal_explainability_slope = float("nan")
     analytic_explainability_slope = float("nan")
+    analytic_coarse_residual_slope = float("nan")
     analytic_negative_control_gap = float("nan")
     analytic_same_text_gap = float("nan")
     analytic_same_text_gap_max = float("nan")
     analytic_alignment_local_margin_p10 = float("nan")
     analytic_tempo_monotonicity_rate = float("nan")
+    analytic_tempo_transfer_slope = float("nan")
+    analytic_tempo_tie_rate = float("nan")
+    analytic_invalid_g_rate = float("nan")
+    analytic_anti_monotonicity_rate = float("nan")
     alignment_mean_local_confidence_speech = float("nan")
     alignment_mean_coarse_confidence_speech = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
     coarse_only_runtime_metrics: dict[str, float] = {}
+    coarse_only_runtime_limit_violations: list[str] = []
+    coarse_only_control_regressions: list[str] = []
     learned_runtime_metrics: dict[str, float] = {}
     learned_runtime_regressions: list[str] = []
     learned_control_regressions: list[str] = []
+    speech_metric_column = _resolve_speech_metric_column(frame)
+    mono_column = _resolve_monotonicity_column(frame)
     domain_column = "g_domain_valid" if "g_domain_valid" in frame.columns else "g_valid"
     if domain_column in frame.columns:
         g_domain_valid_mean = float(
@@ -377,9 +579,20 @@ def build_gate_status(frame) -> dict[str, object]:
         if str(mode).strip() and str(mode).strip().lower() != "nan"
     } if "eval_mode" in frame.columns else set()
     if "analytic" in observed_modes:
+        signal_column = _resolve_gate0_signal_column(frame)
+        analytic_signal_explainability_slope = _mean_for_eval_mode(
+            frame,
+            column=signal_column,
+            eval_mode="analytic",
+        )
         analytic_explainability_slope = _mean_for_eval_mode(
             frame,
             column="explainability_slope",
+            eval_mode="analytic",
+        )
+        analytic_coarse_residual_slope = _mean_for_eval_mode(
+            frame,
+            column=_resolve_gate0_decomp_column(frame),
             eval_mode="analytic",
         )
         analytic_negative_control_gap = _mean_for_eval_mode(
@@ -404,24 +617,79 @@ def build_gate_status(frame) -> dict[str, object]:
         )
         analytic_tempo_monotonicity_rate = _mean_for_eval_mode(
             frame,
-            column="tempo_monotonicity_rate",
+            column=mono_column,
             eval_mode="analytic",
         )
-    for column, tolerance in _GATE2_RUNTIME_DEGRADATION_TOLERANCES.items():
+        analytic_tempo_transfer_slope = _mean_for_eval_mode(
+            frame,
+            column="tempo_transfer_slope",
+            eval_mode="analytic",
+        )
+        analytic_tempo_tie_rate = _mean_for_eval_mode(
+            frame,
+            column="tempo_tie_rate",
+            eval_mode="analytic",
+        )
+        analytic_anti_monotonicity_rate = _mean_for_eval_mode(
+            frame,
+            column="anti_monotonicity_rate",
+            eval_mode="analytic",
+        )
+        analytic_invalid_g_rate = _invalid_g_rate_for_eval_mode(frame, eval_mode="analytic")
+    analytic_transfer = analytic_tempo_transfer_slope
+    analytic_speech_metric = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="analytic")
+    for column, limit in _GATE2_RUNTIME_LIMITS.items():
         coarse_only_runtime_metrics[column] = _mean_for_eval_mode(frame, column=column, eval_mode="coarse_only")
+        coarse_mean = coarse_only_runtime_metrics[column]
+        if np.isfinite(coarse_mean) and coarse_mean > float(limit):
+            coarse_only_runtime_limit_violations.append(column)
+    coarse_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="coarse_only")
+    coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
+    coarse_only_speech_metric = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="coarse_only")
+    if np.isfinite(analytic_tempo_monotonicity_rate) and np.isfinite(coarse_mono):
+        if coarse_mono < (analytic_tempo_monotonicity_rate - _GATE2_MONOTONICITY_DROP_TOL):
+            coarse_only_control_regressions.append("monotonicity_rate")
+    if np.isfinite(analytic_transfer) and np.isfinite(coarse_transfer):
+        if coarse_transfer < (analytic_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+            coarse_only_control_regressions.append("tempo_transfer_slope")
+    if np.isfinite(analytic_speech_metric) and np.isfinite(coarse_only_speech_metric):
+        if (analytic_speech_metric - coarse_only_speech_metric) <= _GATE2_SPEECH_GAIN_MIN:
+            coarse_only_control_regressions.append(speech_metric_column)
+    coarse_only_coarse_target_corr = _corr_for_eval_mode(
+        frame,
+        x_col="oracle_bias",
+        y_col="predicted_bias",
+        eval_mode="coarse_only",
+    )
+    for column, tolerance in _GATE3_RUNTIME_DEGRADATION_TOLERANCES.items():
         learned_runtime_metrics[column] = _mean_for_eval_mode(frame, column=column, eval_mode="learned")
         coarse_mean = coarse_only_runtime_metrics[column]
         learned_mean = learned_runtime_metrics[column]
         if np.isfinite(coarse_mean) and np.isfinite(learned_mean) and learned_mean > (coarse_mean + float(tolerance)):
             learned_runtime_regressions.append(column)
-    coarse_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="coarse_only")
-    learned_mono = _mean_for_eval_mode(frame, column="monotonicity_rate", eval_mode="learned")
-    if np.isfinite(coarse_mono) and np.isfinite(learned_mono) and learned_mono < (coarse_mono - _GATE2_MONOTONICITY_DROP_TOL):
+    learned_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="learned")
+    if np.isfinite(coarse_mono) and np.isfinite(learned_mono) and learned_mono < (coarse_mono - _GATE3_MONOTONICITY_DROP_TOL):
         learned_control_regressions.append("monotonicity_rate")
-    coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
     learned_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="learned")
-    if np.isfinite(coarse_transfer) and np.isfinite(learned_transfer) and learned_transfer < (coarse_transfer - _GATE2_TRANSFER_SLOPE_DROP_TOL):
+    if np.isfinite(coarse_transfer) and np.isfinite(learned_transfer) and learned_transfer < (coarse_transfer - _GATE3_TRANSFER_SLOPE_DROP_TOL):
         learned_control_regressions.append("tempo_transfer_slope")
+    learned_speech_metric = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="learned")
+    if np.isfinite(coarse_only_speech_metric) and np.isfinite(learned_speech_metric):
+        if (coarse_only_speech_metric - learned_speech_metric) <= _GATE3_SPEECH_GAIN_MIN:
+            learned_control_regressions.append(speech_metric_column)
+    learned_coarse_target_corr = _corr_for_eval_mode(
+        frame,
+        x_col="oracle_bias",
+        y_col="predicted_bias",
+        eval_mode="learned",
+    )
+    learned_residual_target_corr = _mean_for_eval_mode(frame, column="residual_target_corr", eval_mode="learned")
+    learned_residual_bias_share = _mean_for_eval_mode(frame, column="residual_bias_share", eval_mode="learned")
+    learned_local_silence_delta_share = _mean_for_eval_mode(
+        frame,
+        column="local_silence_delta_share",
+        eval_mode="learned",
+    )
     gate0_pass = (
         np.isfinite(g_domain_valid_mean)
         and g_domain_valid_mean >= 0.95
@@ -429,8 +697,8 @@ def build_gate_status(frame) -> dict[str, object]:
         and gate0_drop_rate <= 0.05
         and np.isfinite(continuous_alignment_coverage)
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
-        and np.isfinite(analytic_explainability_slope)
-        and analytic_explainability_slope > _GATE0_EXPLAINABILITY_SLOPE_MIN
+        and np.isfinite(analytic_signal_explainability_slope)
+        and analytic_signal_explainability_slope > _GATE0_SIGNAL_SLOPE_MIN
         and np.isfinite(alignment_mean_local_confidence_speech)
         and alignment_mean_local_confidence_speech >= _ALIGNMENT_MEAN_LOCAL_CONF_MIN
         and np.isfinite(alignment_mean_coarse_confidence_speech)
@@ -446,6 +714,18 @@ def build_gate_status(frame) -> dict[str, object]:
         and analytic_tempo_monotonicity_rate >= _GATE1_MONOTONICITY_RATE_MIN
         and np.isfinite(analytic_negative_control_gap)
         and analytic_negative_control_gap > _GATE1_NEGATIVE_CONTROL_GAP_MIN
+        and np.isfinite(analytic_tempo_transfer_slope)
+        and analytic_tempo_transfer_slope >= _GATE1_TRANSFER_SLOPE_MIN
+        and np.isfinite(analytic_invalid_g_rate)
+        and analytic_invalid_g_rate <= _GATE1_INVALID_G_RATE_MAX
+        and (
+            (not np.isfinite(analytic_tempo_tie_rate))
+            or analytic_tempo_tie_rate <= _GATE1_TIE_RATE_MAX
+        )
+        and (
+            (not np.isfinite(analytic_anti_monotonicity_rate))
+            or analytic_anti_monotonicity_rate <= _GATE1_ANTI_MONO_RATE_MAX
+        )
         and (
             (not np.isfinite(analytic_same_text_gap_max))
             or analytic_same_text_gap_max <= _GATE1_SAME_TEXT_GAP_MAX
@@ -453,36 +733,85 @@ def build_gate_status(frame) -> dict[str, object]:
     )
     gate1_pass = gate0_pass and gate1_criteria_pass
     gate2_criteria_pass = (
-        {"coarse_only", "learned"}.issubset(observed_modes)
+        "coarse_only" in observed_modes
         and np.isfinite(unmatched_speech_ratio_p95)
         and unmatched_speech_ratio_p95 <= 0.15
-        and not learned_runtime_regressions
-        and not learned_control_regressions
+        and not coarse_only_runtime_limit_violations
+        and not coarse_only_control_regressions
     )
     gate2_pass = gate1_pass and gate2_criteria_pass
+    gate3_local_metrics_ok = True
+    if "residual_target_corr" in frame.columns:
+        gate3_local_metrics_ok = (
+            gate3_local_metrics_ok
+            and np.isfinite(learned_residual_target_corr)
+            and learned_residual_target_corr >= _GATE3_RESIDUAL_CORR_MIN
+        )
+    if "residual_bias_share" in frame.columns:
+        gate3_local_metrics_ok = (
+            gate3_local_metrics_ok
+            and np.isfinite(learned_residual_bias_share)
+            and learned_residual_bias_share <= _GATE3_RESIDUAL_BIAS_SHARE_MAX
+        )
+    if "local_silence_delta_share" in frame.columns:
+        gate3_local_metrics_ok = (
+            gate3_local_metrics_ok
+            and np.isfinite(learned_local_silence_delta_share)
+            and learned_local_silence_delta_share <= _GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX
+        )
+    coarse_corr_ok = True
+    if np.isfinite(coarse_only_coarse_target_corr) and np.isfinite(learned_coarse_target_corr):
+        coarse_corr_ok = learned_coarse_target_corr >= (
+            coarse_only_coarse_target_corr - _GATE3_COARSE_CORR_DROP_TOL
+        )
+    gate3_criteria_pass = (
+        gate2_pass
+        and "learned" in observed_modes
+        and not learned_runtime_regressions
+        and not learned_control_regressions
+        and gate3_local_metrics_ok
+        and coarse_corr_ok
+    )
+    gate3_pass = gate3_criteria_pass
     return {
         "gate0_pass": bool(gate0_pass),
         "gate1_pass": bool(gate1_pass),
         "gate2_pass": bool(gate2_pass),
+        "gate3_pass": bool(gate3_pass),
         "missing_controls": missing_controls,
         "missing_eval_modes": missing_eval_modes,
         "incomplete_triplets": int(incomplete_triplets),
         "continuous_alignment_coverage": continuous_alignment_coverage,
         "g_domain_valid_mean": g_domain_valid_mean,
         "gate0_drop_rate": gate0_drop_rate,
+        "analytic_signal_explainability_slope": analytic_signal_explainability_slope,
         "analytic_explainability_slope": analytic_explainability_slope,
+        "analytic_coarse_residual_slope": analytic_coarse_residual_slope,
         "analytic_negative_control_gap": analytic_negative_control_gap,
         "analytic_same_text_gap": analytic_same_text_gap,
         "analytic_same_text_gap_max": analytic_same_text_gap_max,
         "analytic_alignment_local_margin_p10": analytic_alignment_local_margin_p10,
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
+        "analytic_tempo_transfer_slope": analytic_tempo_transfer_slope,
+        "analytic_tempo_tie_rate": analytic_tempo_tie_rate,
+        "analytic_invalid_g_rate": analytic_invalid_g_rate,
+        "analytic_anti_monotonicity_rate": analytic_anti_monotonicity_rate,
         "alignment_mean_local_confidence_speech": alignment_mean_local_confidence_speech,
         "alignment_mean_coarse_confidence_speech": alignment_mean_coarse_confidence_speech,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
         "coarse_only_runtime_metrics": coarse_only_runtime_metrics,
+        "coarse_only_runtime_limit_violations": coarse_only_runtime_limit_violations,
+        "coarse_only_control_regressions": coarse_only_control_regressions,
+        "coarse_only_speech_metric": coarse_only_speech_metric,
+        "coarse_only_coarse_target_corr": coarse_only_coarse_target_corr,
         "learned_runtime_metrics": learned_runtime_metrics,
         "learned_runtime_regressions": learned_runtime_regressions,
         "learned_control_regressions": learned_control_regressions,
+        "learned_speech_metric": learned_speech_metric,
+        "learned_coarse_target_corr": learned_coarse_target_corr,
+        "learned_residual_target_corr": learned_residual_target_corr,
+        "learned_residual_bias_share": learned_residual_bias_share,
+        "learned_local_silence_delta_share": learned_local_silence_delta_share,
         "warnings": issues,
     }
 
@@ -696,6 +1025,37 @@ def main() -> None:
             merge_keys = [key for key in ("src_id", "eval_mode") if key in summary_df.columns]
             if merge_keys == ["src_id", "eval_mode"]:
                 summary_df = summary_df.merge(mono_summary, on=merge_keys, how="left")
+        ladder_df = summarize_falsification_ladder(ref_crop_df, monotonicity_df, prefix_silence_df)
+        if not ladder_df.empty and "eval_mode" in summary_df.columns and "eval_mode" in ladder_df.columns:
+            ladder_cols = [
+                "eval_mode",
+                "signal_explainability_spearman",
+                "signal_explainability_slope",
+                "signal_explainability_r2_like",
+                "coarse_residual_spearman",
+                "coarse_residual_slope",
+                "coarse_residual_r2_like",
+                "explainability_spearman",
+                "explainability_slope",
+                "explainability_r2_like",
+                "monotonicity_rate",
+                "anti_monotonicity_rate",
+                "tempo_tie_rate",
+                "tempo_transfer_slope",
+                "tempo_transfer_spearman",
+                "invalid_g_rate",
+                "negative_control_gap",
+                "same_text_gap",
+            ]
+            available_ladder_cols = [column for column in ladder_cols if column in ladder_df.columns]
+            summary_df = summary_df.drop(
+                columns=[column for column in available_ladder_cols if column != "eval_mode" and column in summary_df.columns],
+                errors="ignore",
+            ).merge(
+                ladder_df[available_ladder_cols].drop_duplicates(subset=["eval_mode"]),
+                on=["eval_mode"],
+                how="left",
+            )
         issues = _warn_sparse_review_metadata(summary_df)
         summary_df.to_csv(output, index=False)
         gate_status = build_gate_status(summary_df)

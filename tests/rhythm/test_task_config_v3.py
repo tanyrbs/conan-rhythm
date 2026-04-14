@@ -462,6 +462,18 @@ def test_validate_rhythm_training_hparams_rejects_strict_gate_without_debug_expo
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_strict_gate_without_strict_invalid_g(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text('{"gate0_pass": true, "gate1_pass": true, "gate2_pass": false}', encoding="utf-8")
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    hparams["rhythm_v3_strict_eval_invalid_g"] = False
+    with pytest.raises(ValueError, match="rhythm_v3_strict_eval_invalid_g=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_strict_gate_when_gate_status_fails(tmp_path):
     gate_status = tmp_path / "gate_status.json"
     gate_status.write_text('{"gate0_pass": true, "gate1_pass": false, "gate2_pass": true}', encoding="utf-8")
@@ -493,6 +505,21 @@ def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_tr
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     hparams["rhythm_v3_require_gate2_for_official_train"] = True
     with pytest.raises(ValueError, match="requires gate2_pass=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_missing_gate3_when_prefix_finetune_requires_it(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text(
+        '{"gate0_pass": true, "gate1_pass": true, "gate2_pass": true, "gate3_pass": false}',
+        encoding="utf-8",
+    )
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    hparams["rhythm_v3_require_gate3_for_prefix_finetune"] = True
+    with pytest.raises(ValueError, match="requires gate3_pass=true"):
         validate_rhythm_training_hparams(hparams)
 
 

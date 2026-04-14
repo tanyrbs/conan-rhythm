@@ -22,6 +22,8 @@ from utils.plot.rhythm_v3_viz import (
     RhythmV3DebugRecord,
     attach_projection_debug,
     build_debug_records_from_batch,
+    build_gate3_local_table,
+    build_local_residual_review_table,
     build_monotonicity_table,
     build_prefix_silence_review_table,
     build_projection_debug_payload,
@@ -69,6 +71,7 @@ def _make_debug_records_cli_row(
         "g_support_ratio_vs_speech": 1.0,
         "g_support_ratio_vs_valid": 1.0,
         "g_valid": 1.0,
+        "g_domain_valid": 1.0,
         "g_trim_ratio": 0.2,
         "prompt_global_weight_present": 1.0,
         "prompt_unit_log_prior_present": 0.0,
@@ -84,6 +87,10 @@ def _make_debug_records_cli_row(
     }
     if eval_mode == "analytic":
         row["tempo_monotonicity_rate"] = 1.0
+        row["tempo_transfer_slope"] = 0.2
+        row["tempo_tie_rate"] = 0.0
+        row["anti_monotonicity_rate"] = 0.0
+        row["invalid_g_rate"] = 0.0
     if eval_mode in {"coarse_only", "learned"}:
         row["silence_leakage"] = 0.01
         row["prefix_discrepancy"] = 0.01
@@ -215,7 +222,12 @@ def test_build_debug_records_and_summary_from_runtime_objects():
         global_shift_analytic=torch.tensor([[0.12, 0.02, 0.0]], dtype=torch.float32),
         coarse_logstretch=torch.tensor([[0.17, 0.07, 0.0]], dtype=torch.float32),
         coarse_correction=torch.tensor([[0.05, 0.05, 0.05]], dtype=torch.float32),
+        coarse_correction_pred=torch.tensor([[0.05, 0.05, 0.05]], dtype=torch.float32),
         local_residual=torch.tensor([[-0.07, -0.12, 0.0]], dtype=torch.float32),
+        local_residual_pred=torch.tensor([[-0.07, -0.12, 0.0]], dtype=torch.float32),
+        coarse_scalar_raw=torch.tensor([[0.05]], dtype=torch.float32),
+        global_term_before_local=torch.tensor([[0.17, 0.07, 0.0]], dtype=torch.float32),
+        residual_gate_mean=torch.tensor([[0.4]], dtype=torch.float32),
         source_rate_seq=torch.tensor([[0.08, 0.18, 0.18]], dtype=torch.float32),
         prefix_unit_offset=torch.tensor([[0.0, 0.1, 0.1]], dtype=torch.float32),
         projector_rounding_residual=torch.tensor([[0.03]], dtype=torch.float32),
@@ -279,7 +291,12 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["tempo_delta"])
     assert np.isfinite(summary["analytic_gap_abs_mean"])
     assert np.isfinite(summary["coarse_bias_abs_mean"])
+    assert np.isfinite(summary["coarse_scalar_raw"])
     assert np.isfinite(summary["local_residual_abs_mean"])
+    assert np.isfinite(summary["residual_target_corr"])
+    assert np.isfinite(summary["residual_bias_share"])
+    assert np.isfinite(summary["local_silence_delta_share"])
+    assert np.isfinite(summary["speech_weighted_mae"])
     assert np.isfinite(summary["cumulative_drift"])
 
 
@@ -380,6 +397,7 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert "g_src_compute_status" in ref_crop_df.columns
     assert "gate0_row_dropped" in ref_crop_df.columns
     assert "g_src_prefix_mean" in ref_crop_df.columns
+    assert "delta_g_ref_minus_src_prefix" in ref_crop_df.columns
     assert "same_text_reference" in ref_crop_df.columns
     assert "same_speaker_reference" in ref_crop_df.columns
     assert np.isfinite(ref_crop_df["delta_g"]).any()
@@ -395,8 +413,76 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert ladder_df.shape[0] == 1
     assert ladder_df.iloc[0]["eval_mode"] == "analytic"
     assert np.isfinite(ladder_df.iloc[0]["monotonicity_rate"])
+    assert "signal_explainability_slope" in ladder_df.columns
+    assert "coarse_residual_slope" in ladder_df.columns
     assert "tempo_transfer_slope" in ladder_df.columns
+    assert "tempo_tie_rate" in ladder_df.columns
+    assert "invalid_g_rate" in ladder_df.columns
     assert "negative_control_gap" in ladder_df.columns
+
+
+def test_gate3_review_tables_follow_current_local_metrics_surface():
+    record = RhythmV3DebugRecord.from_mapping(
+        {
+            "item_name": "src_gate3_case",
+            "metadata": {
+                "src_id": "src_gate3",
+                "pair_id": "pair_gate3",
+                "sample_id": "sample_gate3",
+                "eval_mode": "learned",
+                "ref_bin": "mid",
+                "ref_condition": "real",
+            },
+            "source_content_units": np.asarray([5, 6, 7], dtype=np.int64),
+            "source_duration_obs": np.asarray([2.0, 3.0, 2.5], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "unit_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prompt_content_units": np.asarray([9, 9, 8], dtype=np.int64),
+            "prompt_duration_obs": np.asarray([3.0, 2.0, 1.0], dtype=np.float32),
+            "prompt_valid_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prompt_speech_mask": np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+            "unit_duration_tgt": np.asarray([2.4, 2.9, 2.1], dtype=np.float32),
+            "unit_confidence_tgt": np.asarray([1.0, 0.9, 0.8], dtype=np.float32),
+            "global_rate": 0.20,
+            "source_rate_seq": np.asarray([0.06, 0.09, 0.11], dtype=np.float32),
+            "global_shift_analytic": np.asarray([0.12, 0.08, 0.10], dtype=np.float32),
+            "global_bias_scalar": 0.04,
+            "coarse_correction": np.asarray([0.04, 0.04, 0.04], dtype=np.float32),
+            "local_residual": np.asarray([0.01, -0.03, 0.02], dtype=np.float32),
+            "coarse_scalar_raw": np.asarray([0.04], dtype=np.float32),
+            "global_term_before_local": np.asarray([0.16, 0.12, 0.14], dtype=np.float32),
+            "residual_gate_mean": np.asarray([0.5], dtype=np.float32),
+            "unit_logstretch": np.asarray([0.17, 0.09, 0.16], dtype=np.float32),
+            "unit_duration_exec": np.asarray([2.5, 2.8, 2.2], dtype=np.float32),
+            "unit_duration_raw": np.asarray([2.5, 2.9, 2.2], dtype=np.float32),
+            "commit_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prefix_unit_offset": np.asarray([0.0, 0.04, 0.05], dtype=np.float32),
+            "projector_budget_hit_pos": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+            "projector_budget_hit_neg": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        }
+    )
+
+    local_df = build_local_residual_review_table([record])
+    assert local_df.shape[0] == 1
+    local_row = local_df.iloc[0]
+    assert local_row["sample_id"] == "sample_gate3"
+    assert local_row["ref_bin"] == "mid"
+    assert np.isfinite(float(local_row["coarse_scalar_raw"]))
+    assert np.isfinite(float(local_row["residual_target_corr"]))
+    assert np.isfinite(float(local_row["residual_bias_share"]))
+    assert np.isfinite(float(local_row["local_silence_delta_share"]))
+
+    gate3_df = build_gate3_local_table([record])
+    assert gate3_df.shape[0] == 1
+    gate3_row = gate3_df.iloc[0]
+    assert gate3_row["sample_id"] == "sample_gate3"
+    assert gate3_row["pair_id"] == "pair_gate3"
+    assert gate3_row["ref_condition"] == "real"
+    assert gate3_row["committed_speech_runs"] == 3
+    assert np.isfinite(float(gate3_row["local_residual_mae"]))
+    assert np.isfinite(float(gate3_row["local_residual_huber"]))
+    assert np.isfinite(float(gate3_row["coarse_scalar_raw"]))
+    assert np.isfinite(float(gate3_row["residual_bias_share"]))
 
 
 def test_falsification_ladder_reports_negative_control_gap():
@@ -1125,6 +1211,92 @@ def test_build_gate_status_flags_learned_runtime_regression_vs_coarse_only():
     status = build_gate_status(frame)
     assert status["gate2_pass"] is False
     assert "silence_leakage" in status["learned_runtime_regressions"]
+
+
+def test_build_gate_status_splits_gate2_from_gate3_local_residual_failures():
+    def make_row(
+        *,
+        eval_mode: str,
+        ref_bin: str,
+        ref_condition: str,
+        tempo_monotonicity_rate: float | None = None,
+        speech_weighted_mae: float | None = None,
+        oracle_bias: float | None = None,
+        predicted_bias: float | None = None,
+        residual_target_corr: float | None = None,
+        residual_bias_share: float | None = None,
+        local_silence_delta_share: float | None = None,
+    ) -> dict[str, float | str]:
+        row = _make_debug_records_cli_row(
+            eval_mode=eval_mode,
+            ref_bin=ref_bin,
+            ref_condition=ref_condition,
+            explainability_slope=0.4,
+            negative_control_gap=0.3,
+            same_text_gap=0.0,
+            tempo_monotonicity_rate=tempo_monotonicity_rate,
+            alignment_local_margin_p10=0.05,
+        )
+        row["tempo_transfer_slope"] = 0.4 if eval_mode == "analytic" else (0.42 if eval_mode == "coarse_only" else 0.41)
+        row["speech_weighted_mae"] = 0.30 if speech_weighted_mae is None else speech_weighted_mae
+        row["oracle_bias"] = 0.20 if oracle_bias is None else oracle_bias
+        row["predicted_bias"] = 0.18 if predicted_bias is None else predicted_bias
+        if residual_target_corr is not None:
+            row["residual_target_corr"] = residual_target_corr
+        if residual_bias_share is not None:
+            row["residual_bias_share"] = residual_bias_share
+        if local_silence_delta_share is not None:
+            row["local_silence_delta_share"] = local_silence_delta_share
+        return row
+
+    frame = pd.DataFrame(
+        [
+            make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real", tempo_monotonicity_rate=1.0, speech_weighted_mae=0.30),
+            make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real", tempo_monotonicity_rate=1.0, speech_weighted_mae=0.30),
+            make_row(eval_mode="analytic", ref_bin="fast", ref_condition="real", tempo_monotonicity_rate=1.0, speech_weighted_mae=0.30),
+            make_row(eval_mode="coarse_only", ref_bin="mid", ref_condition="source_only", speech_weighted_mae=0.20, oracle_bias=0.10, predicted_bias=0.12),
+            make_row(
+                eval_mode="learned",
+                ref_bin="slow",
+                ref_condition="source_only",
+                speech_weighted_mae=0.15,
+                oracle_bias=0.10,
+                predicted_bias=0.11,
+                residual_target_corr=0.20,
+                residual_bias_share=0.40,
+                local_silence_delta_share=0.01,
+            ),
+            make_row(
+                eval_mode="learned",
+                ref_bin="mid",
+                ref_condition="random_ref",
+                speech_weighted_mae=0.15,
+                oracle_bias=0.20,
+                predicted_bias=0.21,
+                residual_target_corr=0.20,
+                residual_bias_share=0.40,
+                local_silence_delta_share=0.01,
+            ),
+            make_row(
+                eval_mode="learned",
+                ref_bin="fast",
+                ref_condition="shuffled_ref",
+                speech_weighted_mae=0.15,
+                oracle_bias=0.30,
+                predicted_bias=0.31,
+                residual_target_corr=0.20,
+                residual_bias_share=0.40,
+                local_silence_delta_share=0.01,
+            ),
+        ]
+    )
+
+    status = build_gate_status(frame)
+    assert status["gate0_pass"] is True
+    assert status["gate1_pass"] is True
+    assert status["gate2_pass"] is True
+    assert status["gate3_pass"] is False
+    assert status["learned_residual_bias_share"] == pytest.approx(0.4)
 
 
 def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path, monkeypatch):

@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
 
 from modules.Conan.rhythm.bridge import run_rhythm_frontend
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
+from modules.Conan.rhythm_v3.source_cache import DURATION_V3_CACHE_META_KEY, build_duration_v3_cache_meta
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
+from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
 
 
@@ -45,10 +47,18 @@ class _AssemblerOwner:
             "sealed_mask",
             "sep_hint",
             "boundary_confidence",
+            "source_boundary_cue",
+            DURATION_V3_CACHE_META_KEY,
             "ref_rhythm_stats",
             "ref_rhythm_trace",
             "rhythm_reference_is_self",
         )
+
+    @staticmethod
+    def _build_optional_collate_spec() -> dict[str, tuple[str, float | int | None]]:
+        return {
+            DURATION_V3_CACHE_META_KEY: ("object", None),
+        }
 
     @staticmethod
     def _get_source_rhythm_cache(item, visible_tokens, *, target_mode: str):
@@ -59,6 +69,8 @@ class _AssemblerOwner:
             "sealed_mask": np.asarray(item["sealed_mask"]),
             "sep_hint": np.asarray(item["sep_hint"]),
             "boundary_confidence": np.asarray(item["boundary_confidence"]),
+            "source_boundary_cue": np.asarray(item["source_boundary_cue"]),
+            DURATION_V3_CACHE_META_KEY: dict(item[DURATION_V3_CACHE_META_KEY]),
         }
 
     @staticmethod
@@ -101,6 +113,15 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
             "sealed_mask": np.asarray([1, 1, 1], dtype=np.float32),
             "sep_hint": np.asarray([0, 0, 1], dtype=np.int64),
             "boundary_confidence": np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            "source_boundary_cue": np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            DURATION_V3_CACHE_META_KEY: build_duration_v3_cache_meta(
+                silent_token=57,
+                separator_aware=True,
+                tail_open_units=1,
+                emit_silence_runs=True,
+                debounce_min_run_frames=2,
+                phrase_boundary_threshold=0.55,
+            ),
             "ref_rhythm_stats": np.asarray([0.2, 2.0, 4.0, 0.1, 0.3, 0.8], dtype=np.float32),
             "ref_rhythm_trace": np.zeros((8, 5), dtype=np.float32),
         }
@@ -125,6 +146,37 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
 
         self.assertIn("rhythm_reference_is_self", sample)
         self.assertTrue(torch.allclose(sample["rhythm_reference_is_self"], torch.tensor([0.0])))
+
+    def test_duration_v3_runtime_minimal_batch_contract_keeps_prompt_clean_support_sidecars(self) -> None:
+        required = {
+            "prompt_closed_mask",
+            "prompt_boundary_confidence",
+            "prompt_ref_len_sec",
+            "prompt_speech_ratio_scalar",
+            "prompt_global_weight_present",
+            "prompt_unit_log_prior_present",
+            "prompt_unit_prior_vocab_size",
+            "source_boundary_cue",
+            DURATION_V3_CACHE_META_KEY,
+        }
+        runtime_keys = set(RhythmConanDatasetMixin._RHYTHM_RUNTIME_MINIMAL_KEYS)
+        self.assertTrue(required.issubset(runtime_keys))
+
+    def test_sample_builder_preserves_duration_v3_cache_meta_for_runtime_contract(self) -> None:
+        owner = _AssemblerOwner(require_external_reference=False)
+        assembler = RhythmDatasetSampleAssembler(owner)
+        item = self._build_item("src")
+
+        sample = assembler.assemble(
+            sample=self._build_sample(),
+            item=item,
+            ref_item=item,
+            item_name="src",
+        )
+
+        self.assertIn(DURATION_V3_CACHE_META_KEY, sample)
+        self.assertEqual(sample[DURATION_V3_CACHE_META_KEY]["cache_version"], 3)
+        self.assertIn("source_boundary_cue", sample)
 
     def test_sample_builder_fail_fast_blocks_self_fallback_when_external_reference_is_required(self) -> None:
         owner = _AssemblerOwner(require_external_reference=True)
@@ -156,6 +208,35 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
 
         self.assertIn("rhythm_reference_is_self", built)
         self.assertTrue(torch.allclose(built["rhythm_reference_is_self"], torch.tensor([1.0])))
+
+    def test_tensorize_optional_value_preserves_object_collate_fields(self) -> None:
+        class _ObjectOwner(_AssemblerOwner):
+            @staticmethod
+            def _build_optional_collate_spec() -> dict[str, tuple[str, float | int | None]]:
+                return {
+                    "unit_alignment_source_cache_signature_tgt": ("object", None),
+                    "unit_alignment_projection_gate_reason_tgt": ("object", None),
+                    "unit_alignment_source_valid_run_index_tgt": ("object", None),
+                }
+
+        assembler = RhythmDatasetSampleAssembler(_ObjectOwner(require_external_reference=False))
+
+        signature = assembler._tensorize_optional_value(
+            "unit_alignment_source_cache_signature_tgt",
+            np.asarray(["source-sig"], dtype=object),
+        )
+        reason = assembler._tensorize_optional_value(
+            "unit_alignment_projection_gate_reason_tgt",
+            np.asarray(["low_margin"], dtype=object),
+        )
+        run_index = assembler._tensorize_optional_value(
+            "unit_alignment_source_valid_run_index_tgt",
+            np.asarray([0, 2, 4], dtype=np.int64),
+        )
+
+        self.assertEqual(signature, "source-sig")
+        self.assertEqual(reason, "low_margin")
+        np.testing.assert_array_equal(run_index, np.asarray([0, 2, 4], dtype=np.int64))
 
     def test_metrics_expose_reference_self_and_external_rates(self) -> None:
         planner = type(

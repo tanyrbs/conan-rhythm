@@ -165,6 +165,13 @@ def _validate_rhythm_v3_gate_status_json(
             "rhythm_v3_require_gate2_for_official_train requires gate2_pass=true in "
             "rhythm_v3_required_gate_status_json."
         )
+    if _is_enabled_flag(hparams.get("rhythm_v3_require_gate3_for_prefix_finetune", False)) and not bool(
+        payload.get("gate3_pass", False)
+    ):
+        raise ValueError(
+            "rhythm_v3_require_gate3_for_prefix_finetune requires gate3_pass=true in "
+            "rhythm_v3_required_gate_status_json."
+        )
 
 
 def validate_duration_v3_training_hparams(hparams) -> None:
@@ -539,6 +546,10 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         if not _is_enabled_flag(hparams.get("rhythm_v3_export_projector_telemetry", True)):
             raise ValueError(
                 "rhythm_v3_gate_quality_strict requires rhythm_v3_export_projector_telemetry=true."
+            )
+        if not _is_enabled_flag(hparams.get("rhythm_v3_strict_eval_invalid_g", True)):
+            raise ValueError(
+                "rhythm_v3_gate_quality_strict requires rhythm_v3_strict_eval_invalid_g=true."
             )
         if not _is_enabled_flag(hparams.get("rhythm_v3_detach_global_term_in_local_head", True)):
             raise ValueError(

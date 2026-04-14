@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from modules.Conan.rhythm_v3.source_cache import DURATION_V3_CACHE_META_KEY
+from tasks.Conan.rhythm.common.task_mixin import CommonRhythmTaskMixin
 from tasks.Conan.rhythm.runtime_modes import merge_retimed_weight, resolve_acoustic_target_post_model
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
 
@@ -91,6 +93,58 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(kwargs["rhythm_state"], "state")
         self.assertEqual(kwargs["rhythm_source_cache"]["dur_anchor_src"].shape[1], 2)
         self.assertEqual(kwargs["rhythm_offline_source_cache"]["dur_anchor_src"].shape[1], 3)
+
+    def test_collect_rhythm_source_cache_preserves_collated_duration_v3_cache_meta(self) -> None:
+        class DummyTask(CommonRhythmTaskMixin):
+            def __init__(self) -> None:
+                self.model = SimpleNamespace(rhythm_enable_v3=True)
+
+        task = DummyTask()
+        meta = {
+            "cache_version": 3,
+            "silent_token": 57,
+            "separator_aware": True,
+            "tail_open_units": 1,
+            "emit_silence_runs": True,
+            "debounce_min_run_frames": 2,
+            "phrase_boundary_threshold": 0.55,
+        }
+        sample = {
+            "content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
+            "source_duration_obs": torch.tensor([[2.0, 1.0, 2.0]], dtype=torch.float32),
+            DURATION_V3_CACHE_META_KEY: [dict(meta)],
+        }
+
+        payload = task._collect_rhythm_source_cache(sample)
+
+        self.assertEqual(payload[DURATION_V3_CACHE_META_KEY], meta)
+
+    def test_collect_rhythm_source_cache_preserves_cache_meta_on_legacy_alias_path(self) -> None:
+        class DummyTask(CommonRhythmTaskMixin):
+            def __init__(self) -> None:
+                self.model = SimpleNamespace(rhythm_enable_v3=True)
+
+        task = DummyTask()
+        meta = {
+            "cache_version": 3,
+            "silent_token": 57,
+            "separator_aware": True,
+            "tail_open_units": 2,
+            "emit_silence_runs": True,
+            "debounce_min_run_frames": 2,
+            "phrase_boundary_threshold": 0.55,
+        }
+        sample = {
+            "content_units": torch.tensor([[1, 57, 2]], dtype=torch.long),
+            "dur_anchor_src": torch.tensor([[2.0, 1.0, 2.0]], dtype=torch.float32),
+            "sealed_mask": torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
+            DURATION_V3_CACHE_META_KEY: [dict(meta)],
+        }
+
+        payload = task._collect_rhythm_source_cache(sample)
+
+        self.assertEqual(payload["source_duration_obs"].shape[1], 3)
+        self.assertEqual(payload[DURATION_V3_CACHE_META_KEY], meta)
 
     def test_target_build_config_accepts_duplicate_distill_alias(self) -> None:
         owner = SimpleNamespace(

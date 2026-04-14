@@ -6,6 +6,32 @@ This document defines the **util-first** validation workflow for the maintained
 The current goal is not to grow a larger dashboard. The goal is to make the
 core theory easy to **audit and falsify** with the smallest stable surface.
 
+## 0. Current local snapshot
+
+Latest maintained local rerun:
+
+- `2026-04-14`
+
+Canonical status snapshot:
+
+- `docs/rhythm_v3_local_status_2026-04-14.md`
+
+Latest exported local artifacts:
+
+- `tmp/gate_reaudit_20260414/full_split_boundary_audit_report.json`
+- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_report.json`
+- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_direction_report.json`
+- `tmp/gate_reaudit_20260414/gate1_analytic_summary.json`
+
+Current verdict on the local quick-ARCTIC surface:
+
+- Gate 0 fails on the maintained domain contract
+- Gate 1 fails because no strict-valid analytic triplet survives
+- Gate 2 and Gate 3 remain blocked
+
+So this validation stack should currently be read as a **stop surface**, not as
+evidence that the repository is ready for new official training.
+
 ## 1. What we validate first
 
 The maintained V1-G line makes five hard claims:

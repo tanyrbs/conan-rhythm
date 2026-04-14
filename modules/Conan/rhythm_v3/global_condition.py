@@ -175,11 +175,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             if self.min_boundary_confidence is not None and not isinstance(prompt_boundary_confidence, torch.Tensor)
             else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
         )
-        invalid_clean_rows = (
-            (support_stats.clean_count <= 0.0)
-            | missing_closed_sidecar_rows
-            | missing_boundary_sidecar_rows
-        )
+        invalid_clean_rows = support_stats.clean_count <= 0.0
+        invalid_clean_support_rows = invalid_clean_rows | missing_closed_sidecar_rows | missing_boundary_sidecar_rows
         invalid_support_rows = support_stats.support_count <= 0.0
         support_weight = support_stats.support_count
         if isinstance(prompt_global_weight, torch.Tensor):
@@ -191,7 +188,7 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             support_weight = support_mass
             invalid_support_rows = invalid_support_rows | (support_mass <= 0.0)
         domain_invalid_rows = no_speech_rows | low_speech_ratio_rows | invalid_ref_len_rows
-        invalid_rows = invalid_support_rows | invalid_clean_rows | domain_invalid_rows
+        invalid_rows = invalid_support_rows | invalid_clean_support_rows | domain_invalid_rows
         if bool(invalid_rows.any().item()):
             if self.training or self.strict_eval_invalid_g:
                 raise ValueError(
@@ -284,6 +281,15 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                     prompt_g_clean_ratio_vs_valid=(
                         effective_clean_count / valid_count
                     ).detach(),
+                    prompt_g_speech_ratio_weighted=speech_ratio.detach(),
+                    prompt_g_speech_ratio_count=support_stats.speech_ratio_count.detach(),
+                    prompt_g_invalid_no_speech=no_speech_rows.float().detach(),
+                    prompt_g_invalid_low_speech_ratio=low_speech_ratio_rows.float().detach(),
+                    prompt_g_invalid_ref_len=invalid_ref_len_rows.float().detach(),
+                    prompt_g_invalid_support=invalid_support_rows.float().detach(),
+                    prompt_g_invalid_clean=invalid_clean_rows.float().detach(),
+                    prompt_g_invalid_missing_closed=missing_closed_sidecar_rows.float().detach(),
+                    prompt_g_invalid_missing_boundary=missing_boundary_sidecar_rows.float().detach(),
                 ),
             )
         )

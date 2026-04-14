@@ -80,6 +80,54 @@ def test_build_duration_v3_ref_conditioning_accepts_explicit_prompt_units_withou
     assert "ref_rhythm_trace" not in conditioning
 
 
+def test_build_duration_v3_ref_conditioning_preserves_prompt_clean_support_sidecars():
+    sample = {
+        "rhythm_ref_conditioning": {
+            "prompt_content_units": torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+            "prompt_duration_obs": torch.tensor([[3.0, 4.0, 2.0, 0.0]], dtype=torch.float32),
+            "prompt_unit_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "prompt_speech_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "prompt_closed_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "prompt_boundary_confidence": torch.tensor([[0.9, 0.8, 0.95, 0.0]], dtype=torch.float32),
+            "prompt_global_weight": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+            "prompt_global_weight_present": torch.tensor([[1.0]], dtype=torch.float32),
+            "prompt_ref_len_sec": torch.tensor([[5.0]], dtype=torch.float32),
+            "prompt_speech_ratio_scalar": torch.tensor([[1.0]], dtype=torch.float32),
+            "prompt_unit_log_prior": torch.tensor([[0.1, 0.2, 0.3, 0.0]], dtype=torch.float32),
+            "prompt_unit_log_prior_present": torch.tensor([[1.0]], dtype=torch.float32),
+            "prompt_unit_prior_vocab_size": torch.tensor([[58]], dtype=torch.long),
+            "g_trim_ratio": torch.tensor([[0.2]], dtype=torch.float32),
+        }
+    }
+    conditioning = build_duration_v3_ref_conditioning(
+        sample,
+        explicit=sample["rhythm_ref_conditioning"],
+    )
+    assert torch.equal(conditioning["prompt_closed_mask"], sample["rhythm_ref_conditioning"]["prompt_closed_mask"])
+    assert torch.equal(
+        conditioning["prompt_boundary_confidence"],
+        sample["rhythm_ref_conditioning"]["prompt_boundary_confidence"],
+    )
+    assert torch.equal(conditioning["prompt_ref_len_sec"], sample["rhythm_ref_conditioning"]["prompt_ref_len_sec"])
+    assert torch.equal(
+        conditioning["prompt_speech_ratio_scalar"],
+        sample["rhythm_ref_conditioning"]["prompt_speech_ratio_scalar"],
+    )
+    assert torch.equal(
+        conditioning["prompt_global_weight_present"],
+        sample["rhythm_ref_conditioning"]["prompt_global_weight_present"],
+    )
+    assert torch.equal(
+        conditioning["prompt_unit_log_prior_present"],
+        sample["rhythm_ref_conditioning"]["prompt_unit_log_prior_present"],
+    )
+    assert torch.equal(
+        conditioning["prompt_unit_prior_vocab_size"],
+        sample["rhythm_ref_conditioning"]["prompt_unit_prior_vocab_size"],
+    )
+    assert torch.equal(conditioning["g_trim_ratio"], sample["rhythm_ref_conditioning"]["g_trim_ratio"])
+
+
 def test_build_duration_v3_ref_conditioning_drops_removed_proxy_only_surface():
     sample = {
         "rhythm_ref_conditioning": {

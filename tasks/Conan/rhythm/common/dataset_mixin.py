@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 from importlib import import_module
 
@@ -10,6 +11,7 @@ from utils.commons.dataset_utils import collate_1d_or_2d
 from modules.Conan.rhythm.policy import build_rhythm_hparams_policy
 from modules.Conan.rhythm.supervision import RHYTHM_CACHE_VERSION
 from modules.Conan.rhythm_v3.source_cache import (
+    DURATION_V3_CACHE_META_KEY,
     build_source_rhythm_cache_v3 as build_source_rhythm_cache,
     estimate_boundary_confidence,
     estimate_run_stability,
@@ -286,6 +288,7 @@ class CommonRhythmDatasetMixin:
             "phrase_group_index": ("long", 0),
             "phrase_group_pos": ("float", 0.0),
             "phrase_final_mask": ("float", 0.0),
+            "rhythm_v3_cache_meta": ("object", None),
             "rhythm_offline_content_units": ("long", 0),
             "rhythm_offline_dur_anchor_src": ("long", 0),
             "rhythm_offline_source_silence_mask": ("float", 0.0),
@@ -298,6 +301,7 @@ class CommonRhythmDatasetMixin:
             "rhythm_offline_phrase_group_index": ("long", 0),
             "rhythm_offline_phrase_group_pos": ("float", 0.0),
             "rhythm_offline_phrase_final_mask": ("float", 0.0),
+            "rhythm_offline_rhythm_v3_cache_meta": ("object", None),
             "ref_rhythm_stats": ("float", 0.0),
             "ref_rhythm_trace": ("float", 0.0),
             "prompt_content_units": ("long", 0),
@@ -630,19 +634,22 @@ class CommonRhythmDatasetMixin:
             "boundary_confidence": boundary_confidence,
             "source_run_stability": run_stability,
         }
+        full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
+        adapted["source_boundary_cue"] = self._restore_debug_sidecar(
+            full_side,
+            "source_boundary_cue",
+            boundary_confidence.astype(np.float32, copy=False),
+        )
+        cache_meta = item.get(DURATION_V3_CACHE_META_KEY) if isinstance(item, Mapping) else None
+        if isinstance(cache_meta, Mapping):
+            adapted[DURATION_V3_CACHE_META_KEY] = dict(cache_meta)
         if full_silence is not None:
             adapted["source_silence_mask"] = np.asarray(out_silence, dtype=np.float32)
         if self._should_export_rhythm_debug_sidecars():
-            full_side = {key: np.asarray(item[key]) for key in self._RHYTHM_SOURCE_DEBUG_CACHE_KEYS if key in item}
             default_phrase_group_index = np.zeros_like(adapted["content_units"], dtype=np.int64)
             default_phrase_group_pos = np.zeros_like(boundary_confidence, dtype=np.float32)
             default_phrase_final_mask = np.zeros_like(boundary_confidence, dtype=np.float32)
             adapted.update({
-                "source_boundary_cue": self._restore_debug_sidecar(
-                    full_side,
-                    "source_boundary_cue",
-                    boundary_confidence.astype(np.float32, copy=False),
-                ),
                 "phrase_group_index": self._restore_debug_sidecar(
                     full_side,
                     "phrase_group_index",
@@ -739,10 +746,18 @@ class CommonRhythmDatasetMixin:
         has_source_silence_cache = "source_silence_mask" in item
         if all(key in item for key in cache_keys) and (not explicit_silence or has_source_silence_cache):
             cache = {key: item[key] for key in cache_keys}
+            cache_meta = item.get(DURATION_V3_CACHE_META_KEY) if isinstance(item, Mapping) else None
+            if isinstance(cache_meta, Mapping):
+                cache[DURATION_V3_CACHE_META_KEY] = dict(cache_meta)
             if has_source_silence_cache:
                 cache["source_silence_mask"] = item["source_silence_mask"]
             if "source_run_stability" in item:
                 cache["source_run_stability"] = item["source_run_stability"]
+            if "source_boundary_cue" in item:
+                cache["source_boundary_cue"] = item["source_boundary_cue"]
+            for extra_key in ("phrase_group_index", "phrase_group_pos", "phrase_final_mask"):
+                if extra_key in item:
+                    cache[extra_key] = item[extra_key]
             self._validate_source_cache_shapes(
                 cache,
                 item_name=str(item.get("item_name", "<unknown-item>")),

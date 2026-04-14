@@ -942,6 +942,55 @@ class ConanDurationAdapter(nn.Module):
                     "g_strict_speech_only": support_count.new_ones(support_count.shape),
                     "prompt_g_support_mask": support_mask.detach(),
                     "prompt_g_clean_mask": clean_mask.detach(),
+                    "prompt_g_speech_ratio_weighted": (
+                        ref_memory.prompt_g_speech_ratio_weighted.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_speech_ratio_weighted", None), torch.Tensor)
+                        else speech_ratio.detach()
+                    ),
+                    "prompt_g_speech_ratio_count": (
+                        ref_memory.prompt_g_speech_ratio_count.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_speech_ratio_count", None), torch.Tensor)
+                        else (speech_count / valid_count.clamp_min(1.0)).detach()
+                    ),
+                    "prompt_g_invalid_no_speech": (
+                        ref_memory.prompt_g_invalid_no_speech.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_no_speech", None), torch.Tensor)
+                        else (speech_count <= 0.0).float().detach()
+                    ),
+                    "prompt_g_invalid_low_speech_ratio": (
+                        ref_memory.prompt_g_invalid_low_speech_ratio.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_low_speech_ratio", None), torch.Tensor)
+                        else (speech_ratio < (min_prompt_speech_ratio - 1.0e-6)).float().detach()
+                    ),
+                    "prompt_g_invalid_ref_len": (
+                        ref_memory.prompt_g_invalid_ref_len.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_ref_len", None), torch.Tensor)
+                        else (
+                            None
+                            if prompt_ref_len_valid is None
+                            else (1.0 - prompt_ref_len_valid.float()).detach()
+                        )
+                    ),
+                    "prompt_g_invalid_support": (
+                        ref_memory.prompt_g_invalid_support.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_support", None), torch.Tensor)
+                        else (1.0 - g_valid_support).detach()
+                    ),
+                    "prompt_g_invalid_clean": (
+                        ref_memory.prompt_g_invalid_clean.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_clean", None), torch.Tensor)
+                        else (clean_count <= 0.5).float().detach()
+                    ),
+                    "prompt_g_invalid_missing_closed": (
+                        ref_memory.prompt_g_invalid_missing_closed.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_missing_closed", None), torch.Tensor)
+                        else None
+                    ),
+                    "prompt_g_invalid_missing_boundary": (
+                        ref_memory.prompt_g_invalid_missing_boundary.detach()
+                        if isinstance(getattr(ref_memory, "prompt_g_invalid_missing_boundary", None), torch.Tensor)
+                        else None
+                    ),
                 }
             coarse_correction_used = (
                 execution.coarse_correction.detach()

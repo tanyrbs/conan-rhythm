@@ -395,6 +395,86 @@ def build_reference_teacher_targets(
     })
 
 
+def _resolve_frame_state_vocab_size(
+    content_units: np.ndarray,
+    *,
+    frame_state_vocab_size: int | None,
+) -> int:
+    units = np.asarray(content_units, dtype=np.int64).reshape(-1)
+    inferred = (int(units.max()) + 1) if units.size > 0 else 1
+    if frame_state_vocab_size is None:
+        return max(1, inferred)
+    vocab_size = int(frame_state_vocab_size)
+    if vocab_size <= 0:
+        raise ValueError("frame_state_vocab_size must be positive when provided.")
+    if inferred > vocab_size:
+        raise ValueError(
+            "frame_state_vocab_size is too small for the current source cache: "
+            f"need at least {inferred}, got {vocab_size}"
+        )
+    return vocab_size
+
+
+def _build_frame_sidecars_from_source_cache(
+    source_cache: dict[str, np.ndarray],
+    *,
+    frame_state_vocab_size: int | None,
+) -> dict[str, np.ndarray]:
+    content_units = np.asarray(source_cache["content_units"], dtype=np.int64).reshape(-1)
+    dur_anchor_src = np.asarray(source_cache["dur_anchor_src"], dtype=np.int64).reshape(-1)
+    source_silence_mask = np.asarray(
+        source_cache.get("source_silence_mask", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    if content_units.shape[0] != dur_anchor_src.shape[0]:
+        raise ValueError(
+            "content_units/dur_anchor_src size mismatch: "
+            f"{content_units.shape[0]} vs {dur_anchor_src.shape[0]}"
+        )
+    if source_silence_mask.shape[0] != dur_anchor_src.shape[0]:
+        raise ValueError(
+            "source_silence_mask/dur_anchor_src size mismatch: "
+            f"{source_silence_mask.shape[0]} vs {dur_anchor_src.shape[0]}"
+        )
+    if dur_anchor_src.size > 0 and np.any(dur_anchor_src < 0):
+        raise ValueError("dur_anchor_src must be non-negative to expand frame sidecars.")
+
+    vocab_size = _resolve_frame_state_vocab_size(
+        content_units,
+        frame_state_vocab_size=frame_state_vocab_size,
+    )
+    total_frames = int(dur_anchor_src.sum())
+    if total_frames <= 0:
+        return {
+            "frame_states": np.zeros((0, vocab_size), dtype=np.float32),
+            "frame_to_run": np.zeros((0,), dtype=np.int64),
+            "frame_speech_prob": np.zeros((0,), dtype=np.float32),
+            "frame_weight": np.zeros((0,), dtype=np.float32),
+            "frame_valid": np.zeros((0,), dtype=np.float32),
+            "frame_unit_hint": np.zeros((0,), dtype=np.int64),
+        }
+
+    run_index = np.arange(dur_anchor_src.shape[0], dtype=np.int64)
+    frame_to_run = np.repeat(run_index, dur_anchor_src).astype(np.int64, copy=False)
+    frame_unit_hint = np.repeat(content_units, dur_anchor_src).astype(np.int64, copy=False)
+    frame_silence = np.repeat(source_silence_mask, dur_anchor_src).astype(np.float32, copy=False)
+    if frame_unit_hint.min(initial=0) < 0 or frame_unit_hint.max(initial=-1) >= vocab_size:
+        raise ValueError(
+            "frame_unit_hint exceeds frame_state_vocab_size: "
+            f"max={int(frame_unit_hint.max(initial=-1))}, vocab_size={vocab_size}"
+        )
+    frame_states = np.zeros((total_frames, vocab_size), dtype=np.float32)
+    frame_states[np.arange(total_frames, dtype=np.int64), frame_unit_hint] = 1.0
+    return {
+        "frame_states": frame_states,
+        "frame_to_run": frame_to_run,
+        "frame_speech_prob": np.clip(1.0 - frame_silence, 0.0, 1.0).astype(np.float32, copy=False),
+        "frame_weight": np.ones((total_frames,), dtype=np.float32),
+        "frame_valid": np.ones((total_frames,), dtype=np.float32),
+        "frame_unit_hint": frame_unit_hint,
+    }
+
+
 def build_item_rhythm_bundle(
     *,
     content_tokens,
@@ -403,6 +483,7 @@ def build_item_rhythm_bundle(
     separator_aware: bool = True,
     tail_open_units: int = 1,
     emit_silence_runs: bool = False,
+    debounce_min_run_frames: int = 1,
     trace_bins: int = 24,
     trace_horizon: float = 0.35,
     trace_smooth_kernel: int = 5,
@@ -418,6 +499,7 @@ def build_item_rhythm_bundle(
     teacher_target_source: str = "algorithmic",
     teacher_bundle_override: dict | None = None,
     teacher_kwargs: dict | None = None,
+    frame_state_vocab_size: int | None = None,
 ) -> dict[str, np.ndarray]:
     source = build_source_rhythm_cache(
         content_tokens,
@@ -425,6 +507,7 @@ def build_item_rhythm_bundle(
         separator_aware=separator_aware,
         tail_open_units=tail_open_units,
         emit_silence_runs=emit_silence_runs,
+        debounce_min_run_frames=debounce_min_run_frames,
         phrase_boundary_threshold=source_phrase_threshold,
     )
     conditioning = build_reference_rhythm_conditioning(
@@ -435,7 +518,11 @@ def build_item_rhythm_bundle(
         slow_topk=slow_topk,
         selector_cell_size=selector_cell_size,
     )
-    bundle = {**source, **conditioning}
+    frame_sidecars = _build_frame_sidecars_from_source_cache(
+        source,
+        frame_state_vocab_size=frame_state_vocab_size,
+    )
+    bundle = {**source, **conditioning, **frame_sidecars}
     guided = None
     teacher_surface_name = None
     teacher_confidence = None

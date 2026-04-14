@@ -1,8 +1,24 @@
 {
+  "updated_at": "2026-04-14",
+  "status": "blocked_before_training",
+  "basis": "tmp/gate_reaudit_20260414",
   "gate0_pass": false,
   "gate1_pass": false,
   "gate2_pass": false,
+  "gate3_pass": false,
+  "gate0_summary": {
+    "configured_min_boundary_confidence_for_g": 0.5,
+    "train_g_domain_valid_items": "0/32",
+    "valid_g_domain_valid_items": "0/16",
+    "test_g_domain_valid_items": "0/16"
+  },
+  "gate1_summary": {
+    "probe_cases": 4,
+    "strict_valid_rows": "0/20",
+    "all_sources_valid_real": "0/3"
+  },
   "warnings": [
-    "placeholder gate-status file; replace with scripts/rhythm_v3_debug_records.py output before training"
+    "current local maintained rerun failed before Gate-2 / Gate-3 admission",
+    "replace with scripts/rhythm_v3_debug_records.py output only after a passing Gate-0 / Gate-1 rerun"
   ]
 }

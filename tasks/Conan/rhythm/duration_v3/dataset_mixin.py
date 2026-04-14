@@ -164,39 +164,31 @@ class DurationV3DatasetMixin:
         )
 
     def _alignment_quality_thresholds(self) -> tuple[float, float, float, float]:
+        unmatched_max = self._resolve_hparam_alias(
+            "rhythm_v3_alignment_unmatched_speech_ratio_max",
+            "rhythm_v3_align_unmatched_speech_ratio_max",
+            default=None,
+        )
+        mean_local_min = self._resolve_hparam_alias(
+            "rhythm_v3_alignment_mean_local_confidence_speech_min",
+            "rhythm_v3_align_mean_local_confidence_speech_min",
+            default=None,
+        )
+        mean_coarse_min = self._resolve_hparam_alias(
+            "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+            "rhythm_v3_align_mean_coarse_confidence_speech_min",
+            default=None,
+        )
+        local_margin_min = self._resolve_hparam_alias(
+            "rhythm_v3_alignment_local_margin_p10_min",
+            "rhythm_v3_align_local_margin_p10_min",
+            default=None,
+        )
         return (
-            float(
-                self._resolve_hparam_alias(
-                    "rhythm_v3_alignment_unmatched_speech_ratio_max",
-                    "rhythm_v3_align_unmatched_speech_ratio_max",
-                    default=0.15,
-                )
-                or 0.15
-            ),
-            float(
-                self._resolve_hparam_alias(
-                    "rhythm_v3_alignment_mean_local_confidence_speech_min",
-                    "rhythm_v3_align_mean_local_confidence_speech_min",
-                    default=0.55,
-                )
-                or 0.55
-            ),
-            float(
-                self._resolve_hparam_alias(
-                    "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
-                    "rhythm_v3_align_mean_coarse_confidence_speech_min",
-                    default=0.60,
-                )
-                or 0.60
-            ),
-            float(
-                self._resolve_hparam_alias(
-                    "rhythm_v3_alignment_local_margin_p10_min",
-                    "rhythm_v3_align_local_margin_p10_min",
-                    default=0.0,
-                )
-                or 0.0
-            ),
+            float(0.15 if unmatched_max is None else unmatched_max),
+            float(0.55 if mean_local_min is None else mean_local_min),
+            float(0.60 if mean_coarse_min is None else mean_coarse_min),
+            float(0.0 if local_margin_min is None else local_margin_min),
         )
 
     def _hard_fail_bad_alignment_projection(self) -> bool:

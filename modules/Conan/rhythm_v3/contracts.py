@@ -130,6 +130,15 @@ class PromptConditioningEvidence:
     prompt_g_support_ratio_vs_valid: Optional[torch.Tensor] = None
     prompt_g_clean_ratio_vs_speech: Optional[torch.Tensor] = None
     prompt_g_clean_ratio_vs_valid: Optional[torch.Tensor] = None
+    prompt_g_speech_ratio_weighted: Optional[torch.Tensor] = None
+    prompt_g_speech_ratio_count: Optional[torch.Tensor] = None
+    prompt_g_invalid_no_speech: Optional[torch.Tensor] = None
+    prompt_g_invalid_low_speech_ratio: Optional[torch.Tensor] = None
+    prompt_g_invalid_ref_len: Optional[torch.Tensor] = None
+    prompt_g_invalid_support: Optional[torch.Tensor] = None
+    prompt_g_invalid_clean: Optional[torch.Tensor] = None
+    prompt_g_invalid_missing_closed: Optional[torch.Tensor] = None
+    prompt_g_invalid_missing_boundary: Optional[torch.Tensor] = None
 
 @dataclass
 class ReferenceDurationMemory:
@@ -329,6 +338,42 @@ class ReferenceDurationMemory:
     @property
     def prompt_g_clean_ratio_vs_valid(self) -> Optional[torch.Tensor]:
         return None if self.prompt is None else self.prompt.prompt_g_clean_ratio_vs_valid
+
+    @property
+    def prompt_g_speech_ratio_weighted(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_speech_ratio_weighted
+
+    @property
+    def prompt_g_speech_ratio_count(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_speech_ratio_count
+
+    @property
+    def prompt_g_invalid_no_speech(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_no_speech
+
+    @property
+    def prompt_g_invalid_low_speech_ratio(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_low_speech_ratio
+
+    @property
+    def prompt_g_invalid_ref_len(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_ref_len
+
+    @property
+    def prompt_g_invalid_support(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_support
+
+    @property
+    def prompt_g_invalid_clean(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_clean
+
+    @property
+    def prompt_g_invalid_missing_closed(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_missing_closed
+
+    @property
+    def prompt_g_invalid_missing_boundary(self) -> Optional[torch.Tensor]:
+        return None if self.prompt is None else self.prompt.prompt_g_invalid_missing_boundary
 
 
 @dataclass
@@ -623,6 +668,33 @@ def move_prompt_conditioning_evidence(
         prompt_g_clean_ratio_vs_valid=_move_tensor(
             prompt.prompt_g_clean_ratio_vs_valid, device=device, dtype=dtype
         ),
+        prompt_g_speech_ratio_weighted=_move_tensor(
+            prompt.prompt_g_speech_ratio_weighted, device=device, dtype=dtype
+        ),
+        prompt_g_speech_ratio_count=_move_tensor(
+            prompt.prompt_g_speech_ratio_count, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_no_speech=_move_tensor(
+            prompt.prompt_g_invalid_no_speech, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_low_speech_ratio=_move_tensor(
+            prompt.prompt_g_invalid_low_speech_ratio, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_ref_len=_move_tensor(
+            prompt.prompt_g_invalid_ref_len, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_support=_move_tensor(
+            prompt.prompt_g_invalid_support, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_clean=_move_tensor(
+            prompt.prompt_g_invalid_clean, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_missing_closed=_move_tensor(
+            prompt.prompt_g_invalid_missing_closed, device=device, dtype=dtype
+        ),
+        prompt_g_invalid_missing_boundary=_move_tensor(
+            prompt.prompt_g_invalid_missing_boundary, device=device, dtype=dtype
+        ),
     )
 
 
@@ -678,6 +750,15 @@ def move_reference_duration_memory(
             memory.prompt.prompt_g_support_ratio_vs_valid if memory.prompt is not None else None,
             memory.prompt.prompt_g_clean_ratio_vs_speech if memory.prompt is not None else None,
             memory.prompt.prompt_g_clean_ratio_vs_valid if memory.prompt is not None else None,
+            memory.prompt.prompt_g_speech_ratio_weighted if memory.prompt is not None else None,
+            memory.prompt.prompt_g_speech_ratio_count if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_no_speech if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_low_speech_ratio if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_ref_len if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_support if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_clean if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_missing_closed if memory.prompt is not None else None,
+            memory.prompt.prompt_g_invalid_missing_boundary if memory.prompt is not None else None,
         )
     ):
         return memory
@@ -857,6 +938,15 @@ def validate_prompt_conditioning_evidence(
     _check_batch("prompt_g_support_ratio_vs_valid", prompt.prompt_g_support_ratio_vs_valid, dims=2)
     _check_batch("prompt_g_clean_ratio_vs_speech", prompt.prompt_g_clean_ratio_vs_speech, dims=2)
     _check_batch("prompt_g_clean_ratio_vs_valid", prompt.prompt_g_clean_ratio_vs_valid, dims=2)
+    _check_batch("prompt_g_speech_ratio_weighted", prompt.prompt_g_speech_ratio_weighted, dims=2)
+    _check_batch("prompt_g_speech_ratio_count", prompt.prompt_g_speech_ratio_count, dims=2)
+    _check_batch("prompt_g_invalid_no_speech", prompt.prompt_g_invalid_no_speech, dims=2)
+    _check_batch("prompt_g_invalid_low_speech_ratio", prompt.prompt_g_invalid_low_speech_ratio, dims=2)
+    _check_batch("prompt_g_invalid_ref_len", prompt.prompt_g_invalid_ref_len, dims=2)
+    _check_batch("prompt_g_invalid_support", prompt.prompt_g_invalid_support, dims=2)
+    _check_batch("prompt_g_invalid_clean", prompt.prompt_g_invalid_clean, dims=2)
+    _check_batch("prompt_g_invalid_missing_closed", prompt.prompt_g_invalid_missing_closed, dims=2)
+    _check_batch("prompt_g_invalid_missing_boundary", prompt.prompt_g_invalid_missing_boundary, dims=2)
 
     if prompt.prompt_basis_activation is not None and prompt.prompt_basis_activation.size(-1) != operator_rank:
         raise ValueError(
@@ -944,6 +1034,15 @@ def validate_prompt_conditioning_evidence(
         ("prompt_g_support_ratio_vs_valid", prompt.prompt_g_support_ratio_vs_valid),
         ("prompt_g_clean_ratio_vs_speech", prompt.prompt_g_clean_ratio_vs_speech),
         ("prompt_g_clean_ratio_vs_valid", prompt.prompt_g_clean_ratio_vs_valid),
+        ("prompt_g_speech_ratio_weighted", prompt.prompt_g_speech_ratio_weighted),
+        ("prompt_g_speech_ratio_count", prompt.prompt_g_speech_ratio_count),
+        ("prompt_g_invalid_no_speech", prompt.prompt_g_invalid_no_speech),
+        ("prompt_g_invalid_low_speech_ratio", prompt.prompt_g_invalid_low_speech_ratio),
+        ("prompt_g_invalid_ref_len", prompt.prompt_g_invalid_ref_len),
+        ("prompt_g_invalid_support", prompt.prompt_g_invalid_support),
+        ("prompt_g_invalid_clean", prompt.prompt_g_invalid_clean),
+        ("prompt_g_invalid_missing_closed", prompt.prompt_g_invalid_missing_closed),
+        ("prompt_g_invalid_missing_boundary", prompt.prompt_g_invalid_missing_boundary),
     ):
         if value is not None and value.size(1) != 1:
             raise ValueError(
@@ -1101,6 +1200,15 @@ def ensure_reference_duration_memory_batch(
                 prompt_g_support_ratio_vs_valid=_expand(memory.prompt.prompt_g_support_ratio_vs_valid),
                 prompt_g_clean_ratio_vs_speech=_expand(memory.prompt.prompt_g_clean_ratio_vs_speech),
                 prompt_g_clean_ratio_vs_valid=_expand(memory.prompt.prompt_g_clean_ratio_vs_valid),
+                prompt_g_speech_ratio_weighted=_expand(memory.prompt.prompt_g_speech_ratio_weighted),
+                prompt_g_speech_ratio_count=_expand(memory.prompt.prompt_g_speech_ratio_count),
+                prompt_g_invalid_no_speech=_expand(memory.prompt.prompt_g_invalid_no_speech),
+                prompt_g_invalid_low_speech_ratio=_expand(memory.prompt.prompt_g_invalid_low_speech_ratio),
+                prompt_g_invalid_ref_len=_expand(memory.prompt.prompt_g_invalid_ref_len),
+                prompt_g_invalid_support=_expand(memory.prompt.prompt_g_invalid_support),
+                prompt_g_invalid_clean=_expand(memory.prompt.prompt_g_invalid_clean),
+                prompt_g_invalid_missing_closed=_expand(memory.prompt.prompt_g_invalid_missing_closed),
+                prompt_g_invalid_missing_boundary=_expand(memory.prompt.prompt_g_invalid_missing_boundary),
             )
         ),
         summary_state=_expand(memory.summary_state),

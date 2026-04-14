@@ -12,8 +12,44 @@ If you are doing new work in this repository, start from:
 For the architecture/spec reading, see `docs/rhythm_migration_plan.md`.
 For validation/debug export and the retained five-figure review surface, see
 `docs/rhythm_v3_validation_stack.md`.
+For the latest local Gate rerun and current stop/go verdict, see
+`docs/rhythm_v3_local_status_2026-04-14.md`.
 
 ---
+
+## 0. Current local status
+
+Latest local rerun date:
+
+- `2026-04-14`
+
+Current verdict:
+
+- Gate 0: fail
+- Gate 1: fail
+- Gate 2: blocked
+- Gate 3: blocked
+- official training: blocked
+- prefix fine-tune: blocked
+
+The current maintained `raw_median + boundary-clean@0.5` path is therefore
+**not allowed to enter Gate-2 / Gate-3 training on the local quick-ARCTIC
+surface**. The blocking reasons are:
+
+- maintained prompt clean-support at `min_boundary_confidence_for_g=0.5`
+  collapses to `0/32` train, `0/16` valid, `0/16` test
+- even after counterfactual support recovery, only a non-maintained slice
+  (`token=71`, `drop_edge=1`) shows a non-trivial positive Gate-0 signal slope
+- the strict Gate-1 analytic rerun produced `valid_real=0/3` for every probe
+  source, so no real `slow / mid / fast` triplet survives the maintained
+  domain contract
+
+Current artifact bundle:
+
+- `tmp/gate_reaudit_20260414/`
+
+Do not start new Gate-2 / Gate-3 training from the maintained config until a
+new gate-status JSON is generated from a passing Gate-0 / Gate-1 rerun.
 
 ## 1. What the maintained path is
 
@@ -81,7 +117,7 @@ small overrides:
 | --- | --- | --- |
 | `A` | static / analytic falsification | `rhythm_v3_eval_mode=analytic`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0`, `rhythm_v3_silence_coarse_weight=0.0` |
 | `B` | coarse-only validation training | `rhythm_v3_eval_mode=coarse_only`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_bias=0.20`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
-| `C` | maintained learned sanity | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
+| `C` | Gate 3 local residual falsification | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
 | `D` | no-detach ablation | same as `C`, but `rhythm_v3_detach_global_term_in_local_head=false`; treat this as an explicit comparison run rather than the maintained minimal-V1 contract |
 | `E` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
 
@@ -360,6 +396,15 @@ Likewise, treat gate completeness as a contract rather than a plotting detail:
 - large positive `analytic_same_text_gap` is now a Gate 1 failure, not just a
   review note, because it means same-text is outperforming cross-text by an
   unsafe margin
+
+When the contract list has passed for Gates 0–2, run the optional
+`egs/overrides/rhythm_v3_gate3_learned.yaml` overlay (or the alias
+`egs/overrides/rhythm_v3_gate3_local_residual.yaml`) so Gate 3 can falsify the
+learned local residual on the same maintained `rhythm_v3_eval_mode=learned`
+surface. This stage keeps the coarse path intact, re-enables the learned path
+(`rhythm_v3_disable_learned_gate=false`), and asks whether local residuals add
+speech-side value without stealing coarse control or leaking into silence before
+you move on to prefix fine-tuning.
 
 ---
 
@@ -659,8 +704,8 @@ This keeps the current workflow aligned with the falsification-first order:
 
 1. static `g` audit
 2. analytic monotonicity
-3. coarse-only sanity
-4. learned sanity
+3. coarse-only falsification
+4. local residual falsification
 5. prefix fine-tune
 
 Stop the run and reconsider the statistic/interface if any of these show up
@@ -719,7 +764,7 @@ minimal-V1 line:
    pre/post execution telemetry is exported, so improvements can be attributed
    to the writer or the projector instead of being conflated
 5. gate checkpoint:
-   Gate 0, Gate 1, and Gate 2 all run on the same maintained bundle, and
+   Gate 0, Gate 1, Gate 2, and Gate 3 all run on the same maintained bundle, and
    negative controls must lose rather than merely exist
 6. test harness checkpoint:
    rhythm tests run under `pytest`, and repo-local temporary paths are used for

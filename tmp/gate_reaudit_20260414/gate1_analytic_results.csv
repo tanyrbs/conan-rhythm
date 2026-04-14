@@ -1,0 +1,21 @@
+g_domain_valid,gate0_row_dropped,probe_error,prompt_tempo_ref,prompt_total_units,ref_condition,ref_name,ref_pair_item_name,same_speaker_reference,same_text_reference,source_name,tempo_out
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,32,slow,aba_train_arctic_a0012,aba_train_arctic_a0012,1,0,aba_train_arctic_a0010,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for aba_train_arctic_a0015: ref_len_sec=2.400 outside [3.0, 8.0]",nan,16,mid,aba_train_arctic_a0015,aba_train_arctic_a0015,1,0,aba_train_arctic_a0010,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.33333332672197086,33,fast,aba_train_arctic_a0016,aba_train_arctic_a0016,1,0,aba_train_arctic_a0010,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for bdl_train_arctic_a0012: ref_len_sec=2.960 outside [3.0, 8.0]",nan,18,random_ref,bdl_train_arctic_a0012,bdl_train_arctic_a0012,0,0,aba_train_arctic_a0010,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.19999999398584362,16,source_only,aba_train_arctic_a0010,aba_train_arctic_a0010,1,1,aba_train_arctic_a0010,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for asi_train_arctic_a0015: ref_len_sec=2.160 outside [3.0, 8.0]",nan,12,slow,asi_train_arctic_a0015,asi_train_arctic_a0015,1,0,asi_train_arctic_a0011,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.33333332672197086,37,mid,asi_train_arctic_a0014,asi_train_arctic_a0014,1,0,asi_train_arctic_a0011,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.33333332672197086,52,fast,asi_train_arctic_a0013,asi_train_arctic_a0013,1,0,asi_train_arctic_a0011,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for bdl_train_arctic_a0012: ref_len_sec=2.960 outside [3.0, 8.0]",nan,18,random_ref,bdl_train_arctic_a0012,bdl_train_arctic_a0012,0,0,asi_train_arctic_a0011,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,29,source_only,asi_train_arctic_a0011,asi_train_arctic_a0011,1,1,asi_train_arctic_a0011,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for bdl_train_arctic_a0012: ref_len_sec=2.960 outside [3.0, 8.0]",nan,18,slow,bdl_train_arctic_a0012,bdl_train_arctic_a0012,1,0,bdl_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,35,mid,bdl_train_arctic_a0013,bdl_train_arctic_a0013,1,0,bdl_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.33333332672197086,39,fast,bdl_train_arctic_a0016,bdl_train_arctic_a0016,1,0,bdl_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,32,random_ref,aba_train_arctic_a0012,aba_train_arctic_a0012,0,0,bdl_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.28867513118218263,28,source_only,bdl_train_arctic_a0014,bdl_train_arctic_a0014,1,1,bdl_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,23,slow,slt_train_arctic_a0010,slt_train_arctic_a0010,1,0,slt_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.33333332672197086,44,mid,slt_train_arctic_a0013,slt_train_arctic_a0013,1,0,slt_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.49999999904767284,40,fast,slt_train_arctic_a0016,slt_train_arctic_a0016,1,0,slt_train_arctic_a0014,nan
+0.0,1.0,V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.,0.24999999904767284,32,random_ref,aba_train_arctic_a0012,aba_train_arctic_a0012,0,0,slt_train_arctic_a0014,nan
+0.0,1.0,"minimal_v1 prompt conditioning rejects prompt conditioning for slt_train_arctic_a0014: ref_len_sec=2.900 outside [3.0, 8.0]",nan,36,source_only,slt_train_arctic_a0014,slt_train_arctic_a0014,1,1,slt_train_arctic_a0014,nan

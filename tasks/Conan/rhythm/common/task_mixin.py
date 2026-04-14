@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import import_module
 
 import torch
@@ -14,6 +15,7 @@ from modules.Conan.rhythm.policy import (
 from modules.Conan.rhythm.prefix_state import build_prefix_state_from_exec_torch
 from modules.Conan.rhythm.stages import resolve_runtime_dual_mode_teacher_enable
 from modules.Conan.rhythm_v3.contracts import collect_duration_v3_source_cache
+from modules.Conan.rhythm_v3.source_cache import DURATION_V3_CACHE_META_KEY
 from tasks.Conan.rhythm.acoustic_loss_utils import expand_frame_weight, reduce_weighted_elementwise_loss
 from tasks.Conan.rhythm.common.task_config import (
     parse_task_optional_bool,
@@ -193,10 +195,33 @@ class CommonRhythmTaskMixin:
     def _use_runtime_dual_mode_teacher() -> bool:
         return resolve_runtime_dual_mode_teacher_enable(hparams, infer=False)
 
+    @staticmethod
+    def _collapse_duration_v3_cache_meta(value):
+        if isinstance(value, Mapping):
+            return dict(value)
+        if not isinstance(value, (list, tuple)):
+            return None
+        meta_rows = [dict(item) for item in value if isinstance(item, Mapping)]
+        if not meta_rows:
+            return None
+        first = meta_rows[0]
+        for item in meta_rows[1:]:
+            if item != first:
+                raise ValueError(
+                    "Batched rhythm_v3_cache_meta mismatch across samples. "
+                    "Source-cache frontend settings must stay consistent within a batch."
+                )
+        return first
+
     def _collect_rhythm_source_cache(self, sample, *, prefix: str = ""):
         if getattr(getattr(self, "model", None), "rhythm_enable_v3", False):
             payload = collect_duration_v3_source_cache(sample, prefix=prefix)
             if payload is not None:
+                cache_meta = self._collapse_duration_v3_cache_meta(
+                    sample.get(f"{prefix}{DURATION_V3_CACHE_META_KEY}")
+                )
+                if cache_meta is not None:
+                    payload[DURATION_V3_CACHE_META_KEY] = cache_meta
                 return payload
             legacy_duration = sample.get(f"{prefix}dur_anchor_src")
             legacy_content = sample.get(f"{prefix}content_units")
@@ -205,7 +230,7 @@ class CommonRhythmTaskMixin:
             legacy_sep = sample.get(f"{prefix}sep_hint")
             legacy_sealed = sample.get(f"{prefix}sealed_mask")
             unit_mask = (legacy_duration.float() > 0).float() if torch.is_tensor(legacy_duration) else None
-            return {
+            payload = {
                 "content_units": legacy_content,
                 "source_duration_obs": legacy_duration,
                 "unit_mask": unit_mask,
@@ -220,6 +245,12 @@ class CommonRhythmTaskMixin:
                 "phrase_group_pos": sample.get(f"{prefix}phrase_group_pos"),
                 "phrase_final_mask": sample.get(f"{prefix}phrase_final_mask"),
             }
+            cache_meta = self._collapse_duration_v3_cache_meta(
+                sample.get(f"{prefix}{DURATION_V3_CACHE_META_KEY}")
+            )
+            if cache_meta is not None:
+                payload[DURATION_V3_CACHE_META_KEY] = cache_meta
+            return payload
         keys = self._LEGACY_RHYTHM_SOURCE_CACHE_REQUIRED_KEYS + self._LEGACY_RHYTHM_SOURCE_CACHE_OPTIONAL_KEYS
         payload = {}
         for key in keys:

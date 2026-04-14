@@ -1,0 +1,14 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Gate 3: local-residual falsification on the maintained runtime writer.
+# Re-enable the learned path only after Gate 2 has shown coarse-only is
+# already stable enough to stand on its own.
+rhythm_v3_eval_mode: learned
+rhythm_v3_gate_quality_strict: true
+rhythm_v3_disable_learned_gate: false
+rhythm_v3_disable_local_residual: false
+rhythm_v3_disable_coarse_bias: false
+rhythm_v3_detach_global_term_in_local_head: true
+rhythm_v3_silence_coarse_weight: 0.0
+lambda_rhythm_pref: 0.0
+lambda_rhythm_cons: 0.0

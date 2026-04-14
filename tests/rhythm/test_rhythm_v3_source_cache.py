@@ -8,6 +8,7 @@ import sys
 import torch
 from pathlib import Path
 
+from modules.Conan.rhythm.supervision import _build_frame_sidecars_from_source_cache
 from modules.Conan.rhythm_v3.source_cache import (
     DURATION_V3_CACHE_META_KEY,
     UNIT_LOG_PRIOR_META_KEY,
@@ -72,6 +73,53 @@ def test_build_source_rhythm_cache_v3_defaults_follow_mainline_surface():
     assert meta["emit_silence_runs"] is True
     assert meta["debounce_min_run_frames"] == 2
     assert cache["source_silence_mask"].tolist() == [0.0, 1.0, 0.0]
+
+
+def test_build_frame_sidecars_from_source_cache_expands_runs_to_frames():
+    cache = build_source_rhythm_cache_v3(
+        [1, 1, 57, 57, 2, 2],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+
+    sidecars = _build_frame_sidecars_from_source_cache(
+        cache,
+        frame_state_vocab_size=58,
+    )
+
+    assert sidecars["frame_states"].shape == (6, 58)
+    assert sidecars["frame_states"].dtype == np.float32
+    assert sidecars["frame_to_run"].dtype == np.int64
+    assert sidecars["frame_unit_hint"].dtype == np.int64
+    np.testing.assert_array_equal(
+        sidecars["frame_to_run"],
+        np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_unit_hint"],
+        np.asarray([1, 1, 57, 57, 2, 2], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_speech_prob"],
+        np.asarray([1.0, 1.0, 0.0, 0.0, 1.0, 1.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_valid"],
+        np.ones((6,), dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_weight"],
+        np.ones((6,), dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_states"][np.arange(6), sidecars["frame_unit_hint"]],
+        np.ones((6,), dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        sidecars["frame_states"].sum(axis=1),
+        np.ones((6,), dtype=np.float32),
+    )
 
 
 def test_attach_unit_log_prior_to_source_cache_maps_vocab_prior_to_runs():

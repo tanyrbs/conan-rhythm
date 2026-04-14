@@ -1,0 +1,5 @@
+base_config: egs/overrides/rhythm_v3_gate3_learned.yaml
+
+# Compatibility shim: upstream references this filename directly.
+# The maintained local Gate-3 learned profile lives in rhythm_v3_gate3_learned.yaml
+# so we keep this thin alias rather than duplicating settings and risking drift.

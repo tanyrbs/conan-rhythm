@@ -260,15 +260,99 @@ def cumulative_drift(prefix_offset: Any) -> torch.Tensor:
     return valid.abs().mean()
 
 
+def speech_weighted_mae(
+    pred: Any,
+    target: Any,
+    speech_mask: Any,
+    weight: Any | None = None,
+) -> torch.Tensor:
+    pred_t = _to_tensor(pred).float()
+    target_t = _to_tensor(target).float()
+    speech_t = _to_tensor(speech_mask).float()
+    if weight is None:
+        metric_weight = speech_t
+    else:
+        metric_weight = _to_tensor(weight).float() * speech_t
+    diff = (pred_t - target_t).abs() * metric_weight
+    return diff.sum() / metric_weight.sum().clamp_min(1.0)
+
+
+def residual_bias_share(
+    residual_pred: Any,
+    speech_mask: Any,
+    coarse_scalar: Any,
+) -> torch.Tensor:
+    residual = _to_tensor(residual_pred).float()
+    speech = _to_tensor(speech_mask).float()
+    coarse = _to_tensor(coarse_scalar).float().reshape(-1)
+
+    if residual.ndim == 1:
+        residual = residual.unsqueeze(0)
+    if speech.ndim == 1:
+        speech = speech.unsqueeze(0)
+
+    batch = min(int(residual.size(0)), int(speech.size(0)))
+    residual = residual[:batch]
+    speech = speech[:batch]
+    if coarse.numel() == 1 and batch > 1:
+        coarse = coarse.repeat(batch)
+    else:
+        coarse = coarse[:batch]
+    speech_mass = speech.sum(dim=1).clamp_min(1.0)
+    mean_r = (residual * speech).sum(dim=1) / speech_mass
+    rms_r = torch.sqrt(((residual.square() * speech).sum(dim=1) / speech_mass).clamp_min(1.0e-8))
+    denom = coarse.abs() + rms_r + 1.0e-6
+    return (mean_r.abs() / denom).mean()
+
+
+def local_silence_delta_share(
+    pred_learned: Any,
+    pred_coarse: Any,
+    speech_mask: Any,
+    silence_mask: Any,
+) -> torch.Tensor:
+    learned = _to_tensor(pred_learned).float()
+    coarse = _to_tensor(pred_coarse).float()
+    speech = _to_tensor(speech_mask).float()
+    silence = _to_tensor(silence_mask).float()
+    delta = (learned - coarse).abs()
+    num = (delta * silence).sum()
+    den = (delta * speech).sum().clamp_min(1.0e-6)
+    return num / den
+
+
+def residual_target_stats(
+    residual_pred: Any,
+    residual_target: Any,
+    speech_mask: Any,
+) -> dict[str, float]:
+    pred = _to_tensor(residual_pred).float().reshape(-1)
+    target = _to_tensor(residual_target).float().reshape(-1)
+    speech = _to_tensor(speech_mask).float().reshape(-1) > 0.5
+    valid = speech & torch.isfinite(pred) & torch.isfinite(target)
+    if not bool(valid.any().item()):
+        return {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+            "count": 0.0,
+        }
+    return tempo_explainability(pred[valid], target[valid])
+
+
 __all__ = [
     "budget_hit_rate",
     "build_duration_v3_metric_sections",
     "build_rhythm_metric_dict",
     "build_rhythm_metric_sections",
     "cumulative_drift",
+    "local_silence_delta_share",
     "prefix_discrepancy",
+    "residual_bias_share",
+    "residual_target_stats",
     "same_text_gap",
     "silence_leakage",
+    "speech_weighted_mae",
     "monotonic_triplet_table",
     "tempo_explainability",
     "tempo_tie_rate",

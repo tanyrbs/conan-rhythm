@@ -1,0 +1,4679 @@
+{
+  "config": {
+    "config": "egs/local_arctic_rhythm_v3_quick.yaml",
+    "binary_data_dir": "C:/project/00-2 project/data/binary/vc_6layer",
+    "processed_data_dir": "C:/project/00-2 project/data/processed/vc",
+    "silent_token": 57,
+    "separator_aware": true,
+    "emit_silence_runs": true,
+    "drop_edge_runs_for_g": 1,
+    "min_prompt_speech_ratio": 0.6,
+    "min_prompt_ref_len_sec": 3.0,
+    "max_prompt_ref_len_sec": 8.0,
+    "configured_min_boundary_confidence_for_g": 0.5,
+    "thresholds": [
+      0.5,
+      0.45,
+      0.4,
+      0.35,
+      0.3,
+      0.0
+    ]
+  },
+  "rows": [
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0009",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0009",
+      "num_prompt_runs": 14,
+      "prompt_ref_len_sec": 3.640000104904175,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 14.0,
+      "valid_run_count": 14.0,
+      "closed_run_count": 14.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.45548373460769653,
+      "bc_mean": 0.24170413613319397,
+      "bc_p90": 0.3895998239517213,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 12.0,
+          "support_seed_count": 14.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8910967707633972,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7776861190795898,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7776861190795898,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7776861190795898,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 12.0,
+          "support_seed_count": 14.0,
+          "clean_count": 14.0,
+          "support_weight": 9.867162704467773,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0010",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0010",
+      "num_prompt_runs": 16,
+      "prompt_ref_len_sec": 3.880000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 16.0,
+      "valid_run_count": 16.0,
+      "closed_run_count": 16.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.46970659494400024,
+      "bc_mean": 0.24055150151252747,
+      "bc_p90": 0.3381930738687515,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 14.0,
+          "support_seed_count": 16.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.893941342830658,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.893941342830658,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.893941342830658,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.893941342830658,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 14.0,
+          "support_seed_count": 16.0,
+          "clean_count": 16.0,
+          "support_weight": 11.5344877243042,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0011",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0011",
+      "num_prompt_runs": 29,
+      "prompt_ref_len_sec": 3.759999990463257,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 29.0,
+      "valid_run_count": 29.0,
+      "closed_run_count": 29.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.47843247652053833,
+      "bc_mean": 0.24243701994419098,
+      "bc_p90": 0.3828791856765747,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8956865072250366,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7845419645309448,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.637420892715454,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5027546882629395,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 29.0,
+          "support_weight": 21.058956146240234,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0012",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0012",
+      "num_prompt_runs": 32,
+      "prompt_ref_len_sec": 4.300000190734863,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 32.0,
+      "valid_run_count": 32.0,
+      "closed_run_count": 32.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48099470138549805,
+      "bc_mean": 0.24265499413013458,
+      "bc_p90": 0.38451772332191475,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8961989283561707,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7816896438598633,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6610066890716553,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.389081954956055,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 32.0,
+          "support_weight": 23.339275360107422,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0013",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0013",
+      "num_prompt_runs": 54,
+      "prompt_ref_len_sec": 5.920000076293945,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 54.0,
+      "valid_run_count": 54.0,
+      "closed_run_count": 54.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.467710018157959,
+      "bc_mean": 0.24311895668506622,
+      "bc_p90": 0.37203181982040406,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 52.0,
+          "support_seed_count": 54.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8935419917106628,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7849019765853882,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.427933216094971,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 10.0,
+          "support_seed_count": 12.0,
+          "clean_count": 12.0,
+          "support_weight": 8.777451515197754,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 52.0,
+          "support_seed_count": 54.0,
+          "clean_count": 54.0,
+          "support_weight": 38.99956512451172,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0014",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0014",
+      "num_prompt_runs": 21,
+      "prompt_ref_len_sec": 3.5999999046325684,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 21.0,
+      "valid_run_count": 21.0,
+      "closed_run_count": 21.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4546239376068115,
+      "bc_mean": 0.24349263310432434,
+      "bc_p90": 0.4156951904296875,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 19.0,
+          "support_seed_count": 21.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8909248113632202,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8909248113632202,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7758080959320068,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7758080959320068,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 19.0,
+          "support_seed_count": 21.0,
+          "clean_count": 21.0,
+          "support_weight": 14.861739158630371,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0015",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0015",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for aba_train_arctic_a0015: ref_len_sec=2.400 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "aba_train_arctic_a0016",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0016",
+      "num_prompt_runs": 33,
+      "prompt_ref_len_sec": 5.71999979019165,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 33.0,
+      "valid_run_count": 33.0,
+      "closed_run_count": 33.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48157015442848206,
+      "bc_mean": 0.24223069846630096,
+      "bc_p90": 0.3667278647422791,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 31.0,
+          "support_seed_count": 33.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7864960432052612,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8818449378013611,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7562732696533203,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.38416862487793,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 31.0,
+          "support_seed_count": 33.0,
+          "clean_count": 33.0,
+          "support_weight": 24.440589904785156,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0009",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0009",
+      "num_prompt_runs": 32,
+      "prompt_ref_len_sec": 3.240000009536743,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 32.0,
+      "valid_run_count": 32.0,
+      "closed_run_count": 32.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4838966727256775,
+      "bc_mean": 0.24196863174438477,
+      "bc_p90": 0.38630436658859263,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8967793583869934,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8835633993148804,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.503612756729126,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.369104862213135,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 32.0,
+          "support_weight": 23.86493682861328,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0010",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0010",
+      "num_prompt_runs": 22,
+      "prompt_ref_len_sec": 3.2200000286102295,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 22.0,
+      "valid_run_count": 22.0,
+      "closed_run_count": 22.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.39740821719169617,
+      "bc_mean": 0.24588294327259064,
+      "bc_p90": 0.37762986123561865,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7551493644714355,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.496331214904785,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 22.0,
+          "support_weight": 16.369579315185547,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0011",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0011",
+      "num_prompt_runs": 29,
+      "prompt_ref_len_sec": 3.180000066757202,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 29.0,
+      "valid_run_count": 29.0,
+      "closed_run_count": 29.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4535996913909912,
+      "bc_mean": 0.2443113774061203,
+      "bc_p90": 0.398428463935852,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8907199501991272,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8907199501991272,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.519432306289673,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.3800764083862305,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 29.0,
+          "support_weight": 21.05044174194336,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0012",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0012",
+      "num_prompt_runs": 27,
+      "prompt_ref_len_sec": 3.059999942779541,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 27.0,
+      "valid_run_count": 27.0,
+      "closed_run_count": 27.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4739750027656555,
+      "bc_mean": 0.24280299246311188,
+      "bc_p90": 0.36975919008255015,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 25.0,
+          "support_seed_count": 27.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8947950005531311,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8858325481414795,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8858325481414795,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.4832699298858643,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 25.0,
+          "support_seed_count": 27.0,
+          "clean_count": 27.0,
+          "support_weight": 19.035602569580078,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0013",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0013",
+      "num_prompt_runs": 52,
+      "prompt_ref_len_sec": 4.21999979019165,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 52.0,
+      "valid_run_count": 52.0,
+      "closed_run_count": 52.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4876514673233032,
+      "bc_mean": 0.24240072071552277,
+      "bc_p90": 0.3587126135826111,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 50.0,
+          "support_seed_count": 52.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7895984649658203,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8975303173065186,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.416550636291504,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 10.0,
+          "support_seed_count": 12.0,
+          "clean_count": 12.0,
+          "support_weight": 8.750560760498047,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 50.0,
+          "support_seed_count": 52.0,
+          "clean_count": 52.0,
+          "support_weight": 37.57071304321289,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0014",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0014",
+      "num_prompt_runs": 37,
+      "prompt_ref_len_sec": 3.700000047683716,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 37.0,
+      "valid_run_count": 37.0,
+      "closed_run_count": 37.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4760564863681793,
+      "bc_mean": 0.24463409185409546,
+      "bc_p90": 0.3763491988182068,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 35.0,
+          "support_seed_count": 37.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8952113389968872,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8952113389968872,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6459784507751465,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.3947434425354,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 35.0,
+          "support_seed_count": 37.0,
+          "clean_count": 37.0,
+          "support_weight": 27.00995635986328,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0015",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0015",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for asi_train_arctic_a0015: ref_len_sec=2.160 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "asi_train_arctic_a0016",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0016",
+      "num_prompt_runs": 35,
+      "prompt_ref_len_sec": 3.9600000381469727,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 35.0,
+      "valid_run_count": 35.0,
+      "closed_run_count": 35.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.47512999176979065,
+      "bc_mean": 0.24373015761375427,
+      "bc_p90": 0.37899506092071533,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8950260281562805,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7830500602722168,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.4986720085144043,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.2310380935668945,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 35.0,
+          "support_weight": 25.864242553710938,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0009",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0009",
+      "num_prompt_runs": 30,
+      "prompt_ref_len_sec": 3.2200000286102295,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 30.0,
+      "valid_run_count": 30.0,
+      "closed_run_count": 30.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.43994754552841187,
+      "bc_mean": 0.24365068972110748,
+      "bc_p90": 0.40195153355598456,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8879895210266113,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.660557985305786,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.406923770904541,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 30.0,
+          "support_weight": 20.447574615478516,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0010",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0010",
+      "num_prompt_runs": 29,
+      "prompt_ref_len_sec": 3.3399999141693115,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 29.0,
+      "valid_run_count": 29.0,
+      "closed_run_count": 29.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4632170796394348,
+      "bc_mean": 0.244330495595932,
+      "bc_p90": 0.40945576429367064,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8926434516906738,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.659360647201538,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.659360647201538,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.659360647201538,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 29.0,
+          "support_weight": 20.490825653076172,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0011",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0011",
+      "num_prompt_runs": 12,
+      "prompt_ref_len_sec": 3.119999885559082,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 12.0,
+      "valid_run_count": 12.0,
+      "closed_run_count": 12.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.431007981300354,
+      "bc_mean": 0.2446087747812271,
+      "bc_p90": 0.4115258485078812,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 10.0,
+          "support_seed_count": 12.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 10.0,
+          "support_seed_count": 12.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7715480327606201,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7715480327606201,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7715480327606201,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 10.0,
+          "support_seed_count": 12.0,
+          "clean_count": 12.0,
+          "support_weight": 7.899797439575195,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0012",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0012",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for bdl_train_arctic_a0012: ref_len_sec=2.960 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0013",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0013",
+      "num_prompt_runs": 35,
+      "prompt_ref_len_sec": 4.21999979019165,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 35.0,
+      "valid_run_count": 35.0,
+      "closed_run_count": 35.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.46809494495391846,
+      "bc_mean": 0.2431146651506424,
+      "bc_p90": 0.4169996857643128,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8936190009117126,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6693763732910156,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6693763732910156,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5325403213500977,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 35.0,
+          "support_weight": 26.206941604614258,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0014",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0014",
+      "num_prompt_runs": 28,
+      "prompt_ref_len_sec": 3.059999942779541,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 28.0,
+      "valid_run_count": 28.0,
+      "closed_run_count": 28.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4799047112464905,
+      "bc_mean": 0.24241335690021515,
+      "bc_p90": 0.3849499344825745,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 26.0,
+          "support_seed_count": 28.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.895980954170227,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8853840827941895,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7661257982254028,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.497321367263794,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 26.0,
+          "support_seed_count": 28.0,
+          "clean_count": 28.0,
+          "support_weight": 20.816877365112305,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0015",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0015",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for bdl_train_arctic_a0015: ref_len_sec=1.840 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "bdl_train_arctic_a0016",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0016",
+      "num_prompt_runs": 39,
+      "prompt_ref_len_sec": 3.880000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 39.0,
+      "valid_run_count": 39.0,
+      "closed_run_count": 39.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48869752883911133,
+      "bc_mean": 0.2411702275276184,
+      "bc_p90": 0.35725730657577515,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 37.0,
+          "support_seed_count": 39.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8977395296096802,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8863036632537842,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.656064748764038,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.408303737640381,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 37.0,
+          "support_seed_count": 39.0,
+          "clean_count": 39.0,
+          "support_weight": 27.179821014404297,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0009",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0009",
+      "num_prompt_runs": 35,
+      "prompt_ref_len_sec": 3.0999999046325684,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 35.0,
+      "valid_run_count": 35.0,
+      "closed_run_count": 35.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4618605375289917,
+      "bc_mean": 0.24323460459709167,
+      "bc_p90": 0.39754632711410526,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7835190296173096,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7743334770202637,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.541311502456665,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.403997898101807,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 33.0,
+          "support_seed_count": 35.0,
+          "clean_count": 35.0,
+          "support_weight": 24.041473388671875,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0010",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0010",
+      "num_prompt_runs": 23,
+      "prompt_ref_len_sec": 3.0199999809265137,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 23.0,
+      "valid_run_count": 23.0,
+      "closed_run_count": 23.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.44979703426361084,
+      "bc_mean": 0.24486662447452545,
+      "bc_p90": 0.3893917679786682,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 21.0,
+          "support_seed_count": 23.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 21.0,
+          "support_seed_count": 23.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.779791235923767,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.765819787979126,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.632331371307373,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 21.0,
+          "support_seed_count": 23.0,
+          "clean_count": 23.0,
+          "support_weight": 15.958077430725098,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0011",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0011",
+      "num_prompt_runs": 38,
+      "prompt_ref_len_sec": 3.059999942779541,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 38.0,
+      "valid_run_count": 38.0,
+      "closed_run_count": 38.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48032841086387634,
+      "bc_mean": 0.24256309866905212,
+      "bc_p90": 0.38356597423553473,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8960657119750977,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8805313110351562,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.257704257965088,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 7.0,
+          "support_seed_count": 9.0,
+          "clean_count": 9.0,
+          "support_weight": 6.145444869995117,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 38.0,
+          "support_weight": 26.887033462524414,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0012",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0012",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_train_arctic_a0012: ref_len_sec=2.840 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0013",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0013",
+      "num_prompt_runs": 44,
+      "prompt_ref_len_sec": 3.5399999618530273,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 44.0,
+      "valid_run_count": 44.0,
+      "closed_run_count": 44.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.480445921421051,
+      "bc_mean": 0.24321506917476654,
+      "bc_p90": 0.36623168289661406,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 42.0,
+          "support_seed_count": 44.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7865195274353027,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8960891962051392,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.3883466720581055,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 8.0,
+          "support_seed_count": 10.0,
+          "clean_count": 10.0,
+          "support_weight": 7.012653350830078,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 42.0,
+          "support_seed_count": 44.0,
+          "clean_count": 44.0,
+          "support_weight": 32.28578567504883,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0014",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0014",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_train_arctic_a0014: ref_len_sec=2.900 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0015",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0015",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_train_arctic_a0015: ref_len_sec=1.880 outside [3.0, 8.0]"
+    },
+    {
+      "split": "train",
+      "item_name": "slt_train_arctic_a0016",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0016",
+      "num_prompt_runs": 40,
+      "prompt_ref_len_sec": 3.5799999237060547,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 40.0,
+      "valid_run_count": 40.0,
+      "closed_run_count": 40.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4876706600189209,
+      "bc_mean": 0.24218051135540009,
+      "bc_p90": 0.35046324133872986,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 38.0,
+          "support_seed_count": 40.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8975341320037842,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8896780014038086,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6577842235565186,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.251899719238281,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 38.0,
+          "support_seed_count": 40.0,
+          "clean_count": 40.0,
+          "support_weight": 27.72650146484375,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "aba_valid_arctic_a0001",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0001",
+      "num_prompt_runs": 15,
+      "prompt_ref_len_sec": 3.2200000286102295,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 15.0,
+      "valid_run_count": 15.0,
+      "closed_run_count": 15.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4473732113838196,
+      "bc_mean": 0.24497705698013306,
+      "bc_p90": 0.39057207107543945,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 13.0,
+          "support_seed_count": 15.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 13.0,
+          "support_seed_count": 15.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7725260257720947,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8830513954162598,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.64213228225708,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 13.0,
+          "support_seed_count": 15.0,
+          "clean_count": 15.0,
+          "support_weight": 10.39783000946045,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "aba_valid_arctic_a0002",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0002",
+      "num_prompt_runs": 30,
+      "prompt_ref_len_sec": 5.239999771118164,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 30.0,
+      "valid_run_count": 30.0,
+      "closed_run_count": 30.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.447027325630188,
+      "bc_mean": 0.2418852001428604,
+      "bc_p90": 0.4267008602619171,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7787737846374512,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6495492458343506,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6495492458343506,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 28.0,
+          "support_seed_count": 30.0,
+          "clean_count": 30.0,
+          "support_weight": 23.378292083740234,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "aba_valid_arctic_a0003",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0003",
+      "num_prompt_runs": 16,
+      "prompt_ref_len_sec": 4.940000057220459,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 16.0,
+      "valid_run_count": 16.0,
+      "closed_run_count": 16.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4490956664085388,
+      "bc_mean": 0.2457444667816162,
+      "bc_p90": 0.37871502339839935,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 14.0,
+          "support_seed_count": 16.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 14.0,
+          "support_seed_count": 16.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8898191452026367,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8770030736923218,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.75148606300354,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 14.0,
+          "support_seed_count": 16.0,
+          "clean_count": 16.0,
+          "support_weight": 11.276199340820312,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "aba_valid_arctic_a0004",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0004",
+      "num_prompt_runs": 8,
+      "prompt_ref_len_sec": 3.380000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 8.0,
+      "valid_run_count": 8.0,
+      "closed_run_count": 8.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.3810945153236389,
+      "bc_mean": 0.25061139464378357,
+      "bc_p90": 0.37928385138511655,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.751920461654663,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.751920461654663,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.119040489196777,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "asi_valid_arctic_a0001",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0001",
+      "num_prompt_runs": 29,
+      "prompt_ref_len_sec": 3.119999885559082,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 29.0,
+      "valid_run_count": 29.0,
+      "closed_run_count": 29.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.46511340141296387,
+      "bc_mean": 0.24280087649822235,
+      "bc_p90": 0.3923557043075561,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7831902503967285,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8824453353881836,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.759922981262207,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5182008743286133,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 27.0,
+          "support_seed_count": 29.0,
+          "clean_count": 29.0,
+          "support_weight": 20.759193420410156,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "asi_valid_arctic_a0002",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0002",
+      "num_prompt_runs": 26,
+      "prompt_ref_len_sec": 3.4800000190734863,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 26.0,
+      "valid_run_count": 26.0,
+      "closed_run_count": 26.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48054009675979614,
+      "bc_mean": 0.2395866960287094,
+      "bc_p90": 0.3714572936296463,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 24.0,
+          "support_seed_count": 26.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8961080312728882,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8896640539169312,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8896640539169312,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.775871992111206,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 24.0,
+          "support_seed_count": 26.0,
+          "clean_count": 26.0,
+          "support_weight": 18.8059024810791,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "asi_valid_arctic_a0003",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0003",
+      "num_prompt_runs": 27,
+      "prompt_ref_len_sec": 3.7200000286102295,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 27.0,
+      "valid_run_count": 27.0,
+      "closed_run_count": 27.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4562862813472748,
+      "bc_mean": 0.24492540955543518,
+      "bc_p90": 0.41568104028701786,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 25.0,
+          "support_seed_count": 27.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8912572860717773,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7668614387512207,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7668614387512207,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.386462211608887,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 25.0,
+          "support_seed_count": 27.0,
+          "clean_count": 27.0,
+          "support_weight": 19.964561462402344,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "asi_valid_arctic_a0004",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0004",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for asi_valid_arctic_a0004: ref_len_sec=2.500 outside [3.0, 8.0]"
+    },
+    {
+      "split": "valid",
+      "item_name": "bdl_valid_arctic_a0001",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0001",
+      "num_prompt_runs": 26,
+      "prompt_ref_len_sec": 3.240000009536743,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 26.0,
+      "valid_run_count": 26.0,
+      "closed_run_count": 26.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4580467939376831,
+      "bc_mean": 0.24357984960079193,
+      "bc_p90": 0.37263648211956024,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 24.0,
+          "support_seed_count": 26.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7821996212005615,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8905901908874512,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8905901908874512,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6396448612213135,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 24.0,
+          "support_seed_count": 26.0,
+          "clean_count": 26.0,
+          "support_weight": 18.813383102416992,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "bdl_valid_arctic_a0002",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0002",
+      "num_prompt_runs": 14,
+      "prompt_ref_len_sec": 3.380000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 14.0,
+      "valid_run_count": 14.0,
+      "closed_run_count": 14.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.47284334897994995,
+      "bc_mean": 0.24170009791851044,
+      "bc_p90": 0.33551012575626377,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 12.0,
+          "support_seed_count": 14.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.894568681716919,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.894568681716919,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.894568681716919,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.894568681716919,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 12.0,
+          "support_seed_count": 14.0,
+          "clean_count": 14.0,
+          "support_weight": 9.262774467468262,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "bdl_valid_arctic_a0003",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0003",
+      "num_prompt_runs": 38,
+      "prompt_ref_len_sec": 3.380000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 38.0,
+      "valid_run_count": 38.0,
+      "closed_run_count": 38.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4560919404029846,
+      "bc_mean": 0.2449091374874115,
+      "bc_p90": 0.3962671458721161,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8912184238433838,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8816950917243958,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.286003112792969,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 7.0,
+          "support_seed_count": 9.0,
+          "clean_count": 9.0,
+          "support_weight": 6.149538993835449,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 38.0,
+          "support_weight": 28.439420700073242,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "bdl_valid_arctic_a0004",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0004",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for bdl_valid_arctic_a0004: ref_len_sec=2.580 outside [3.0, 8.0]"
+    },
+    {
+      "split": "valid",
+      "item_name": "slt_valid_arctic_a0001",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0001",
+      "num_prompt_runs": 37,
+      "prompt_ref_len_sec": 3.359999895095825,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 37.0,
+      "valid_run_count": 37.0,
+      "closed_run_count": 37.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4637618064880371,
+      "bc_mean": 0.24111397564411163,
+      "bc_p90": 0.42033076882362364,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 35.0,
+          "support_seed_count": 37.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8920555114746094,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.660674571990967,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5323774814605713,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.402313232421875,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 35.0,
+          "support_seed_count": 37.0,
+          "clean_count": 37.0,
+          "support_weight": 25.39873695373535,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "slt_valid_arctic_a0002",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0002",
+      "num_prompt_runs": 38,
+      "prompt_ref_len_sec": 3.759999990463257,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 38.0,
+      "valid_run_count": 38.0,
+      "closed_run_count": 38.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.46386799216270447,
+      "bc_mean": 0.24471107125282288,
+      "bc_p90": 0.38200543522834784,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8927736282348633,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8881173133850098,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 5.0,
+          "support_seed_count": 7.0,
+          "clean_count": 7.0,
+          "support_weight": 4.404436111450195,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 8.0,
+          "support_seed_count": 10.0,
+          "clean_count": 10.0,
+          "support_weight": 7.0076398849487305,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 36.0,
+          "support_seed_count": 38.0,
+          "clean_count": 38.0,
+          "support_weight": 26.336692810058594,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "slt_valid_arctic_a0003",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0003",
+      "num_prompt_runs": 33,
+      "prompt_ref_len_sec": 3.2200000286102295,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 33.0,
+      "valid_run_count": 33.0,
+      "closed_run_count": 33.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4570503234863281,
+      "bc_mean": 0.24407266080379486,
+      "bc_p90": 0.3909472763538361,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 31.0,
+          "support_seed_count": 33.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.781708002090454,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.886037290096283,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6409220695495605,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.236812591552734,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 31.0,
+          "support_seed_count": 33.0,
+          "clean_count": 33.0,
+          "support_weight": 23.529170989990234,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "valid",
+      "item_name": "slt_valid_arctic_a0004",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0004",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_valid_arctic_a0004: ref_len_sec=2.520 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "aba_test_arctic_a0005",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0005",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for aba_test_arctic_a0005: ref_len_sec=2.400 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "aba_test_arctic_a0006",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0006",
+      "num_prompt_runs": 24,
+      "prompt_ref_len_sec": 4.760000228881836,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 24.0,
+      "valid_run_count": 24.0,
+      "closed_run_count": 24.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4723670482635498,
+      "bc_mean": 0.24362175166606903,
+      "bc_p90": 0.370206356048584,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 22.0,
+          "support_seed_count": 24.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8944734334945679,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7794532775878906,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7693564891815186,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5264134407043457,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 22.0,
+          "support_seed_count": 24.0,
+          "clean_count": 24.0,
+          "support_weight": 17.17240333557129,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "aba_test_arctic_a0007",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0007",
+      "num_prompt_runs": 44,
+      "prompt_ref_len_sec": 5.0,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 44.0,
+      "valid_run_count": 44.0,
+      "closed_run_count": 44.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4904465973377228,
+      "bc_mean": 0.24102617800235748,
+      "bc_p90": 0.3524286180734635,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 42.0,
+          "support_seed_count": 44.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7901811599731445,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7901811599731445,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6636741161346436,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 7.0,
+          "support_seed_count": 9.0,
+          "clean_count": 9.0,
+          "support_weight": 6.127123832702637,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 42.0,
+          "support_seed_count": 44.0,
+          "clean_count": 44.0,
+          "support_weight": 32.3036994934082,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "aba_test_arctic_a0008",
+      "speaker": "aba",
+      "prompt_id": "arctic_a0008",
+      "num_prompt_runs": 11,
+      "prompt_ref_len_sec": 3.180000066757202,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 11.0,
+      "valid_run_count": 11.0,
+      "closed_run_count": 11.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4555119276046753,
+      "bc_mean": 0.24244919419288635,
+      "bc_p90": 0.36887502670288086,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 9.0,
+          "support_seed_count": 11.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8911023736000061,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8911023736000061,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7648773193359375,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7648773193359375,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 9.0,
+          "support_seed_count": 11.0,
+          "clean_count": 11.0,
+          "support_weight": 7.644291877746582,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "asi_test_arctic_a0005",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0005",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for asi_test_arctic_a0005: ref_len_sec=1.440 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "asi_test_arctic_a0006",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0006",
+      "num_prompt_runs": 24,
+      "prompt_ref_len_sec": 3.380000114440918,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 24.0,
+      "valid_run_count": 24.0,
+      "closed_run_count": 24.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4582352638244629,
+      "bc_mean": 0.24579398334026337,
+      "bc_p90": 0.38800070583820345,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 22.0,
+          "support_seed_count": 24.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8916470408439636,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8916470408439636,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.755728006362915,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5250332355499268,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 22.0,
+          "support_seed_count": 24.0,
+          "clean_count": 24.0,
+          "support_weight": 18.36783218383789,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "asi_test_arctic_a0007",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0007",
+      "num_prompt_runs": 25,
+      "prompt_ref_len_sec": 3.059999942779541,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 25.0,
+      "valid_run_count": 25.0,
+      "closed_run_count": 25.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4579682946205139,
+      "bc_mean": 0.24371376633644104,
+      "bc_p90": 0.3909909248352052,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 23.0,
+          "support_seed_count": 25.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8915936946868896,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8841622471809387,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8841622471809387,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.5070881843566895,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 23.0,
+          "support_seed_count": 25.0,
+          "clean_count": 25.0,
+          "support_weight": 17.97095489501953,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "asi_test_arctic_a0008",
+      "speaker": "asi",
+      "prompt_id": "arctic_a0008",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for asi_test_arctic_a0008: ref_len_sec=2.320 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "bdl_test_arctic_a0005",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0005",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for bdl_test_arctic_a0005: ref_len_sec=1.300 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "bdl_test_arctic_a0006",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0006",
+      "num_prompt_runs": 22,
+      "prompt_ref_len_sec": 3.059999942779541,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 22.0,
+      "valid_run_count": 22.0,
+      "closed_run_count": 22.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.45253199338912964,
+      "bc_mean": 0.24516834318637848,
+      "bc_p90": 0.36318103671073915,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.890506386756897,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 2.0,
+          "clean_count": 2.0,
+          "support_weight": 1.7793165445327759,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.761614441871643,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 4.0,
+          "support_seed_count": 6.0,
+          "clean_count": 6.0,
+          "support_weight": 3.515913486480713,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 20.0,
+          "support_seed_count": 22.0,
+          "clean_count": 22.0,
+          "support_weight": 16.367158889770508,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "bdl_test_arctic_a0007",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0007",
+      "num_prompt_runs": 32,
+      "prompt_ref_len_sec": 3.0399999618530273,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 32.0,
+      "valid_run_count": 32.0,
+      "closed_run_count": 32.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.4916529655456543,
+      "bc_mean": 0.24008898437023163,
+      "bc_p90": 0.32396964728832256,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8983306288719177,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8820169568061829,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 1.0,
+          "support_seed_count": 3.0,
+          "clean_count": 3.0,
+          "support_weight": 0.8820169568061829,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7476221323013306,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 30.0,
+          "support_seed_count": 32.0,
+          "clean_count": 32.0,
+          "support_weight": 22.697595596313477,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "bdl_test_arctic_a0008",
+      "speaker": "bdl",
+      "prompt_id": "arctic_a0008",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for bdl_test_arctic_a0008: ref_len_sec=2.200 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "slt_test_arctic_a0005",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0005",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_test_arctic_a0005: ref_len_sec=1.500 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "slt_test_arctic_a0006",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0006",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_test_arctic_a0006: ref_len_sec=2.980 outside [3.0, 8.0]"
+    },
+    {
+      "split": "test",
+      "item_name": "slt_test_arctic_a0007",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0007",
+      "num_prompt_runs": 40,
+      "prompt_ref_len_sec": 3.0199999809265137,
+      "prompt_ref_len_valid": 1.0,
+      "prompt_speech_ratio": 1.0,
+      "prompt_speech_ratio_valid": 1.0,
+      "speech_run_count": 40.0,
+      "valid_run_count": 40.0,
+      "closed_run_count": 40.0,
+      "open_run_count": 0.0,
+      "source_silence_run_count": 0.0,
+      "sep_nonzero_count": 0,
+      "raw_silent_token_count": 0,
+      "bc_max": 0.48631376028060913,
+      "bc_mean": 0.24128377437591553,
+      "bc_p90": 0.3891630649566651,
+      "threshold_stats": {
+        "0.50": {
+          "threshold": 0.5,
+          "support_count": 38.0,
+          "support_seed_count": 40.0,
+          "clean_count": 0.0,
+          "support_weight": 0.0,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 0.0
+        },
+        "0.45": {
+          "threshold": 0.45,
+          "support_count": 1.0,
+          "support_seed_count": 1.0,
+          "clean_count": 1.0,
+          "support_weight": 0.8972627520561218,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.40": {
+          "threshold": 0.4,
+          "support_count": 2.0,
+          "support_seed_count": 4.0,
+          "clean_count": 4.0,
+          "support_weight": 1.7806460857391357,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.35": {
+          "threshold": 0.35,
+          "support_count": 3.0,
+          "support_seed_count": 5.0,
+          "clean_count": 5.0,
+          "support_weight": 2.6578619480133057,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.30": {
+          "threshold": 0.3,
+          "support_count": 6.0,
+          "support_seed_count": 8.0,
+          "clean_count": 8.0,
+          "support_weight": 5.258975982666016,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        },
+        "0.00": {
+          "threshold": 0.0,
+          "support_count": 38.0,
+          "support_seed_count": 40.0,
+          "clean_count": 40.0,
+          "support_weight": 27.055435180664062,
+          "support_domain_valid": 1.0,
+          "g_domain_valid": 1.0
+        }
+      }
+    },
+    {
+      "split": "test",
+      "item_name": "slt_test_arctic_a0008",
+      "speaker": "slt",
+      "prompt_id": "arctic_a0008",
+      "error": "minimal_v1 prompt conditioning rejects prompt conditioning for slt_test_arctic_a0008: ref_len_sec=2.300 outside [3.0, 8.0]"
+    }
+  ],
+  "summary": {
+    "overall": {
+      "item_count": 64,
+      "ok_items": 46,
+      "error_items": 18,
+      "raw_silent_token_items": 0,
+      "sep_nonzero_items": 0,
+      "source_silence_items": 0,
+      "ref_len_valid_items": 46,
+      "speech_ratio_valid_items": 46,
+      "bc_max_mean": 0.4637049734592438,
+      "bc_max_p50": 0.46449069678783417,
+      "bc_max_p95": 0.4884408116340637,
+      "configured_threshold": "0.50",
+      "support_positive_items": 46,
+      "clean_positive_items": 0,
+      "g_domain_valid_items": 0,
+      "threshold_sweep": {
+        "0.50": {
+          "support_positive_items": 46,
+          "clean_positive_items": 0,
+          "g_domain_valid_items": 0,
+          "mean_support_count": 27.2391300201416,
+          "mean_clean_count": 0.0
+        },
+        "0.45": {
+          "support_positive_items": 46,
+          "clean_positive_items": 38,
+          "g_domain_valid_items": 38,
+          "mean_support_count": 4.043478488922119,
+          "mean_clean_count": 1.08695650100708
+        },
+        "0.40": {
+          "support_positive_items": 46,
+          "clean_positive_items": 44,
+          "g_domain_valid_items": 44,
+          "mean_support_count": 1.97826087474823,
+          "mean_clean_count": 2.67391300201416
+        },
+        "0.35": {
+          "support_positive_items": 46,
+          "clean_positive_items": 46,
+          "g_domain_valid_items": 46,
+          "mean_support_count": 2.7173912525177,
+          "mean_clean_count": 4.456521511077881
+        },
+        "0.30": {
+          "support_positive_items": 46,
+          "clean_positive_items": 46,
+          "g_domain_valid_items": 46,
+          "mean_support_count": 4.4347825050354,
+          "mean_clean_count": 6.26086950302124
+        },
+        "0.00": {
+          "support_positive_items": 46,
+          "clean_positive_items": 46,
+          "g_domain_valid_items": 46,
+          "mean_support_count": 27.2391300201416,
+          "mean_clean_count": 29.2391300201416
+        }
+      }
+    },
+    "splits": {
+      "train": {
+        "item_count": 32,
+        "ok_items": 25,
+        "error_items": 7,
+        "raw_silent_token_items": 0,
+        "sep_nonzero_items": 0,
+        "source_silence_items": 0,
+        "ref_len_valid_items": 25,
+        "speech_ratio_valid_items": 25,
+        "bc_max_mean": 0.46668845415115356,
+        "bc_max_p50": 0.4739750027656555,
+        "bc_max_p95": 0.48766682147979734,
+        "configured_threshold": "0.50",
+        "support_positive_items": 25,
+        "clean_positive_items": 0,
+        "g_domain_valid_items": 0,
+        "threshold_sweep": {
+          "0.50": {
+            "support_positive_items": 25,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "mean_support_count": 29.440000534057617,
+            "mean_clean_count": 0.0
+          },
+          "0.45": {
+            "support_positive_items": 25,
+            "clean_positive_items": 21,
+            "g_domain_valid_items": 21,
+            "mean_support_count": 4.159999847412109,
+            "mean_clean_count": 1.0800000429153442
+          },
+          "0.40": {
+            "support_positive_items": 25,
+            "clean_positive_items": 24,
+            "g_domain_valid_items": 24,
+            "mean_support_count": 2.240000009536743,
+            "mean_clean_count": 2.799999952316284
+          },
+          "0.35": {
+            "support_positive_items": 25,
+            "clean_positive_items": 25,
+            "g_domain_valid_items": 25,
+            "mean_support_count": 3.0799999237060547,
+            "mean_clean_count": 4.840000152587891
+          },
+          "0.30": {
+            "support_positive_items": 25,
+            "clean_positive_items": 25,
+            "g_domain_valid_items": 25,
+            "mean_support_count": 4.800000190734863,
+            "mean_clean_count": 6.639999866485596
+          },
+          "0.00": {
+            "support_positive_items": 25,
+            "clean_positive_items": 25,
+            "g_domain_valid_items": 25,
+            "mean_support_count": 29.440000534057617,
+            "mean_clean_count": 31.440000534057617
+          }
+        },
+        "speaker_slices": {
+          "aba": {
+            "item_count": 7,
+            "ok_items": 7,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 7,
+            "speech_ratio_valid_items": 7,
+            "bc_max_mean": 0.4697888195514679,
+            "bc_max_p50": 0.46970659494400024,
+            "bc_max_p95": 0.4813975185155869,
+            "configured_threshold": "0.50",
+            "support_positive_items": 7,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 7,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 26.428571701049805,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 1.1428571939468384,
+                "mean_clean_count": 1.4285714626312256
+              },
+              "0.40": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 1.5714285373687744,
+                "mean_clean_count": 2.4285714626312256
+              },
+              "0.35": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 2.5714285373687744,
+                "mean_clean_count": 4.0
+              },
+              "0.30": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 4.142857074737549,
+                "mean_clean_count": 5.857142925262451
+              },
+              "0.00": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 26.428571701049805,
+                "mean_clean_count": 28.428571701049805
+              }
+            }
+          },
+          "asi": {
+            "item_count": 7,
+            "ok_items": 7,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 7,
+            "speech_ratio_valid_items": 7,
+            "bc_max_mean": 0.4639596939086914,
+            "bc_max_p50": 0.47512999176979065,
+            "bc_max_p95": 0.4865250289440155,
+            "configured_threshold": "0.50",
+            "support_positive_items": 7,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 7,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 31.428571701049805,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 7,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 3.857142925262451,
+                "mean_clean_count": 1.0
+              },
+              "0.40": {
+                "support_positive_items": 7,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 3.857142925262451,
+                "mean_clean_count": 2.4285714626312256
+              },
+              "0.35": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 3.2857143878936768,
+                "mean_clean_count": 5.285714149475098
+              },
+              "0.30": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 5.5714287757873535,
+                "mean_clean_count": 7.5714287757873535
+              },
+              "0.00": {
+                "support_positive_items": 7,
+                "clean_positive_items": 7,
+                "g_domain_valid_items": 7,
+                "mean_support_count": 31.428571701049805,
+                "mean_clean_count": 33.42856979370117
+              }
+            }
+          },
+          "bdl": {
+            "item_count": 6,
+            "ok_items": 6,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 6,
+            "speech_ratio_valid_items": 6,
+            "bc_max_mean": 0.4618116319179535,
+            "bc_max_p50": 0.46565601229667664,
+            "bc_max_p95": 0.4864993244409561,
+            "configured_threshold": "0.50",
+            "support_positive_items": 6,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 6,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 26.83333396911621,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 6,
+                "clean_positive_items": 4,
+                "g_domain_valid_items": 4,
+                "mean_support_count": 7.0,
+                "mean_clean_count": 0.6666666865348816
+              },
+              "0.40": {
+                "support_positive_items": 6,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 1.8333333730697632,
+                "mean_clean_count": 3.5
+              },
+              "0.35": {
+                "support_positive_items": 6,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 2.6666667461395264,
+                "mean_clean_count": 4.333333492279053
+              },
+              "0.30": {
+                "support_positive_items": 6,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 3.8333332538604736,
+                "mean_clean_count": 5.5
+              },
+              "0.00": {
+                "support_positive_items": 6,
+                "clean_positive_items": 6,
+                "g_domain_valid_items": 6,
+                "mean_support_count": 26.83333396911621,
+                "mean_clean_count": 28.83333396911621
+              }
+            }
+          },
+          "slt": {
+            "item_count": 5,
+            "ok_items": 5,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 5,
+            "speech_ratio_valid_items": 5,
+            "bc_max_mean": 0.47202053666114807,
+            "bc_max_p50": 0.48032841086387634,
+            "bc_max_p95": 0.4862257122993469,
+            "configured_threshold": "0.50",
+            "support_positive_items": 5,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 5,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 34.0,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 5,
+                "clean_positive_items": 4,
+                "g_domain_valid_items": 4,
+                "mean_support_count": 5.400000095367432,
+                "mean_clean_count": 1.2000000476837158
+              },
+              "0.40": {
+                "support_positive_items": 5,
+                "clean_positive_items": 5,
+                "g_domain_valid_items": 5,
+                "mean_support_count": 1.399999976158142,
+                "mean_clean_count": 3.0
+              },
+              "0.35": {
+                "support_positive_items": 5,
+                "clean_positive_items": 5,
+                "g_domain_valid_items": 5,
+                "mean_support_count": 4.0,
+                "mean_clean_count": 6.0
+              },
+              "0.30": {
+                "support_positive_items": 5,
+                "clean_positive_items": 5,
+                "g_domain_valid_items": 5,
+                "mean_support_count": 5.800000190734863,
+                "mean_clean_count": 7.800000190734863
+              },
+              "0.00": {
+                "support_positive_items": 5,
+                "clean_positive_items": 5,
+                "g_domain_valid_items": 5,
+                "mean_support_count": 34.0,
+                "mean_clean_count": 36.0
+              }
+            }
+          }
+        }
+      },
+      "valid": {
+        "item_count": 16,
+        "ok_items": 13,
+        "error_items": 3,
+        "raw_silent_token_items": 0,
+        "sep_nonzero_items": 0,
+        "source_silence_items": 0,
+        "ref_len_valid_items": 13,
+        "speech_ratio_valid_items": 13,
+        "bc_max_mean": 0.45370715856552124,
+        "bc_max_p50": 0.4570503234863281,
+        "bc_max_p95": 0.4759220480918884,
+        "configured_threshold": "0.50",
+        "support_positive_items": 13,
+        "clean_positive_items": 0,
+        "g_domain_valid_items": 0,
+        "threshold_sweep": {
+          "0.50": {
+            "support_positive_items": 13,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "mean_support_count": 23.923076629638672,
+            "mean_clean_count": 0.0
+          },
+          "0.45": {
+            "support_positive_items": 13,
+            "clean_positive_items": 9,
+            "g_domain_valid_items": 9,
+            "mean_support_count": 5.615384578704834,
+            "mean_clean_count": 1.076923131942749
+          },
+          "0.40": {
+            "support_positive_items": 13,
+            "clean_positive_items": 12,
+            "g_domain_valid_items": 12,
+            "mean_support_count": 1.7692307233810425,
+            "mean_clean_count": 2.692307710647583
+          },
+          "0.35": {
+            "support_positive_items": 13,
+            "clean_positive_items": 13,
+            "g_domain_valid_items": 13,
+            "mean_support_count": 2.461538553237915,
+            "mean_clean_count": 4.153846263885498
+          },
+          "0.30": {
+            "support_positive_items": 13,
+            "clean_positive_items": 13,
+            "g_domain_valid_items": 13,
+            "mean_support_count": 3.923076868057251,
+            "mean_clean_count": 5.769230842590332
+          },
+          "0.00": {
+            "support_positive_items": 13,
+            "clean_positive_items": 13,
+            "g_domain_valid_items": 13,
+            "mean_support_count": 23.923076629638672,
+            "mean_clean_count": 25.923076629638672
+          }
+        },
+        "speaker_slices": {
+          "aba": {
+            "item_count": 4,
+            "ok_items": 4,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 4,
+            "speech_ratio_valid_items": 4,
+            "bc_max_mean": 0.4311476945877075,
+            "bc_max_p50": 0.4472002685070038,
+            "bc_max_p95": 0.4488372981548309,
+            "configured_threshold": "0.50",
+            "support_positive_items": 4,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 4,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 15.25,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 4,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 15.25,
+                "mean_clean_count": 0.0
+              },
+              "0.40": {
+                "support_positive_items": 4,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 2.75,
+                "mean_clean_count": 1.75
+              },
+              "0.35": {
+                "support_positive_items": 4,
+                "clean_positive_items": 4,
+                "g_domain_valid_items": 4,
+                "mean_support_count": 1.75,
+                "mean_clean_count": 3.25
+              },
+              "0.30": {
+                "support_positive_items": 4,
+                "clean_positive_items": 4,
+                "g_domain_valid_items": 4,
+                "mean_support_count": 2.5,
+                "mean_clean_count": 4.0
+              },
+              "0.00": {
+                "support_positive_items": 4,
+                "clean_positive_items": 4,
+                "g_domain_valid_items": 4,
+                "mean_support_count": 15.25,
+                "mean_clean_count": 17.25
+              }
+            }
+          },
+          "asi": {
+            "item_count": 3,
+            "ok_items": 3,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 3,
+            "speech_ratio_valid_items": 3,
+            "bc_max_mean": 0.4673132598400116,
+            "bc_max_p50": 0.46511340141296387,
+            "bc_max_p95": 0.4789974272251129,
+            "configured_threshold": "0.50",
+            "support_positive_items": 3,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 3,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 25.33333396911621,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.3333333730697632,
+                "mean_clean_count": 1.3333333730697632
+              },
+              "0.40": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.3333333730697632,
+                "mean_clean_count": 3.3333332538604736
+              },
+              "0.35": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.6666666269302368,
+                "mean_clean_count": 3.6666667461395264
+              },
+              "0.30": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 3.6666667461395264,
+                "mean_clean_count": 5.666666507720947
+              },
+              "0.00": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 25.33333396911621,
+                "mean_clean_count": 27.33333396911621
+              }
+            }
+          },
+          "bdl": {
+            "item_count": 3,
+            "ok_items": 3,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 3,
+            "speech_ratio_valid_items": 3,
+            "bc_max_mean": 0.46232736110687256,
+            "bc_max_p50": 0.4580467939376831,
+            "bc_max_p95": 0.47136369347572327,
+            "configured_threshold": "0.50",
+            "support_positive_items": 3,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 3,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 24.0,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.3333333730697632,
+                "mean_clean_count": 1.3333333730697632
+              },
+              "0.40": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.0,
+                "mean_clean_count": 2.3333332538604736
+              },
+              "0.35": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 2.6666667461395264,
+                "mean_clean_count": 4.0
+              },
+              "0.30": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 3.6666667461395264,
+                "mean_clean_count": 5.666666507720947
+              },
+              "0.00": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 24.0,
+                "mean_clean_count": 26.0
+              }
+            }
+          },
+          "slt": {
+            "item_count": 3,
+            "ok_items": 3,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 3,
+            "speech_ratio_valid_items": 3,
+            "bc_max_mean": 0.46156004071235657,
+            "bc_max_p50": 0.4637618064880371,
+            "bc_max_p95": 0.4638573735952377,
+            "configured_threshold": "0.50",
+            "support_positive_items": 3,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 3,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 34.0,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.3333333730697632,
+                "mean_clean_count": 2.0
+              },
+              "0.40": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.6666666269302368,
+                "mean_clean_count": 3.6666667461395264
+              },
+              "0.35": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 4.0,
+                "mean_clean_count": 6.0
+              },
+              "0.30": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 6.333333492279053,
+                "mean_clean_count": 8.333333015441895
+              },
+              "0.00": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 34.0,
+                "mean_clean_count": 36.0
+              }
+            }
+          }
+        }
+      },
+      "test": {
+        "item_count": 16,
+        "ok_items": 8,
+        "error_items": 8,
+        "raw_silent_token_items": 0,
+        "sep_nonzero_items": 0,
+        "source_silence_items": 0,
+        "ref_len_valid_items": 8,
+        "speech_ratio_valid_items": 8,
+        "bc_max_mean": 0.4706284999847412,
+        "bc_max_p50": 0.46530115604400635,
+        "bc_max_p95": 0.49123073667287825,
+        "configured_threshold": "0.50",
+        "support_positive_items": 8,
+        "clean_positive_items": 0,
+        "g_domain_valid_items": 0,
+        "threshold_sweep": {
+          "0.50": {
+            "support_positive_items": 8,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "mean_support_count": 25.75,
+            "mean_clean_count": 0.0
+          },
+          "0.45": {
+            "support_positive_items": 8,
+            "clean_positive_items": 8,
+            "g_domain_valid_items": 8,
+            "mean_support_count": 1.125,
+            "mean_clean_count": 1.125
+          },
+          "0.40": {
+            "support_positive_items": 8,
+            "clean_positive_items": 8,
+            "g_domain_valid_items": 8,
+            "mean_support_count": 1.5,
+            "mean_clean_count": 2.25
+          },
+          "0.35": {
+            "support_positive_items": 8,
+            "clean_positive_items": 8,
+            "g_domain_valid_items": 8,
+            "mean_support_count": 2.0,
+            "mean_clean_count": 3.75
+          },
+          "0.30": {
+            "support_positive_items": 8,
+            "clean_positive_items": 8,
+            "g_domain_valid_items": 8,
+            "mean_support_count": 4.125,
+            "mean_clean_count": 5.875
+          },
+          "0.00": {
+            "support_positive_items": 8,
+            "clean_positive_items": 8,
+            "g_domain_valid_items": 8,
+            "mean_support_count": 25.75,
+            "mean_clean_count": 27.75
+          }
+        },
+        "speaker_slices": {
+          "aba": {
+            "item_count": 3,
+            "ok_items": 3,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 3,
+            "speech_ratio_valid_items": 3,
+            "bc_max_mean": 0.4727751910686493,
+            "bc_max_p50": 0.4723670482635498,
+            "bc_max_p95": 0.48863864243030547,
+            "configured_threshold": "0.50",
+            "support_positive_items": 3,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 3,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 24.33333396911621,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.3333333730697632,
+                "mean_clean_count": 1.3333333730697632
+              },
+              "0.40": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 1.6666666269302368,
+                "mean_clean_count": 1.6666666269302368
+              },
+              "0.35": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 2.3333332538604736,
+                "mean_clean_count": 3.6666667461395264
+              },
+              "0.30": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 4.333333492279053,
+                "mean_clean_count": 5.666666507720947
+              },
+              "0.00": {
+                "support_positive_items": 3,
+                "clean_positive_items": 3,
+                "g_domain_valid_items": 3,
+                "mean_support_count": 24.33333396911621,
+                "mean_clean_count": 26.33333396911621
+              }
+            }
+          },
+          "asi": {
+            "item_count": 2,
+            "ok_items": 2,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 2,
+            "speech_ratio_valid_items": 2,
+            "bc_max_mean": 0.4581017792224884,
+            "bc_max_p50": 0.4581017792224884,
+            "bc_max_p95": 0.45822191536426543,
+            "configured_threshold": "0.50",
+            "support_positive_items": 2,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 2,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 22.5,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.0,
+                "mean_clean_count": 1.0
+              },
+              "0.40": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.0,
+                "mean_clean_count": 2.0
+              },
+              "0.35": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.5,
+                "mean_clean_count": 3.5
+              },
+              "0.30": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 4.0,
+                "mean_clean_count": 6.0
+              },
+              "0.00": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 22.5,
+                "mean_clean_count": 24.5
+              }
+            }
+          },
+          "bdl": {
+            "item_count": 2,
+            "ok_items": 2,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 2,
+            "speech_ratio_valid_items": 2,
+            "bc_max_mean": 0.47209247946739197,
+            "bc_max_p50": 0.47209247946739197,
+            "bc_max_p95": 0.4896969169378281,
+            "configured_threshold": "0.50",
+            "support_positive_items": 2,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 2,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 25.0,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.0,
+                "mean_clean_count": 1.0
+              },
+              "0.40": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.5,
+                "mean_clean_count": 2.5
+              },
+              "0.35": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 1.5,
+                "mean_clean_count": 3.5
+              },
+              "0.30": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 3.0,
+                "mean_clean_count": 5.0
+              },
+              "0.00": {
+                "support_positive_items": 2,
+                "clean_positive_items": 2,
+                "g_domain_valid_items": 2,
+                "mean_support_count": 25.0,
+                "mean_clean_count": 27.0
+              }
+            }
+          },
+          "slt": {
+            "item_count": 1,
+            "ok_items": 1,
+            "error_items": 0,
+            "raw_silent_token_items": 0,
+            "sep_nonzero_items": 0,
+            "source_silence_items": 0,
+            "ref_len_valid_items": 1,
+            "speech_ratio_valid_items": 1,
+            "bc_max_mean": 0.48631376028060913,
+            "bc_max_p50": 0.48631376028060913,
+            "bc_max_p95": 0.48631376028060913,
+            "configured_threshold": "0.50",
+            "support_positive_items": 1,
+            "clean_positive_items": 0,
+            "g_domain_valid_items": 0,
+            "threshold_sweep": {
+              "0.50": {
+                "support_positive_items": 1,
+                "clean_positive_items": 0,
+                "g_domain_valid_items": 0,
+                "mean_support_count": 38.0,
+                "mean_clean_count": 0.0
+              },
+              "0.45": {
+                "support_positive_items": 1,
+                "clean_positive_items": 1,
+                "g_domain_valid_items": 1,
+                "mean_support_count": 1.0,
+                "mean_clean_count": 1.0
+              },
+              "0.40": {
+                "support_positive_items": 1,
+                "clean_positive_items": 1,
+                "g_domain_valid_items": 1,
+                "mean_support_count": 2.0,
+                "mean_clean_count": 4.0
+              },
+              "0.35": {
+                "support_positive_items": 1,
+                "clean_positive_items": 1,
+                "g_domain_valid_items": 1,
+                "mean_support_count": 3.0,
+                "mean_clean_count": 5.0
+              },
+              "0.30": {
+                "support_positive_items": 1,
+                "clean_positive_items": 1,
+                "g_domain_valid_items": 1,
+                "mean_support_count": 6.0,
+                "mean_clean_count": 8.0
+              },
+              "0.00": {
+                "support_positive_items": 1,
+                "clean_positive_items": 1,
+                "g_domain_valid_items": 1,
+                "mean_support_count": 38.0,
+                "mean_clean_count": 40.0
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

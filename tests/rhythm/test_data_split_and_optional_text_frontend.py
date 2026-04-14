@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -140,6 +142,56 @@ class ConanBinarizerSplitTests(unittest.TestCase):
                 binarizer = ConanBinarizer(processed_data_dir=str(processed_dir))
                 with self.assertRaisesRegex(BinarizationError, "overlap"):
                     binarizer.load_meta_data()
+
+    def test_process_item_passes_v3_frontend_cache_settings_into_rhythm_bundle(self) -> None:
+        item = {
+            "item_name": "speaker_demo_0001",
+            "wav_fn": "dummy.wav",
+            "hubert": "1 57 2 2",
+        }
+        captured = {}
+
+        def _fake_process_audio(wav_fn, res, binarization_args):
+            res.update(
+                {
+                    "mel": np.zeros((4, 80), dtype=np.float32),
+                    "wav": np.zeros((4 * 320,), dtype=np.float16),
+                    "sec": 0.08,
+                    "len": 4,
+                }
+            )
+            return res["wav"], res["mel"]
+
+        def _fake_bundle(**kwargs):
+            captured.update(kwargs)
+            return {"dummy_bundle_key": np.asarray([1], dtype=np.int64)}
+
+        with mock.patch.dict(
+            "data_gen.conan_binarizer.hparams",
+            {
+                "hop_size": 320,
+                "silent_token": 57,
+                "content_vocab_size": 102,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_debounce_min_run_frames": 2,
+                "binarization_args": {"with_rhythm_cache": True},
+            },
+            clear=True,
+        ):
+            with mock.patch.object(ConanBinarizer, "process_audio", side_effect=_fake_process_audio):
+                with mock.patch.object(ConanBinarizer, "_resolve_spk_id", return_value=3):
+                    with mock.patch("data_gen.conan_binarizer.build_item_rhythm_bundle", side_effect=_fake_bundle):
+                        processed = ConanBinarizer.process_item(
+                            dict(item),
+                            {"with_rhythm_cache": True},
+                            processed_data_dir="unused",
+                        )
+
+        self.assertIsNotNone(processed)
+        self.assertIn("dummy_bundle_key", processed)
+        self.assertTrue(captured["emit_silence_runs"])
+        self.assertEqual(captured["debounce_min_run_frames"], 2)
+        self.assertEqual(captured["frame_state_vocab_size"], 102)
 
 
 class MetadataScriptDefaultsTests(unittest.TestCase):

@@ -545,6 +545,8 @@ def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empt
     assert torch.count_nonzero(memory.prompt_log_residual[1]).item() == 0
     assert torch.allclose(memory.global_rate[1], torch.zeros_like(memory.global_rate[1]))
     assert torch.allclose(memory.prompt_g_domain_valid, torch.tensor([[1.0], [0.0]], dtype=torch.float32))
+    assert torch.allclose(memory.prompt_g_invalid_low_speech_ratio, torch.tensor([[0.0], [1.0]], dtype=torch.float32))
+    assert torch.allclose(memory.prompt_g_invalid_clean, torch.tensor([[0.0], [1.0]], dtype=torch.float32))
     assert torch.allclose(
         memory.prompt_g_support_ratio_vs_valid,
         torch.tensor([[0.5], [0.0]], dtype=torch.float32),

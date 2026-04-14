@@ -57,6 +57,35 @@ class RhythmDatasetSampleAssembler:
             if isinstance(scalar, (bytes, bytearray)):
                 scalar = scalar.decode("utf-8")
             return "" if scalar is None else str(scalar)
+        build_optional_collate_spec = getattr(self.owner, "_build_optional_collate_spec", None)
+        if callable(build_optional_collate_spec):
+            spec = build_optional_collate_spec()
+            dtype_name = spec.get(key, (None, None))[0]
+            if dtype_name == "object":
+                if isinstance(value, torch.Tensor):
+                    return value.detach().cpu().numpy()
+                if isinstance(value, np.ndarray):
+                    if value.dtype != object:
+                        return value
+                    scalar = _extract_object_scalar(value)
+                    if value.size <= 1:
+                        if isinstance(scalar, (bytes, bytearray)):
+                            scalar = scalar.decode("utf-8")
+                        return "" if scalar is None else str(scalar)
+                    return value
+                if isinstance(value, (list, tuple)):
+                    arr = np.asarray(value)
+                    if arr.dtype != object:
+                        return arr
+                    scalar = _extract_object_scalar(arr)
+                    if arr.size <= 1:
+                        if isinstance(scalar, (bytes, bytearray)):
+                            scalar = scalar.decode("utf-8")
+                        return "" if scalar is None else str(scalar)
+                    return list(value)
+                if isinstance(value, (bytes, bytearray)):
+                    return value.decode("utf-8")
+                return value
         if key in {
             "ref_rhythm_trace",
             "ref_phrase_trace",

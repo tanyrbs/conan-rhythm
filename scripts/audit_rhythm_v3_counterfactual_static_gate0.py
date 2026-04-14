@@ -1,0 +1,595 @@
+from __future__ import annotations
+
+import argparse
+import copy
+import csv
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from utils.commons.single_thread_env import apply_single_thread_env
+
+apply_single_thread_env()
+
+import numpy as np
+import torch
+
+from modules.Conan.rhythm_v3.g_stats import summarize_global_rate_support
+from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3
+from tasks.Conan.dataset import ConanDataset
+from tasks.Conan.rhythm.duration_v3.metrics import tempo_explainability
+from utils.commons.hparams import set_hparams
+from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, derive_record, weighted_median_np
+from utils.plot.rhythm_v3_viz.review import compute_source_global_rate_for_analysis
+
+
+DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick.yaml"
+DEFAULT_SPLITS = "train,valid,test"
+DEFAULT_CANDIDATES = "57,71,72,63"
+DEFAULT_DROP_EDGES = "1,3"
+DEFAULT_OUTPUT_CSV = "tmp/gate1_boundary_audit/counterfactual_static_gate0_rows.csv"
+DEFAULT_OUTPUT_JSON = "tmp/gate1_boundary_audit/counterfactual_static_gate0_report.json"
+DEFAULT_RELAXED_HPARAMS = (
+    "use_pitch_embed=False,"
+    "rhythm_v3_gate_quality_strict=False,"
+    "rhythm_v3_minimal_v1_profile=False,"
+    "rhythm_v3_strict_minimal_claim_profile=False,"
+    "rhythm_v3_alignment_prefilter_bad_samples=False,"
+    "rhythm_v3_alignment_local_margin_p10_min=0.0,"
+    "rhythm_v3_alignment_mean_local_confidence_speech_min=0.0,"
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0,"
+    "rhythm_v3_disallow_same_text_reference=False"
+)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Pair-level static Gate 0 audit for counterfactual prompt-side silent-token candidates."
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG, help="Config YAML.")
+    parser.add_argument("--splits", default=DEFAULT_SPLITS, help="Comma-separated dataset splits.")
+    parser.add_argument("--candidate_tokens", default=DEFAULT_CANDIDATES, help="Comma-separated candidate token ids.")
+    parser.add_argument("--drop_edge_runs", default=DEFAULT_DROP_EDGES, help="Comma-separated drop_edge_runs_for_g values.")
+    parser.add_argument("--binary_data_dir", default="", help="Optional binary_data_dir override.")
+    parser.add_argument("--processed_data_dir", default="", help="Optional processed_data_dir override.")
+    parser.add_argument("--hparams", default="", help="Extra hparam overrides appended after relaxed defaults.")
+    parser.add_argument("--output_csv", default=DEFAULT_OUTPUT_CSV, help="Where to write flattened pair rows.")
+    parser.add_argument("--output_json", default=DEFAULT_OUTPUT_JSON, help="Where to write the structured report.")
+    return parser.parse_args()
+
+
+def _compose_hparams_override(args: argparse.Namespace) -> str:
+    parts = [DEFAULT_RELAXED_HPARAMS]
+    if args.binary_data_dir:
+        parts.append(f"binary_data_dir='{args.binary_data_dir}'")
+    if args.processed_data_dir:
+        parts.append(f"processed_data_dir='{args.processed_data_dir}'")
+    if args.hparams:
+        parts.append(args.hparams)
+    return ",".join(part for part in parts if part)
+
+
+def _parse_splits(text: str) -> list[str]:
+    splits = [part.strip() for part in str(text).split(",") if part.strip()]
+    if not splits:
+        raise ValueError("At least one split is required.")
+    return splits
+
+
+def _parse_int_list(text: str) -> list[int]:
+    values: list[int] = []
+    seen: set[int] = set()
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = int(part)
+        if value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    if not values:
+        raise ValueError("At least one integer value is required.")
+    return values
+
+
+def _prompt_tensor(key: str, value: Any) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        if key == "prompt_content_units" or key.endswith("_vocab_size"):
+            return value.long()
+        return value.float()
+    if key == "prompt_content_units" or key.endswith("_vocab_size"):
+        return torch.as_tensor(value, dtype=torch.long)
+    return torch.as_tensor(value, dtype=torch.float32)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _safe_float(value: Any, default: float = float("nan")) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = sorted({key for row in rows for key in row.keys()})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _is_valid_ref_len(value: float, *, min_ref_len_sec: float, max_ref_len_sec: float) -> bool:
+    return bool(np.isfinite(value) and value >= min_ref_len_sec and value <= max_ref_len_sec)
+
+
+def _build_counterfactual_conditioning(
+    *,
+    ds: ConanDataset,
+    raw_ref_item: dict[str, Any],
+    candidate_token: int,
+) -> dict[str, Any]:
+    hubert = np.asarray(raw_ref_item["hubert"])
+    cache = build_source_rhythm_cache_v3(
+        hubert,
+        silent_token=int(candidate_token),
+        separator_aware=bool(ds.hparams.get("rhythm_separator_aware", True)),
+        tail_open_units=int(ds.hparams.get("rhythm_tail_open_units", 1)),
+        emit_silence_runs=False,
+        debounce_min_run_frames=int(ds.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
+        phrase_boundary_threshold=float(ds.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+        unit_prior_path=None,
+    )
+    prompt_item = dict(raw_ref_item)
+    prompt_item.update(cache)
+    return ds._build_reference_prompt_unit_conditioning(
+        prompt_item,
+        target_mode=ds._resolve_rhythm_target_mode(),
+    )
+
+
+def _compute_pair_row(
+    *,
+    ds: ConanDataset,
+    split: str,
+    fetch_index: int,
+    candidate_token: int,
+    drop_edge_runs: int,
+) -> dict[str, Any]:
+    pair_entry = getattr(ds, "_pair_entries", [])[fetch_index]
+    src_local = int(pair_entry["src_local"])
+    ref_local = int(pair_entry["ref_local"])
+    tgt_local = int(pair_entry["target_local"])
+
+    raw_source_item = ds._get_raw_item_cached(src_local)
+    raw_ref_item = ds._get_raw_item_cached(ref_local)
+    raw_target_item = ds._get_raw_item_cached(tgt_local)
+
+    sample = copy.deepcopy(ds[fetch_index])
+    sample["_raw_item"] = raw_source_item
+    sample["_raw_ref_item"] = raw_ref_item
+    sample["_raw_paired_target_item"] = raw_target_item
+    sample["ref_item_id"] = int(ref_local)
+
+    same_text_reference = int(ds._same_rhythm_text(raw_source_item, raw_ref_item))
+    same_text_target = int(ds._same_rhythm_text(raw_source_item, raw_target_item))
+    same_speaker_reference = int(
+        str(raw_source_item.get("speaker", "")).strip() == str(raw_ref_item.get("speaker", "")).strip()
+    )
+    same_speaker_target = int(
+        str(raw_source_item.get("speaker", "")).strip() == str(raw_target_item.get("speaker", "")).strip()
+    )
+    try:
+        conditioning = _build_counterfactual_conditioning(
+            ds=ds,
+            raw_ref_item=raw_ref_item,
+            candidate_token=int(candidate_token),
+        )
+    except Exception as exc:
+        return {
+            "split": str(split),
+            "sample_id": f"{split}:{fetch_index}",
+            "pair_id": int(pair_entry.get("group_id", fetch_index)),
+            "src_id": str(raw_source_item.get("item_name", "")),
+            "src_item_name": str(raw_source_item.get("item_name", "")),
+            "ref_item_name": str(raw_ref_item.get("item_name", "")),
+            "tgt_item_name": str(raw_target_item.get("item_name", "")),
+            "src_spk": str(raw_source_item.get("speaker", "")),
+            "ref_spk": str(raw_ref_item.get("speaker", "")),
+            "tgt_spk": str(raw_target_item.get("speaker", "")),
+            "candidate_token": int(candidate_token),
+            "drop_edge_runs_for_g": int(drop_edge_runs),
+            "same_text_reference": same_text_reference,
+            "same_text_target": same_text_target,
+            "same_speaker_reference": same_speaker_reference,
+            "same_speaker_target": same_speaker_target,
+            "g_ref": float("nan"),
+            "g_ref_status": f"conditioning_error:{type(exc).__name__}",
+            "g_src_utt": float("nan"),
+            "g_src_prefix_mean": float("nan"),
+            "g_src_status": "conditioning_error",
+            "delta_g": float("nan"),
+            "delta_g_ref_minus_src_utt": float("nan"),
+            "delta_g_ref_minus_src_prefix": float("nan"),
+            "c_star": float("nan"),
+            "zbar_sp_star": float("nan"),
+            "support_seed_count": 0.0,
+            "support_count": 0.0,
+            "clean_count": 0.0,
+            "support_fraction": 0.0,
+            "edge_runs_dropped": 0.0,
+            "support_domain_valid": 0,
+            "g_domain_valid": 0,
+            "prompt_ref_len_sec": float("nan"),
+            "prompt_speech_ratio": float("nan"),
+            "speech_ratio_valid": 0,
+            "ref_len_valid": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    for key in list(sample.keys()):
+        if key.startswith("prompt_"):
+            sample.pop(key)
+    for key, value in conditioning.items():
+        sample[key] = _prompt_tensor(key, value)
+
+    batch = ds.collater([sample])
+    metadata = {
+        "sample_id": f"{split}:{fetch_index}",
+        "pair_id": int(pair_entry.get("group_id", fetch_index)),
+        "src_id": str(raw_source_item.get("item_name", "")),
+        "src_prompt_id": str(raw_source_item.get("item_name", "")),
+        "src_spk": str(raw_source_item.get("item_name", "")).split("_", 1)[0],
+        "ref_item_name": str(raw_ref_item.get("item_name", "")),
+        "ref_prompt_id": str(raw_ref_item.get("item_name", "")),
+        "ref_spk": str(raw_ref_item.get("item_name", "")).split("_", 1)[0],
+        "tgt_prompt_id": str(raw_target_item.get("item_name", "")),
+        "tgt_spk": str(raw_target_item.get("item_name", "")).split("_", 1)[0],
+        "same_text_reference": same_text_reference,
+        "same_text_target": same_text_target,
+        "same_speaker_reference": same_speaker_reference,
+        "same_speaker_target": same_speaker_target,
+    }
+    record = build_debug_records_from_batch(sample=batch, metadata=metadata)[0]
+    derived = derive_record(record)
+
+    speech_mask = np.asarray(derived.speech_mask, dtype=np.float32).reshape(-1)
+    speech_valid = speech_mask > 0.5
+    source_valid_mask = (
+        np.asarray(record.unit_mask, dtype=np.float32).reshape(-1)
+        if record.unit_mask is not None
+        else np.ones_like(speech_mask, dtype=np.float32)
+    )
+    target_logstretch = None if derived.target_logstretch is None else np.asarray(derived.target_logstretch, dtype=np.float32).reshape(-1)
+    source_rate_seq = None if derived.source_rate_seq is None else np.asarray(derived.source_rate_seq, dtype=np.float32).reshape(-1)
+
+    g_variant = str(ds.hparams.get("rhythm_v3_g_variant", "raw_median"))
+    g_trim_ratio = float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2)
+    min_boundary_confidence = ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
+    if min_boundary_confidence is not None:
+        min_boundary_confidence = float(min_boundary_confidence)
+
+    prompt_duration_obs = np.asarray(conditioning["prompt_duration_obs"], dtype=np.float32).reshape(-1)
+    prompt_valid_mask = np.asarray(
+        conditioning.get("prompt_valid_mask", conditioning.get("prompt_unit_mask")),
+        dtype=np.float32,
+    ).reshape(-1)
+    prompt_speech_mask = np.asarray(conditioning["prompt_speech_mask"], dtype=np.float32).reshape(-1)
+    prompt_closed_mask = np.asarray(conditioning["prompt_closed_mask"], dtype=np.float32).reshape(-1)
+    prompt_boundary_confidence = np.asarray(conditioning["prompt_boundary_confidence"], dtype=np.float32).reshape(-1)
+    prompt_ref_len_sec = _safe_float(np.asarray(conditioning.get("prompt_ref_len_sec")).reshape(-1)[0] if conditioning.get("prompt_ref_len_sec") is not None else float("nan"))
+    prompt_speech_ratio = _safe_float(
+        np.asarray(conditioning.get("prompt_speech_ratio_scalar")).reshape(-1)[0]
+        if conditioning.get("prompt_speech_ratio_scalar") is not None
+        else float("nan")
+    )
+
+    support_stats = summarize_global_rate_support(
+        speech_mask=torch.as_tensor(prompt_speech_mask, dtype=torch.float32),
+        valid_mask=torch.as_tensor(prompt_valid_mask, dtype=torch.float32),
+        duration_obs=torch.as_tensor(prompt_duration_obs, dtype=torch.float32),
+        drop_edge_runs=int(drop_edge_runs),
+        min_speech_ratio=float(ds.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.6),
+        closed_mask=torch.as_tensor(prompt_closed_mask, dtype=torch.float32),
+        boundary_confidence=torch.as_tensor(prompt_boundary_confidence, dtype=torch.float32),
+        min_boundary_confidence=min_boundary_confidence,
+    )
+    g_ref, g_ref_status = compute_source_global_rate_for_analysis(
+        source_duration_obs=prompt_duration_obs,
+        source_speech_mask=prompt_speech_mask,
+        source_valid_mask=prompt_valid_mask,
+        g_variant=g_variant,
+        source_unit_ids=np.asarray(conditioning["prompt_content_units"], dtype=np.int64).reshape(-1),
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=int(drop_edge_runs),
+        source_closed_mask=prompt_closed_mask,
+        source_boundary_confidence=prompt_boundary_confidence,
+        min_boundary_confidence=min_boundary_confidence,
+        return_status=True,
+    )
+    g_src_utt, g_src_status = compute_source_global_rate_for_analysis(
+        source_duration_obs=record.source_duration_obs,
+        source_speech_mask=speech_mask,
+        source_valid_mask=source_valid_mask,
+        g_variant=g_variant,
+        source_unit_ids=record.source_content_units,
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=int(drop_edge_runs),
+        return_status=True,
+    )
+    delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
+    g_src_prefix_mean = float("nan")
+    if source_rate_seq is not None and bool(np.any(speech_valid)):
+        g_src_prefix_mean = float(np.nanmean(source_rate_seq[speech_valid]))
+    delta_g_ref_minus_src_prefix = (
+        float(g_ref - g_src_prefix_mean)
+        if np.isfinite(g_ref) and np.isfinite(g_src_prefix_mean)
+        else float("nan")
+    )
+
+    c_star = float("nan")
+    zbar_sp_star = float("nan")
+    if (
+        target_logstretch is not None
+        and source_rate_seq is not None
+        and np.isfinite(g_ref)
+        and bool(np.any(speech_valid))
+    ):
+        width = min(
+            int(target_logstretch.shape[0]),
+            int(source_rate_seq.shape[0]),
+            int(speech_mask.shape[0]),
+        )
+        target_logstretch = target_logstretch[:width]
+        source_rate_seq = source_rate_seq[:width]
+        speech_valid = speech_valid[:width]
+        confidence = None
+        if record.unit_confidence_coarse_tgt is not None:
+            confidence = np.asarray(record.unit_confidence_coarse_tgt, dtype=np.float32).reshape(-1)[:width]
+        elif record.unit_confidence_tgt is not None:
+            confidence = np.asarray(record.unit_confidence_tgt, dtype=np.float32).reshape(-1)[:width]
+        analytic_shift = (float(g_ref) - source_rate_seq).astype(np.float32)
+        residual = target_logstretch - analytic_shift
+        c_star = float(
+            weighted_median_np(
+                residual[speech_valid],
+                None if confidence is None else confidence[speech_valid],
+            )
+        )
+        zbar_sp_star = float(
+            weighted_median_np(
+                target_logstretch[speech_valid],
+                None if confidence is None else confidence[speech_valid],
+            )
+        )
+
+    min_prompt_speech_ratio = float(ds.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.6)
+    min_prompt_ref_len_sec = float(ds.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 3.0)
+    max_prompt_ref_len_sec = float(ds.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 8.0)
+    speech_ratio_valid = bool(np.isfinite(prompt_speech_ratio) and prompt_speech_ratio >= (min_prompt_speech_ratio - 1.0e-6))
+    ref_len_valid = _is_valid_ref_len(
+        prompt_ref_len_sec,
+        min_ref_len_sec=min_prompt_ref_len_sec,
+        max_ref_len_sec=max_prompt_ref_len_sec,
+    )
+    support_count = float(support_stats.support_count.reshape(-1)[0].item())
+    support_seed_count = float(support_stats.support_seed_count.reshape(-1)[0].item())
+    clean_count = float(support_stats.clean_count.reshape(-1)[0].item())
+    support_domain_valid = float(support_stats.domain_valid.reshape(-1)[0].item())
+    g_domain_valid = int(
+        support_count > 0.5
+        and clean_count > 0.5
+        and support_domain_valid > 0.5
+        and speech_ratio_valid
+        and ref_len_valid
+    )
+
+    return {
+        "split": split,
+        "fetch_index": int(fetch_index),
+        "pair_id": int(pair_entry.get("group_id", fetch_index)),
+        "src_item_name": str(raw_source_item.get("item_name", "")),
+        "ref_item_name": str(raw_ref_item.get("item_name", "")),
+        "tgt_item_name": str(raw_target_item.get("item_name", "")),
+        "src_spk": str(raw_source_item.get("speaker", "")),
+        "ref_spk": str(raw_ref_item.get("speaker", "")),
+        "tgt_spk": str(raw_target_item.get("speaker", "")),
+        "candidate_token": int(candidate_token),
+        "drop_edge_runs_for_g": int(drop_edge_runs),
+        "same_text_reference": int(metadata["same_text_reference"]),
+        "same_text_target": int(metadata["same_text_target"]),
+        "same_speaker_reference": int(metadata["same_speaker_reference"]),
+        "same_speaker_target": int(metadata["same_speaker_target"]),
+        "g_ref": float(g_ref),
+        "g_ref_status": str(g_ref_status),
+        "g_src_utt": float(g_src_utt),
+        "g_src_prefix_mean": float(g_src_prefix_mean),
+        "g_src_status": str(g_src_status),
+        "delta_g": float(delta_g),
+        "delta_g_ref_minus_src_utt": float(delta_g),
+        "delta_g_ref_minus_src_prefix": float(delta_g_ref_minus_src_prefix),
+        "c_star": float(c_star),
+        "zbar_sp_star": float(zbar_sp_star),
+        "support_seed_count": support_seed_count,
+        "support_count": support_count,
+        "clean_count": clean_count,
+        "support_fraction": float(support_stats.support_fraction.reshape(-1)[0].item()),
+        "edge_runs_dropped": float(support_stats.edge_runs_dropped.reshape(-1)[0].item()),
+        "support_domain_valid": support_domain_valid,
+        "g_domain_valid": int(g_domain_valid),
+        "prompt_ref_len_sec": float(prompt_ref_len_sec),
+        "prompt_speech_ratio": float(prompt_speech_ratio),
+        "speech_ratio_valid": int(speech_ratio_valid),
+        "ref_len_valid": int(ref_len_valid),
+    }
+
+
+def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    frame = rows
+
+    def _subset(predicate) -> list[dict[str, Any]]:
+        return [row for row in frame if predicate(row)]
+
+    def _metric(subset: list[dict[str, Any]], *, x_key: str, y_key: str) -> dict[str, float]:
+        if not subset:
+            return {
+                "spearman": float("nan"),
+                "robust_slope": float("nan"),
+                "r2_like": float("nan"),
+                "count": 0.0,
+            }
+        return tempo_explainability(
+            [row[x_key] for row in subset],
+            [row[y_key] for row in subset],
+        )
+
+    valid_rows = _subset(lambda row: int(row["g_domain_valid"]) > 0)
+    cross_rows = _subset(lambda row: int(row["same_text_reference"]) == 0)
+    valid_cross_rows = _subset(lambda row: int(row["g_domain_valid"]) > 0 and int(row["same_text_reference"]) == 0)
+    same_rows = _subset(lambda row: int(row["same_text_reference"]) > 0)
+
+    overall_signal = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    valid_signal = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    cross_signal = _metric(cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    valid_cross_signal = _metric(valid_cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    same_signal = _metric(same_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    overall_resid = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
+    valid_resid = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
+    valid_prefix_signal = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="zbar_sp_star")
+    return {
+        "candidate_token": int(frame[0]["candidate_token"]),
+        "drop_edge_runs_for_g": int(frame[0]["drop_edge_runs_for_g"]),
+        "item_count": len(frame),
+        "finite_pairs_signal": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["zbar_sp_star"])))),
+        "finite_pairs_residual": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["c_star"])))),
+        "g_domain_valid_items": int(sum(1 for row in frame if int(row["g_domain_valid"]) > 0)),
+        "same_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) > 0)),
+        "cross_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) == 0)),
+        "mean_support_count": float(np.mean([float(row["support_count"]) for row in frame])),
+        "mean_clean_count": float(np.mean([float(row["clean_count"]) for row in frame])),
+        "mean_prompt_speech_ratio": float(np.nanmean(np.asarray([row["prompt_speech_ratio"] for row in frame], dtype=np.float32))),
+        "overall_signal_spearman": float(overall_signal["spearman"]),
+        "overall_signal_robust_slope": float(overall_signal["robust_slope"]),
+        "overall_signal_r2_like": float(overall_signal["r2_like"]),
+        "overall_signal_count": float(overall_signal["count"]),
+        "valid_signal_spearman": float(valid_signal["spearman"]),
+        "valid_signal_robust_slope": float(valid_signal["robust_slope"]),
+        "valid_signal_r2_like": float(valid_signal["r2_like"]),
+        "valid_signal_count": float(valid_signal["count"]),
+        "cross_signal_spearman": float(cross_signal["spearman"]),
+        "cross_signal_robust_slope": float(cross_signal["robust_slope"]),
+        "cross_signal_r2_like": float(cross_signal["r2_like"]),
+        "cross_signal_count": float(cross_signal["count"]),
+        "valid_cross_signal_spearman": float(valid_cross_signal["spearman"]),
+        "valid_cross_signal_robust_slope": float(valid_cross_signal["robust_slope"]),
+        "valid_cross_signal_r2_like": float(valid_cross_signal["r2_like"]),
+        "valid_cross_signal_count": float(valid_cross_signal["count"]),
+        "same_signal_spearman": float(same_signal["spearman"]),
+        "same_signal_robust_slope": float(same_signal["robust_slope"]),
+        "same_signal_r2_like": float(same_signal["r2_like"]),
+        "same_signal_count": float(same_signal["count"]),
+        "overall_residual_spearman": float(overall_resid["spearman"]),
+        "overall_residual_robust_slope": float(overall_resid["robust_slope"]),
+        "overall_residual_r2_like": float(overall_resid["r2_like"]),
+        "overall_residual_count": float(overall_resid["count"]),
+        "valid_residual_spearman": float(valid_resid["spearman"]),
+        "valid_residual_robust_slope": float(valid_resid["robust_slope"]),
+        "valid_residual_r2_like": float(valid_resid["r2_like"]),
+        "valid_residual_count": float(valid_resid["count"]),
+        "valid_prefix_signal_spearman": float(valid_prefix_signal["spearman"]),
+        "valid_prefix_signal_robust_slope": float(valid_prefix_signal["robust_slope"]),
+        "valid_prefix_signal_r2_like": float(valid_prefix_signal["r2_like"]),
+        "valid_prefix_signal_count": float(valid_prefix_signal["count"]),
+    }
+
+
+def main() -> None:
+    args = _parse_args()
+    set_hparams(
+        config=args.config,
+        hparams_str=_compose_hparams_override(args),
+        global_hparams=True,
+        print_hparams=False,
+        reset=True,
+    )
+
+    splits = _parse_splits(args.splits)
+    candidate_tokens = _parse_int_list(args.candidate_tokens)
+    drop_edge_values = _parse_int_list(args.drop_edge_runs)
+
+    rows: list[dict[str, Any]] = []
+    for split in splits:
+        ds = ConanDataset(prefix=split, shuffle=False)
+        pair_entries = getattr(ds, "_pair_entries", None)
+        if not pair_entries:
+            continue
+        for fetch_index in range(len(pair_entries)):
+            for candidate_token in candidate_tokens:
+                for drop_edge_runs in drop_edge_values:
+                    rows.append(
+                        _compute_pair_row(
+                            ds=ds,
+                            split=split,
+                            fetch_index=fetch_index,
+                            candidate_token=int(candidate_token),
+                            drop_edge_runs=int(drop_edge_runs),
+                        )
+                    )
+
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault((int(row["candidate_token"]), int(row["drop_edge_runs_for_g"])), []).append(row)
+    summary = [_summarize_group(grouped[key]) for key in sorted(grouped.keys())]
+
+    output_csv = Path(args.output_csv)
+    output_json = Path(args.output_json)
+    _write_csv(output_csv, rows)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "config": args.config,
+                    "splits": splits,
+                    "candidate_tokens": candidate_tokens,
+                    "drop_edge_runs": drop_edge_values,
+                    "counterfactual_emit_silence_runs": False,
+                },
+                "summary": summary,
+                "rows": rows,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[counterfactual-static-gate0] rows={len(rows)}")
+    print(f"[counterfactual-static-gate0] wrote_csv={output_csv}")
+    print(f"[counterfactual-static-gate0] wrote_json={output_json}")
+    for row in summary:
+        print(
+            "[counterfactual-static-gate0] "
+            f"token={int(row['candidate_token'])} drop_edge={int(row['drop_edge_runs_for_g'])} "
+            f"valid={int(row['g_domain_valid_items'])}/{int(row['item_count'])} "
+            f"overall_signal_slope={float(row['overall_signal_robust_slope']):.4f} "
+            f"valid_signal_slope={float(row['valid_signal_robust_slope']):.4f} "
+            f"valid_prefix_signal_slope={float(row['valid_prefix_signal_robust_slope']):.4f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

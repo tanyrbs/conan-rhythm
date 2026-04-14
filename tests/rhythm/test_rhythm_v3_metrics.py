@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from tasks.Conan.rhythm.duration_v3.metrics import (
+    local_silence_delta_share,
     monotonic_triplet_table,
+    residual_bias_share,
+    residual_target_stats,
+    speech_weighted_mae,
     tempo_explainability,
     tempo_monotonicity,
     tempo_tie_rate,
@@ -213,6 +218,35 @@ def test_rhythm_v3_metrics_source_rate_seq_mean_uses_speech_mask():
     metrics = build_rhythm_metric_dict(output, sample=sample)
     expected = (source_rate_seq * speech_mask).sum(dim=1) / speech_mask.sum(dim=1).clamp_min(1.0e-6)
     assert torch.allclose(metrics["rhythm_metric_source_rate_seq_mean"], expected)
+
+
+def test_gate3_local_metrics_capture_speech_gain_and_purity():
+    pred = torch.tensor([[0.30, 0.10, 0.0]], dtype=torch.float32)
+    target = torch.tensor([[0.20, 0.20, 0.0]], dtype=torch.float32)
+    speech_mask = torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32)
+    weight = torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32)
+    mae = speech_weighted_mae(pred, target, speech_mask, weight)
+    expected = (0.10 * 1.0 + 0.10 * 2.0) / 3.0
+    assert torch.allclose(mae, torch.tensor(expected, dtype=torch.float32))
+
+    residual_pred = torch.tensor([[0.08, -0.04, 0.0]], dtype=torch.float32)
+    residual_target = torch.tensor([[0.10, -0.05, 0.0]], dtype=torch.float32)
+    stats = residual_target_stats(residual_pred, residual_target, speech_mask)
+    assert stats["count"] == pytest.approx(2.0)
+    assert stats["spearman"] == pytest.approx(1.0)
+
+    bias_share = residual_bias_share(residual_pred, speech_mask, torch.tensor([[0.20]], dtype=torch.float32))
+    assert torch.isfinite(bias_share)
+    assert float(bias_share.item()) < 0.30
+
+
+def test_gate3_local_silence_delta_share_stays_zero_when_delta_is_speech_only():
+    learned = torch.tensor([[0.18, 0.12, 0.0]], dtype=torch.float32)
+    coarse = torch.tensor([[0.10, 0.10, 0.0]], dtype=torch.float32)
+    speech_mask = torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32)
+    silence_mask = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+    share = local_silence_delta_share(learned, coarse, speech_mask, silence_mask)
+    assert torch.allclose(share, torch.tensor(0.0))
 
 
 def test_duration_v3_loss_targets_clip_silence_only_coarse():

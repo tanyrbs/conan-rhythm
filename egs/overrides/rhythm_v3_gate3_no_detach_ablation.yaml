@@ -1,0 +1,5 @@
+base_config: egs/overrides/rhythm_v3_gate3_learned.yaml
+
+# Gate 3 ablation: keep the maintained learned profile, but let the local head
+# backprop through the shared global/coarse term as a pressure probe.
+rhythm_v3_detach_global_term_in_local_head: false
