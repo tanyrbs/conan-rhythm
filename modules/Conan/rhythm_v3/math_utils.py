@@ -152,6 +152,36 @@ def build_causal_local_rate_seq(
     )
 
 
+def build_causal_dual_rate_seq(
+    *,
+    observed_log: torch.Tensor,
+    speech_mask: torch.Tensor,
+    init_rate: torch.Tensor | None,
+    default_init_rate: torch.Tensor | float | None = None,
+    decay_fast: float = 0.80,
+    decay_slow: float = 0.97,
+    slow_mix: float = 0.65,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fast_seq, fast_last = build_causal_local_rate_seq(
+        observed_log=observed_log,
+        speech_mask=speech_mask,
+        init_rate=init_rate,
+        default_init_rate=default_init_rate,
+        decay=decay_fast,
+    )
+    slow_seq, slow_last = build_causal_local_rate_seq(
+        observed_log=observed_log,
+        speech_mask=speech_mask,
+        init_rate=init_rate,
+        default_init_rate=default_init_rate,
+        decay=decay_slow,
+    )
+    mix = float(max(0.0, min(1.0, slow_mix)))
+    seq = ((1.0 - mix) * fast_seq) + (mix * slow_seq)
+    last = ((1.0 - mix) * fast_last) + (mix * slow_last)
+    return seq, last
+
+
 def _normalize_prefix_variant(value: str) -> str:
     variant = normalize_global_rate_variant(value)
     if variant == "unit_norm":
@@ -165,6 +195,9 @@ def normalize_src_prefix_stat_mode(value: str | None) -> str:
         "": "ema",
         "auto": "ema",
         "legacy": "ema",
+        "dual": "dual_timescale",
+        "dual_scale": "dual_timescale",
+        "dualtime": "dual_timescale",
         "robust": "family_hybrid",
         "hybrid": "family_hybrid",
         "family": "family_hybrid",
@@ -173,7 +206,7 @@ def normalize_src_prefix_stat_mode(value: str | None) -> str:
         "global_family": "exact_global_family",
     }
     normalized = aliases.get(normalized, normalized)
-    valid = {"ema", "family_hybrid", "exact_global_family"}
+    valid = {"ema", "dual_timescale", "family_hybrid", "exact_global_family"}
     if normalized not in valid:
         raise ValueError(
             f"Unsupported src_prefix_stat_mode={value!r}. Expected one of: {sorted(valid)}"
@@ -303,6 +336,9 @@ def build_causal_prefix_global_rate_seq_exact(
     drop_edge_runs: int = 0,
     min_support: int = 3,
     min_speech_ratio: float = 0.0,
+    min_support_log_iqr: float = 0.0,
+    min_support_log_span: float = 0.0,
+    min_support_unique_count: int = 1,
     weight: torch.Tensor | None = None,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
@@ -383,11 +419,18 @@ def build_causal_prefix_global_rate_seq_exact(
                     None if boundary is None else boundary[batch_idx]
                 ),
                 min_boundary_confidence=min_boundary_confidence,
+                min_support_log_iqr=min_support_log_iqr,
+                min_support_log_span=min_support_log_span,
+                min_support_unique_count=min_support_unique_count,
             )
-            domain_valid = bool(
-                support_stats.domain_valid.reshape(-1)[0].detach().item() > 0.5
+            control_valid = bool(
+                (
+                    support_stats.control_valid
+                    if isinstance(support_stats.control_valid, torch.Tensor)
+                    else support_stats.domain_valid
+                ).reshape(-1)[0].detach().item() > 0.5
             )
-            if not domain_valid:
+            if not control_valid:
                 continue
             weight_row = None if weight is None else weight[batch_idx]
             unit_ids_row = None if unit_ids is None else unit_ids[batch_idx]
@@ -432,6 +475,9 @@ def build_causal_source_prefix_rate_seq(
     default_init_rate: torch.Tensor | float | None = None,
     stat_mode: str = "ema",
     decay: float = 0.95,
+    decay_fast: float = 0.80,
+    decay_slow: float = 0.97,
+    slow_mix: float = 0.65,
     variant: str = "raw_median",
     trim_ratio: float = 0.2,
     min_support: int = 3,
@@ -442,6 +488,9 @@ def build_causal_source_prefix_rate_seq(
     min_boundary_confidence: float | None = None,
     drop_edge_runs: int = 0,
     min_speech_ratio: float = 0.0,
+    min_support_log_iqr: float = 0.0,
+    min_support_log_span: float = 0.0,
+    min_support_unique_count: int = 1,
     unit_ids: torch.Tensor | None = None,
     unit_prior: torch.Tensor | None = None,
     unit_prior_default_value: float | torch.Tensor | None = None,
@@ -457,6 +506,16 @@ def build_causal_source_prefix_rate_seq(
             init_rate=init_rate,
             default_init_rate=default_init_rate,
             decay=decay,
+        )
+    if resolved_mode == "dual_timescale":
+        return build_causal_dual_rate_seq(
+            observed_log=observed_log,
+            speech_mask=speech_mask,
+            init_rate=init_rate,
+            default_init_rate=default_init_rate,
+            decay_fast=decay_fast,
+            decay_slow=decay_slow,
+            slow_mix=slow_mix,
         )
     if resolved_mode == "exact_global_family":
         # This path is exact only when the caller can replay the full observed
@@ -476,6 +535,9 @@ def build_causal_source_prefix_rate_seq(
             drop_edge_runs=drop_edge_runs,
             min_support=min_support,
             min_speech_ratio=min_speech_ratio,
+            min_support_log_iqr=min_support_log_iqr,
+            min_support_log_span=min_support_log_span,
+            min_support_unique_count=min_support_unique_count,
             weight=weight,
             unit_ids=unit_ids,
             unit_prior=unit_prior,
@@ -499,6 +561,7 @@ def build_causal_source_prefix_rate_seq(
 
 __all__ = [
     "apply_analytic_gap_clip",
+    "build_causal_dual_rate_seq",
     "build_causal_local_rate_seq",
     "build_causal_prefix_global_rate_seq",
     "build_causal_prefix_global_rate_seq_exact",

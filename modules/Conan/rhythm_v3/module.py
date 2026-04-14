@@ -515,6 +515,24 @@ class MixedEffectsDurationModule(nn.Module):
         local_cold_start_runs = int(unused_kwargs.pop("local_cold_start_runs", 2))
         local_short_run_min_duration = float(unused_kwargs.pop("local_short_run_min_duration", 2.0))
         local_rate_decay = float(unused_kwargs.pop("local_rate_decay", 0.95))
+        local_rate_decay_fast = float(
+            unused_kwargs.pop(
+                "local_rate_decay_fast",
+                unused_kwargs.pop("rhythm_v3_local_rate_decay_fast", 0.80),
+            )
+        )
+        local_rate_decay_slow = float(
+            unused_kwargs.pop(
+                "local_rate_decay_slow",
+                unused_kwargs.pop("rhythm_v3_local_rate_decay_slow", 0.97),
+            )
+        )
+        local_rate_slow_mix = float(
+            unused_kwargs.pop(
+                "local_rate_slow_mix",
+                unused_kwargs.pop("rhythm_v3_local_rate_slow_mix", 0.65),
+            )
+        )
         analytic_gap_clip = float(
             unused_kwargs.pop(
                 "analytic_gap_clip",
@@ -665,6 +683,27 @@ class MixedEffectsDurationModule(nn.Module):
         )
         self.min_boundary_confidence_for_g = (
             None if min_boundary_confidence_for_g is None else float(min_boundary_confidence_for_g)
+        )
+        self.min_support_log_iqr_for_g = float(
+            unused_kwargs.pop(
+                "min_support_log_iqr_for_g",
+                unused_kwargs.pop("rhythm_v3_min_support_log_iqr_for_g", 0.0),
+            )
+        )
+        self.min_support_log_span_for_g = float(
+            unused_kwargs.pop(
+                "min_support_log_span_for_g",
+                unused_kwargs.pop("rhythm_v3_min_support_log_span_for_g", 0.0),
+            )
+        )
+        self.min_support_unique_for_g = int(
+            max(
+                1,
+                unused_kwargs.pop(
+                    "min_support_unique_for_g",
+                    unused_kwargs.pop("rhythm_v3_min_support_unique_for_g", 1),
+                ),
+            )
         )
         self.coarse_delta_scale = float(
             unused_kwargs.pop(
@@ -861,6 +900,9 @@ class MixedEffectsDurationModule(nn.Module):
                     local_cold_start_runs=local_cold_start_runs,
                     local_short_run_min_duration=local_short_run_min_duration,
                     local_rate_decay=local_rate_decay,
+                    local_rate_decay_fast=local_rate_decay_fast,
+                    local_rate_decay_slow=local_rate_decay_slow,
+                    local_rate_slow_mix=local_rate_slow_mix,
                     analytic_gap_clip=self.analytic_gap_clip,
                     eval_mode=self.eval_mode,
                     disable_local_residual=self.disable_local_residual,
@@ -878,6 +920,9 @@ class MixedEffectsDurationModule(nn.Module):
                     src_prefix_min_support=self.src_prefix_min_support,
                     g_drop_edge_runs=self.g_drop_edge_runs,
                     min_boundary_confidence_for_g=self.min_boundary_confidence_for_g,
+                    min_support_log_iqr_for_g=self.min_support_log_iqr_for_g,
+                    min_support_log_span_for_g=self.min_support_log_span_for_g,
+                    min_support_unique_for_g=self.min_support_unique_for_g,
                 )
             else:
                 summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
@@ -961,10 +1006,22 @@ class MixedEffectsDurationModule(nn.Module):
                     duration_head_kwargs["src_prefix_stat_mode"] = self.src_prefix_stat_mode
                 if _init_accepts_kwarg(StreamingDurationHead, "src_prefix_min_support"):
                     duration_head_kwargs["src_prefix_min_support"] = self.src_prefix_min_support
+                if _init_accepts_kwarg(StreamingDurationHead, "local_rate_decay_fast"):
+                    duration_head_kwargs["local_rate_decay_fast"] = local_rate_decay_fast
+                if _init_accepts_kwarg(StreamingDurationHead, "local_rate_decay_slow"):
+                    duration_head_kwargs["local_rate_decay_slow"] = local_rate_decay_slow
+                if _init_accepts_kwarg(StreamingDurationHead, "local_rate_slow_mix"):
+                    duration_head_kwargs["local_rate_slow_mix"] = local_rate_slow_mix
                 if _init_accepts_kwarg(StreamingDurationHead, "g_drop_edge_runs"):
                     duration_head_kwargs["g_drop_edge_runs"] = self.g_drop_edge_runs
                 if _init_accepts_kwarg(StreamingDurationHead, "min_boundary_confidence_for_g"):
                     duration_head_kwargs["min_boundary_confidence_for_g"] = self.min_boundary_confidence_for_g
+                if _init_accepts_kwarg(StreamingDurationHead, "min_support_log_iqr_for_g"):
+                    duration_head_kwargs["min_support_log_iqr_for_g"] = self.min_support_log_iqr_for_g
+                if _init_accepts_kwarg(StreamingDurationHead, "min_support_log_span_for_g"):
+                    duration_head_kwargs["min_support_log_span_for_g"] = self.min_support_log_span_for_g
+                if _init_accepts_kwarg(StreamingDurationHead, "min_support_unique_for_g"):
+                    duration_head_kwargs["min_support_unique_for_g"] = self.min_support_unique_for_g
                 self.duration_head = StreamingDurationHead(**duration_head_kwargs)
             self.duration_head.rate_mode = self.rate_mode
             self.duration_head.simple_global_stats = self.simple_global_stats
@@ -982,10 +1039,22 @@ class MixedEffectsDurationModule(nn.Module):
                 self.duration_head.src_prefix_stat_mode = self.src_prefix_stat_mode
             if hasattr(self.duration_head, "src_prefix_min_support"):
                 self.duration_head.src_prefix_min_support = self.src_prefix_min_support
+            if hasattr(self.duration_head, "local_rate_decay_fast"):
+                self.duration_head.local_rate_decay_fast = local_rate_decay_fast
+            if hasattr(self.duration_head, "local_rate_decay_slow"):
+                self.duration_head.local_rate_decay_slow = local_rate_decay_slow
+            if hasattr(self.duration_head, "local_rate_slow_mix"):
+                self.duration_head.local_rate_slow_mix = local_rate_slow_mix
             if hasattr(self.duration_head, "g_drop_edge_runs"):
                 self.duration_head.g_drop_edge_runs = self.g_drop_edge_runs
             if hasattr(self.duration_head, "min_boundary_confidence_for_g"):
                 self.duration_head.min_boundary_confidence_for_g = self.min_boundary_confidence_for_g
+            if hasattr(self.duration_head, "min_support_log_iqr_for_g"):
+                self.duration_head.min_support_log_iqr_for_g = self.min_support_log_iqr_for_g
+            if hasattr(self.duration_head, "min_support_log_span_for_g"):
+                self.duration_head.min_support_log_span_for_g = self.min_support_log_span_for_g
+            if hasattr(self.duration_head, "min_support_unique_for_g"):
+                self.duration_head.min_support_unique_for_g = self.min_support_unique_for_g
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
         elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
@@ -1180,6 +1249,10 @@ class MixedEffectsDurationModule(nn.Module):
             "unit_global_shift_analytic",
             "unit_analytic_gap",
             "unit_analytic_logstretch",
+            "unit_analytic_gap_raw",
+            "unit_analytic_gap_clipped",
+            "unit_analytic_clip_hit",
+            "analytic_clip_hit_rate",
             "global_bias_scalar",
             "unit_coarse_logstretch",
             "unit_coarse_path_logstretch",
@@ -1450,6 +1523,25 @@ class MixedEffectsDurationModule(nn.Module):
             return None
         return (source_rate_seq.float() * mask).sum(dim=1, keepdim=True) / mass.clamp_min(1.0)
 
+    @staticmethod
+    def _compute_source_prefix_final(
+        *,
+        source_rate_seq: torch.Tensor | None,
+        speech_commit_mask: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if not isinstance(source_rate_seq, torch.Tensor):
+            return None
+        mask = speech_commit_mask.float() > 0.5
+        if not bool(mask.any().item()):
+            return None
+        steps = torch.arange(source_rate_seq.size(1), device=source_rate_seq.device)[None, :]
+        valid_idx = torch.where(mask, steps, torch.full_like(steps, -1))
+        last_idx = valid_idx.max(dim=1, keepdim=True).values.long().clamp_min(0)
+        rows = torch.arange(source_rate_seq.size(0), device=source_rate_seq.device)[:, None]
+        final = source_rate_seq[rows, last_idx].reshape(source_rate_seq.size(0), 1)
+        has_any = mask.any(dim=1, keepdim=True)
+        return torch.where(has_any, final, torch.zeros_like(final))
+
     def _compute_source_prefix_rate_seq(
         self,
         *,
@@ -1499,6 +1591,9 @@ class MixedEffectsDurationModule(nn.Module):
             default_init_rate=default_init_rate,
             stat_mode=self.src_prefix_stat_mode,
             decay=float(getattr(self.duration_head, "local_rate_decay", 0.95)),
+            decay_fast=float(getattr(self.duration_head, "local_rate_decay_fast", 0.80)),
+            decay_slow=float(getattr(self.duration_head, "local_rate_decay_slow", 0.97)),
+            slow_mix=float(getattr(self.duration_head, "local_rate_slow_mix", 0.65)),
             variant=self.g_variant,
             trim_ratio=self.g_trim_ratio,
             min_support=self.src_prefix_min_support,
@@ -1517,6 +1612,9 @@ class MixedEffectsDurationModule(nn.Module):
             min_boundary_confidence=self.min_boundary_confidence_for_g,
             drop_edge_runs=self.g_drop_edge_runs,
             min_speech_ratio=0.0,
+            min_support_log_iqr=float(getattr(self.duration_head, "min_support_log_iqr_for_g", 0.0)),
+            min_support_log_span=float(getattr(self.duration_head, "min_support_log_span_for_g", 0.0)),
+            min_support_unique_count=int(getattr(self.duration_head, "min_support_unique_for_g", 1)),
             unit_ids=source_batch.content_units.long(),
         )
         return source_rate_seq * valid_mask, source_rate_final
@@ -1539,39 +1637,6 @@ class MixedEffectsDurationModule(nn.Module):
         sealed_mask = source_batch.sealed_mask.float() if source_batch.sealed_mask is not None else unit_mask
         commit_mask = unit_mask * sealed_mask
         return unit_mask, sealed_mask, commit_mask
-
-    @staticmethod
-    def _build_causal_source_rate_context(
-        *,
-        source_batch: SourceUnitBatch,
-        speech_commit_mask: torch.Tensor,
-        state: DurationRuntimeState,
-        decay: float = 0.95,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        observed_log = torch.log(source_batch.source_duration_obs.float().clamp_min(1.0e-4))
-        context = observed_log.new_zeros(observed_log.shape)
-        final_rate = observed_log.new_zeros((observed_log.size(0), 1))
-        if state.local_rate_ema is None:
-            prev_rate = final_rate.new_zeros(final_rate.shape)
-        else:
-            prev_rate = state.local_rate_ema.float()
-        has_history = state.committed_units.long() > 0
-        decay = float(max(0.0, min(0.999, decay)))
-        for batch_idx in range(int(observed_log.size(0))):
-            ema = float(prev_rate[batch_idx, 0].item()) if bool(has_history[batch_idx].item()) else None
-            for unit_idx in range(int(observed_log.size(1))):
-                is_speech = float(speech_commit_mask[batch_idx, unit_idx].item()) > 0.5
-                obs = float(observed_log[batch_idx, unit_idx].item())
-                if ema is None:
-                    context[batch_idx, unit_idx] = obs if is_speech else 0.0
-                else:
-                    context[batch_idx, unit_idx] = ema
-                if is_speech:
-                    ema = obs if ema is None else ((decay * ema) + ((1.0 - decay) * obs))
-            if ema is None:
-                ema = float(prev_rate[batch_idx, 0].item()) if bool(has_history[batch_idx].item()) else 0.0
-            final_rate[batch_idx, 0] = ema
-        return context, final_rate
 
     def _resolve_prediction_anchor(
         self,

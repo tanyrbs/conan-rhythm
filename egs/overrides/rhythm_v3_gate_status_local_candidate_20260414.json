@@ -5,6 +5,19 @@
   "basis": "docs/rhythm_v3_local_status_2026-04-14.md",
   "evidence_surface": "local_quick_arctic_zero_train",
   "official_training_ready": false,
+  "contract_fingerprint": {
+    "rhythm_v3_g_variant": "weighted_median",
+    "rhythm_v3_g_trim_ratio": 0.2,
+    "rhythm_v3_drop_edge_runs_for_g": 1,
+    "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+    "rhythm_v3_src_prefix_stat_mode": "exact_global_family",
+    "rhythm_v3_src_prefix_min_support": 3,
+    "rhythm_v3_src_rate_init_mode": "first_speech",
+    "rhythm_v3_use_continuous_alignment": true,
+    "rhythm_v3_alignment_mode": "continuous_viterbi_v1",
+    "rhythm_v3_minimal_v1_profile": true,
+    "rhythm_v3_strict_minimal_claim_profile": true
+  },
   "contract": {
     "g_variant": "weighted_median",
     "src_prefix_stat_mode": "exact_global_family",

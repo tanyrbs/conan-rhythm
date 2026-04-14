@@ -245,17 +245,18 @@ def _resize_binary_mask(mask: torch.Tensor, *, target_length: int) -> torch.Tens
     return resized.float()
 
 
-def infer_frame_silence_mask_from_mel(
+def infer_frame_silence_from_mel(
     mel,
     *,
     target_length: int | None = None,
     pause_energy_threshold_std: float = -0.5,
     pause_delta_quantile: float = 0.35,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     mel_tensor = _coerce_single_mel_tensor(mel)
     if mel_tensor is None or int(mel_tensor.size(0)) <= 0:
         target = 0 if target_length is None else int(max(0, target_length))
-        return torch.zeros((target,), dtype=torch.float32)
+        zeros = torch.zeros((target,), dtype=torch.float32)
+        return zeros, zeros.clone()
     energy = mel_tensor.mean(dim=-1)
     energy_mean = energy.mean()
     energy_std = energy.std(unbiased=False).clamp_min(1.0e-6)
@@ -266,6 +267,13 @@ def infer_frame_silence_mask_from_mel(
         delta,
         float(max(0.01, min(0.95, pause_delta_quantile))),
     )
+    energy_margin = (float(pause_energy_threshold_std) - energy_z).clamp_min(0.0)
+    delta_margin = (
+        ((delta_threshold.clamp_min(1.0e-6) - delta) + 1.0e-6)
+        / delta_threshold.clamp_min(1.0e-6)
+    ).clamp(0.0, 1.0)
+    energy_scale = energy_margin.max().clamp_min(1.0e-6)
+    confidence = ((energy_margin / energy_scale) * delta_margin).clamp(0.0, 1.0)
     pause_mask = (
         (energy_z <= float(pause_energy_threshold_std))
         & (delta <= delta_threshold)
@@ -285,7 +293,25 @@ def infer_frame_silence_mask_from_mel(
         pause_mask = (smoothed >= 0.5).float()
     if target_length is not None:
         pause_mask = _resize_binary_mask(pause_mask, target_length=int(target_length))
-    return pause_mask.float()
+        confidence = _resize_binary_mask(confidence, target_length=int(target_length))
+    confidence = confidence.float() * pause_mask.float()
+    return pause_mask.float(), confidence
+
+
+def infer_frame_silence_mask_from_mel(
+    mel,
+    *,
+    target_length: int | None = None,
+    pause_energy_threshold_std: float = -0.5,
+    pause_delta_quantile: float = 0.35,
+) -> torch.Tensor:
+    pause_mask, _ = infer_frame_silence_from_mel(
+        mel,
+        target_length=target_length,
+        pause_energy_threshold_std=pause_energy_threshold_std,
+        pause_delta_quantile=pause_delta_quantile,
+    )
+    return pause_mask
 
 
 def _resolve_frame_silence_mask(
@@ -294,7 +320,7 @@ def _resolve_frame_silence_mask(
     silent_token: int | None,
     frame_silence_mask=None,
     mel=None,
-) -> torch.Tensor | None:
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     token_list = _as_token_list(content_tokens)
     target_length = int(len(token_list))
     token_mask = None
@@ -304,6 +330,8 @@ def _resolve_frame_silence_mask(
             dtype=torch.float32,
         )
     resolved_mask = None
+    inferred_only_mask = None
+    inferred_confidence = None
     if frame_silence_mask is not None:
         if torch.is_tensor(frame_silence_mask):
             resolved_mask = frame_silence_mask.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
@@ -311,13 +339,23 @@ def _resolve_frame_silence_mask(
             resolved_mask = torch.as_tensor(np.asarray(frame_silence_mask), dtype=torch.float32).reshape(-1)
         resolved_mask = _resize_binary_mask(resolved_mask, target_length=target_length)
     elif mel is not None:
-        resolved_mask = infer_frame_silence_mask_from_mel(mel, target_length=target_length)
+        resolved_mask, inferred_confidence = infer_frame_silence_from_mel(
+            mel,
+            target_length=target_length,
+        )
+        inferred_only_mask = resolved_mask.clone()
     if resolved_mask is None:
-        return token_mask
+        return token_mask, None, None
     resolved_mask = resolved_mask.clamp(0.0, 1.0)
     if token_mask is not None:
         resolved_mask = torch.maximum(resolved_mask, token_mask)
-    return resolved_mask
+        if inferred_only_mask is not None:
+            inferred_only_mask = (inferred_only_mask * (token_mask <= 0.5).float()).clamp(0.0, 1.0)
+    if inferred_only_mask is not None:
+        inferred_only_mask = inferred_only_mask.clamp(0.0, 1.0)
+    if inferred_confidence is not None:
+        inferred_confidence = inferred_confidence.clamp(0.0, 1.0)
+    return resolved_mask, inferred_only_mask, inferred_confidence
 
 
 def collect_duration_v3_frontend_diagnostics(
@@ -330,6 +368,10 @@ def collect_duration_v3_frontend_diagnostics(
     content_units = np.asarray(source_map.get("content_units", []), dtype=np.int64).reshape(-1)
     source_silence_mask = np.asarray(
         source_map.get("source_silence_mask", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    source_silence_confidence = np.asarray(
+        source_map.get("source_silence_confidence", np.zeros_like(dur_anchor_src, dtype=np.float32)),
         dtype=np.float32,
     ).reshape(-1)
     sep_hint = np.asarray(
@@ -357,6 +399,7 @@ def collect_duration_v3_frontend_diagnostics(
         "raw_silent_token_count": int(raw_silent_token_count),
         "sep_nonzero_count": int((sep_hint > 0.5).sum()),
         "source_silence_run_count": int((source_silence_mask > 0.5).sum()),
+        "source_silence_confidence_max": _finite_max_or_nan(source_silence_confidence),
         "boundary_confidence_max": _finite_max_or_nan(boundary_confidence),
         "source_boundary_cue_max": _finite_max_or_nan(source_boundary_cue),
     }
@@ -931,7 +974,11 @@ def build_source_rhythm_cache_v3(
         [token_list],
         dtype=torch.long,
     )
-    resolved_frame_silence_mask = _resolve_frame_silence_mask(
+    (
+        resolved_frame_silence_mask,
+        inferred_frame_silence_mask,
+        inferred_frame_silence_confidence,
+    ) = _resolve_frame_silence_mask(
         token_list,
         silent_token=silent_token,
         frame_silence_mask=frame_silence_mask,
@@ -949,17 +996,54 @@ def build_source_rhythm_cache_v3(
         "content_units": batch.content_units[0].cpu().numpy().astype(np.int64),
         "dur_anchor_src": batch.dur_anchor_src[0].cpu().numpy().astype(np.int64),
         "source_silence_mask": batch.silence_mask[0].cpu().numpy().astype(np.float32),
+        "source_silence_confidence": np.zeros_like(
+            batch.silence_mask[0].cpu().numpy().astype(np.float32),
+            dtype=np.float32,
+        ),
         "open_run_mask": batch.open_run_mask[0].cpu().numpy().astype(np.int64),
         "sealed_mask": batch.sealed_mask[0].cpu().numpy().astype(np.int64),
         "sep_hint": batch.sep_hint[0].cpu().numpy().astype(np.int64),
         "boundary_confidence": batch.boundary_confidence[0].cpu().numpy().astype(np.float32),
         "source_run_stability": batch.run_stability[0].cpu().numpy().astype(np.float32),
     }
-    if resolved_frame_silence_mask is not None and int(source_cache["dur_anchor_src"].shape[0]) > 0:
+    if (
+        inferred_frame_silence_mask is not None
+        and inferred_frame_silence_confidence is not None
+        and int(source_cache["dur_anchor_src"].shape[0]) > 0
+    ):
+        inferred_conf_np = inferred_frame_silence_confidence.detach().cpu().numpy().astype(np.float32)
+        cursor = 0
+        run_conf = np.zeros_like(source_cache["source_silence_confidence"], dtype=np.float32)
+        for run_idx, run_width in enumerate(np.asarray(source_cache["dur_anchor_src"], dtype=np.int64).reshape(-1).tolist()):
+            width = max(0, int(run_width))
+            if width <= 0:
+                continue
+            end = min(int(inferred_conf_np.shape[0]), cursor + width)
+            if end > cursor:
+                run_conf[run_idx] = float(np.max(inferred_conf_np[cursor:end]))
+            cursor += width
+        source_cache["source_silence_confidence"] = run_conf.astype(np.float32, copy=False)
+    if (
+        inferred_frame_silence_mask is not None
+        and inferred_frame_silence_confidence is not None
+        and int(source_cache["dur_anchor_src"].shape[0]) > 0
+    ):
         sep_hint = np.asarray(source_cache["sep_hint"], dtype=np.int64).copy()
         silence_runs = np.asarray(source_cache["source_silence_mask"], dtype=np.float32) > 0.5
-        silence_indices = np.flatnonzero(silence_runs)
-        for silence_idx in silence_indices.tolist():
+        inferred_runs = np.zeros_like(silence_runs, dtype=bool)
+        inferred_runs_raw = inferred_frame_silence_mask.detach().cpu().numpy().astype(np.float32) > 0.5
+        cursor = 0
+        for run_idx, run_width in enumerate(np.asarray(source_cache["dur_anchor_src"], dtype=np.int64).reshape(-1).tolist()):
+            width = max(0, int(run_width))
+            if width <= 0:
+                continue
+            end = min(int(inferred_runs_raw.shape[0]), cursor + width)
+            if end > cursor:
+                inferred_runs[run_idx] = bool(np.any(inferred_runs_raw[cursor:end]))
+            cursor += width
+        silence_conf = np.asarray(source_cache["source_silence_confidence"], dtype=np.float32)
+        inferred_indices = np.flatnonzero(silence_runs & inferred_runs & (silence_conf >= 0.60))
+        for silence_idx in inferred_indices.tolist():
             if silence_idx > 0:
                 sep_hint[silence_idx - 1] = 1
             if silence_idx < int(sep_hint.shape[0] - 1):
@@ -1012,6 +1096,9 @@ def build_source_rhythm_cache_v3(
             "raw_silent_token_count": np.asarray([frontend_diag["raw_silent_token_count"]], dtype=np.int32),
             "sep_nonzero_count": np.asarray([frontend_diag["sep_nonzero_count"]], dtype=np.int32),
             "source_silence_run_count": np.asarray([frontend_diag["source_silence_run_count"]], dtype=np.int32),
+            "source_silence_confidence_max": np.asarray(
+                [frontend_diag["source_silence_confidence_max"]], dtype=np.float32
+            ),
             "boundary_confidence_max": np.asarray([frontend_diag["boundary_confidence_max"]], dtype=np.float32),
             "source_boundary_cue_max": np.asarray([frontend_diag["source_boundary_cue_max"]], dtype=np.float32),
         }
@@ -1050,6 +1137,7 @@ __all__ = [
     "duration_v3_cache_meta_signature",
     "estimate_boundary_confidence",
     "estimate_run_stability",
+    "infer_frame_silence_from_mel",
     "infer_frame_silence_mask_from_mel",
     "load_unit_log_prior_bundle",
     "maybe_attach_unit_log_prior_from_path",

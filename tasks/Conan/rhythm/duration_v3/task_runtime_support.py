@@ -64,6 +64,9 @@ class DurationV3TaskRuntimeSupportMixin:
             ),
             silence_logstretch_max=max(0.01, float(hparams.get("rhythm_v3_silence_max_logstretch", 0.35) or 0.35)),
             local_rate_decay=float(hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95),
+            local_rate_decay_fast=float(hparams.get("rhythm_v3_local_rate_decay_fast", 0.80) or 0.80),
+            local_rate_decay_slow=float(hparams.get("rhythm_v3_local_rate_decay_slow", 0.97) or 0.97),
+            local_rate_slow_mix=float(hparams.get("rhythm_v3_local_rate_slow_mix", 0.65) or 0.65),
             analytic_gap_clip=max(0.0, float(hparams.get("rhythm_v3_analytic_gap_clip", 0.35) or 0.0)),
             silence_short_gap_scale=float(hparams.get("rhythm_v3_short_gap_silence_scale", 0.35) or 0.35),
             use_log_base_rate=use_log_base_rate,
@@ -84,6 +87,14 @@ class DurationV3TaskRuntimeSupportMixin:
                 if hparams.get("rhythm_v3_min_boundary_confidence_for_g", None) is None
                 else float(hparams.get("rhythm_v3_min_boundary_confidence_for_g"))
             ),
+            min_support_log_iqr_for_g=float(hparams.get("rhythm_v3_min_support_log_iqr_for_g", 0.0) or 0.0),
+            min_support_log_span_for_g=float(hparams.get("rhythm_v3_min_support_log_span_for_g", 0.0) or 0.0),
+            min_support_unique_for_g=int(hparams.get("rhythm_v3_min_support_unique_for_g", 1) or 1),
+            enable_shared_beta1_probe=bool(hparams.get("rhythm_v3_enable_shared_beta1_probe", False)),
+            beta1_min=float(hparams.get("rhythm_v3_beta1_min", 0.7) or 0.7),
+            beta1_max=float(hparams.get("rhythm_v3_beta1_max", 1.3) or 1.3),
+            beta1_min_points=int(hparams.get("rhythm_v3_beta1_min_points", 24) or 24),
+            beta1_min_var=float(hparams.get("rhythm_v3_beta1_min_var", 2.5e-3) or 2.5e-3),
         )
 
 

@@ -35,6 +35,12 @@ _GATE0_SIGNAL_SLOPE_MIN = 0.0
 _GATE1_NEGATIVE_CONTROL_GAP_MIN = 0.0
 _GATE1_SAME_TEXT_GAP_MAX = 0.10
 _GATE1_TRANSFER_SLOPE_MIN = 0.10
+_GATE1_EFFECT_SIZE_MIN = 0.02
+_GATE1_MAX_CLIP_HIT_RATE = 0.50
+_GATE1_MAX_BOUNDARY_HIT_RATE = 0.40
+_GATE1_PROJECTED_REAL_RANGE_MIN = 0.05
+_GATE1_ANALYTIC_SATURATION_RATE_MAX = 0.75
+_GATE1_PROJECTOR_BUCKET_COUNT_MIN = 3.0
 _GATE1_TIE_RATE_MAX = 0.05
 _GATE1_INVALID_G_RATE_MAX = 0.0
 _GATE1_ANTI_MONO_RATE_MAX = 0.10
@@ -91,6 +97,44 @@ def _corr_for_eval_mode(frame, *, x_col: str, y_col: str, eval_mode: str) -> flo
     if int(subset.shape[0]) <= 1:
         return float("nan")
     return float(subset[x_col].corr(subset[y_col], method="spearman"))
+
+
+def _fast_slow_effect_for_eval_mode(frame, *, eval_mode: str) -> float:
+    if "fast_minus_slow" in getattr(frame, "columns", []):
+        value = _mean_for_eval_mode(frame, column="fast_minus_slow", eval_mode=eval_mode)
+        if np.isfinite(value):
+            return value
+    if not {"eval_mode", "ref_bin", "ref_condition", "tempo_out"}.issubset(getattr(frame, "columns", [])):
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    real_mask = frame["ref_condition"].astype(str).str.strip().str.lower() == "real"
+    slow_vals = pd.to_numeric(
+        frame.loc[mode_mask & real_mask & (frame["ref_bin"].astype(str).str.strip().str.lower() == "slow"), "tempo_out"],
+        errors="coerce",
+    ).to_numpy(dtype=np.float32)
+    fast_vals = pd.to_numeric(
+        frame.loc[mode_mask & real_mask & (frame["ref_bin"].astype(str).str.strip().str.lower() == "fast"), "tempo_out"],
+        errors="coerce",
+    ).to_numpy(dtype=np.float32)
+    if slow_vals.size <= 0 or fast_vals.size <= 0:
+        return float("nan")
+    slow_mean = float(np.nanmean(slow_vals)) if np.isfinite(slow_vals).any() else float("nan")
+    fast_mean = float(np.nanmean(fast_vals)) if np.isfinite(fast_vals).any() else float("nan")
+    if not np.isfinite(slow_mean) or not np.isfinite(fast_mean):
+        return float("nan")
+    return float(fast_mean - slow_mean)
+
+
+def _real_tempo_range_for_eval_mode(frame, *, eval_mode: str) -> float:
+    if not {"eval_mode", "ref_condition", "tempo_out"}.issubset(getattr(frame, "columns", [])):
+        return float("nan")
+    mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
+    real_mask = frame["ref_condition"].astype(str).str.strip().str.lower() == "real"
+    values = pd.to_numeric(frame.loc[mode_mask & real_mask, "tempo_out"], errors="coerce").to_numpy(dtype=np.float32)
+    values = values[np.isfinite(values)]
+    if values.size <= 0:
+        return float("nan")
+    return float(np.max(values) - np.min(values))
 
 
 def _resolve_monotonicity_column(frame) -> str:
@@ -315,6 +359,43 @@ def collect_gate_issues(frame) -> list[str]:
                 quality_issues.append(
                     f"analytic_tempo_transfer_slope={analytic_transfer:.3f}<{_GATE1_TRANSFER_SLOPE_MIN:.3f}"
                 )
+            analytic_effect = _fast_slow_effect_for_eval_mode(frame, eval_mode="analytic")
+            if np.isfinite(analytic_effect) and analytic_effect < _GATE1_EFFECT_SIZE_MIN:
+                quality_issues.append(
+                    f"analytic_fast_slow_effect={analytic_effect:.3f}<{_GATE1_EFFECT_SIZE_MIN:.3f}"
+                )
+            analytic_clip = _mean_for_eval_mode(frame, column="analytic_saturation_rate", eval_mode="analytic")
+            if np.isfinite(analytic_clip) and analytic_clip > _GATE1_MAX_CLIP_HIT_RATE:
+                quality_issues.append(
+                    f"analytic_clip_hit_rate={analytic_clip:.3f}>{_GATE1_MAX_CLIP_HIT_RATE:.3f}"
+                )
+            if np.isfinite(analytic_clip) and analytic_clip > _GATE1_ANALYTIC_SATURATION_RATE_MAX:
+                quality_issues.append(
+                    f"analytic_mean_saturation={analytic_clip:.3f}>{_GATE1_ANALYTIC_SATURATION_RATE_MAX:.3f}"
+                )
+            analytic_boundary = _mean_for_eval_mode(frame, column="projector_boundary_hit_rate", eval_mode="analytic")
+            if np.isfinite(analytic_boundary) and analytic_boundary > _GATE1_MAX_BOUNDARY_HIT_RATE:
+                quality_issues.append(
+                    f"analytic_boundary_hit_rate={analytic_boundary:.3f}>{_GATE1_MAX_BOUNDARY_HIT_RATE:.3f}"
+                )
+            analytic_projected_range = _real_tempo_range_for_eval_mode(frame, eval_mode="analytic")
+            if not np.isfinite(analytic_projected_range):
+                quality_issues.append("analytic_projected_real_range=missing")
+            elif analytic_projected_range < _GATE1_PROJECTED_REAL_RANGE_MIN:
+                quality_issues.append(
+                    f"analytic_projected_real_range={analytic_projected_range:.3f}<{_GATE1_PROJECTED_REAL_RANGE_MIN:.3f}"
+                )
+            analytic_bucket_count = _mean_for_eval_mode(
+                frame,
+                column="projector_bucket_count",
+                eval_mode="analytic",
+            )
+            if not np.isfinite(analytic_bucket_count):
+                quality_issues.append("analytic_mean_bucket_count=missing")
+            elif analytic_bucket_count < _GATE1_PROJECTOR_BUCKET_COUNT_MIN:
+                quality_issues.append(
+                    f"analytic_mean_bucket_count={analytic_bucket_count:.3f}<{_GATE1_PROJECTOR_BUCKET_COUNT_MIN:.3f}"
+                )
             analytic_tie_rate = _mean_for_eval_mode(frame, column="tempo_tie_rate", eval_mode="analytic")
             if not np.isfinite(analytic_tie_rate):
                 quality_issues.append("analytic_tempo_tie_rate=missing")
@@ -483,6 +564,9 @@ def collect_review_issues(frame) -> list[str]:
 def build_gate_status(frame) -> dict[str, object]:
     if pd is None or frame is None or not hasattr(frame, "columns") or int(frame.shape[0]) <= 0:
         return {
+            "gate0a_pass": False,
+            "gate0b_pass": False,
+            "gate0c_pass": False,
             "gate0_pass": False,
             "gate1_pass": False,
             "gate2_pass": False,
@@ -497,6 +581,12 @@ def build_gate_status(frame) -> dict[str, object]:
             "analytic_explainability_slope": float("nan"),
             "analytic_coarse_residual_slope": float("nan"),
             "analytic_negative_control_gap": float("nan"),
+            "analytic_fast_slow_effect": float("nan"),
+            "analytic_clip_hit_rate": float("nan"),
+            "analytic_boundary_hit_rate": float("nan"),
+            "analytic_projected_real_range": float("nan"),
+            "analytic_mean_saturation": float("nan"),
+            "analytic_mean_bucket_count": float("nan"),
             "analytic_same_text_gap": float("nan"),
             "analytic_same_text_gap_max": float("nan"),
             "analytic_tempo_monotonicity_rate": float("nan"),
@@ -543,6 +633,9 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_tempo_tie_rate = float("nan")
     analytic_invalid_g_rate = float("nan")
     analytic_anti_monotonicity_rate = float("nan")
+    analytic_projected_real_range = float("nan")
+    analytic_mean_saturation = float("nan")
+    analytic_mean_bucket_count = float("nan")
     analytic_valid_items = 0
     analytic_triplet_count = 0
     alignment_mean_local_confidence_speech = float("nan")
@@ -673,6 +766,26 @@ def build_gate_status(frame) -> dict[str, object]:
             eval_mode="analytic",
         )
         analytic_invalid_g_rate = _invalid_g_rate_for_eval_mode(frame, eval_mode="analytic")
+    analytic_fast_slow_effect = _fast_slow_effect_for_eval_mode(frame, eval_mode="analytic")
+    if not np.isfinite(analytic_fast_slow_effect):
+        analytic_fast_slow_effect = analytic_tempo_transfer_slope
+    analytic_clip_hit_rate = _mean_for_eval_mode(
+        frame,
+        column="analytic_saturation_rate",
+        eval_mode="analytic",
+    )
+    analytic_mean_saturation = analytic_clip_hit_rate
+    analytic_boundary_hit_rate = _mean_for_eval_mode(
+        frame,
+        column="projector_boundary_hit_rate",
+        eval_mode="analytic",
+    )
+    analytic_projected_real_range = _real_tempo_range_for_eval_mode(frame, eval_mode="analytic")
+    analytic_mean_bucket_count = _mean_for_eval_mode(
+        frame,
+        column="projector_bucket_count",
+        eval_mode="analytic",
+    )
     analytic_transfer = analytic_tempo_transfer_slope
     analytic_speech_metric = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="analytic")
     for column, limit in _GATE2_RUNTIME_LIMITS.items():
@@ -727,17 +840,17 @@ def build_gate_status(frame) -> dict[str, object]:
         column="local_silence_delta_share",
         eval_mode="learned",
     )
-    gate0_pass = (
+    gate0a_pass = (
         analytic_valid_items >= _GATE0_VALID_ITEMS_MIN
         and
         np.isfinite(g_domain_valid_mean)
         and g_domain_valid_mean >= 0.95
         and np.isfinite(gate0_drop_rate)
         and gate0_drop_rate <= 0.05
-        and np.isfinite(continuous_alignment_coverage)
+    )
+    gate0b_pass = (
+        np.isfinite(continuous_alignment_coverage)
         and continuous_alignment_coverage >= 1.0 - 1.0e-6
-        and np.isfinite(analytic_signal_explainability_slope)
-        and analytic_signal_explainability_slope > _GATE0_SIGNAL_SLOPE_MIN
         and np.isfinite(alignment_mean_local_confidence_speech)
         and alignment_mean_local_confidence_speech >= _ALIGNMENT_MEAN_LOCAL_CONF_MIN
         and np.isfinite(alignment_mean_coarse_confidence_speech)
@@ -745,6 +858,11 @@ def build_gate_status(frame) -> dict[str, object]:
         and np.isfinite(analytic_alignment_local_margin_p10)
         and analytic_alignment_local_margin_p10 >= _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN
     )
+    gate0c_pass = (
+        np.isfinite(analytic_signal_explainability_slope)
+        and analytic_signal_explainability_slope > _GATE0_SIGNAL_SLOPE_MIN
+    )
+    gate0_pass = gate0a_pass and gate0b_pass and gate0c_pass
     gate1_criteria_pass = (
         "analytic" in observed_modes
         and analytic_triplet_count >= _GATE1_TRIPLETS_MIN
@@ -756,8 +874,26 @@ def build_gate_status(frame) -> dict[str, object]:
         and analytic_negative_control_gap > _GATE1_NEGATIVE_CONTROL_GAP_MIN
         and np.isfinite(analytic_tempo_transfer_slope)
         and analytic_tempo_transfer_slope >= _GATE1_TRANSFER_SLOPE_MIN
+        and np.isfinite(analytic_fast_slow_effect)
+        and analytic_fast_slow_effect >= _GATE1_EFFECT_SIZE_MIN
         and np.isfinite(analytic_invalid_g_rate)
         and analytic_invalid_g_rate <= _GATE1_INVALID_G_RATE_MAX
+        and (
+            (not np.isfinite(analytic_clip_hit_rate))
+            or analytic_clip_hit_rate <= _GATE1_MAX_CLIP_HIT_RATE
+        )
+        and (
+            (not np.isfinite(analytic_boundary_hit_rate))
+            or analytic_boundary_hit_rate <= _GATE1_MAX_BOUNDARY_HIT_RATE
+        )
+        and np.isfinite(analytic_projected_real_range)
+        and analytic_projected_real_range >= _GATE1_PROJECTED_REAL_RANGE_MIN
+        and (
+            (not np.isfinite(analytic_mean_saturation))
+            or analytic_mean_saturation <= _GATE1_ANALYTIC_SATURATION_RATE_MAX
+        )
+        and np.isfinite(analytic_mean_bucket_count)
+        and analytic_mean_bucket_count >= _GATE1_PROJECTOR_BUCKET_COUNT_MIN
         and (
             (not np.isfinite(analytic_tempo_tie_rate))
             or analytic_tempo_tie_rate <= _GATE1_TIE_RATE_MAX
@@ -814,6 +950,9 @@ def build_gate_status(frame) -> dict[str, object]:
     )
     gate3_pass = gate3_criteria_pass
     return {
+        "gate0a_pass": bool(gate0a_pass),
+        "gate0b_pass": bool(gate0b_pass),
+        "gate0c_pass": bool(gate0c_pass),
         "gate0_pass": bool(gate0_pass),
         "gate1_pass": bool(gate1_pass),
         "gate2_pass": bool(gate2_pass),
@@ -828,6 +967,12 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_explainability_slope": analytic_explainability_slope,
         "analytic_coarse_residual_slope": analytic_coarse_residual_slope,
         "analytic_negative_control_gap": analytic_negative_control_gap,
+        "analytic_fast_slow_effect": analytic_fast_slow_effect,
+        "analytic_clip_hit_rate": analytic_clip_hit_rate,
+        "analytic_boundary_hit_rate": analytic_boundary_hit_rate,
+        "analytic_projected_real_range": analytic_projected_real_range,
+        "analytic_mean_saturation": analytic_mean_saturation,
+        "analytic_mean_bucket_count": analytic_mean_bucket_count,
         "analytic_same_text_gap": analytic_same_text_gap,
         "analytic_same_text_gap_max": analytic_same_text_gap_max,
         "analytic_alignment_local_margin_p10": analytic_alignment_local_margin_p10,
@@ -879,6 +1024,102 @@ def _warn_sparse_review_metadata(frame) -> list[str]:
     return missing_issues + quality_issues
 
 
+def _infer_single_meta(records, key, default=None):
+    values = []
+    prefixed_key = f"rhythm_v3_{key}"
+    for record in records:
+        meta = dict(getattr(record, "metadata", {}) or {})
+        value = meta.get(key)
+        if value is None:
+            value = meta.get(prefixed_key)
+        if value is not None and str(value).strip() != "":
+            values.append(value)
+    if not values:
+        return default
+    uniq = {str(value) for value in values}
+    if len(uniq) > 1:
+        raise RuntimeError(
+            f"Mixed metadata for {key}: {sorted(uniq)}. Pass it explicitly on CLI."
+        )
+    return values[0]
+
+
+def _coerce_contract_fingerprint_value(key: str, value):
+    if value is None:
+        return None
+    if key in {
+        "rhythm_v3_use_continuous_alignment",
+        "rhythm_v3_minimal_v1_profile",
+        "rhythm_v3_strict_minimal_claim_profile",
+    }:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if key in {"rhythm_v3_drop_edge_runs_for_g", "rhythm_v3_src_prefix_min_support"}:
+        return int(value)
+    if key in {"rhythm_v3_g_trim_ratio", "rhythm_v3_min_boundary_confidence_for_g"}:
+        return float(value)
+    return str(value)
+
+
+def _build_gate_contract_fingerprint(*, records, args) -> dict[str, object]:
+    alignment_kind = str(
+        _infer_single_meta(records, "alignment_kind", default="")
+    ).strip().lower()
+    use_continuous_alignment = None
+    if alignment_kind:
+        use_continuous_alignment = bool(alignment_kind.startswith("continuous"))
+    fingerprint = {
+        "rhythm_v3_g_variant": args.g_variant,
+        "rhythm_v3_g_trim_ratio": args.g_trim_ratio,
+        "rhythm_v3_drop_edge_runs_for_g": args.drop_edge_runs,
+        "rhythm_v3_min_boundary_confidence_for_g": _infer_single_meta(
+            records,
+            "min_boundary_confidence_for_g",
+            default=None,
+        ),
+        "rhythm_v3_src_prefix_stat_mode": _infer_single_meta(
+            records,
+            "src_prefix_stat_mode",
+            default=None,
+        ),
+        "rhythm_v3_src_prefix_min_support": _infer_single_meta(
+            records,
+            "src_prefix_min_support",
+            default=None,
+        ),
+        "rhythm_v3_src_rate_init_mode": _infer_single_meta(
+            records,
+            "src_rate_init_mode",
+            default=None,
+        ),
+        "rhythm_v3_use_continuous_alignment": _infer_single_meta(
+            records,
+            "use_continuous_alignment",
+            default=use_continuous_alignment,
+        ),
+        "rhythm_v3_alignment_mode": _infer_single_meta(
+            records,
+            "alignment_mode",
+            default=None,
+        ),
+        "rhythm_v3_minimal_v1_profile": _infer_single_meta(
+            records,
+            "minimal_v1_profile",
+            default=None,
+        ),
+        "rhythm_v3_strict_minimal_claim_profile": _infer_single_meta(
+            records,
+            "strict_minimal_claim_profile",
+            default=None,
+        ),
+    }
+    return {
+        key: _coerce_contract_fingerprint_value(key, value)
+        for key, value in fingerprint.items()
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Single maintained review/export CLI for rhythm_v3 debug-record bundles.",
@@ -915,19 +1156,19 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--g-variant",
-        default="raw_median",
+        default=None,
         help="Global-cue statistic variant used for summary/review reconstruction.",
     )
     parser.add_argument(
         "--g-trim-ratio",
         type=float,
-        default=0.2,
+        default=None,
         help="Trim ratio for trimmed_mean analysis variants.",
     )
     parser.add_argument(
         "--drop-edge-runs",
         type=int,
-        default=0,
+        default=None,
         help="Drop this many speech runs at each edge when reconstructing analysis-side g statistics.",
     )
     parser.add_argument(
@@ -960,6 +1201,22 @@ def main() -> None:
         records.extend(load_debug_records(raw))
     if not records:
         raise RuntimeError("No debug records found.")
+    if args.g_variant is None:
+        args.g_variant = str(
+            _infer_single_meta(records, "g_variant", default="raw_median")
+        )
+    if args.g_trim_ratio is None:
+        args.g_trim_ratio = float(
+            _infer_single_meta(records, "g_trim_ratio", default=0.2)
+        )
+    if args.drop_edge_runs is None:
+        args.drop_edge_runs = int(
+            _infer_single_meta(
+                records,
+                "drop_edge_runs_for_g",
+                default=_infer_single_meta(records, "g_drop_edge_runs", default=0),
+            )
+        )
 
     rows = [
         record_summary(
@@ -1107,6 +1364,10 @@ def main() -> None:
         issues = _warn_sparse_review_metadata(summary_df)
         summary_df.to_csv(output, index=False)
         gate_status = build_gate_status(summary_df)
+        gate_status["contract_fingerprint"] = _build_gate_contract_fingerprint(
+            records=records,
+            args=args,
+        )
         gate_status_path = None
         if args.gate_status_json:
             gate_status_path = Path(args.gate_status_json)

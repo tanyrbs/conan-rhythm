@@ -33,6 +33,10 @@ class GlobalRateSupportStats:
     clean_mask: torch.Tensor | None = None
     clean_count: torch.Tensor | None = None
     speech_ratio_count: torch.Tensor | None = None
+    support_log_iqr: torch.Tensor | None = None
+    support_log_span: torch.Tensor | None = None
+    support_unique_count: torch.Tensor | None = None
+    control_valid: torch.Tensor | None = None
 
 
 def compute_duration_weighted_speech_ratio(
@@ -66,6 +70,52 @@ def compute_duration_weighted_speech_ratio(
     duration_mass = duration.sum(dim=reduce_dim, keepdim=True)
     duration_ratio = (duration * speech).sum(dim=reduce_dim, keepdim=True) / duration_mass.clamp_min(EPS)
     return torch.where(duration_mass > EPS, duration_ratio, count_ratio)
+
+
+def _masked_support_log_stats(
+    *,
+    duration_obs: torch.Tensor | None,
+    support_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    reduce_dim = 0 if support_mask.ndim == 1 else 1
+    out_shape = support_mask.sum(dim=reduce_dim, keepdim=True).shape
+    nan = support_mask.float().new_full(out_shape, float("nan"))
+    if duration_obs is None:
+        return nan, nan.clone(), nan.clone()
+    if tuple(duration_obs.shape) != tuple(support_mask.shape):
+        raise ValueError(
+            "_masked_support_log_stats duration_obs/support_mask shape mismatch: "
+            f"{tuple(duration_obs.shape)} vs {tuple(support_mask.shape)}"
+        )
+    log_dur = torch.log(duration_obs.float().clamp_min(EPS))
+    support = support_mask.bool()
+    batched_log = log_dur.unsqueeze(0) if support_mask.ndim == 1 else log_dur
+    batched_support = support.unsqueeze(0) if support_mask.ndim == 1 else support
+    iqr_rows: list[torch.Tensor] = []
+    span_rows: list[torch.Tensor] = []
+    unique_rows: list[torch.Tensor] = []
+    for row_values, row_mask in zip(batched_log, batched_support):
+        values = row_values[row_mask]
+        values = values[torch.isfinite(values)]
+        if int(values.numel()) <= 0:
+            empty = row_values.new_tensor(float("nan"))
+            iqr_rows.append(empty)
+            span_rows.append(empty.clone())
+            unique_rows.append(empty.clone())
+            continue
+        values = torch.sort(values).values
+        q25 = torch.quantile(values, 0.25)
+        q75 = torch.quantile(values, 0.75)
+        rounded = torch.round(values * 1.0e4) / 1.0e4
+        iqr_rows.append((q75 - q25).reshape(()))
+        span_rows.append((values[-1] - values[0]).reshape(()))
+        unique_rows.append(row_values.new_tensor(float(torch.unique(rounded).numel())))
+    iqr = torch.stack(iqr_rows)
+    span = torch.stack(span_rows)
+    uniq = torch.stack(unique_rows)
+    if support_mask.ndim == 1:
+        return iqr.reshape(1), span.reshape(1), uniq.reshape(1)
+    return iqr.reshape(-1, 1), span.reshape(-1, 1), uniq.reshape(-1, 1)
 
 
 def normalize_global_rate_variant(value) -> str:
@@ -407,6 +457,9 @@ def summarize_global_rate_support(
     closed_mask: torch.Tensor | None = None,
     boundary_confidence: torch.Tensor | None = None,
     min_boundary_confidence: float | None = None,
+    min_support_log_iqr: float = 0.0,
+    min_support_log_span: float = 0.0,
+    min_support_unique_count: int = 1,
 ) -> GlobalRateSupportStats:
     speech = speech_mask.bool()
     valid = torch.ones_like(speech, dtype=torch.bool) if valid_mask is None else valid_mask.bool()
@@ -465,6 +518,25 @@ def summarize_global_rate_support(
         (support_count >= float(max(1, int(min_speech_runs))))
         & (speech_ratio >= float(max(0.0, min(1.0, min_speech_ratio))) - 1.0e-6)
     ).float()
+    support_log_iqr, support_log_span, support_unique_count = _masked_support_log_stats(
+        duration_obs=duration_obs,
+        support_mask=support_mask,
+    )
+    control_valid = (
+        (domain_valid > 0.5)
+        & (
+            torch.isnan(support_log_iqr)
+            | (support_log_iqr >= float(max(0.0, min_support_log_iqr)) - 1.0e-6)
+        )
+        & (
+            torch.isnan(support_log_span)
+            | (support_log_span >= float(max(0.0, min_support_log_span)) - 1.0e-6)
+        )
+        & (
+            torch.isnan(support_unique_count)
+            | (support_unique_count >= float(max(1, int(min_support_unique_count))) - 1.0e-6)
+        )
+    ).float()
     return GlobalRateSupportStats(
         support_mask=support_mask,
         support_count=support_count,
@@ -478,6 +550,10 @@ def summarize_global_rate_support(
         domain_valid=domain_valid,
         clean_mask=clean_mask,
         clean_count=clean_count,
+        support_log_iqr=support_log_iqr,
+        support_log_span=support_log_span,
+        support_unique_count=support_unique_count,
+        control_valid=control_valid,
     )
 
 

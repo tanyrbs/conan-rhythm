@@ -715,6 +715,11 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
         ret["rhythm_v3_g_variant"] = self.module.g_variant
         ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
+        ret["rhythm_v3_min_boundary_confidence_for_g"] = (
+            None
+            if getattr(self.module, "min_boundary_confidence_for_g", None) is None
+            else float(self.module.min_boundary_confidence_for_g)
+        )
         src_prefix_stat_mode = str(getattr(self.module, "src_prefix_stat_mode", "ema"))
         ret["rhythm_v3_src_prefix_stat_mode"] = src_prefix_stat_mode
         ret["rhythm_v3_src_prefix_requires_full_history"] = float(
@@ -731,6 +736,16 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_src_prefix_min_support"] = float(
             getattr(self.module, "src_prefix_min_support", 3)
         )
+        ret["rhythm_v3_minimal_v1_profile"] = float(bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False)))
+        ret["rhythm_v3_strict_minimal_claim_profile"] = float(
+            bool(self.hparams.get("rhythm_v3_strict_minimal_claim_profile", True))
+        )
+        ret["rhythm_v3_use_continuous_alignment"] = float(
+            bool(self.hparams.get("rhythm_v3_use_continuous_alignment", False))
+        )
+        ret["rhythm_v3_alignment_mode"] = str(
+            self.hparams.get("rhythm_v3_alignment_mode", "continuous_viterbi_v1") or "continuous_viterbi_v1"
+        )
         ret["rhythm_v3_detach_global_term_in_local_head"] = float(
             bool(getattr(self.module, "detach_global_term_in_local_head", False))
         )
@@ -742,6 +757,8 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_g_src_utt"] = execution.g_src_utt.detach()
         if isinstance(getattr(execution, "g_src_prefix_mean", None), torch.Tensor):
             ret["rhythm_g_src_prefix_mean"] = execution.g_src_prefix_mean.detach()
+        if isinstance(getattr(execution, "g_src_prefix_final", None), torch.Tensor):
+            ret["rhythm_g_src_prefix_final"] = execution.g_src_prefix_final.detach()
         if ref_memory is not None and isinstance(getattr(ref_memory, "summary_state", None), torch.Tensor):
             ret["rhythm_v3_summary_state_dim"] = float(ref_memory.summary_state.size(1))
         elif ref_memory is not None and isinstance(getattr(ref_memory, "operator_coeff", None), torch.Tensor):
@@ -1081,9 +1098,34 @@ class ConanDurationAdapter(nn.Module):
                     if isinstance(getattr(execution, "g_src_prefix_mean", None), torch.Tensor)
                     else None
                 ),
+                "g_src_prefix_final": (
+                    execution.g_src_prefix_final.detach()
+                    if isinstance(getattr(execution, "g_src_prefix_final", None), torch.Tensor)
+                    else None
+                ),
                 "global_shift_analytic": (
                     execution.global_shift_analytic.detach()
                     if isinstance(getattr(execution, "global_shift_analytic", None), torch.Tensor)
+                    else None
+                ),
+                "analytic_gap_raw": (
+                    execution.analytic_gap_raw.detach()
+                    if isinstance(getattr(execution, "analytic_gap_raw", None), torch.Tensor)
+                    else None
+                ),
+                "analytic_gap_clipped": (
+                    execution.analytic_gap_clipped.detach()
+                    if isinstance(getattr(execution, "analytic_gap_clipped", None), torch.Tensor)
+                    else None
+                ),
+                "analytic_clip_hit": (
+                    execution.analytic_clip_hit.detach()
+                    if isinstance(getattr(execution, "analytic_clip_hit", None), torch.Tensor)
+                    else None
+                ),
+                "analytic_clip_hit_rate": (
+                    execution.analytic_clip_hit_rate.detach()
+                    if isinstance(getattr(execution, "analytic_clip_hit_rate", None), torch.Tensor)
                     else None
                 ),
                 "analytic_logstretch": (
@@ -1369,8 +1411,13 @@ class ConanDurationAdapter(nn.Module):
             ret["rhythm_debug_g_src_prefix_seq"] = debug_bundle["g_src_prefix_seq"]
             ret["rhythm_debug_g_src_utt"] = debug_bundle["g_src_utt"]
             ret["rhythm_debug_g_src_prefix_mean"] = debug_bundle["g_src_prefix_mean"]
+            ret["rhythm_debug_g_src_prefix_final"] = debug_bundle["g_src_prefix_final"]
             ret["rhythm_debug_analytic_gap"] = debug_bundle["global_shift_analytic"]
             ret["rhythm_debug_analytic_logstretch"] = debug_bundle["analytic_logstretch"]
+            ret["rhythm_debug_analytic_gap_raw"] = debug_bundle["analytic_gap_raw"]
+            ret["rhythm_debug_analytic_gap_clipped"] = debug_bundle["analytic_gap_clipped"]
+            ret["rhythm_debug_analytic_clip_hit"] = debug_bundle["analytic_clip_hit"]
+            ret["rhythm_debug_analytic_clip_hit_rate"] = debug_bundle["analytic_clip_hit_rate"]
             ret["rhythm_debug_coarse_bias"] = debug_bundle["coarse_correction"]
             ret["rhythm_debug_coarse_used"] = debug_bundle["coarse_correction_used"]
             ret["rhythm_debug_coarse_pred"] = debug_bundle["coarse_correction_pred"]

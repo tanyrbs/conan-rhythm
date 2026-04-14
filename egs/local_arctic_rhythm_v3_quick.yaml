@@ -1,4 +1,4 @@
-base_config: egs/conan_emformer_rhythm_v3.yaml
+base_config: egs/overrides/rhythm_v3_local_weighted_exact.yaml
 
 processed_data_dir: 'C:/project/00-2 project/data/processed/vc'
 binary_data_dir: 'C:/project/00-2 project/data/binary/vc_6layer'

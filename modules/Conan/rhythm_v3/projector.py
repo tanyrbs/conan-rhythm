@@ -674,6 +674,10 @@ class StreamingDurationProjector(nn.Module):
         silence_pred: torch.Tensor | None = None,
         source_rate_seq: torch.Tensor | None = None,
         source_prefix_summary: torch.Tensor | None = None,
+        analytic_gap_raw: torch.Tensor | None = None,
+        analytic_gap_clipped: torch.Tensor | None = None,
+        analytic_clip_hit: torch.Tensor | None = None,
+        analytic_clip_hit_rate: torch.Tensor | None = None,
     ) -> DurationExecution:
         batch_size = unit_duration_exec.size(0)
         device = unit_duration_exec.device
@@ -835,6 +839,10 @@ class StreamingDurationProjector(nn.Module):
             silence_pred=silence_pred,
             source_rate_seq=source_rate_seq,
             source_prefix_summary=source_prefix_summary,
+            analytic_gap_raw=analytic_gap_raw,
+            analytic_gap_clipped=analytic_gap_clipped,
+            analytic_clip_hit=analytic_clip_hit,
+            analytic_clip_hit_rate=analytic_clip_hit_rate,
             prefix_unit_offset=prefix_unit_offset_next,
             projector_rounding_residual=residual_next.detach(),
             projector_budget_pos_used=budget_pos_used.detach(),

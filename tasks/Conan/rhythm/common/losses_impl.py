@@ -116,6 +116,8 @@ class DurationV3LossTargets:
     local_residual_tgt: Optional[torch.Tensor] = None
     local_residual_tgt_center: Optional[torch.Tensor] = None
     local_residual_tgt_abs_mean: Optional[torch.Tensor] = None
+    beta1_tgt: Optional[torch.Tensor] = None
+    residual_logstretch_tgt_mean: Optional[torch.Tensor] = None
     prefix_duration_tgt: Optional[torch.Tensor] = None
     prompt_basis_activation: Optional[torch.Tensor] = None
     prompt_random_target_tgt: Optional[torch.Tensor] = None
@@ -515,6 +517,18 @@ def _build_duration_v3_diagnostic_metrics(
         diagnostics["rhythm_v3_coarse_target_speech_conf_mean"] = coarse_conf.float().mean().detach()
     else:
         diagnostics["rhythm_v3_coarse_target_speech_conf_mean"] = zero
+    beta1_tgt = getattr(targets, "beta1_tgt", None)
+    if isinstance(beta1_tgt, torch.Tensor):
+        diagnostics["rhythm_v3_beta1_tgt"] = beta1_tgt.float().mean().detach()
+    else:
+        diagnostics["rhythm_v3_beta1_tgt"] = zero
+    residual_tgt_mean = getattr(targets, "residual_logstretch_tgt_mean", None)
+    if isinstance(residual_tgt_mean, torch.Tensor):
+        diagnostics["rhythm_v3_residual_logstretch_tgt_mean"] = (
+            residual_tgt_mean.float().abs().mean().detach()
+        )
+    else:
+        diagnostics["rhythm_v3_residual_logstretch_tgt_mean"] = zero
     if isinstance(getattr(targets, "silence_coarse_logstretch_tgt", None), torch.Tensor):
         silence_coarse_abs_mean = _masked_abs_mean_scalar(
             targets.silence_coarse_logstretch_tgt.float(),

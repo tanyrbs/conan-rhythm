@@ -27,17 +27,15 @@ from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
 from utils.plot.rhythm_v3_viz.review import (
-    compute_source_global_rate_for_analysis,
-    compute_speech_tempo_for_analysis,
 )
-from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
+from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases, compute_conditioning_runtime_control
 
 
 DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick_gate1.yaml"
 DEFAULT_SPLIT = "train"
 DEFAULT_OUTPUT_CSV = "tmp/gate1_counterfactual_probe/results.csv"
 DEFAULT_OUTPUT_JSON = "tmp/gate1_counterfactual_probe/summary.json"
-DEFAULT_MIN_REAL_RANGE = 0.01
+DEFAULT_MIN_REAL_RANGE = 0.05
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
@@ -284,40 +282,6 @@ def _build_probe_sample(
     return sample, conditioning, raw_ref_item, ref_item
 
 
-def _conditioning_tempo(ds: ConanDataset, conditioning: dict[str, Any]) -> float:
-    return compute_speech_tempo_for_analysis(
-        source_duration_obs=conditioning.get("prompt_duration_obs"),
-        source_speech_mask=conditioning.get("prompt_speech_mask"),
-        source_valid_mask=conditioning.get("prompt_valid_mask"),
-        source_weight=conditioning.get("prompt_global_weight"),
-        source_unit_ids=conditioning.get("prompt_content_units"),
-        source_closed_mask=conditioning.get("prompt_closed_mask"),
-        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
-        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
-        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
-        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
-        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-    )
-
-
-def _conditioning_g(ds: ConanDataset, conditioning: dict[str, Any]) -> tuple[float, str]:
-    return compute_source_global_rate_for_analysis(
-        source_duration_obs=conditioning.get("prompt_duration_obs"),
-        source_speech_mask=conditioning.get("prompt_speech_mask"),
-        source_valid_mask=conditioning.get("prompt_valid_mask"),
-        source_weight=conditioning.get("prompt_global_weight"),
-        source_unit_ids=conditioning.get("prompt_content_units"),
-        source_closed_mask=conditioning.get("prompt_closed_mask"),
-        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
-        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
-        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
-        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
-        require_explicit_speech_mask=False,
-        return_status=True,
-    )
-
-
 def _run_condition(
     *,
     ds: ConanDataset,
@@ -412,15 +376,21 @@ def _run_condition(
             metadata=metadata,
         )[0]
         summary = record_summary(record)
-    prompt_g_ref, prompt_g_status = _conditioning_g(ds, conditioning)
+    control = compute_conditioning_runtime_control(ds, conditioning)
+    prompt_g_ref = float(summary.get("g_ref", float("nan")))
+    if not np.isfinite(prompt_g_ref):
+        prompt_g_ref = float(control["prompt_g_ref"])
+    prompt_tempo_ref_runtime = float(summary.get("tempo_ref_runtime", float("nan")))
+    if not np.isfinite(prompt_tempo_ref_runtime):
+        prompt_tempo_ref_runtime = float(control["prompt_tempo_ref_runtime"])
     summary.update(
         {
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
-            "prompt_tempo_ref": _conditioning_tempo(ds, conditioning),
             "prompt_g_ref": float(prompt_g_ref),
-            "prompt_g_status": str(prompt_g_status),
+            "prompt_tempo_ref_runtime": float(prompt_tempo_ref_runtime),
+            "prompt_g_status": str(control["prompt_g_status"]),
             "prompt_total_units": int(np.asarray(conditioning["prompt_duration_obs"]).reshape(-1).shape[0]),
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
@@ -507,9 +477,21 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "direction": direction,
         }
 
-    prompt_control = _ordered_control_summary("prompt_g_ref", flip_sign=False, direction="decreasing")
-    delta_g_control = _ordered_control_summary("delta_g", flip_sign=False, direction="decreasing")
-    anti_control = _ordered_control_summary("delta_g", flip_sign=True, direction="increasing")
+    prompt_control = _ordered_control_summary("prompt_tempo_ref_runtime", flip_sign=False)
+
+    delta_key = (
+        "delta_g_ref_minus_src_prefix_final_neg"
+        if rows and "delta_g_ref_minus_src_prefix_final_neg" in rows[0]
+        else (
+            "delta_g_ref_minus_src_prefix_neg"
+            if rows and "delta_g_ref_minus_src_prefix_neg" in rows[0]
+            else "delta_g_ref_minus_src_utt_neg"
+        )
+    )
+    anti_key = delta_key[:-4] if delta_key.endswith("_neg") else delta_key
+
+    delta_g_control = _ordered_control_summary(delta_key, flip_sign=False)
+    anti_control = _ordered_control_summary(anti_key, flip_sign=True)
     tempo_ref = list(prompt_control["x_sorted"])
     tempo_out = list(prompt_control["tempo_out_sorted"])
     monotone = bool(prompt_control["pass"])
@@ -548,8 +530,8 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "all_real_domain_valid": bool(len(real_rows) == len(all_real_rows) and len(all_real_rows) > 0),
         "g_ref_sorted": tempo_ref,
         "prompt_tempo_ref_sorted": [
-            float(row.get("prompt_tempo_ref", float("nan")))
-            for row in sorted(real_rows, key=lambda row: float(row.get("prompt_g_ref", float("nan"))))
+            float(row.get("prompt_tempo_ref_runtime", float("nan")))
+            for row in sorted(real_rows, key=lambda row: float(row.get("prompt_tempo_ref_runtime", float("nan"))))
         ],
         "monotone_by_prompt_g": bool(monotone),
         "monotone_by_prompt_tempo": bool(monotone),

@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING
 
 import torch
+from .g_stats import normalize_global_rate_variant
 from .unitizer import StreamingUnitizerRowState, StreamingUnitizerState
 
 if TYPE_CHECKING:
@@ -435,6 +436,7 @@ class DurationExecution:
     g_src_prefix: Optional[torch.Tensor] = None
     g_src_utt: Optional[torch.Tensor] = None
     g_src_prefix_mean: Optional[torch.Tensor] = None
+    g_src_prefix_final: Optional[torch.Tensor] = None
     eval_mode: Optional[str] = None
     prompt_speech_ratio: Optional[torch.Tensor] = None
     prompt_valid_len: Optional[torch.Tensor] = None
@@ -456,6 +458,10 @@ class DurationExecution:
     projector_clamp_mass: Optional[torch.Tensor] = None
     projector_rounding_regret: Optional[torch.Tensor] = None
     projector_projection_regret: Optional[torch.Tensor] = None
+    analytic_gap_raw: Optional[torch.Tensor] = None
+    analytic_gap_clipped: Optional[torch.Tensor] = None
+    analytic_clip_hit: Optional[torch.Tensor] = None
+    analytic_clip_hit_rate: Optional[torch.Tensor] = None
     commit_closed_prefix_ok: Optional[torch.Tensor] = None
     open_tail_commit_violation: Optional[torch.Tensor] = None
     open_tail_commit_violation_count: Optional[torch.Tensor] = None

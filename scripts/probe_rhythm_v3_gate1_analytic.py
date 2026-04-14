@@ -26,17 +26,16 @@ from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
 from utils.plot.rhythm_v3_viz.review import (
-    compute_source_global_rate_for_analysis,
-    compute_speech_tempo_for_analysis,
+    bootstrap_ci,
 )
-from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
+from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases, compute_conditioning_runtime_control
 
 
 DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick_gate1.yaml"
 DEFAULT_SPLIT = "train"
 DEFAULT_OUTPUT_CSV = "tmp/gate1_analytic_probe/results.csv"
 DEFAULT_OUTPUT_JSON = "tmp/gate1_analytic_probe/summary.json"
-DEFAULT_MIN_REAL_RANGE = 0.01
+DEFAULT_MIN_REAL_RANGE = 0.05
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
@@ -64,6 +63,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output_csv", default=DEFAULT_OUTPUT_CSV, help="Where to write row-level results.")
     parser.add_argument("--output_json", default=DEFAULT_OUTPUT_JSON, help="Where to write grouped summary.")
     parser.add_argument("--min_real_range", type=float, default=DEFAULT_MIN_REAL_RANGE, help="Minimum tempo span required to count as a meaningful analytic control response.")
+    parser.add_argument("--max_sources_per_speaker", type=int, default=3, help="How many source items to probe per speaker.")
+    parser.add_argument("--min_ref_gap", type=float, default=0.08, help="Minimum slow/fast prompt gap required when auto-building cases.")
+    parser.add_argument("--min_fast_slow_effect", type=float, default=0.02, help="Minimum projected fast-slow effect size required for a positive control response.")
+    parser.add_argument("--max_clip_hit_rate", type=float, default=0.50, help="Maximum allowed mean analytic clip-hit rate for a source-level pass.")
+    parser.add_argument("--max_boundary_hit_rate", type=float, default=0.40, help="Maximum allowed mean projector boundary-hit rate for a source-level pass.")
     return parser.parse_args()
 
 
@@ -80,7 +84,11 @@ def _compose_hparams_override(args: argparse.Namespace) -> str:
 
 def _load_cases(args: argparse.Namespace, ds: ConanDataset) -> list[dict[str, Any]]:
     if not args.cases_json:
-        return build_auto_gate1_cases(ds)
+        return build_auto_gate1_cases(
+            ds,
+            max_sources_per_speaker=int(args.max_sources_per_speaker),
+            min_slow_fast_gap=float(args.min_ref_gap),
+        )
     with open(args.cases_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, list):
@@ -156,40 +164,6 @@ def _build_probe_sample(
         dtype=torch.float32,
     )
     return sample, conditioning, raw_ref_item, ref_item
-
-
-def _conditioning_tempo(ds: ConanDataset, conditioning: dict[str, np.ndarray]) -> float:
-    return compute_speech_tempo_for_analysis(
-        source_duration_obs=conditioning.get("prompt_duration_obs"),
-        source_speech_mask=conditioning.get("prompt_speech_mask"),
-        source_valid_mask=conditioning.get("prompt_valid_mask"),
-        source_weight=conditioning.get("prompt_global_weight"),
-        source_unit_ids=conditioning.get("prompt_content_units"),
-        source_closed_mask=conditioning.get("prompt_closed_mask"),
-        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
-        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
-        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
-        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
-        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-    )
-
-
-def _conditioning_g(ds: ConanDataset, conditioning: dict[str, np.ndarray]) -> tuple[float, str]:
-    return compute_source_global_rate_for_analysis(
-        source_duration_obs=conditioning.get("prompt_duration_obs"),
-        source_speech_mask=conditioning.get("prompt_speech_mask"),
-        source_valid_mask=conditioning.get("prompt_valid_mask"),
-        source_weight=conditioning.get("prompt_global_weight"),
-        source_unit_ids=conditioning.get("prompt_content_units"),
-        source_closed_mask=conditioning.get("prompt_closed_mask"),
-        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
-        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
-        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
-        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
-        require_explicit_speech_mask=False,
-        return_status=True,
-    )
 
 
 def _run_condition(
@@ -283,15 +257,21 @@ def _run_condition(
             metadata=metadata,
         )[0]
         summary = record_summary(record)
-    prompt_g_ref, prompt_g_status = _conditioning_g(ds, conditioning)
+    control = compute_conditioning_runtime_control(ds, conditioning)
+    prompt_g_ref = float(summary.get("g_ref", float("nan")))
+    if not np.isfinite(prompt_g_ref):
+        prompt_g_ref = float(control["prompt_g_ref"])
+    prompt_tempo_ref_runtime = float(summary.get("tempo_ref_runtime", float("nan")))
+    if not np.isfinite(prompt_tempo_ref_runtime):
+        prompt_tempo_ref_runtime = float(control["prompt_tempo_ref_runtime"])
     summary.update(
         {
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
-            "prompt_tempo_ref": _conditioning_tempo(ds, conditioning),
             "prompt_g_ref": float(prompt_g_ref),
-            "prompt_g_status": str(prompt_g_status),
+            "prompt_tempo_ref_runtime": float(prompt_tempo_ref_runtime),
+            "prompt_g_status": str(control["prompt_g_status"]),
             "prompt_total_units": int(np.asarray(conditioning["prompt_duration_obs"]).reshape(-1).shape[0]),
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
@@ -319,116 +299,112 @@ def _row_domain_valid(row: dict[str, Any]) -> bool:
     return bool(gate0_row_dropped <= 0.5)
 
 
-def _tempo_curve_summary(
+def _series_summary(
     rows: list[dict[str, Any]],
     *,
     x_key: str,
-    tempo_key: str,
+    y_key: str,
     min_real_range: float,
-    direction: str = "increasing",
 ) -> dict[str, Any]:
-    tempo_ref = [float(row.get(x_key, float("nan"))) for row in rows]
-    tempo_out = [float(row.get(tempo_key, float("nan"))) for row in rows]
-    monotone = len(rows) >= 3
-    for left, right in zip(tempo_out, tempo_out[1:]):
-        if direction == "decreasing":
-            ok = np.isfinite(left) and np.isfinite(right) and right <= (left + 1.0e-6)
-        else:
-            ok = np.isfinite(left) and np.isfinite(right) and right >= (left - 1.0e-6)
-        if not ok:
+    ordered = sorted(rows, key=lambda row: float(row[x_key]))
+    x_vals = [float(row[x_key]) for row in ordered]
+    y_vals = [float(row[y_key]) for row in ordered]
+
+    monotone = len(ordered) >= 3
+    for left, right in zip(y_vals, y_vals[1:]):
+        if not (np.isfinite(left) and np.isfinite(right) and right >= (left - 1.0e-6)):
             monotone = False
             break
+
     slope = float("nan")
-    if len(rows) >= 2:
-        x = np.asarray(tempo_ref, dtype=np.float32)
-        y = np.asarray(tempo_out, dtype=np.float32)
+    if len(ordered) >= 2:
+        x = np.asarray(x_vals, dtype=np.float32)
+        y = np.asarray(y_vals, dtype=np.float32)
         if np.all(np.isfinite(x)) and np.all(np.isfinite(y)) and float(np.max(x) - np.min(x)) > 1.0e-6:
             slope = float(np.polyfit(x, y, deg=1)[0])
+
     real_range = float("nan")
-    if tempo_out:
-        y = np.asarray(tempo_out, dtype=np.float32)
+    if y_vals:
+        y = np.asarray(y_vals, dtype=np.float32)
         if np.all(np.isfinite(y)):
             real_range = float(np.max(y) - np.min(y))
-    slope_ok = np.isfinite(slope) and (
-        slope < 0.0 if direction == "decreasing" else slope > 0.0
-    )
-    passed = bool(
+
+    control_ok = bool(
         monotone
-        and slope_ok
+        and np.isfinite(slope)
+        and slope > 0.0
         and np.isfinite(real_range)
         and real_range >= float(min_real_range)
     )
     return {
-        "x_sorted": tempo_ref,
-        "tempo_out_sorted": tempo_out,
-        "order_monotone": bool(monotone),
-        "pass": passed,
+        "x_sorted": x_vals,
+        "y_sorted": y_vals,
+        "monotone": bool(monotone),
         "transfer_slope": slope,
-        "real_tempo_range": real_range,
-        "direction": direction,
+        "real_range": real_range,
+        "control_ok": control_ok,
     }
 
 
-def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) -> dict[str, Any]:
+def _monotonicity_summary(
+    rows: list[dict[str, Any]],
+    *,
+    min_real_range: float,
+    min_fast_slow_effect: float,
+    max_clip_hit_rate: float,
+    max_boundary_hit_rate: float,
+) -> dict[str, Any]:
     all_real_rows = [row for row in rows if row["ref_condition"] in {"slow", "mid", "fast"}]
     real_rows = [row for row in all_real_rows if _row_domain_valid(row)]
-    real_rows = sorted(real_rows, key=lambda row: float(row.get("prompt_g_ref", float("nan"))))
+
+    def _empty_summary() -> dict[str, Any]:
+        return {
+            "x_sorted": [],
+            "y_sorted": [],
+            "monotone": False,
+            "transfer_slope": float("nan"),
+            "real_range": float("nan"),
+            "control_ok": False,
+        }
+
+    raw_summary = (
+        _series_summary(
+            real_rows,
+            x_key="prompt_tempo_ref_runtime",
+            y_key="tempo_out_raw" if "tempo_out_raw" in real_rows[0] else "tempo_out",
+            min_real_range=min_real_range,
+        )
+        if real_rows
+        else _empty_summary()
+    )
+    preproj_summary = (
+        _series_summary(
+            real_rows,
+            x_key="prompt_tempo_ref_runtime",
+            y_key="tempo_out_preproj" if "tempo_out_preproj" in real_rows[0] else "tempo_out",
+            min_real_range=min_real_range,
+        )
+        if real_rows
+        else _empty_summary()
+    )
+    exec_summary = (
+        _series_summary(
+            real_rows,
+            x_key="prompt_tempo_ref_runtime",
+            y_key="tempo_out_exec" if "tempo_out_exec" in real_rows[0] else "tempo_out",
+            min_real_range=min_real_range,
+        )
+        if real_rows
+        else _empty_summary()
+    )
     controls = {
-        row["ref_condition"]: float(row["tempo_out_projected"] if "tempo_out_projected" in row else row["tempo_out"])
+        row["ref_condition"]: float(row.get("tempo_out_exec", row.get("tempo_out", float("nan"))))
         for row in rows
         if row["ref_condition"] not in {"slow", "mid", "fast"}
     }
-    preclip = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="tempo_out_preclip",
-        min_real_range=min_real_range,
-        direction="decreasing",
-    )
-    continuous = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="tempo_out_continuous",
-        min_real_range=min_real_range,
-        direction="decreasing",
-    )
-    projected = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="tempo_out_projected",
-        min_real_range=min_real_range,
-        direction="decreasing",
-    )
-    count_ratio_continuous = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="speech_exec_ratio_continuous",
-        min_real_range=0.0,
-        direction="increasing",
-    )
-    count_ratio_projected = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="speech_exec_ratio_projected",
-        min_real_range=0.0,
-        direction="increasing",
-    )
-    logstretch_continuous = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="mean_speech_logstretch_continuous",
-        min_real_range=0.0,
-        direction="increasing",
-    )
-    logstretch_projected = _tempo_curve_summary(
-        real_rows,
-        x_key="prompt_g_ref",
-        tempo_key="mean_speech_logstretch_projected",
-        min_real_range=0.0,
-        direction="increasing",
-    )
+
     mean_saturation = float(
-        np.nanmean(np.asarray([row.get("analytic_saturation_rate", float("nan")) for row in real_rows], dtype=np.float32))
+        np.nanmean(np.asarray([row.get("analytic_clip_hit_rate", float("nan")) for row in real_rows], dtype=np.float32))
     ) if real_rows else float("nan")
     mean_boundary_hit = float(
         np.nanmean(np.asarray([row.get("projector_boundary_hit_rate", float("nan")) for row in real_rows], dtype=np.float32))
@@ -436,49 +412,54 @@ def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) 
     mean_bucket_count = float(
         np.nanmean(np.asarray([row.get("projector_bucket_count", float("nan")) for row in real_rows], dtype=np.float32))
     ) if real_rows else float("nan")
+    exec_fast_minus_slow = float("nan")
+    if len(exec_summary["y_sorted"]) >= 2:
+        left = exec_summary["y_sorted"][-1]
+        right = exec_summary["y_sorted"][0]
+        if np.isfinite(left) and np.isfinite(right):
+            exec_fast_minus_slow = float(left - right)
+    exec_pass = bool(
+        exec_summary["control_ok"]
+        and np.isfinite(exec_fast_minus_slow)
+        and exec_fast_minus_slow >= float(min_fast_slow_effect)
+        and (
+            (not np.isfinite(mean_saturation))
+            or mean_saturation <= float(max_clip_hit_rate)
+        )
+        and (
+            (not np.isfinite(mean_boundary_hit))
+            or mean_boundary_hit <= float(max_boundary_hit_rate)
+        )
+    )
     return {
         "source_name": rows[0]["source_name"] if rows else "",
         "src_prefix_stat_mode": rows[0].get("src_prefix_stat_mode", "") if rows else "",
         "total_real_row_count": len(all_real_rows),
         "valid_real_row_count": len(real_rows),
         "all_real_domain_valid": bool(len(real_rows) == len(all_real_rows) and len(all_real_rows) > 0),
-        "g_ref_sorted": projected["x_sorted"],
-        "prompt_tempo_ref_sorted": [float(row.get("prompt_tempo_ref", float("nan"))) for row in real_rows],
-        "order_monotone_by_prompt_g": projected["order_monotone"],
-        "monotone_by_prompt_g": projected["pass"],
-        "order_monotone_by_prompt_tempo": projected["order_monotone"],
-        "monotone_by_prompt_tempo": projected["pass"],
-        "transfer_slope": projected["transfer_slope"],
-        "real_tempo_range": projected["real_tempo_range"],
-        "tempo_ref_sorted": projected["x_sorted"],
-        "tempo_out_sorted": projected["tempo_out_sorted"],
-        "preclip_monotone_by_prompt_tempo": preclip["pass"],
-        "preclip_transfer_slope": preclip["transfer_slope"],
-        "preclip_real_tempo_range": preclip["real_tempo_range"],
-        "tempo_out_preclip_sorted": preclip["tempo_out_sorted"],
-        "continuous_monotone_by_prompt_tempo": continuous["pass"],
-        "continuous_transfer_slope": continuous["transfer_slope"],
-        "continuous_real_tempo_range": continuous["real_tempo_range"],
-        "tempo_out_continuous_sorted": continuous["tempo_out_sorted"],
-        "projected_monotone_by_prompt_tempo": projected["pass"],
-        "projected_transfer_slope": projected["transfer_slope"],
-        "projected_real_tempo_range": projected["real_tempo_range"],
-        "tempo_out_projected_sorted": projected["tempo_out_sorted"],
-        "continuous_exec_ratio_slope": count_ratio_continuous["transfer_slope"],
-        "continuous_exec_ratio_range": count_ratio_continuous["real_tempo_range"],
-        "continuous_exec_ratio_sorted": count_ratio_continuous["tempo_out_sorted"],
-        "projected_exec_ratio_slope": count_ratio_projected["transfer_slope"],
-        "projected_exec_ratio_range": count_ratio_projected["real_tempo_range"],
-        "projected_exec_ratio_sorted": count_ratio_projected["tempo_out_sorted"],
-        "continuous_exec_logstretch_slope": logstretch_continuous["transfer_slope"],
-        "continuous_exec_logstretch_range": logstretch_continuous["real_tempo_range"],
-        "continuous_exec_logstretch_sorted": logstretch_continuous["tempo_out_sorted"],
-        "projected_exec_logstretch_slope": logstretch_projected["transfer_slope"],
-        "projected_exec_logstretch_range": logstretch_projected["real_tempo_range"],
-        "projected_exec_logstretch_sorted": logstretch_projected["tempo_out_sorted"],
+        "tempo_ref_runtime_sorted": exec_summary["x_sorted"],
+        "monotone_by_prompt_tempo_raw": raw_summary["control_ok"],
+        "transfer_slope_raw": raw_summary["transfer_slope"],
+        "real_tempo_range_raw": raw_summary["real_range"],
+        "tempo_out_raw_sorted": raw_summary["y_sorted"],
+        "monotone_by_prompt_tempo_preproj": preproj_summary["control_ok"],
+        "transfer_slope_preproj": preproj_summary["transfer_slope"],
+        "real_tempo_range_preproj": preproj_summary["real_range"],
+        "tempo_out_preproj_sorted": preproj_summary["y_sorted"],
+        "monotone_by_prompt_tempo_exec": exec_pass,
+        "transfer_slope_exec": exec_summary["transfer_slope"],
+        "real_tempo_range_exec": exec_summary["real_range"],
+        "tempo_out_exec_sorted": exec_summary["y_sorted"],
+        "monotone_by_prompt_tempo": exec_pass,
+        "transfer_slope": exec_summary["transfer_slope"],
+        "real_tempo_range": exec_summary["real_range"],
+        "fast_minus_slow": exec_fast_minus_slow,
+        "tempo_ref_sorted": exec_summary["x_sorted"],
+        "tempo_out_sorted": exec_summary["y_sorted"],
         "mean_analytic_saturation_rate": mean_saturation,
         "mean_projector_boundary_hit_rate": mean_boundary_hit,
         "mean_projector_bucket_count": mean_bucket_count,
+        "relaxed_probe": True,
         "controls": controls,
     }
 
@@ -547,41 +528,63 @@ def main() -> None:
     for row in rows:
         grouped[str(row["source_name"])].append(row)
     summary_rows = [
-        _monotonicity_summary(grouped[source_name], min_real_range=float(args.min_real_range))
+        _monotonicity_summary(
+            grouped[source_name],
+            min_real_range=float(args.min_real_range),
+            min_fast_slow_effect=float(args.min_fast_slow_effect),
+            max_clip_hit_rate=float(args.max_clip_hit_rate),
+            max_boundary_hit_rate=float(args.max_boundary_hit_rate),
+        )
         for source_name in sorted(grouped.keys())
     ]
+    slopes = [
+        float(row["transfer_slope"])
+        for row in summary_rows
+        if np.isfinite(float(row.get("transfer_slope", float("nan"))))
+    ]
+    effects = [
+        float(row["fast_minus_slow"])
+        for row in summary_rows
+        if np.isfinite(float(row.get("fast_minus_slow", float("nan"))))
+    ]
+    aggregate = {
+        "source_count": int(len(summary_rows)),
+        "monotone_source_count": int(sum(1 for row in summary_rows if bool(row["monotone_by_prompt_tempo"]))),
+        "transfer_slope_ci": bootstrap_ci(slopes) if slopes else (float("nan"), float("nan"), float("nan")),
+        "fast_minus_slow_ci": bootstrap_ci(effects) if effects else (float("nan"), float("nan"), float("nan")),
+        "max_sources_per_speaker": int(args.max_sources_per_speaker),
+        "min_ref_gap": float(args.min_ref_gap),
+        "min_fast_slow_effect": float(args.min_fast_slow_effect),
+        "max_clip_hit_rate": float(args.max_clip_hit_rate),
+        "max_boundary_hit_rate": float(args.max_boundary_hit_rate),
+        "relaxed_probe": True,
+    }
 
     output_csv = Path(args.output_csv)
     output_json = Path(args.output_json)
     _write_csv(output_csv, rows)
     output_json.parent.mkdir(parents=True, exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as handle:
-        json.dump({"rows": rows, "summary": summary_rows}, handle, indent=2, ensure_ascii=False)
+        json.dump({"rows": rows, "summary": summary_rows, "aggregate": aggregate}, handle, indent=2, ensure_ascii=False)
 
     print(f"[gate1-probe] split={args.split} cases={len(cases)} rows={len(rows)}")
     print(f"[gate1-probe] wrote_csv={output_csv}")
     print(f"[gate1-probe] wrote_json={output_json}")
     for row in summary_rows:
         source_name = row["source_name"]
-        monotone = "PASS" if row["monotone_by_prompt_tempo"] else "FAIL"
-        slope = row["transfer_slope"]
-        slope_str = "nan" if not np.isfinite(slope) else f"{slope:.4f}"
-        cont_slope = row.get("continuous_transfer_slope", float("nan"))
-        cont_slope_str = "nan" if not np.isfinite(cont_slope) else f"{cont_slope:.4f}"
-        preclip_slope = row.get("preclip_transfer_slope", float("nan"))
-        preclip_slope_str = "nan" if not np.isfinite(preclip_slope) else f"{preclip_slope:.4f}"
-        exec_ratio_slope = row.get("projected_exec_ratio_slope", float("nan"))
-        exec_ratio_slope_str = "nan" if not np.isfinite(exec_ratio_slope) else f"{exec_ratio_slope:.4f}"
-        exec_logstretch_slope = row.get("projected_exec_logstretch_slope", float("nan"))
-        exec_logstretch_slope_str = "nan" if not np.isfinite(exec_logstretch_slope) else f"{exec_logstretch_slope:.4f}"
+        mono_pre = "PASS" if row["monotone_by_prompt_tempo_preproj"] else "FAIL"
+        mono_exec = "PASS" if row["monotone_by_prompt_tempo_exec"] else "FAIL"
+        s_pre = row["transfer_slope_preproj"]
+        s_exec = row["transfer_slope_exec"]
+        s_pre_str = "nan" if not np.isfinite(s_pre) else f"{s_pre:.4f}"
+        s_exec_str = "nan" if not np.isfinite(s_exec) else f"{s_exec:.4f}"
         print(
-            f"[gate1-probe] {source_name} monotone={monotone} "
-            f"preclip_slope={preclip_slope_str} continuous_slope={cont_slope_str} projected_slope={slope_str} "
-            f"projected_exec_ratio_slope={exec_ratio_slope_str} "
-            f"projected_exec_logstretch_slope={exec_logstretch_slope_str} "
-            f"projected_range={row['real_tempo_range']:.4f} saturation={row.get('mean_analytic_saturation_rate', float('nan')):.4f} "
+            f"[gate1-probe] {source_name} "
+            f"preproj={mono_pre}/{s_pre_str} exec={mono_exec}/{s_exec_str} "
+            f"range_pre={row['real_tempo_range_preproj']:.4f} range_exec={row['real_tempo_range_exec']:.4f} "
             f"valid_real={row['valid_real_row_count']}/{row['total_real_row_count']} "
-            f"tempo_ref={row['tempo_ref_sorted']} tempo_out={row['tempo_out_sorted']}"
+            f"tempo_ref={row['tempo_ref_runtime_sorted']} "
+            f"tempo_preproj={row['tempo_out_preproj_sorted']} tempo_exec={row['tempo_out_exec_sorted']}"
         )
         if row["controls"]:
             print(f"[gate1-probe] {source_name} controls={row['controls']}")

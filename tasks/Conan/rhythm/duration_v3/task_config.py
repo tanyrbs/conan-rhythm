@@ -66,6 +66,19 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
 _LEGACY_PROMPT_SUMMARY_BACKBONES = {"role_memory", "unit_run"}
 _MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global", "v1g_minimal"}
 _UNIT_NORM_G_VARIANTS = {"unit_norm", "unit_normalized"}
+_GATE_STATUS_FINGERPRINT_KEYS = (
+    "rhythm_v3_g_variant",
+    "rhythm_v3_g_trim_ratio",
+    "rhythm_v3_drop_edge_runs_for_g",
+    "rhythm_v3_min_boundary_confidence_for_g",
+    "rhythm_v3_src_prefix_stat_mode",
+    "rhythm_v3_src_prefix_min_support",
+    "rhythm_v3_src_rate_init_mode",
+    "rhythm_v3_use_continuous_alignment",
+    "rhythm_v3_alignment_mode",
+    "rhythm_v3_minimal_v1_profile",
+    "rhythm_v3_strict_minimal_claim_profile",
+)
 
 
 def _is_unit_norm_variant(value) -> bool:
@@ -130,6 +143,44 @@ def _get_hparam_alias(hparams, primary: str, alias: str, default=None):
     return default
 
 
+_GATE_STATUS_BOOL_KEYS = {
+    "rhythm_v3_use_continuous_alignment",
+    "rhythm_v3_minimal_v1_profile",
+    "rhythm_v3_strict_minimal_claim_profile",
+}
+_GATE_STATUS_INT_KEYS = {
+    "rhythm_v3_drop_edge_runs_for_g",
+    "rhythm_v3_src_prefix_min_support",
+}
+_GATE_STATUS_FLOAT_KEYS = {
+    "rhythm_v3_g_trim_ratio",
+    "rhythm_v3_min_boundary_confidence_for_g",
+}
+
+
+def _normalize_gate_fingerprint_value(key: str, value):
+    if value is None:
+        return None
+    if key in _GATE_STATUS_BOOL_KEYS:
+        return _is_enabled_flag(value)
+    if key in _GATE_STATUS_INT_KEYS:
+        return int(value)
+    if key in _GATE_STATUS_FLOAT_KEYS:
+        return float(value)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, (int, bool, str)) or value is None:
+        return value
+    return str(value)
+
+
+def _build_gate_contract_fingerprint(hparams) -> dict[str, object]:
+    return {
+        key: _normalize_gate_fingerprint_value(key, hparams.get(key))
+        for key in _GATE_STATUS_FINGERPRINT_KEYS
+    }
+
+
 def _validate_rhythm_v3_gate_status_json(
     hparams,
     *,
@@ -172,6 +223,24 @@ def _validate_rhythm_v3_gate_status_json(
             "rhythm_v3_require_gate3_for_prefix_finetune requires gate3_pass=true in "
             "rhythm_v3_required_gate_status_json."
         )
+    payload_fp = payload.get("contract_fingerprint")
+    if isinstance(payload_fp, dict):
+        current_fp = _build_gate_contract_fingerprint(hparams)
+        mismatches = []
+        for key in _GATE_STATUS_FINGERPRINT_KEYS:
+            if key not in payload_fp:
+                continue
+            payload_value = _normalize_gate_fingerprint_value(key, payload_fp.get(key))
+            if payload_value != current_fp.get(key):
+                mismatches.append(
+                    f"{key}: payload={payload_value!r} current={current_fp.get(key)!r}"
+                )
+        if mismatches:
+            raise ValueError(
+                "rhythm_v3_required_gate_status_json contract mismatch with current hparams. "
+                "Regenerate gate status for the current g/prefix/alignment contract. "
+                + "; ".join(mismatches)
+            )
 
 
 def validate_duration_v3_training_hparams(hparams) -> None:
@@ -464,6 +533,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         "rhythm_v3_short_gap_silence_scale",
         "rhythm_v3_leading_silence_scale",
         "rhythm_v3_local_rate_decay",
+        "rhythm_v3_local_rate_decay_fast",
+        "rhythm_v3_local_rate_decay_slow",
+        "rhythm_v3_local_rate_slow_mix",
         "rhythm_v3_boundary_carry_decay",
         "rhythm_v3_boundary_reset_thresh",
     ):
@@ -511,6 +583,26 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         raise ValueError(
             "rhythm_v3_src_rate_init_mode must be one of: auto, learned, zero, first_speech."
         )
+    src_prefix_stat_mode = str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema").strip().lower()
+    if src_prefix_stat_mode not in {
+        "ema",
+        "dual_timescale",
+        "dual",
+        "dual_scale",
+        "dualtime",
+        "family_hybrid",
+        "robust",
+        "hybrid",
+        "family",
+        "exact_global_family",
+        "exact",
+        "exact_family",
+        "global_family",
+    }:
+        raise ValueError(
+            "rhythm_v3_src_prefix_stat_mode must be one of: "
+            "ema, dual_timescale, family_hybrid, exact_global_family."
+        )
     coarse_delta_scale = float(hparams.get("rhythm_v3_coarse_delta_scale", 0.20) or 0.0)
     if coarse_delta_scale < 0.0:
         raise ValueError("rhythm_v3_coarse_delta_scale must be >= 0 for rhythm_v3.")
@@ -530,6 +622,21 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         min_boundary_confidence_for_g = float(min_boundary_confidence_for_g)
         if min_boundary_confidence_for_g < 0.0 or min_boundary_confidence_for_g > 1.0:
             raise ValueError("rhythm_v3_min_boundary_confidence_for_g must be within [0, 1] for rhythm_v3.")
+    for key in (
+        "rhythm_v3_min_support_log_iqr_for_g",
+        "rhythm_v3_min_support_log_span_for_g",
+        "rhythm_v3_beta1_min_var",
+    ):
+        if float(hparams.get(key, 0.0) or 0.0) < 0.0:
+            raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_min_support_unique_for_g", 1) or 0) <= 0:
+        raise ValueError("rhythm_v3_min_support_unique_for_g must be >= 1 for rhythm_v3.")
+    beta1_min = float(hparams.get("rhythm_v3_beta1_min", 0.7) or 0.7)
+    beta1_max = float(hparams.get("rhythm_v3_beta1_max", 1.3) or 1.3)
+    if beta1_min > beta1_max:
+        raise ValueError("rhythm_v3_beta1_min must be <= rhythm_v3_beta1_max for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_beta1_min_points", 24) or 0) <= 0:
+        raise ValueError("rhythm_v3_beta1_min_points must be > 0 for rhythm_v3.")
     g_variant = str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower()
     if _is_unit_norm_variant(g_variant):
         if minimal_v1_profile and strict_minimal_claim_profile:

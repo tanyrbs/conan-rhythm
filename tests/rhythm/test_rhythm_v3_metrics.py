@@ -11,6 +11,7 @@ from tasks.Conan.rhythm.duration_v3.metrics import (
     monotonic_triplet_table,
     residual_bias_share,
     residual_target_stats,
+    silence_leakage,
     speech_weighted_mae,
     tempo_explainability,
     tempo_monotonicity,
@@ -247,6 +248,18 @@ def test_gate3_local_silence_delta_share_stays_zero_when_delta_is_speech_only():
     silence_mask = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
     share = local_silence_delta_share(learned, coarse, speech_mask, silence_mask)
     assert torch.allclose(share, torch.tensor(0.0))
+
+
+def test_silence_metrics_return_nan_when_speech_denominator_is_too_small():
+    delta = torch.tensor([[0.0, 0.0, 1.0e-5]], dtype=torch.float32)
+    speech_mask = torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32)
+    silence_mask = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+
+    leak = silence_leakage(delta, speech_mask, silence_mask)
+    share = local_silence_delta_share(delta, torch.zeros_like(delta), speech_mask, silence_mask)
+
+    assert torch.isnan(leak)
+    assert torch.isnan(share)
 
 
 def test_duration_v3_loss_targets_clip_silence_only_coarse():

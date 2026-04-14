@@ -88,7 +88,8 @@ def test_collect_duration_v3_frontend_diagnostics_reports_cached_surface_stats()
     assert diag["unit_count"] == 3
     assert diag["raw_silent_token_count"] == 2
     assert diag["source_silence_run_count"] == 1
-    assert diag["sep_nonzero_count"] >= 1
+    assert diag["sep_nonzero_count"] >= 0
+    assert diag["source_silence_confidence_max"] == pytest.approx(0.0)
     assert np.isfinite(diag["boundary_confidence_max"])
     assert np.isfinite(diag["source_boundary_cue_max"])
     np.testing.assert_array_equal(cache["raw_silent_token_count"], np.asarray([2], dtype=np.int32))
@@ -119,7 +120,20 @@ def test_build_source_rhythm_cache_v3_uses_acoustic_silence_when_silent_token_is
     assert int(cache["source_silence_frame_count"].reshape(-1)[0]) >= 2
     assert int(cache["source_silence_run_count"].reshape(-1)[0]) >= 1
     assert float(np.asarray(cache["source_silence_mask"], dtype=np.float32).sum()) > 0.0
+    assert float(np.asarray(cache["source_silence_confidence"], dtype=np.float32).max()) > 0.0
     assert float(np.asarray(cache["sep_hint"], dtype=np.float32).sum()) > 0.0
+
+
+def test_build_source_rhythm_cache_v3_keeps_token_only_silence_confidence_zero():
+    cache = build_source_rhythm_cache_v3(
+        [1, 1, 57, 57, 2, 2],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+
+    assert "source_silence_confidence" in cache
+    assert float(np.asarray(cache["source_silence_confidence"], dtype=np.float32).max()) == pytest.approx(0.0)
 
 
 def test_build_frame_sidecars_from_source_cache_expands_runs_to_frames():

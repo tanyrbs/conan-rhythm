@@ -547,6 +547,9 @@ def _compute_pair_row(
     min_boundary_confidence = ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
     if min_boundary_confidence is not None:
         min_boundary_confidence = float(min_boundary_confidence)
+    min_support_log_iqr = float(ds.hparams.get("rhythm_v3_min_support_log_iqr_for_g", 0.0) or 0.0)
+    min_support_log_span = float(ds.hparams.get("rhythm_v3_min_support_log_span_for_g", 0.0) or 0.0)
+    min_support_unique = int(ds.hparams.get("rhythm_v3_min_support_unique_for_g", 1) or 1)
 
     prompt_duration_obs = np.asarray(conditioning["prompt_duration_obs"], dtype=np.float32).reshape(-1)
     prompt_valid_mask = np.asarray(
@@ -572,6 +575,9 @@ def _compute_pair_row(
         closed_mask=torch.as_tensor(prompt_closed_mask, dtype=torch.float32),
         boundary_confidence=torch.as_tensor(prompt_boundary_confidence, dtype=torch.float32),
         min_boundary_confidence=min_boundary_confidence,
+        min_support_log_iqr=min_support_log_iqr,
+        min_support_log_span=min_support_log_span,
+        min_support_unique_count=min_support_unique,
     )
     g_ref, g_ref_status = compute_source_global_rate_for_analysis(
         source_duration_obs=prompt_duration_obs,
@@ -605,11 +611,20 @@ def _compute_pair_row(
             else None
         ),
         min_boundary_confidence=min_boundary_confidence,
+        min_support_log_iqr=min_support_log_iqr,
+        min_support_log_span=min_support_log_span,
+        min_support_unique_count=min_support_unique,
     )
     source_support_mask = source_support_stats.support_mask.detach().cpu().numpy().reshape(-1).astype(bool)
     source_support_count = float(source_support_stats.support_count.reshape(-1)[0].item())
     source_clean_count = float(source_support_stats.clean_count.reshape(-1)[0].item())
-    source_support_domain_valid = float(source_support_stats.domain_valid.reshape(-1)[0].item())
+    source_support_domain_valid = float(
+        (
+            source_support_stats.control_valid
+            if isinstance(source_support_stats.control_valid, torch.Tensor)
+            else source_support_stats.domain_valid
+        ).reshape(-1)[0].item()
+    )
     g_src_utt, g_src_status = compute_source_global_rate_for_analysis(
         source_duration_obs=record.source_duration_obs,
         source_speech_mask=speech_mask,
@@ -677,6 +692,9 @@ def _compute_pair_row(
             min_boundary_confidence=min_boundary_confidence,
             drop_edge_runs=int(drop_edge_runs),
             min_speech_ratio=0.0,
+            min_support_log_iqr=min_support_log_iqr,
+            min_support_log_span=min_support_log_span,
+            min_support_unique_count=min_support_unique,
             unit_ids=(
                 None
                 if record.source_content_units is None
@@ -862,7 +880,13 @@ def _compute_pair_row(
     support_count = float(support_stats.support_count.reshape(-1)[0].item())
     support_seed_count = float(support_stats.support_seed_count.reshape(-1)[0].item())
     clean_count = float(support_stats.clean_count.reshape(-1)[0].item())
-    support_domain_valid = float(support_stats.domain_valid.reshape(-1)[0].item())
+    support_domain_valid = float(
+        (
+            support_stats.control_valid
+            if isinstance(support_stats.control_valid, torch.Tensor)
+            else support_stats.domain_valid
+        ).reshape(-1)[0].item()
+    )
     source_g_domain_valid = int(
         np.isfinite(g_src_utt)
         and source_clean_count > 0.5
@@ -943,6 +967,21 @@ def _compute_pair_row(
         "source_clean_count": float(source_clean_count),
         "support_fraction": float(support_stats.support_fraction.reshape(-1)[0].item()),
         "edge_runs_dropped": float(support_stats.edge_runs_dropped.reshape(-1)[0].item()),
+        "support_log_iqr": float(
+            support_stats.support_log_iqr.reshape(-1)[0].item()
+            if isinstance(support_stats.support_log_iqr, torch.Tensor)
+            else float("nan")
+        ),
+        "support_log_span": float(
+            support_stats.support_log_span.reshape(-1)[0].item()
+            if isinstance(support_stats.support_log_span, torch.Tensor)
+            else float("nan")
+        ),
+        "support_unique_count": float(
+            support_stats.support_unique_count.reshape(-1)[0].item()
+            if isinstance(support_stats.support_unique_count, torch.Tensor)
+            else float("nan")
+        ),
         "support_domain_valid": support_domain_valid,
         "source_support_domain_valid": float(source_support_domain_valid),
         "source_g_domain_valid": int(source_g_domain_valid),

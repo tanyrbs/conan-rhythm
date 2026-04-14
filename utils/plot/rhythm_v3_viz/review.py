@@ -811,6 +811,7 @@ def build_ref_crop_table(
     unit_step_ms: float = DEFAULT_REVIEW_UNIT_STEP_MS,
     require_explicit_speech_mask: bool = False,
     min_speech_ratio: float = DEFAULT_GATE_MIN_SPEECH_RATIO,
+    min_boundary_confidence: float | None = None,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
     rows: list[dict[str, Any]] = []
@@ -1412,6 +1413,7 @@ def build_monotonicity_table(
     g_trim_ratio: float = 0.2,
     drop_edge_runs: int = 0,
     require_explicit_speech_mask: bool = False,
+    min_boundary_confidence: float | None = None,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
     grouped: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}

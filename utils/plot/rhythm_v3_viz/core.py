@@ -578,6 +578,17 @@ def build_debug_record(
                 _maybe_set_meta(meta, meta_key, scalar)
         if model_output.get("rhythm_v3_g_trim_ratio") is not None:
             _maybe_set_meta(meta, "g_trim_ratio", _as_object_scalar(model_output.get("rhythm_v3_g_trim_ratio")))
+        for key in (
+            "rhythm_v3_min_boundary_confidence_for_g",
+            "rhythm_v3_src_prefix_stat_mode",
+            "rhythm_v3_src_prefix_min_support",
+            "rhythm_v3_minimal_v1_profile",
+            "rhythm_v3_strict_minimal_claim_profile",
+            "rhythm_v3_use_continuous_alignment",
+            "rhythm_v3_alignment_mode",
+        ):
+            if model_output.get(key) is not None:
+                _maybe_set_meta(meta, key, _as_object_scalar(model_output.get(key)))
         if model_output.get("rhythm_v3_src_rate_init_mode") is not None:
             _maybe_set_meta(
                 meta,
@@ -1379,6 +1390,11 @@ def record_summary(
         if record.projector_budget_hit_neg is not None and record.projector_budget_hit_neg.size > 0
         else np.nan
     )
+    budget_hit_any_rate = float("nan")
+    if np.isfinite(budget_hit_pos_rate) or np.isfinite(budget_hit_neg_rate):
+        budget_hit_any_rate = float(
+            np.nanmax(np.asarray([budget_hit_pos_rate, budget_hit_neg_rate], dtype=np.float32))
+        )
     sample_id = str(meta.get("sample_id", record.item_name or ""))
     pair_id = str(meta.get("pair_id", meta.get("rhythm_pair_group_id", sample_id)))
     src_prompt_id = str(meta.get("src_prompt_id", meta.get("source_item_name", record.item_name or "")))
@@ -1567,6 +1583,7 @@ def record_summary(
         "analytic_gap_runtime_abs_mean": analytic_gap_abs_mean,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
         "analytic_saturation_rate": analytic_saturation_rate,
+        "analytic_gap_clip_hit_rate": analytic_saturation_rate,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,
         "coarse_scalar_raw": coarse_scalar_raw,
         "coarse_target_abs_err": (
@@ -1589,6 +1606,7 @@ def record_summary(
         "prefix_discrepancy": float(meta.get("prefix_discrepancy")) if meta.get("prefix_discrepancy") is not None else np.nan,
         "budget_hit_pos_rate": budget_hit_pos_rate,
         "budget_hit_neg_rate": budget_hit_neg_rate,
+        "budget_hit_any_rate": budget_hit_any_rate,
         "projector_boundary_hit_rate": (
             float(np.mean(record.projector_boundary_hit.reshape(-1) > 0.5))
             if record.projector_boundary_hit is not None and record.projector_boundary_hit.size > 0

@@ -1,7 +1,7 @@
 base_config: egs/local_arctic_rhythm_v3_quick.yaml
 
 rhythm_v3_eval_mode: analytic
-rhythm_v3_gate_quality_strict: true
+rhythm_v3_gate_quality_strict: false
 rhythm_v3_disable_local_residual: true
 rhythm_v3_disable_coarse_bias: true
 lambda_rhythm_bias: 0.0

@@ -43,6 +43,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         local_cold_start_runs: int = 2,
         local_short_run_min_duration: float = 2.0,
         local_rate_decay: float = 0.95,
+        local_rate_decay_fast: float = 0.80,
+        local_rate_decay_slow: float = 0.97,
+        local_rate_slow_mix: float = 0.65,
         analytic_gap_clip: float = 0.35,
         short_gap_silence_scale: float = 0.35,
         leading_silence_scale: float = 0.0,
@@ -62,6 +65,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         src_prefix_min_support: int = 3,
         g_drop_edge_runs: int = 0,
         min_boundary_confidence_for_g: float | None = None,
+        min_support_log_iqr_for_g: float = 0.0,
+        min_support_log_span_for_g: float = 0.0,
+        min_support_unique_for_g: int = 1,
         codebook=None,
     ) -> None:
         super().__init__()
@@ -91,6 +97,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.local_cold_start_runs = int(max(0, local_cold_start_runs))
         self.local_short_run_min_duration = float(max(1.0, local_short_run_min_duration))
         self.local_rate_decay = float(max(0.0, min(0.999, local_rate_decay)))
+        self.local_rate_decay_fast = float(max(0.0, min(0.999, local_rate_decay_fast)))
+        self.local_rate_decay_slow = float(max(0.0, min(0.999, local_rate_decay_slow)))
+        self.local_rate_slow_mix = float(max(0.0, min(1.0, local_rate_slow_mix)))
         self.analytic_gap_clip = float(max(0.0, analytic_gap_clip))
         self.eval_mode = normalize_falsification_eval_mode(eval_mode)
         self.disable_local_residual = bool(disable_local_residual)
@@ -127,6 +136,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.min_boundary_confidence_for_g = (
             None if min_boundary_confidence_for_g is None else float(min_boundary_confidence_for_g)
         )
+        self.min_support_log_iqr_for_g = float(max(0.0, min_support_log_iqr_for_g))
+        self.min_support_log_span_for_g = float(max(0.0, min_support_log_span_for_g))
+        self.min_support_unique_for_g = int(max(1, min_support_unique_for_g))
         init_tensor = torch.full((1,), float(src_rate_init_value))
         if freeze_src_rate_init:
             self.register_buffer("src_rate_init", init_tensor)
@@ -221,6 +233,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             default_init_rate=default_init_rate,
             stat_mode=self.src_prefix_stat_mode,
             decay=self.local_rate_decay,
+            decay_fast=self.local_rate_decay_fast,
+            decay_slow=self.local_rate_decay_slow,
+            slow_mix=self.local_rate_slow_mix,
             variant=self.g_variant,
             trim_ratio=self.g_trim_ratio,
             min_support=self.src_prefix_min_support,
@@ -231,6 +246,9 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             min_boundary_confidence=self.min_boundary_confidence_for_g,
             drop_edge_runs=self.g_drop_edge_runs,
             min_speech_ratio=0.0,
+            min_support_log_iqr=self.min_support_log_iqr_for_g,
+            min_support_log_span=self.min_support_log_span_for_g,
+            min_support_unique_count=self.min_support_unique_for_g,
             unit_ids=content_units.long(),
         )
         query = self.query_encoder(
@@ -268,18 +286,23 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         else:
             spk_ctx = query.new_zeros((batch_size, self.query_dim))
 
-        analytic_gap_preclip = g_ref_col - local_rate_seq.float()
+        analytic_gap_raw = g_ref_col - local_rate_seq.float()
         analytic_gap = apply_analytic_gap_clip(
-            analytic_gap_preclip,
+            analytic_gap_raw,
             self.analytic_gap_clip,
         )
         global_shift_analytic = analytic_gap * commit_valid_mask
-        if self.analytic_gap_clip > 0.0:
-            analytic_saturation = (
-                analytic_gap_preclip.abs() >= (float(self.analytic_gap_clip) - 1.0e-6)
-            ).float() * speech_mask
+        if float(self.analytic_gap_clip) > 0.0:
+            analytic_clip_hit = (
+                (analytic_gap_raw.abs() >= (float(self.analytic_gap_clip) - 1.0e-6)).float()
+                * speech_mask
+            )
         else:
-            analytic_saturation = torch.zeros_like(speech_mask)
+            analytic_clip_hit = torch.zeros_like(speech_mask)
+        analytic_clip_hit_rate = (
+            analytic_clip_hit.sum(dim=1, keepdim=True)
+            / speech_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        )
         if self.use_src_gap_in_coarse_head:
             g_src_utt = _masked_median_2d(local_rate_seq.float(), speech_mask)
             delta_g_utt = (g_ref_col - g_src_utt).detach()
@@ -366,8 +389,13 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "unit_global_shift_analytic": analytic_term,
             "unit_analytic_gap": analytic_term,
             "unit_analytic_logstretch": analytic_term,
-            "unit_analytic_gap_preclip": analytic_gap_preclip * commit_valid_mask,
-            "unit_analytic_gap_saturation": analytic_saturation * mask,
+            "unit_analytic_gap_preclip": analytic_gap_raw * commit_valid_mask,
+            "unit_analytic_gap_raw": analytic_gap_raw * mask,
+            "unit_analytic_gap_clipped": analytic_term,
+            "unit_analytic_gap_saturation": analytic_clip_hit * mask,
+            "unit_analytic_gap_clip_hit": analytic_clip_hit * mask,
+            "unit_analytic_clip_hit": analytic_clip_hit * mask,
+            "analytic_clip_hit_rate": analytic_clip_hit_rate,
             "analytic_gap_clip_value": mask.new_full((mask.size(0), 1), float(self.analytic_gap_clip)),
             "src_prefix_stat_mode": self.src_prefix_stat_mode,
             "global_bias_scalar": global_bias_scalar,

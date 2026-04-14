@@ -52,6 +52,11 @@ def _make_debug_records_cli_row(
     pair_id: str | None = None,
     **overrides,
 ) -> dict[str, float | str]:
+    default_tempo_out = {
+        "slow": 1.2,
+        "mid": 1.0,
+        "fast": 0.8,
+    }.get(ref_bin, 1.0)
     row: dict[str, float | str] = {
         "item_name": item_name or f"demo_case_{eval_mode}_{ref_bin}",
         "src_id": src_id,
@@ -80,10 +85,12 @@ def _make_debug_records_cli_row(
         "alignment_mean_coarse_confidence_speech": 0.9,
         "projector_boundary_hit_rate": 0.0,
         "projector_boundary_decay_rate": 0.0,
+        "projector_bucket_count": 4.0,
         "gate0_row_dropped": 0.0,
         "gate0_drop_reason": "ok",
         "g_compute_status": "ok",
         "g_src_compute_status": "ok",
+        "tempo_out": default_tempo_out,
     }
     if eval_mode == "analytic":
         row["tempo_monotonicity_rate"] = 1.0
@@ -1328,6 +1335,116 @@ def test_build_gate_status_splits_gate2_from_gate3_local_residual_failures():
     assert status["learned_residual_bias_share"] == pytest.approx(0.4)
 
 
+def test_build_gate_status_exposes_gate0_split_flags_and_rejects_high_clip_rate():
+    frame = _expand_gate_status_rows(
+        [
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="slow",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                analytic_saturation_rate=0.8,
+                projector_boundary_hit_rate=0.0,
+            ),
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="mid",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                analytic_saturation_rate=0.8,
+                projector_boundary_hit_rate=0.0,
+            ),
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="fast",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                analytic_saturation_rate=0.8,
+                projector_boundary_hit_rate=0.0,
+            ),
+        ]
+    )
+
+    status = build_gate_status(frame)
+
+    assert "gate0a_pass" in status
+    assert "gate0b_pass" in status
+    assert "gate0c_pass" in status
+    assert status["gate0a_pass"] is True
+    assert status["gate0b_pass"] is True
+    assert status["gate0c_pass"] is True
+    assert status["gate1_pass"] is False
+    assert status["analytic_clip_hit_rate"] == pytest.approx(0.8)
+
+
+def test_build_gate_status_rejects_low_projected_range_and_bucket_collapse():
+    frame = _expand_gate_status_rows(
+        [
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="slow",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                tempo_out=1.00,
+                projector_bucket_count=2.0,
+            ),
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="mid",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                tempo_out=1.02,
+                projector_bucket_count=2.0,
+            ),
+            _make_debug_records_cli_row(
+                eval_mode="analytic",
+                ref_bin="fast",
+                ref_condition="real",
+                explainability_slope=0.4,
+                negative_control_gap=0.3,
+                same_text_gap=0.0,
+                tempo_monotonicity_rate=1.0,
+                alignment_local_margin_p10=0.05,
+                tempo_transfer_slope=0.4,
+                tempo_out=1.03,
+                projector_bucket_count=2.0,
+            ),
+        ]
+    )
+
+    status = build_gate_status(frame)
+
+    assert status["gate0_pass"] is True
+    assert status["gate1_pass"] is False
+    assert status["analytic_projected_real_range"] == pytest.approx(0.03)
+    assert status["analytic_mean_bucket_count"] == pytest.approx(2.0)
+
+
 def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path, monkeypatch):
     record = RhythmV3DebugRecord.from_mapping(
         {
@@ -1382,8 +1499,9 @@ def test_debug_records_strict_gates_fail_nonzero_and_write_gate_status(tmp_path,
         debug_records_main()
     assert exc_info.value.code != 0
     assert gate_status_path.exists()
-    payload = gate_status_path.read_text(encoding="utf-8")
+    payload = json.loads(gate_status_path.read_text(encoding="utf-8"))
     assert "gate0_pass" in payload
+    assert payload["contract_fingerprint"]["rhythm_v3_g_variant"] == "raw_median"
 
 
 def test_debug_records_cli_strict_gates_fail_on_missing_negative_control(tmp_path, monkeypatch, capsys):

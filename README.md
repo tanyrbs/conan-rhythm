@@ -21,15 +21,16 @@ Latest checked local rerun:
 Current reading on the quick-ARCTIC surface:
 
 - frontend/cache support-domain collapse has been repaired
-- maintained `raw_median` is still not qualified on this local surface
-- `weighted_median` and `trimmed_mean` stay flat in Gate 0 / Gate 1
-- `softclean_wmed` and `softclean_wtmean` recover some push, but only for `1/4`
-  Gate-1 probe sources and therefore still fail qualification
-- Gate 2 / Gate 3 training remain blocked
+- latest local strongest fixed contract
+  `weighted_median + exact_global_family` now passes local Gate 0 / Gate 1
+- maintained official default `raw_median + ema` remains blocked for training
+- Gate 2 / Gate 3 training remain blocked and must be rerun on the same contract
+- official learned training is still blocked until Gate 2 is recorded under the
+  same contract fingerprint
 
 So the present blocker is no longer "prompt domain dies before `g` exists".
-The blocker is now "a usable prompt domain exists, but the current single-scalar
-control still has weak or unstable runtime push".
+The blocker is now "the local strongest contract is alive, but the official
+training/unblock surface is still stricter and not yet revalidated past Gate 1".
 
 ## Current maintained default
 
@@ -103,6 +104,8 @@ as comment-only edits:
 - `egs/overrides/rhythm_v3_gate0_g_audit.yaml`
 - `egs/overrides/rhythm_v3_gate1_analytic.yaml`
 - `egs/overrides/rhythm_v3_gate2_coarse_only.yaml`
+- `egs/overrides/rhythm_v3_local_weighted_exact.yaml` for the current frozen
+  local strongest fixed contract used by Gate 2 / Gate 3 candidate reruns
 
 ## What the default v3 path does
 

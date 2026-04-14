@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -505,6 +506,34 @@ def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_tr
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     hparams["rhythm_v3_require_gate2_for_official_train"] = True
     with pytest.raises(ValueError, match="requires gate2_pass=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_gate_status_contract_mismatch(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": True,
+                "contract_fingerprint": {
+                    "rhythm_v3_g_variant": "weighted_median",
+                    "rhythm_v3_src_prefix_stat_mode": "exact_global_family",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    hparams["rhythm_v3_g_variant"] = "raw_median"
+    hparams["rhythm_v3_src_prefix_stat_mode"] = "ema"
+    with pytest.raises(ValueError, match="contract mismatch"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1460,6 +1489,7 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_strict_minimal_claim_profile: true" in source
     assert "rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json" in source
+    assert "rhythm_v3_require_gate2_for_official_train: true" in source
     assert "rhythm_v3_strict_eval_invalid_g: true" in source
     assert "rhythm_v3_use_src_gap_in_coarse_head: false" in source
     assert "rhythm_v3_min_prompt_speech_ratio: 0.60" in source

@@ -429,6 +429,24 @@ def test_summarize_global_rate_support_tracks_duration_weighted_and_count_speech
     assert torch.allclose(summary.domain_valid, torch.tensor([[0.0]], dtype=torch.float32))
 
 
+def test_summarize_global_rate_support_exposes_control_valid_dynamic_range_gate():
+    speech_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    duration_obs = torch.tensor([[4.0, 4.02, 4.01, 4.03]], dtype=torch.float32)
+
+    summary = summarize_global_rate_support(
+        speech_mask=speech_mask,
+        duration_obs=duration_obs,
+        min_speech_runs=3,
+        min_support_log_iqr=0.08,
+        min_support_log_span=0.18,
+        min_support_unique_count=3,
+    )
+
+    assert torch.allclose(summary.domain_valid, torch.tensor([[1.0]], dtype=torch.float32))
+    assert torch.allclose(summary.control_valid, torch.tensor([[0.0]], dtype=torch.float32))
+    assert float(summary.support_log_span.reshape(-1)[0].item()) < 0.18
+
+
 def test_compute_global_rate_accepts_reused_support_mask_for_weighted_median():
     log_dur = torch.log(torch.tensor([[2.0, 4.0, 8.0, 16.0]], dtype=torch.float32))
     speech_mask = torch.ones_like(log_dur)

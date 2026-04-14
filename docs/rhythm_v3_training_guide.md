@@ -55,8 +55,8 @@ So the right reading is:
 
 - the old local `Gate0/1 fail` story is no longer current
 - the newest local strongest-contract candidate is alive
-- official training still stays blocked until that candidate is promoted or a
-  different official contract is frozen
+- official training still stays blocked until that candidate is frozen and
+  Gate 2 is recorded under the same contract fingerprint
 
 ## 1. What the maintained path is
 
@@ -119,6 +119,13 @@ Minimal-V1 training now also fail-fast checks the prompt-side domain sidecars
 The maintained yaml already exposes the switches needed for staged validation.
 In practice, keep one base config and move between these five profiles with
 small overrides:
+
+The current frozen local strongest-contract overlay is:
+
+- `egs/overrides/rhythm_v3_local_weighted_exact.yaml`
+
+Use that overlay for Gate 2 / Gate 3 candidate reruns so later stages cannot
+silently drift back to `raw_median + ema`.
 
 | Profile | Purpose | Key overrides |
 | --- | --- | --- |
@@ -719,7 +726,9 @@ The checked-in base config intentionally points at the official blocked gate:
 
 Use the local candidate JSON only as a machine-readable summary of the latest
 zero-train strongest-contract evidence. It is not the official training
-unblock artifact.
+unblock artifact. The base config now also requires `gate2_pass=true` before
+official learned training can start, so refreshing Gate 0 / Gate 1 alone is
+not enough to unblock training.
 
 This keeps the current workflow aligned with the falsification-first order:
 

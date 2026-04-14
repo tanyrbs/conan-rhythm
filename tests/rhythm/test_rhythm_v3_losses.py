@@ -26,6 +26,7 @@ from tasks.Conan.rhythm.losses import (
     build_rhythm_loss_dict,
 )
 from tasks.Conan.rhythm.targets import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
+from tasks.Conan.rhythm.common import targets_impl
 from tasks.Conan.rhythm.common.targets_impl import _build_duration_v3_silence_tau
 
 
@@ -1841,6 +1842,66 @@ def test_rhythm_v3_baseline_targets_can_be_deglobalized():
     assert targets is not None
     assert torch.allclose(targets.baseline_global_tgt, torch.full((1, 1), torch.log(torch.tensor(2.0))))
     assert torch.allclose(targets.baseline_duration_tgt, torch.full((1, 3), 2.0))
+
+
+def test_duration_v3_target_builder_prefers_boundary_confidence_alias(monkeypatch):
+    captured = {}
+
+    def _fake_prefix_builder(**kwargs):
+        captured["boundary_confidence"] = kwargs.get("boundary_confidence")
+        observed_log = kwargs["observed_log"]
+        return (
+            torch.zeros_like(observed_log),
+            torch.zeros((observed_log.size(0), 1), dtype=observed_log.dtype, device=observed_log.device),
+        )
+
+    monkeypatch.setattr(targets_impl, "build_causal_source_prefix_rate_seq", _fake_prefix_builder)
+
+    unit_mask = torch.ones((1, 3), dtype=torch.float32)
+    boundary_confidence = torch.tensor([[0.2, 0.8, 0.4]], dtype=torch.float32)
+    output = {
+        "rhythm_execution": type("DummyExec", (), {"commit_mask": unit_mask})(),
+        "rhythm_unit_batch": type(
+            "DummyBatch",
+            (),
+            {
+                "unit_mask": unit_mask,
+                "sealed_mask": unit_mask,
+                "sep_mask": torch.zeros((1, 3), dtype=torch.float32),
+                "unit_anchor_base": torch.ones((1, 3), dtype=torch.float32),
+                "source_duration_obs": torch.tensor([[2.0, 3.0, 4.0]], dtype=torch.float32),
+                "source_silence_mask": torch.zeros((1, 3), dtype=torch.float32),
+                "source_run_stability": torch.ones((1, 3), dtype=torch.float32),
+                "boundary_confidence": boundary_confidence,
+                "source_boundary_cue": None,
+                "content_units": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            },
+        )(),
+        "rhythm_ref_conditioning": type(
+            "DummyRef",
+            (),
+            {
+                "global_rate": torch.zeros((1, 1), dtype=torch.float32),
+            },
+        )(),
+    }
+    targets = build_duration_v3_loss_targets(
+        sample={"unit_duration_tgt": torch.tensor([[2.0, 3.5, 4.5]], dtype=torch.float32)},
+        output=output,
+        config=DurationV3TargetBuildConfig(
+            lambda_dur=1.0,
+            lambda_op=0.0,
+            lambda_pref=0.0,
+            lambda_zero=0.0,
+            lambda_ortho=0.0,
+            minimal_v1_profile=True,
+            anchor_mode="source_observed",
+            g_variant="weighted_median",
+            src_prefix_stat_mode="exact_global_family",
+        ),
+    )
+    assert targets is not None
+    assert torch.allclose(captured["boundary_confidence"], boundary_confidence * unit_mask)
 
 
 def test_rhythm_v3_baseline_pretrain_routes_total_to_baseline_only():

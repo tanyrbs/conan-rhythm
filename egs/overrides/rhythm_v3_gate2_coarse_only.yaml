@@ -1,8 +1,10 @@
-base_config: egs/conan_emformer_rhythm_v3.yaml
+base_config: egs/overrides/rhythm_v3_local_weighted_exact.yaml
 
 # Gate 2: coarse-only falsification on the same maintained structural path.
 rhythm_v3_eval_mode: coarse_only
 rhythm_v3_gate_quality_strict: true
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json
+rhythm_v3_require_gate2_for_official_train: false
 rhythm_v3_disable_local_residual: true
 rhythm_v3_disable_coarse_bias: false
 lambda_rhythm_pref: 0.0
