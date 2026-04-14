@@ -32,8 +32,7 @@ DEFAULT_OUTPUT_JSON = "tmp/gate1_boundary_audit/full_split_boundary_audit_report
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
-    "rhythm_v3_minimal_v1_profile=False,"
-    "rhythm_v3_strict_minimal_claim_profile=False"
+    "rhythm_v3_strict_eval_invalid_g=True"
 )
 
 
@@ -156,6 +155,7 @@ def _audit_item(
     min_prompt_ref_len_sec: float,
     max_prompt_ref_len_sec: float,
     silent_token: int | None,
+    phrase_boundary_threshold: float,
 ) -> dict[str, Any]:
     raw_item = ds._get_raw_item_cached(local_idx)
     item_name = str(raw_item.get("item_name", f"{split}_{local_idx}"))
@@ -219,6 +219,11 @@ def _audit_item(
     )
     source_silence_mask = _array_1d(
         ref_item.get("source_silence_mask"),
+        dtype=np.float32,
+        default=np.zeros_like(prompt_duration_obs, dtype=np.float32),
+    )
+    source_boundary_cue = _array_1d(
+        ref_item.get("source_boundary_cue"),
         dtype=np.float32,
         default=np.zeros_like(prompt_duration_obs, dtype=np.float32),
     )
@@ -292,6 +297,8 @@ def _audit_item(
         bc_max = float(bc_finite.max())
         bc_mean = float(bc_finite.mean())
         bc_p90 = float(np.percentile(bc_finite, 90))
+    source_boundary_finite = source_boundary_cue[np.isfinite(source_boundary_cue)]
+    source_boundary_max = float(source_boundary_finite.max()) if source_boundary_finite.size > 0 else float("nan")
 
     return {
         "split": split,
@@ -322,6 +329,11 @@ def _audit_item(
         "bc_max": bc_max,
         "bc_mean": bc_mean,
         "bc_p90": bc_p90,
+        "source_boundary_max": source_boundary_max,
+        "source_phrase_threshold": float(phrase_boundary_threshold),
+        "source_phrase_reachable": float(
+            np.isfinite(source_boundary_max) and source_boundary_max >= (float(phrase_boundary_threshold) - 1.0e-6)
+        ),
         "threshold_stats": threshold_stats,
     }
 
@@ -379,6 +391,13 @@ def _summarize_rows(
         "bc_max_mean": _finite_mean([float(row.get("bc_max", float("nan"))) for row in valid_rows]),
         "bc_max_p50": _finite_percentile([float(row.get("bc_max", float("nan"))) for row in valid_rows], 50),
         "bc_max_p95": _finite_percentile([float(row.get("bc_max", float("nan"))) for row in valid_rows], 95),
+        "source_boundary_max_mean": _finite_mean([float(row.get("source_boundary_max", float("nan"))) for row in valid_rows]),
+        "source_boundary_max_p95": _finite_percentile(
+            [float(row.get("source_boundary_max", float("nan"))) for row in valid_rows], 95
+        ),
+        "source_phrase_reachable_items": sum(
+            1 for row in valid_rows if float(row.get("source_phrase_reachable", 0.0)) > 0.5
+        ),
         "configured_threshold": configured_key,
     }
     config_support_positive = 0
@@ -456,12 +475,14 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     split_summaries: dict[str, Any] = {}
     configured_threshold: float | None = None
+    phrase_boundary_threshold: float | None = None
     config_snapshot: dict[str, Any] | None = None
 
     for split in splits:
         ds = ConanDataset(prefix=split, shuffle=False)
         if configured_threshold is None:
             configured_threshold = float(ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g", 0.0) or 0.0)
+            phrase_boundary_threshold = float(ds.hparams.get("rhythm_source_phrase_threshold", 0.55) or 0.55)
             thresholds = _merge_thresholds(thresholds, configured_threshold)
             config_snapshot = {
                 "config": args.config,
@@ -475,6 +496,7 @@ def main() -> None:
                 "min_prompt_ref_len_sec": float(ds.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0),
                 "max_prompt_ref_len_sec": float(ds.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0),
                 "configured_min_boundary_confidence_for_g": configured_threshold,
+                "source_phrase_threshold": phrase_boundary_threshold,
                 "thresholds": thresholds,
             }
         drop_edge_runs = int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0)
@@ -482,6 +504,7 @@ def main() -> None:
         min_prompt_ref_len_sec = float(ds.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
         max_prompt_ref_len_sec = float(ds.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
         silent_token = ds.hparams.get("silent_token", 57)
+        split_phrase_boundary_threshold = float(ds.hparams.get("rhythm_source_phrase_threshold", 0.55) or 0.55)
 
         split_rows = [
             _audit_item(
@@ -494,6 +517,7 @@ def main() -> None:
                 min_prompt_ref_len_sec=min_prompt_ref_len_sec,
                 max_prompt_ref_len_sec=max_prompt_ref_len_sec,
                 silent_token=silent_token,
+                phrase_boundary_threshold=split_phrase_boundary_threshold,
             )
             for local_idx in range(len(ds.avail_idxs))
         ]

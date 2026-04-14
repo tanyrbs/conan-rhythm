@@ -9,7 +9,9 @@ import torch.nn.functional as F
 from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
 from .silence_surface import build_silence_tau_surface_meta
 from .g_stats import (
+    build_softclean_weights,
     compute_global_rate,
+    is_softclean_global_rate_variant,
     normalize_falsification_eval_mode,
     normalize_global_rate_variant,
     summarize_global_rate_support,
@@ -325,6 +327,16 @@ class PromptDurationMemoryEncoder(nn.Module):
         if self.strict_clean_global_support:
             zero_summary_rows = zero_summary_rows | (support_stats.clean_count <= 0.0)
         resolved_weight = prompt_global_weight.float() if isinstance(prompt_global_weight, torch.Tensor) else None
+        estimator_support_mask = support_mask
+        if is_softclean_global_rate_variant(self.g_variant):
+            estimator_support_mask = (speech_mask > 0.5) & (valid_mask > 0.5)
+            if resolved_weight is None:
+                resolved_weight = build_softclean_weights(
+                    speech_mask=speech_mask,
+                    valid_mask=valid_mask,
+                    closed_mask=closed_mask,
+                    boundary_confidence=boundary_confidence,
+                )
         support_weight = support_stats.support_count
         if resolved_weight is not None:
             support_weight = torch.where(
@@ -356,7 +368,7 @@ class PromptDurationMemoryEncoder(nn.Module):
                 drop_edge_runs=self.g_drop_edge_runs,
                 unit_ids=prompt_content_units[normal_rows],
                 unit_prior=None if prompt_unit_log_prior is None else prompt_unit_log_prior[normal_rows],
-                support_mask=support_mask[normal_rows],
+                support_mask=estimator_support_mask[normal_rows],
                 invalid_weight_behavior="raise",
             )
             global_rate[normal_rows] = row_rate

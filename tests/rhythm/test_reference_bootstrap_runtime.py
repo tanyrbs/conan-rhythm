@@ -13,7 +13,11 @@ if str(ROOT) not in sys.path:
 
 from modules.Conan.rhythm.bridge import run_rhythm_frontend
 from modules.Conan.rhythm.unit_frontend import RhythmUnitFrontend
-from modules.Conan.rhythm_v3.source_cache import DURATION_V3_CACHE_META_KEY, build_duration_v3_cache_meta
+from modules.Conan.rhythm_v3.source_cache import (
+    DURATION_V3_CACHE_META_KEY,
+    DURATION_V3_SOURCE_CACHE_VERSION,
+    build_duration_v3_cache_meta,
+)
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
 from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
 from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
@@ -175,7 +179,7 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
         )
 
         self.assertIn(DURATION_V3_CACHE_META_KEY, sample)
-        self.assertEqual(sample[DURATION_V3_CACHE_META_KEY]["cache_version"], 3)
+        self.assertEqual(sample[DURATION_V3_CACHE_META_KEY]["cache_version"], DURATION_V3_SOURCE_CACHE_VERSION)
         self.assertIn("source_boundary_cue", sample)
 
     def test_sample_builder_fail_fast_blocks_self_fallback_when_external_reference_is_required(self) -> None:

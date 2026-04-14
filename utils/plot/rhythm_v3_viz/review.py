@@ -8,7 +8,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from modules.Conan.rhythm_v3.g_stats import compute_global_rate, summarize_global_rate_support
+from modules.Conan.rhythm_v3.g_stats import (
+    build_softclean_weights,
+    compute_global_rate,
+    is_softclean_global_rate_variant,
+    summarize_global_rate_support,
+)
 from tasks.Conan.rhythm.duration_v3.metrics import (
     budget_hit_rate,
     cumulative_drift,
@@ -213,6 +218,39 @@ def _warn_status(name: str, status: str) -> None:
     warnings.warn(f"{name} failed: {status}", RuntimeWarning, stacklevel=3)
 
 
+def _resolve_analysis_softclean_weight(
+    *,
+    variant: str,
+    speech_tensor: torch.Tensor,
+    valid_tensor: torch.Tensor | None,
+    explicit_weight: torch.Tensor | None,
+    closed_mask: Any | None = None,
+    boundary_confidence: Any | None = None,
+) -> torch.Tensor | None:
+    if explicit_weight is not None:
+        return explicit_weight
+    if not is_softclean_global_rate_variant(variant):
+        return None
+    closed_tensor = None
+    boundary_tensor = None
+    if closed_mask is not None:
+        closed_tensor = torch.as_tensor(
+            np.asarray(closed_mask, dtype=np.float32).reshape(1, -1),
+            dtype=torch.float32,
+        )
+    if boundary_confidence is not None:
+        boundary_tensor = torch.as_tensor(
+            np.asarray(boundary_confidence, dtype=np.float32).reshape(1, -1),
+            dtype=torch.float32,
+        )
+    return build_softclean_weights(
+        speech_mask=speech_tensor,
+        valid_mask=valid_tensor,
+        closed_mask=closed_tensor,
+        boundary_confidence=boundary_tensor,
+    )
+
+
 def _maybe_with_status(
     value: float,
     status: str,
@@ -327,6 +365,11 @@ def compute_g(
             else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32)
         )
         resolved_support = None
+        resolved_weight = (
+            None
+            if weight is None
+            else torch.as_tensor(np.asarray(weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32)
+        )
         if support_mask is not None:
             resolved_support = torch.as_tensor(
                 np.asarray(support_mask, dtype=np.float32).reshape(1, -1),
@@ -356,7 +399,20 @@ def compute_g(
                 ),
                 min_boundary_confidence=min_boundary_confidence,
             )
-            resolved_support = support_stats.support_mask.float()
+            if is_softclean_global_rate_variant(variant):
+                resolved_support = (speech_tensor > 0.5) & (
+                    valid_tensor > 0.5 if valid_tensor is not None else torch.ones_like(speech_tensor, dtype=torch.bool)
+                )
+                resolved_weight = _resolve_analysis_softclean_weight(
+                    variant=variant,
+                    speech_tensor=speech_tensor,
+                    valid_tensor=valid_tensor,
+                    explicit_weight=resolved_weight,
+                    closed_mask=closed_mask,
+                    boundary_confidence=boundary_confidence,
+                )
+            else:
+                resolved_support = support_stats.support_mask.float()
         value = compute_global_rate(
             log_dur=torch.log(duration_tensor.clamp_min(1.0e-4)),
             speech_mask=speech_tensor,
@@ -364,9 +420,7 @@ def compute_g(
             variant=variant,
             trim_ratio=float(trim_ratio),
             drop_edge_runs=int(drop_edge_runs),
-            weight=None
-            if weight is None
-            else torch.as_tensor(np.asarray(weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32),
+            weight=resolved_weight,
             unit_ids=None
             if unit_ids is None
             else torch.as_tensor(np.asarray(unit_ids, dtype=np.int64).reshape(1, -1), dtype=torch.long),
@@ -438,6 +492,11 @@ def compute_source_global_rate_for_analysis(
             else torch.as_tensor(valid.reshape(1, -1), dtype=torch.float32)
         )
         resolved_support = None
+        resolved_weight = (
+            None
+            if source_weight is None
+            else torch.as_tensor(np.asarray(source_weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32)
+        )
         if support_mask is not None:
             resolved_support = torch.as_tensor(
                 np.asarray(support_mask, dtype=np.float32).reshape(1, -1),
@@ -470,7 +529,20 @@ def compute_source_global_rate_for_analysis(
                 ),
                 min_boundary_confidence=min_boundary_confidence,
             )
-            resolved_support = support_stats.support_mask.float()
+            if is_softclean_global_rate_variant(g_variant):
+                resolved_support = (speech_tensor > 0.5) & (
+                    valid_tensor > 0.5 if valid_tensor is not None else torch.ones_like(speech_tensor, dtype=torch.bool)
+                )
+                resolved_weight = _resolve_analysis_softclean_weight(
+                    variant=g_variant,
+                    speech_tensor=speech_tensor,
+                    valid_tensor=valid_tensor,
+                    explicit_weight=resolved_weight,
+                    closed_mask=source_closed_mask,
+                    boundary_confidence=source_boundary_confidence,
+                )
+            else:
+                resolved_support = support_stats.support_mask.float()
         value = compute_global_rate(
             log_dur=log_dur_tensor,
             speech_mask=speech_tensor,
@@ -478,9 +550,7 @@ def compute_source_global_rate_for_analysis(
             variant=g_variant,
             trim_ratio=float(g_trim_ratio),
             drop_edge_runs=int(drop_edge_runs),
-            weight=None
-            if source_weight is None
-            else torch.as_tensor(np.asarray(source_weight, dtype=np.float32).reshape(1, -1), dtype=torch.float32),
+            weight=resolved_weight,
             unit_ids=None
             if source_unit_ids is None
             else torch.as_tensor(np.asarray(source_unit_ids, dtype=np.int64).reshape(1, -1), dtype=torch.long),
@@ -839,6 +909,7 @@ def build_ref_crop_table(
             elif src_prompt_id and tgt_prompt_id:
                 same_text_target = int(src_prompt_id == tgt_prompt_id)
         speech_target_stat = float("nan")
+        analytic_target_stat = float("nan")
         if derived.target_logstretch is not None and derived.speech_mask is not None:
             valid = derived.speech_mask > 0.5
             if bool(np.any(valid)):
@@ -848,6 +919,8 @@ def build_ref_crop_table(
                 if weight is None:
                     weight = np.ones_like(derived.target_logstretch, dtype=np.float32)
                 speech_target_stat = weighted_median(derived.target_logstretch[valid], weight[valid])
+                if derived.analytic_shift is not None:
+                    analytic_target_stat = weighted_median(derived.analytic_shift[valid], weight[valid])
         src_spk = _as_str(_meta(record, "src_spk", "source_speaker", default=""))
         if not src_spk:
             src_spk = _infer_speaker_id(record.item_name)
@@ -919,6 +992,7 @@ def build_ref_crop_table(
                     else float("nan")
                 ),
                 "c_star": c_star,
+                "abar_sp_star": analytic_target_stat,
                 "zbar_sp_star": speech_target_stat,
                 "g_valid_support": domain_stats["g_valid_support"],
                 "g_domain_valid": domain_stats["g_domain_valid"],
@@ -1487,7 +1561,20 @@ def summarize_falsification_ladder(
             "robust_slope": float("nan"),
             "r2_like": float("nan"),
         }
+        analytic_explain = tempo_explainability(crop_mode.get("delta_g", []), crop_mode.get("abar_sp_star", [])) if not crop_mode.empty else {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+        }
         decomp_explain = tempo_explainability(crop_mode.get("delta_g", []), crop_mode.get("c_star", [])) if not crop_mode.empty else {
+            "spearman": float("nan"),
+            "robust_slope": float("nan"),
+            "r2_like": float("nan"),
+        }
+        prefix_signal_explain = tempo_explainability(
+            crop_mode.get("delta_g_ref_minus_src_prefix", []),
+            crop_mode.get("zbar_sp_star", []),
+        ) if not crop_mode.empty else {
             "spearman": float("nan"),
             "robust_slope": float("nan"),
             "r2_like": float("nan"),
@@ -1553,9 +1640,15 @@ def summarize_falsification_ladder(
                 "signal_explainability_spearman": float(signal_explain["spearman"]),
                 "signal_explainability_slope": float(signal_explain["robust_slope"]),
                 "signal_explainability_r2_like": float(signal_explain["r2_like"]),
+                "analytic_signal_spearman": float(analytic_explain["spearman"]),
+                "analytic_signal_slope": float(analytic_explain["robust_slope"]),
+                "analytic_signal_r2_like": float(analytic_explain["r2_like"]),
                 "coarse_residual_spearman": float(decomp_explain["spearman"]),
                 "coarse_residual_slope": float(decomp_explain["robust_slope"]),
                 "coarse_residual_r2_like": float(decomp_explain["r2_like"]),
+                "prefix_signal_explainability_spearman": float(prefix_signal_explain["spearman"]),
+                "prefix_signal_explainability_slope": float(prefix_signal_explain["robust_slope"]),
+                "prefix_signal_explainability_r2_like": float(prefix_signal_explain["r2_like"]),
                 "explainability_spearman": float(decomp_explain["spearman"]),
                 "explainability_slope": float(decomp_explain["robust_slope"]),
                 "explainability_r2_like": float(decomp_explain["r2_like"]),

@@ -10,8 +10,10 @@ from .contracts import (
     validate_reference_duration_memory,
 )
 from .g_stats import (
+    build_softclean_weights,
     compute_duration_weighted_speech_ratio,
     compute_global_rate,
+    is_softclean_global_rate_variant,
     normalize_global_rate_variant,
     summarize_global_rate_support,
 )
@@ -178,6 +180,21 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         invalid_clean_rows = support_stats.clean_count <= 0.0
         invalid_clean_support_rows = invalid_clean_rows | missing_closed_sidecar_rows | missing_boundary_sidecar_rows
         invalid_support_rows = support_stats.support_count <= 0.0
+        resolved_weight = (
+            prompt_global_weight.float()
+            if isinstance(prompt_global_weight, torch.Tensor)
+            else None
+        )
+        estimator_support_mask = support_mask
+        if is_softclean_global_rate_variant(self.g_variant):
+            estimator_support_mask = (speech_mask > 0.5) & (valid_mask > 0.5)
+            if resolved_weight is None:
+                resolved_weight = build_softclean_weights(
+                    speech_mask=speech_mask,
+                    valid_mask=valid_mask,
+                    closed_mask=closed_mask,
+                    boundary_confidence=boundary_confidence,
+                )
         support_weight = support_stats.support_count
         if isinstance(prompt_global_weight, torch.Tensor):
             support_mass = torch.where(
@@ -202,16 +219,12 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
                 speech_mask=speech_mask[valid_rows],
                 valid_mask=valid_mask[valid_rows],
                 variant=self.g_variant,
-                weight=(
-                    None
-                    if not isinstance(prompt_global_weight, torch.Tensor)
-                    else prompt_global_weight.float()[valid_rows]
-                ),
+                weight=None if resolved_weight is None else resolved_weight[valid_rows],
                 trim_ratio=self.g_trim_ratio,
                 drop_edge_runs=self.g_drop_edge_runs,
                 unit_ids=prompt_content_units[valid_rows],
                 unit_prior=None if prompt_unit_log_prior is None else prompt_unit_log_prior[valid_rows],
-                support_mask=support_mask[valid_rows],
+                support_mask=estimator_support_mask[valid_rows],
                 invalid_weight_behavior="raise",
             )
             global_rate[valid_rows] = row_rate

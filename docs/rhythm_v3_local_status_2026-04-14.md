@@ -1,148 +1,149 @@
 # rhythm_v3 local status snapshot (2026-04-14)
 
-This file records the latest local maintained rerun after the current round of
-Gate-path fixes.
+This document records the current maintained local rerun after the latest
+frontend/data-contract repair, cache rebuild, script cleanup, and zero-train
+gate rerun.
 
 ## 1. Scope
 
-Surface:
+- maintained `rhythm_v3` minimal-V1 path only
+- local quick-ARCTIC configs only
+- zero-train falsification only
+- Gate 2 / Gate 3 training still blocked
 
-- maintained `rhythm_v3` minimal-V1 path
-- local quick-ARCTIC configs and probe scripts
-- strict prompt-domain contract enabled
+## 2. What changed in this round
 
-Key implementation fixes completed before rerun:
+- source/prompt silence no longer depends on raw `silent_token=57` appearing on
+  the tokenizer surface; cache build, binarization, runtime, and inference now
+  accept acoustic silence inferred from mel
+- prompt metadata construction now filters shared prompt ids by maintained
+  `3.0s-8.0s` duration before split selection
+- `g` audit code now reports three separate static views instead of collapsing
+  everything into one residual-style readout:
+  - total target signal
+  - analytic component
+  - residual coarse component
+- Gate1 probe cases are now auto-selected from the current split instead of
+  relying on stale hard-coded ids
+- old token-guessing helper scripts that no longer belong to the maintained
+  mainline were removed
 
-- source-cache `rhythm_v3_cache_meta` now survives sample assembly, collate,
-  and runtime source-cache collection
-- cached-source `source_boundary_cue` now survives the runtime-minimal sample
-  contract instead of being dropped from strict minimal-V1 batches
-- Gate-1 analytic probe now records strict-invalid rows rather than crashing on
-  prompt-domain failures
-- review/debug code already includes the current Gate-0 signal-vs-residual
-  split and stricter Gate-1 semantics
-
-Regression coverage run after these fixes:
-
-- `389 passed` across the rhythm_v3/runtime/review/config test slices
-
-## 2. Artifacts
+## 3. Current artifacts
 
 Current rerun artifacts live in:
 
-- `tmp/gate_reaudit_20260414/`
+- `tmp/gate_reaudit_20260414_rebuilt2/`
 
 Primary files:
 
-- `tmp/gate_reaudit_20260414/full_split_boundary_audit_report.json`
-- `tmp/gate_reaudit_20260414/full_split_boundary_audit_rows.csv`
-- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_report.json`
-- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_direction_report.json`
-- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_rows.csv`
-- `tmp/gate_reaudit_20260414/gate1_analytic_results.csv`
-- `tmp/gate_reaudit_20260414/gate1_analytic_summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/boundary_summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_raw/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_weighted/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_trimmed/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_softclean/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_softclean_wtmean/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_raw/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_weighted/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_trimmed/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean_wtmean/summary.json`
 
-## 3. Gate verdict
+## 4. Frontend/data-contract check
+
+Latest preflight and boundary audit show:
+
+- `source_silence_items=16/16` on inspected train / valid / test slices
+- `sep_items=16/16` on inspected train / valid / test slices
+- `raw_silent_items=0/N` is no longer a blocker because acoustic silence sidecars
+  are present
+- `max_boundary_confidence` now reaches about `0.96-0.98`
+- boundary support at `min_boundary_confidence_for_g=0.5`:
+  - train `32/32`
+  - valid `16/16`
+  - test `16/16`
+
+Non-blocking remaining preflight warning:
+
+- config stage still reports `transitional`
+
+Interpretation:
+
+- the old "prompt domain collapses before `g` exists" failure mode has been
+  repaired on this local surface
+- current Gate0 / Gate1 failure is no longer attributable to stale cache,
+  missing silence runs, or broken boundary scaling
+
+## 5. Gate verdict
 
 | Gate | Verdict | Why |
 | --- | --- | --- |
-| Gate 0 | fail | maintained clean-support domain collapses at `boundary-clean@0.5` |
-| Gate 1 | fail | no strict-valid analytic `slow / mid / fast` triplet survives |
-| Gate 2 | blocked | Gate 0 / Gate 1 not passed |
+| Gate 0 | fail | prompt-domain coverage is repaired, but total static signal slope stays flat |
+| Gate 1 | fail | runtime analytic control is flat for `raw`, `weighted_median`, and `trimmed_mean`; softclean variants only recover 1 source |
+| Gate 2 | blocked | Gate 0 / Gate 1 still fail |
 | Gate 3 | blocked | Gate 2 not admissible |
 
-Current training decision:
+## 6. Gate0 static audit
 
-- do not start Gate-2 training
-- do not start Gate-3 training
-- do not start official training
-- do not start prefix fine-tune
+All variants keep prompt-domain validity at `63/64`, so support-domain failure
+is no longer the main story.
 
-## 4. Gate 0 metrics
-
-### 4.1 Gate 0-A: maintained domain/support
-
-Configured maintained threshold:
-
-- `rhythm_v3_min_boundary_confidence_for_g = 0.5`
-
-Maintained domain result:
-
-- train: `g_domain_valid_items = 0/32`
-- valid: `g_domain_valid_items = 0/16`
-- test: `g_domain_valid_items = 0/16`
-
-Counterfactual threshold recovery:
-
-- at `0.45`: train `21/32`, valid `9/16`, test `8/16`
-- at `0.40`: train `24/32`, valid `12/16`, test `8/16`
+| Variant | total slope (`Δg_utt -> zbar*`) | analytic slope (`Δg_utt -> abar*`) | residual slope (`Δg_utt -> c*`) | prefix-total slope (`Δg_prefix -> zbar*`) |
+| --- | ---: | ---: | ---: | ---: |
+| `raw_median` | `0.0000` | `0.5316` | `-0.6329` | `0.0000` |
+| `weighted_median` | `0.0000` | `0.5316` | `-0.6329` | `0.0000` |
+| `trimmed_mean` | `-0.0000` | `0.5857` | `-0.6601` | `-0.0000` |
+| `softclean_wmed` | `0.0000` | `0.3833` | `-0.6666` | `-0.0000` |
+| `softclean_wtmean` | `0.0000` | `0.5615` | `-0.6852` | `0.0000` |
 
 Interpretation:
 
-- current failure is not only a signal-direction problem
-- the maintained prompt clean-support domain itself is not standing on this
-  local surface
+- the analytic component is not dead
+- the total target signal is still flat for every tested single-scalar variant
+- the residual branch still points negative
+- the current runtime prefix baseline does not rescue the total-signal failure
 
-### 4.2 Gate 0-B: counterfactual direction
+So the remaining blocker is not "no valid `g`". It is "the present scalar cue
+does not explain the full target stretch signal on this surface".
 
-Selected static counterfactual summary:
+## 7. Gate1 analytic runtime probe
 
-| candidate token | drop_edge | valid items | valid total-signal slope | valid prefix-signal slope | note |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `57` | `1` | `0/64` | `nan` | `nan` | maintained token is dead |
-| `63` | `1` | `29/64` | `-0.0000` | `0.0000` | support recovers but control stays flat |
-| `71` | `1` | `13/64` | `0.3106` | `0.2601` | only non-maintained slice with non-trivial positive total-signal slope |
-| `72` | `1` | `28/64` | `0.0000` | `0.0000` | support recovers but control stays flat |
+| Variant | monotone sources | mean transfer slope | mean real tempo range | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `raw_median` | `0/4` | `~0.0000` | `0.0000` | all outputs collapse to `source_only` / negative-control behavior |
+| `weighted_median` | `0/4` | `~0.0000` | `0.0000` | same as `raw_median` |
+| `trimmed_mean` | `0/4` | `~0.0000` | `0.0000` | same as `raw_median` |
+| `softclean_wmed` | `1/4` | `0.1068` | `0.0393` | only `asi_train_arctic_a0019` shows real push |
+| `softclean_wtmean` | `1/4` | `0.1000` | `0.0333` | same single positive source, slightly weaker than `softclean_wmed` |
 
-Important caveat:
+Per-source positive case:
 
-- even the `token=71, drop_edge=1` slice does **not** rescue the maintained
-  path
-- coarse-residual slopes in the same counterfactual audit remain negative
-- this is therefore a diagnostic recovery slice, not a training green light
-
-## 5. Gate 1 metrics
-
-Strict analytic rerun summary:
-
-- probe cases: `4`
-- total rows: `20`
-- strict-valid rows: `0`
-
-Per-source summary:
-
-| source | valid real refs | transfer slope | monotone by prompt tempo |
-| --- | ---: | ---: | --- |
-| `aba_train_arctic_a0010` | `0/3` | `nan` | `false` |
-| `asi_train_arctic_a0011` | `0/3` | `nan` | `false` |
-| `bdl_train_arctic_a0014` | `0/3` | `nan` | `false` |
-| `slt_train_arctic_a0014` | `0/3` | `nan` | `false` |
-
-Invalid-row reasons across the `20` probe rows:
-
-- `14` rows: `V1-G prompt conditioning requires non-empty closed/boundary-clean support for g.`
-- `6` rows: prompt `ref_len_sec < 3.0`
+- `asi_train_arctic_a0019`
+  - `softclean_wmed`: `transfer_slope=0.4505`, `real_tempo_range=0.1071`
+  - `softclean_wtmean`: `transfer_slope=0.4232`, `real_tempo_range=0.0833`
 
 Interpretation:
 
-- Gate 1 no longer fails because of a probe/runtime plumbing bug
-- Gate 1 now fails because the strict maintained domain contract rejects every
-  analytic real-reference triplet on this local probe surface
+- `weighted_median` and `trimmed_mean` do not improve over `raw_median`
+- softclean weighting helps, but not enough to qualify the maintained claim
+- the current issue is now "push exists only on a narrow subset", not "prompt
+  domain cannot be formed"
 
-## 6. Practical conclusion
+## 8. Current reading
 
-The current maintained local claim should be stated narrowly:
+Current failure should be stated narrowly:
 
-- on this local quick-ARCTIC surface, maintained `raw_median + boundary-clean@0.5`
-  has not earned entry into Gate-2
-- some counterfactual Gate-0 signal recovery exists, but only on a
-  non-maintained slice and only on a subset
-- the correct next step is more zero-train audit and prompt-domain / boundary
-  support cleanup, not parameter training
+- the earlier frontend/data-surface failure was real, and this round repaired it
+- after that repair, the maintained path still fails
+- the remaining failure is not support-domain collapse
+- the remaining failure is weak or unstable single-scalar control force
 
-Until a new rerun produces:
+So the maintained conclusion is:
 
-- non-collapsed maintained Gate-0 domain coverage, and
-- real strict-valid Gate-1 analytic triplets with positive transfer
+- do not start Gate 2 training
+- do not start Gate 3 training
+- do not claim `raw_median` is a qualified maintained default on this local
+  surface
+- do not claim `weighted_median`, `trimmed_mean`, or current softclean variants
+  have fully repaired the problem
 
-the repository should continue to treat Gate-2 / Gate-3 training as blocked.
+The project remains in zero-train falsification mode.

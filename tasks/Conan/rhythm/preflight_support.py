@@ -22,6 +22,7 @@ from modules.Conan.rhythm.surface_metadata import (
     compatible_rhythm_cache_versions,
     materialize_rhythm_cache_compat_fields,
 )
+from modules.Conan.rhythm_v3.source_cache import collect_duration_v3_frontend_diagnostics
 from tasks.Conan.rhythm.config_contract import (
     collect_config_contract_evaluation,
     collect_cache_contract_report,
@@ -44,6 +45,7 @@ class SplitInspectionReport:
     dataset_ready: bool = False
     field_group_hits: list[tuple[tuple[str, ...], int]] = field(default_factory=list)
     cache_versions_seen: list[str] = field(default_factory=list)
+    frontend_summary: dict[str, Any] | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -236,6 +238,132 @@ def _bool_like_metric(value) -> bool:
     if arr.size <= 0:
         return False
     return bool(arr.reshape(-1)[0])
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    except Exception:
+        return float("nan")
+    if arr.size <= 0:
+        return float("nan")
+    scalar = float(arr[0])
+    return scalar if np.isfinite(scalar) else float("nan")
+
+
+def _finite_max(values: list[float]) -> float:
+    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=np.float32)
+    if finite.size <= 0:
+        return float("nan")
+    return float(finite.max())
+
+
+def _append_frontend_finding(
+    message: str,
+    *,
+    strict_contract: bool,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    if strict_contract:
+        errors.append(message)
+    else:
+        warnings.append(message)
+
+
+def _inspect_minimal_v1_frontend_surface(
+    items: list[dict],
+    *,
+    split: str,
+    hparams: dict[str, Any],
+    profile: str,
+    strict_contract: bool,
+) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+    normalized_profile = str(profile or "").strip().lower()
+    minimal_v1_enabled = normalized_profile == "minimal_v1" or bool(
+        hparams.get("rhythm_v3_minimal_v1_profile", False)
+    )
+    if not minimal_v1_enabled or not bool(hparams.get("rhythm_enable_v3", False)):
+        return None, [], []
+    diagnostics = [
+        collect_duration_v3_frontend_diagnostics(item, silent_token=hparams.get("silent_token"))
+        for item in items
+    ]
+    diagnostics = [diag for diag in diagnostics if int(diag.get("unit_count", 0)) > 0]
+    if not diagnostics:
+        return None, [], []
+
+    silent_token = hparams.get("silent_token")
+    emit_silence_runs = bool(hparams.get("rhythm_v3_emit_silence_runs", False))
+    min_boundary_confidence = hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
+    phrase_boundary_threshold = hparams.get("rhythm_source_phrase_threshold", 0.55)
+
+    raw_silent_items = int(sum(1 for diag in diagnostics if int(diag["raw_silent_token_count"]) > 0))
+    sep_items = int(sum(1 for diag in diagnostics if int(diag["sep_nonzero_count"]) > 0))
+    source_silence_items = int(sum(1 for diag in diagnostics if int(diag["source_silence_run_count"]) > 0))
+    max_boundary_confidence = _finite_max([float(diag["boundary_confidence_max"]) for diag in diagnostics])
+    max_source_boundary_cue = _finite_max([float(diag["source_boundary_cue_max"]) for diag in diagnostics])
+
+    summary = {
+        "inspected_items": int(len(diagnostics)),
+        "configured_silent_token": (None if silent_token is None else int(silent_token)),
+        "emit_silence_runs": emit_silence_runs,
+        "raw_silent_token_items": raw_silent_items,
+        "sep_nonzero_items": sep_items,
+        "source_silence_items": source_silence_items,
+        "configured_min_boundary_confidence_for_g": (
+            None if min_boundary_confidence is None else float(min_boundary_confidence)
+        ),
+        "max_boundary_confidence": max_boundary_confidence,
+        "configured_source_phrase_threshold": (
+            None if phrase_boundary_threshold is None else float(phrase_boundary_threshold)
+        ),
+        "max_source_boundary_cue": max_source_boundary_cue,
+    }
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    if emit_silence_runs and silent_token is not None:
+        if raw_silent_items <= 0 and source_silence_items <= 0:
+            _append_frontend_finding(
+                f"Split '{split}' minimal_v1 frontend contract failed: configured silent_token={int(silent_token)} "
+                "was never observed in the inspected cache surface and no source_silence_mask runs were emitted. "
+                "This usually means the tokenizer/silence-token contract is misconfigured for the current binary data.",
+                strict_contract=strict_contract,
+                errors=errors,
+                warnings=warnings,
+            )
+        if sep_items <= 0:
+            _append_frontend_finding(
+                f"Split '{split}' minimal_v1 frontend contract found sep_hint empty across all inspected items. "
+                "Prompt clean-support and source phrase sidecars will be driven only by duration heuristics.",
+                strict_contract=strict_contract,
+                errors=errors,
+                warnings=warnings,
+            )
+    min_boundary_confidence_value = _safe_float(min_boundary_confidence)
+    if np.isfinite(min_boundary_confidence_value):
+        if not np.isfinite(max_boundary_confidence) or max_boundary_confidence < (min_boundary_confidence_value - 1.0e-6):
+            _append_frontend_finding(
+                f"Split '{split}' minimal_v1 prompt clean-support failed reachability: "
+                f"max boundary_confidence={max_boundary_confidence:.3f} never reaches "
+                f"rhythm_v3_min_boundary_confidence_for_g={min_boundary_confidence_value:.3f} in inspected items.",
+                strict_contract=strict_contract,
+                errors=errors,
+                warnings=warnings,
+            )
+    phrase_boundary_threshold_value = _safe_float(phrase_boundary_threshold)
+    if np.isfinite(phrase_boundary_threshold_value):
+        if not np.isfinite(max_source_boundary_cue) or max_source_boundary_cue < (phrase_boundary_threshold_value - 1.0e-6):
+            _append_frontend_finding(
+                f"Split '{split}' source phrase-boundary cue failed reachability: "
+                f"max source_boundary_cue={max_source_boundary_cue:.3f} never reaches "
+                f"rhythm_source_phrase_threshold={phrase_boundary_threshold_value:.3f} in inspected items.",
+                strict_contract=strict_contract,
+                errors=errors,
+                warnings=warnings,
+            )
+    return summary, warnings, errors
 
 
 def _run_dataset_and_model_dry_run(split: str, *, context, run_model: bool) -> list[str]:
@@ -481,6 +609,16 @@ def _inspect_split_data_staging(run_ctx: PreflightRunContext, split: str) -> Spl
             use_pitch_embed=bool(run_ctx.hparams.get("use_pitch_embed", False)),
         )
     )
+    frontend_summary, frontend_warnings, frontend_errors = _inspect_minimal_v1_frontend_surface(
+        items,
+        split=split,
+        hparams=run_ctx.hparams,
+        profile=run_ctx.context.profile,
+        strict_contract=bool(run_ctx.hparams.get("rhythm_v3_gate_quality_strict", False)),
+    )
+    report.frontend_summary = frontend_summary
+    report.warnings.extend(frontend_warnings)
+    report.errors.extend(frontend_errors)
     return report
 
 
@@ -586,6 +724,22 @@ def _emit_split_report(report: SplitInspectionReport) -> None:
         print(f"  - {' | '.join(group)}: {have}/{report.inspected_items}")
     if report.cache_versions_seen:
         print(f"  - cache_versions_seen={report.cache_versions_seen}")
+    if report.frontend_summary:
+        summary = report.frontend_summary
+        print(
+            "  - minimal_v1_frontend: "
+            f"silent_token={summary.get('configured_silent_token')} "
+            f"raw_silent_items={summary.get('raw_silent_token_items')}/{summary.get('inspected_items')} "
+            f"source_silence_items={summary.get('source_silence_items')}/{summary.get('inspected_items')} "
+            f"sep_items={summary.get('sep_nonzero_items')}/{summary.get('inspected_items')}"
+        )
+        print(
+            "  - minimal_v1_frontend: "
+            f"max_boundary_confidence={summary.get('max_boundary_confidence')} "
+            f"min_boundary_confidence_for_g={summary.get('configured_min_boundary_confidence_for_g')} "
+            f"max_source_boundary_cue={summary.get('max_source_boundary_cue')} "
+            f"source_phrase_threshold={summary.get('configured_source_phrase_threshold')}"
+        )
 
 
 def _dedupe_findings(findings: list[str]) -> list[str]:

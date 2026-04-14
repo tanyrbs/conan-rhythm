@@ -111,6 +111,8 @@ def build_source_rhythm_cache(
     emit_silence_runs: bool = False,
     debounce_min_run_frames: int = 1,
     phrase_boundary_threshold: float = 0.55,
+    mel=None,
+    frame_silence_mask=None,
 ) -> dict[str, np.ndarray]:
     return build_source_rhythm_cache_v3(
         content_tokens,
@@ -120,6 +122,8 @@ def build_source_rhythm_cache(
         emit_silence_runs=emit_silence_runs,
         debounce_min_run_frames=debounce_min_run_frames,
         phrase_boundary_threshold=phrase_boundary_threshold,
+        mel=mel,
+        frame_silence_mask=frame_silence_mask,
     )
 
 
@@ -509,6 +513,7 @@ def build_item_rhythm_bundle(
         emit_silence_runs=emit_silence_runs,
         debounce_min_run_frames=debounce_min_run_frames,
         phrase_boundary_threshold=source_phrase_threshold,
+        mel=mel,
     )
     conditioning = build_reference_rhythm_conditioning(
         mel,

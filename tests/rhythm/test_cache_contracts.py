@@ -493,12 +493,13 @@ class RhythmCacheContractTests(unittest.TestCase):
                 np.asarray([0.95, 0.8, 0.3, 0.4], dtype=np.float32),
             )
         )
-        self.assertTrue(
-            np.allclose(
-                conditioning["prompt_global_weight"],
-                np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            )
-        )
+        weights = np.asarray(conditioning["prompt_global_weight"], dtype=np.float32)
+        self.assertEqual(weights.shape, (4,))
+        self.assertGreater(weights[0], 0.8)
+        self.assertEqual(weights[1], 0.0)
+        self.assertEqual(weights[2], 0.0)
+        self.assertGreater(weights[3], 0.0)
+        self.assertLess(weights[3], weights[0])
 
     def test_minimal_v1_prompt_summary_conditioning_requires_closed_boundary_sidecars(self) -> None:
         dataset = _DummyDataset(
@@ -1746,7 +1747,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         source_cache = {
             "rhythm_v3_cache_meta": {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -1793,7 +1794,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         source_cache = {
             "rhythm_v3_cache_meta": {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -2473,7 +2474,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         source_cache = {
             "rhythm_v3_cache_meta": {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -2520,7 +2521,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         source_cache = {
             "rhythm_v3_cache_meta": {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -2567,7 +2568,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         )
         source_cache = {
             "rhythm_v3_cache_meta": {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -2643,7 +2644,7 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "dur_anchor_src": np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
                 "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
                 "rhythm_v3_cache_meta": {
-                    "cache_version": 3,
+                    "cache_version": 4,
                     "silent_token": 57,
                     "separator_aware": True,
                     "tail_open_units": 1,
@@ -2682,13 +2683,13 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "paired_target_frame_valid": np.ones((4,), dtype=np.float32),
                 "source_cache_meta_signature": np.asarray(
                     [
-                        "{\"cache_version\":3,\"debounce_min_run_frames\":2,\"emit_silence_runs\":true,\"phrase_boundary_threshold\":0.55,\"separator_aware\":true,\"silent_token\":57,\"tail_open_units\":1}"
+                        "{\"cache_version\":4,\"debounce_min_run_frames\":2,\"emit_silence_runs\":true,\"phrase_boundary_threshold\":0.55,\"separator_aware\":true,\"silent_token\":57,\"tail_open_units\":1}"
                     ],
                     dtype=object,
                 ),
                 "paired_target_cache_meta_signature": np.asarray(
                     [
-                        "{\"cache_version\":3,\"debounce_min_run_frames\":2,\"emit_silence_runs\":true,\"phrase_boundary_threshold\":0.55,\"separator_aware\":true,\"silent_token\":57,\"tail_open_units\":1}"
+                        "{\"cache_version\":4,\"debounce_min_run_frames\":2,\"emit_silence_runs\":true,\"phrase_boundary_threshold\":0.55,\"separator_aware\":true,\"silent_token\":57,\"tail_open_units\":1}"
                     ],
                     dtype=object,
                 ),
@@ -2727,7 +2728,7 @@ class RhythmCacheContractTests(unittest.TestCase):
                     "dur_anchor_src": np.asarray([2.0, 2.0, 2.0], dtype=np.float32),
                     "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
                     "rhythm_v3_cache_meta": {
-                        "cache_version": 3,
+                        "cache_version": 4,
                         "silent_token": 57,
                         "separator_aware": True,
                         "tail_open_units": 1,

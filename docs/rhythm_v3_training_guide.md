@@ -34,19 +34,21 @@ Current verdict:
 
 The current maintained `raw_median + boundary-clean@0.5` path is therefore
 **not allowed to enter Gate-2 / Gate-3 training on the local quick-ARCTIC
-surface**. The blocking reasons are:
+surface**. The blocking reasons are now:
 
-- maintained prompt clean-support at `min_boundary_confidence_for_g=0.5`
-  collapses to `0/32` train, `0/16` valid, `0/16` test
-- even after counterfactual support recovery, only a non-maintained slice
-  (`token=71`, `drop_edge=1`) shows a non-trivial positive Gate-0 signal slope
-- the strict Gate-1 analytic rerun produced `valid_real=0/3` for every probe
-  source, so no real `slow / mid / fast` triplet survives the maintained
-  domain contract
+- rebuilt local artifacts show prompt-domain support is repaired at
+  `min_boundary_confidence_for_g=0.5`
+- Gate-0 total-signal slope stays flat for `raw_median`,
+  `weighted_median`, `trimmed_mean`, `softclean_wmed`, and
+  `softclean_wtmean`
+- Gate-1 runtime push stays flat for `raw_median`, `weighted_median`, and
+  `trimmed_mean`
+- softclean variants recover push for only `1/4` probe sources, which is still
+  not enough for a maintained claim
 
 Current artifact bundle:
 
-- `tmp/gate_reaudit_20260414/`
+- `tmp/gate_reaudit_20260414_rebuilt2/`
 
 Do not start new Gate-2 / Gate-3 training from the maintained config until a
 new gate-status JSON is generated from a passing Gate-0 / Gate-1 rerun.
@@ -121,9 +123,11 @@ small overrides:
 | `D` | no-detach ablation | same as `C`, but `rhythm_v3_detach_global_term_in_local_head=false`; treat this as an explicit comparison run rather than the maintained minimal-V1 contract |
 | `E` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
 
-Keep `rhythm_v3_g_variant=raw_median` as the first-line baseline. Only move to
-`weighted_median`, `trimmed_mean`, or `unit_norm` after the static `g` audit
-shows a real reason. The maintained strict-claim contract forbids
+Keep `rhythm_v3_g_variant=raw_median` as the checked-in baseline, but read it
+as a falsification baseline rather than a qualified local winner. Current local
+evidence shows `weighted_median` and `trimmed_mean` are not better, while
+`softclean_wmed` / `softclean_wtmean` remain diagnostic-only because they still
+fail Gate-1 across sources. The maintained strict-claim contract forbids
 `rhythm_v3_g_variant=unit_norm`, so keep
 `rhythm_v3_minimal_v1_profile=true` but set
 `rhythm_v3_strict_minimal_claim_profile=false` before running any `unit_norm`

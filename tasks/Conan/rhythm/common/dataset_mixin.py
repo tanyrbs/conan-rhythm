@@ -789,6 +789,11 @@ class CommonRhythmDatasetMixin:
             emit_silence_runs=explicit_silence,
             debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
+            mel=(
+                None
+                if item.get("mel") is None
+                else np.asarray(item["mel"])[: int(np.asarray(visible_tokens).reshape(-1).shape[0])]
+            ),
         )
 
     def _resolve_reference_rhythm_item(self, *, sample, item, target_mode: str):

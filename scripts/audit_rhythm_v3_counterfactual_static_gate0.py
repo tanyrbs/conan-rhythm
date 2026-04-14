@@ -23,6 +23,7 @@ import torch
 from modules.Conan.rhythm_v3.g_stats import summarize_global_rate_support
 from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3
 from tasks.Conan.dataset import ConanDataset
+from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from tasks.Conan.rhythm.duration_v3.metrics import tempo_explainability
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, derive_record, weighted_median_np
@@ -38,13 +39,12 @@ DEFAULT_OUTPUT_JSON = "tmp/gate1_boundary_audit/counterfactual_static_gate0_repo
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
-    "rhythm_v3_minimal_v1_profile=False,"
-    "rhythm_v3_strict_minimal_claim_profile=False,"
+    "rhythm_v3_strict_eval_invalid_g=True,"
     "rhythm_v3_alignment_prefilter_bad_samples=False,"
+    "rhythm_v3_alignment_unmatched_speech_ratio_max=1.0,"
     "rhythm_v3_alignment_local_margin_p10_min=0.0,"
     "rhythm_v3_alignment_mean_local_confidence_speech_min=0.0,"
-    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0,"
-    "rhythm_v3_disallow_same_text_reference=False"
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0"
 )
 
 
@@ -123,6 +123,28 @@ def _safe_float(value: Any, default: float = float("nan")) -> float:
         return float(default)
 
 
+def _weighted_speech_stat(
+    values: np.ndarray | None,
+    *,
+    speech_valid: np.ndarray,
+    confidence: np.ndarray | None,
+) -> float:
+    if values is None:
+        return float("nan")
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    width = min(int(values.shape[0]), int(speech_valid.shape[0]))
+    if width <= 0:
+        return float("nan")
+    keep = speech_valid[:width]
+    if not bool(np.any(keep)):
+        return float("nan")
+    row_values = values[:width]
+    row_weight = None
+    if confidence is not None:
+        row_weight = np.asarray(confidence, dtype=np.float32).reshape(-1)[:width]
+    return float(weighted_median_np(row_values[keep], None if row_weight is None else row_weight[keep]))
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = sorted({key for row in rows for key in row.keys()})
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,10 +171,11 @@ def _build_counterfactual_conditioning(
         silent_token=int(candidate_token),
         separator_aware=bool(ds.hparams.get("rhythm_separator_aware", True)),
         tail_open_units=int(ds.hparams.get("rhythm_tail_open_units", 1)),
-        emit_silence_runs=False,
+        emit_silence_runs=bool(ds.hparams.get("rhythm_v3_emit_silence_runs", True)),
         debounce_min_run_frames=int(ds.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
         phrase_boundary_threshold=float(ds.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         unit_prior_path=None,
+        mel=raw_ref_item.get("mel"),
     )
     prompt_item = dict(raw_ref_item)
     prompt_item.update(cache)
@@ -179,12 +202,6 @@ def _compute_pair_row(
     raw_ref_item = ds._get_raw_item_cached(ref_local)
     raw_target_item = ds._get_raw_item_cached(tgt_local)
 
-    sample = copy.deepcopy(ds[fetch_index])
-    sample["_raw_item"] = raw_source_item
-    sample["_raw_ref_item"] = raw_ref_item
-    sample["_raw_paired_target_item"] = raw_target_item
-    sample["ref_item_id"] = int(ref_local)
-
     same_text_reference = int(ds._same_rhythm_text(raw_source_item, raw_ref_item))
     same_text_target = int(ds._same_rhythm_text(raw_source_item, raw_target_item))
     same_speaker_reference = int(
@@ -194,12 +211,60 @@ def _compute_pair_row(
         str(raw_source_item.get("speaker", "")).strip() == str(raw_target_item.get("speaker", "")).strip()
     )
     try:
+        sample = copy.deepcopy(ds[fetch_index])
+    except RuntimeError as exc:
+        return {
+            "split": str(split),
+            "sample_id": f"{split}:{fetch_index}",
+            "pair_id": int(pair_entry.get("group_id", fetch_index)),
+            "src_id": str(raw_source_item.get("item_name", "")),
+            "src_item_name": str(raw_source_item.get("item_name", "")),
+            "ref_item_name": str(raw_ref_item.get("item_name", "")),
+            "tgt_item_name": str(raw_target_item.get("item_name", "")),
+            "src_spk": str(raw_source_item.get("speaker", "")),
+            "ref_spk": str(raw_ref_item.get("speaker", "")),
+            "tgt_spk": str(raw_target_item.get("speaker", "")),
+            "candidate_token": int(candidate_token),
+            "drop_edge_runs_for_g": int(drop_edge_runs),
+            "same_text_reference": same_text_reference,
+            "same_text_target": same_text_target,
+            "same_speaker_reference": same_speaker_reference,
+            "same_speaker_target": same_speaker_target,
+            "g_ref": float("nan"),
+            "g_ref_status": "sample_fetch_error",
+            "g_src_utt": float("nan"),
+            "g_src_prefix_mean": float("nan"),
+            "g_src_status": "sample_fetch_error",
+            "delta_g": float("nan"),
+            "delta_g_ref_minus_src_utt": float("nan"),
+            "delta_g_ref_minus_src_prefix": float("nan"),
+            "abar_sp_star": float("nan"),
+            "c_star": float("nan"),
+            "zbar_sp_star": float("nan"),
+            "support_seed_count": 0.0,
+            "support_count": 0.0,
+            "clean_count": 0.0,
+            "support_fraction": 0.0,
+            "edge_runs_dropped": 0.0,
+            "support_domain_valid": 0,
+            "g_domain_valid": 0,
+            "prompt_ref_len_sec": float("nan"),
+            "prompt_speech_ratio": float("nan"),
+            "speech_ratio_valid": 0,
+            "ref_len_valid": 0,
+            "error": str(exc),
+        }
+    sample["_raw_item"] = raw_source_item
+    sample["_raw_ref_item"] = raw_ref_item
+    sample["_raw_paired_target_item"] = raw_target_item
+    sample["ref_item_id"] = int(ref_local)
+    try:
         conditioning = _build_counterfactual_conditioning(
             ds=ds,
             raw_ref_item=raw_ref_item,
             candidate_token=int(candidate_token),
         )
-    except Exception as exc:
+    except (RhythmDatasetPrefilterDrop, Exception) as exc:
         return {
             "split": str(split),
             "sample_id": f"{split}:{fetch_index}",
@@ -225,6 +290,7 @@ def _compute_pair_row(
             "delta_g": float("nan"),
             "delta_g_ref_minus_src_utt": float("nan"),
             "delta_g_ref_minus_src_prefix": float("nan"),
+            "abar_sp_star": float("nan"),
             "c_star": float("nan"),
             "zbar_sp_star": float("nan"),
             "support_seed_count": 0.0,
@@ -340,6 +406,7 @@ def _compute_pair_row(
         else float("nan")
     )
 
+    abar_sp_star = float("nan")
     c_star = float("nan")
     zbar_sp_star = float("nan")
     if (
@@ -363,17 +430,20 @@ def _compute_pair_row(
             confidence = np.asarray(record.unit_confidence_tgt, dtype=np.float32).reshape(-1)[:width]
         analytic_shift = (float(g_ref) - source_rate_seq).astype(np.float32)
         residual = target_logstretch - analytic_shift
-        c_star = float(
-            weighted_median_np(
-                residual[speech_valid],
-                None if confidence is None else confidence[speech_valid],
-            )
+        abar_sp_star = _weighted_speech_stat(
+            analytic_shift,
+            speech_valid=speech_valid,
+            confidence=confidence,
         )
-        zbar_sp_star = float(
-            weighted_median_np(
-                target_logstretch[speech_valid],
-                None if confidence is None else confidence[speech_valid],
-            )
+        c_star = _weighted_speech_stat(
+            residual,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        zbar_sp_star = _weighted_speech_stat(
+            target_logstretch,
+            speech_valid=speech_valid,
+            confidence=confidence,
         )
 
     min_prompt_speech_ratio = float(ds.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.6)
@@ -421,6 +491,7 @@ def _compute_pair_row(
         "delta_g": float(delta_g),
         "delta_g_ref_minus_src_utt": float(delta_g),
         "delta_g_ref_minus_src_prefix": float(delta_g_ref_minus_src_prefix),
+        "abar_sp_star": float(abar_sp_star),
         "c_star": float(c_star),
         "zbar_sp_star": float(zbar_sp_star),
         "support_seed_count": support_seed_count,
@@ -461,19 +532,24 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     valid_cross_rows = _subset(lambda row: int(row["g_domain_valid"]) > 0 and int(row["same_text_reference"]) == 0)
     same_rows = _subset(lambda row: int(row["same_text_reference"]) > 0)
 
-    overall_signal = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
-    valid_signal = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
-    cross_signal = _metric(cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
-    valid_cross_signal = _metric(valid_cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
-    same_signal = _metric(same_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
-    overall_resid = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
-    valid_resid = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
-    valid_prefix_signal = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="zbar_sp_star")
+    overall_total = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    valid_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    cross_total = _metric(cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    valid_cross_total = _metric(valid_cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    same_total = _metric(same_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    overall_analytic = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star")
+    valid_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star")
+    overall_residual = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
+    valid_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
+    valid_prefix_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="zbar_sp_star")
+    valid_prefix_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="abar_sp_star")
+    valid_prefix_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="c_star")
     return {
         "candidate_token": int(frame[0]["candidate_token"]),
         "drop_edge_runs_for_g": int(frame[0]["drop_edge_runs_for_g"]),
         "item_count": len(frame),
         "finite_pairs_signal": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["zbar_sp_star"])))),
+        "finite_pairs_analytic": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["abar_sp_star"])))),
         "finite_pairs_residual": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["c_star"])))),
         "g_domain_valid_items": int(sum(1 for row in frame if int(row["g_domain_valid"]) > 0)),
         "same_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) > 0)),
@@ -481,38 +557,86 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_support_count": float(np.mean([float(row["support_count"]) for row in frame])),
         "mean_clean_count": float(np.mean([float(row["clean_count"]) for row in frame])),
         "mean_prompt_speech_ratio": float(np.nanmean(np.asarray([row["prompt_speech_ratio"] for row in frame], dtype=np.float32))),
-        "overall_signal_spearman": float(overall_signal["spearman"]),
-        "overall_signal_robust_slope": float(overall_signal["robust_slope"]),
-        "overall_signal_r2_like": float(overall_signal["r2_like"]),
-        "overall_signal_count": float(overall_signal["count"]),
-        "valid_signal_spearman": float(valid_signal["spearman"]),
-        "valid_signal_robust_slope": float(valid_signal["robust_slope"]),
-        "valid_signal_r2_like": float(valid_signal["r2_like"]),
-        "valid_signal_count": float(valid_signal["count"]),
-        "cross_signal_spearman": float(cross_signal["spearman"]),
-        "cross_signal_robust_slope": float(cross_signal["robust_slope"]),
-        "cross_signal_r2_like": float(cross_signal["r2_like"]),
-        "cross_signal_count": float(cross_signal["count"]),
-        "valid_cross_signal_spearman": float(valid_cross_signal["spearman"]),
-        "valid_cross_signal_robust_slope": float(valid_cross_signal["robust_slope"]),
-        "valid_cross_signal_r2_like": float(valid_cross_signal["r2_like"]),
-        "valid_cross_signal_count": float(valid_cross_signal["count"]),
-        "same_signal_spearman": float(same_signal["spearman"]),
-        "same_signal_robust_slope": float(same_signal["robust_slope"]),
-        "same_signal_r2_like": float(same_signal["r2_like"]),
-        "same_signal_count": float(same_signal["count"]),
-        "overall_residual_spearman": float(overall_resid["spearman"]),
-        "overall_residual_robust_slope": float(overall_resid["robust_slope"]),
-        "overall_residual_r2_like": float(overall_resid["r2_like"]),
-        "overall_residual_count": float(overall_resid["count"]),
-        "valid_residual_spearman": float(valid_resid["spearman"]),
-        "valid_residual_robust_slope": float(valid_resid["robust_slope"]),
-        "valid_residual_r2_like": float(valid_resid["r2_like"]),
-        "valid_residual_count": float(valid_resid["count"]),
-        "valid_prefix_signal_spearman": float(valid_prefix_signal["spearman"]),
-        "valid_prefix_signal_robust_slope": float(valid_prefix_signal["robust_slope"]),
-        "valid_prefix_signal_r2_like": float(valid_prefix_signal["r2_like"]),
-        "valid_prefix_signal_count": float(valid_prefix_signal["count"]),
+        "overall_total_signal_spearman": float(overall_total["spearman"]),
+        "overall_total_signal_robust_slope": float(overall_total["robust_slope"]),
+        "overall_total_signal_r2_like": float(overall_total["r2_like"]),
+        "overall_total_signal_count": float(overall_total["count"]),
+        "valid_total_signal_spearman": float(valid_total["spearman"]),
+        "valid_total_signal_robust_slope": float(valid_total["robust_slope"]),
+        "valid_total_signal_r2_like": float(valid_total["r2_like"]),
+        "valid_total_signal_count": float(valid_total["count"]),
+        "cross_total_signal_spearman": float(cross_total["spearman"]),
+        "cross_total_signal_robust_slope": float(cross_total["robust_slope"]),
+        "cross_total_signal_r2_like": float(cross_total["r2_like"]),
+        "cross_total_signal_count": float(cross_total["count"]),
+        "valid_cross_total_signal_spearman": float(valid_cross_total["spearman"]),
+        "valid_cross_total_signal_robust_slope": float(valid_cross_total["robust_slope"]),
+        "valid_cross_total_signal_r2_like": float(valid_cross_total["r2_like"]),
+        "valid_cross_total_signal_count": float(valid_cross_total["count"]),
+        "same_total_signal_spearman": float(same_total["spearman"]),
+        "same_total_signal_robust_slope": float(same_total["robust_slope"]),
+        "same_total_signal_r2_like": float(same_total["r2_like"]),
+        "same_total_signal_count": float(same_total["count"]),
+        "overall_analytic_signal_spearman": float(overall_analytic["spearman"]),
+        "overall_analytic_signal_robust_slope": float(overall_analytic["robust_slope"]),
+        "overall_analytic_signal_r2_like": float(overall_analytic["r2_like"]),
+        "overall_analytic_signal_count": float(overall_analytic["count"]),
+        "valid_analytic_signal_spearman": float(valid_analytic["spearman"]),
+        "valid_analytic_signal_robust_slope": float(valid_analytic["robust_slope"]),
+        "valid_analytic_signal_r2_like": float(valid_analytic["r2_like"]),
+        "valid_analytic_signal_count": float(valid_analytic["count"]),
+        "overall_residual_signal_spearman": float(overall_residual["spearman"]),
+        "overall_residual_signal_robust_slope": float(overall_residual["robust_slope"]),
+        "overall_residual_signal_r2_like": float(overall_residual["r2_like"]),
+        "overall_residual_signal_count": float(overall_residual["count"]),
+        "valid_residual_signal_spearman": float(valid_residual["spearman"]),
+        "valid_residual_signal_robust_slope": float(valid_residual["robust_slope"]),
+        "valid_residual_signal_r2_like": float(valid_residual["r2_like"]),
+        "valid_residual_signal_count": float(valid_residual["count"]),
+        "valid_prefix_total_signal_spearman": float(valid_prefix_total["spearman"]),
+        "valid_prefix_total_signal_robust_slope": float(valid_prefix_total["robust_slope"]),
+        "valid_prefix_total_signal_r2_like": float(valid_prefix_total["r2_like"]),
+        "valid_prefix_total_signal_count": float(valid_prefix_total["count"]),
+        "valid_prefix_analytic_signal_spearman": float(valid_prefix_analytic["spearman"]),
+        "valid_prefix_analytic_signal_robust_slope": float(valid_prefix_analytic["robust_slope"]),
+        "valid_prefix_analytic_signal_r2_like": float(valid_prefix_analytic["r2_like"]),
+        "valid_prefix_analytic_signal_count": float(valid_prefix_analytic["count"]),
+        "valid_prefix_residual_signal_spearman": float(valid_prefix_residual["spearman"]),
+        "valid_prefix_residual_signal_robust_slope": float(valid_prefix_residual["robust_slope"]),
+        "valid_prefix_residual_signal_r2_like": float(valid_prefix_residual["r2_like"]),
+        "valid_prefix_residual_signal_count": float(valid_prefix_residual["count"]),
+        "overall_signal_spearman": float(overall_total["spearman"]),
+        "overall_signal_robust_slope": float(overall_total["robust_slope"]),
+        "overall_signal_r2_like": float(overall_total["r2_like"]),
+        "overall_signal_count": float(overall_total["count"]),
+        "valid_signal_spearman": float(valid_total["spearman"]),
+        "valid_signal_robust_slope": float(valid_total["robust_slope"]),
+        "valid_signal_r2_like": float(valid_total["r2_like"]),
+        "valid_signal_count": float(valid_total["count"]),
+        "cross_signal_spearman": float(cross_total["spearman"]),
+        "cross_signal_robust_slope": float(cross_total["robust_slope"]),
+        "cross_signal_r2_like": float(cross_total["r2_like"]),
+        "cross_signal_count": float(cross_total["count"]),
+        "valid_cross_signal_spearman": float(valid_cross_total["spearman"]),
+        "valid_cross_signal_robust_slope": float(valid_cross_total["robust_slope"]),
+        "valid_cross_signal_r2_like": float(valid_cross_total["r2_like"]),
+        "valid_cross_signal_count": float(valid_cross_total["count"]),
+        "same_signal_spearman": float(same_total["spearman"]),
+        "same_signal_robust_slope": float(same_total["robust_slope"]),
+        "same_signal_r2_like": float(same_total["r2_like"]),
+        "same_signal_count": float(same_total["count"]),
+        "overall_residual_spearman": float(overall_residual["spearman"]),
+        "overall_residual_robust_slope": float(overall_residual["robust_slope"]),
+        "overall_residual_r2_like": float(overall_residual["r2_like"]),
+        "overall_residual_count": float(overall_residual["count"]),
+        "valid_residual_spearman": float(valid_residual["spearman"]),
+        "valid_residual_robust_slope": float(valid_residual["robust_slope"]),
+        "valid_residual_r2_like": float(valid_residual["r2_like"]),
+        "valid_residual_count": float(valid_residual["count"]),
+        "valid_prefix_signal_spearman": float(valid_prefix_total["spearman"]),
+        "valid_prefix_signal_robust_slope": float(valid_prefix_total["robust_slope"]),
+        "valid_prefix_signal_r2_like": float(valid_prefix_total["r2_like"]),
+        "valid_prefix_signal_count": float(valid_prefix_total["count"]),
     }
 
 

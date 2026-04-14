@@ -834,7 +834,25 @@ class DurationV3DatasetMixin:
                 limit = min(int(resized.size), int(boundary_conf.reshape(-1).shape[0]))
                 resized.reshape(-1)[:limit] = boundary_conf.reshape(-1)[:limit]
                 boundary_conf = resized
-            weight *= (boundary_conf >= float(min_boundary_confidence)).astype(np.float32)
+            boundary_conf = boundary_conf.clip(0.0, 1.0)
+            finite_mask = np.isfinite(boundary_conf)
+            active = (weight > 0.0) & finite_mask
+            if np.any(active):
+                active_bc = boundary_conf[active].astype(np.float32, copy=False)
+                q50 = float(np.quantile(active_bc, 0.50))
+                q75 = float(np.quantile(active_bc, 0.75))
+                center = q50
+                if min_boundary_confidence is not None:
+                    # Keep the configured hard gate for strict domain validity elsewhere, but
+                    # center weighting on the observed boundary scale so prompt weights do not
+                    # collapse when cache-side boundary scores live below a global absolute cut.
+                    center = min(center, float(min_boundary_confidence))
+                scale = max(1.0e-3, q75 - q50)
+                logits = np.clip((boundary_conf - center) / scale, -20.0, 20.0)
+                soft_bc = 1.0 / (1.0 + np.exp(-logits))
+                soft_bc = (0.10 + (0.90 * soft_bc)).astype(np.float32, copy=False)
+                soft_bc = np.where(finite_mask, soft_bc, np.zeros_like(soft_bc, dtype=np.float32))
+                weight *= soft_bc
         drop_edge_runs = max(0, int(drop_edge_runs))
         if drop_edge_runs > 0:
             active = np.flatnonzero(weight > 0.0)
@@ -1257,6 +1275,7 @@ class DurationV3DatasetMixin:
                 debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                 unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
+                mel=prompt_item.get("mel"),
             )
         elif has_cached_prompt_source and target_mode != "cached_only":
             if explicit_silence:
@@ -1270,6 +1289,7 @@ class DurationV3DatasetMixin:
                         debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                         unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
+                        mel=prompt_item.get("mel"),
                     )
                 else:
                     raise RuntimeError(
@@ -1723,6 +1743,7 @@ class DurationV3DatasetMixin:
                 debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                 phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                 unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
+                mel=paired_target_item.get("mel"),
             )
         elif has_cached_target_source and target_mode != "cached_only":
             if explicit_silence:
@@ -1736,6 +1757,7 @@ class DurationV3DatasetMixin:
                         debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
                         phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
                         unit_prior_path=self._resolve_duration_v3_unit_prior_path(),
+                        mel=paired_target_item.get("mel"),
                     )
                 else:
                     raise RuntimeError(

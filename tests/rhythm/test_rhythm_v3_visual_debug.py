@@ -100,6 +100,32 @@ def _make_debug_records_cli_row(
     return row
 
 
+def _expand_gate_status_rows(
+    rows: list[dict[str, float | str]],
+    *,
+    analytic_triplets: int = 30,
+) -> pd.DataFrame:
+    expanded: list[dict[str, float | str]] = []
+    analytic_rows = [dict(row) for row in rows if str(row.get("eval_mode")) == "analytic"]
+    control_rows = [dict(row) for row in rows if str(row.get("eval_mode")) != "analytic"]
+    for triplet_idx in range(int(analytic_triplets)):
+        triplet_id = f"src_gate|analytic|real|triplet_{triplet_idx}"
+        for row_idx, row in enumerate(analytic_rows):
+            clone = dict(row)
+            clone["src_id"] = f"src_gate_{triplet_idx}"
+            clone["sample_id"] = f"sample_gate_{triplet_idx}_{row_idx}"
+            clone["pair_id"] = f"pair_gate_{triplet_idx}_{row_idx}"
+            clone["triplet_id"] = triplet_id
+            expanded.append(clone)
+    for row_idx, row in enumerate(control_rows):
+        clone = dict(row)
+        clone["src_id"] = f"src_ctrl_{row_idx}"
+        clone["sample_id"] = f"sample_ctrl_{row_idx}"
+        clone["pair_id"] = f"pair_ctrl_{row_idx}"
+        expanded.append(clone)
+    return pd.DataFrame(expanded)
+
+
 def _patch_debug_records_cli_rows(
     monkeypatch,
     cli_module,
@@ -398,6 +424,7 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert "gate0_row_dropped" in ref_crop_df.columns
     assert "g_src_prefix_mean" in ref_crop_df.columns
     assert "delta_g_ref_minus_src_prefix" in ref_crop_df.columns
+    assert "abar_sp_star" in ref_crop_df.columns
     assert "same_text_reference" in ref_crop_df.columns
     assert "same_speaker_reference" in ref_crop_df.columns
     assert np.isfinite(ref_crop_df["delta_g"]).any()
@@ -414,7 +441,9 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert ladder_df.iloc[0]["eval_mode"] == "analytic"
     assert np.isfinite(ladder_df.iloc[0]["monotonicity_rate"])
     assert "signal_explainability_slope" in ladder_df.columns
+    assert "analytic_signal_slope" in ladder_df.columns
     assert "coarse_residual_slope" in ladder_df.columns
+    assert "prefix_signal_explainability_slope" in ladder_df.columns
     assert "tempo_transfer_slope" in ladder_df.columns
     assert "tempo_tie_rate" in ladder_df.columns
     assert "invalid_g_rate" in ladder_df.columns
@@ -994,7 +1023,7 @@ def test_collect_gate_issues_flags_large_analytic_same_text_gap():
         row["cumulative_drift"] = 0.05
         return row
 
-    frame = pd.DataFrame(
+    frame = _expand_gate_status_rows(
         [
             make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real"),
             make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real"),
@@ -1037,7 +1066,7 @@ def test_build_gate_status_fails_gate1_on_single_large_analytic_same_text_gap_ou
         row["cumulative_drift"] = 0.05
         return row
 
-    frame = pd.DataFrame(
+    frame = _expand_gate_status_rows(
         [
             make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real", same_text_gap=0.0),
             make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real", same_text_gap=0.0),
@@ -1249,7 +1278,7 @@ def test_build_gate_status_splits_gate2_from_gate3_local_residual_failures():
             row["local_silence_delta_share"] = local_silence_delta_share
         return row
 
-    frame = pd.DataFrame(
+    frame = _expand_gate_status_rows(
         [
             make_row(eval_mode="analytic", ref_bin="slow", ref_condition="real", tempo_monotonicity_rate=1.0, speech_weighted_mae=0.30),
             make_row(eval_mode="analytic", ref_bin="mid", ref_condition="real", tempo_monotonicity_rate=1.0, speech_weighted_mae=0.30),

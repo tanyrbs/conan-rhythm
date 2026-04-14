@@ -271,6 +271,9 @@ class StreamingVoiceConversion:
         prompt_speech_mask: torch.Tensor,
         prompt_run_stability: torch.Tensor | None,
         prompt_open_run_mask: torch.Tensor | None = None,
+        prompt_closed_mask: torch.Tensor | None = None,
+        prompt_boundary_confidence: torch.Tensor | None = None,
+        min_boundary_confidence: float | None = None,
         drop_edge_runs: int = 0,
         allow_shape_repair: bool = False,
     ) -> torch.Tensor:
@@ -308,6 +311,50 @@ class StreamingVoiceConversion:
                 resized.reshape(-1)[:limit] = flat[:limit]
                 open_mask = resized
             weight = weight * (1.0 - open_mask)
+        if isinstance(prompt_closed_mask, torch.Tensor):
+            closed_mask = prompt_closed_mask.float().clamp(0.0, 1.0)
+            if tuple(closed_mask.shape) != tuple(speech.shape):
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_closed_mask shape mismatch: "
+                        f"{tuple(closed_mask.shape)} vs {tuple(speech.shape)}. "
+                        "Set rhythm_v3_allow_prompt_weight_shape_repair=true only for explicit debug repair."
+                    )
+                resized = torch.zeros_like(speech)
+                flat = closed_mask.reshape(-1)
+                limit = min(int(resized.numel()), int(flat.numel()))
+                resized.reshape(-1)[:limit] = flat[:limit]
+                closed_mask = resized
+            weight = weight * closed_mask
+        if isinstance(prompt_boundary_confidence, torch.Tensor) and min_boundary_confidence is not None:
+            boundary_conf = prompt_boundary_confidence.float().clamp(0.0, 1.0)
+            if tuple(boundary_conf.shape) != tuple(speech.shape):
+                if not bool(allow_shape_repair):
+                    raise RuntimeError(
+                        "prompt_boundary_confidence shape mismatch: "
+                        f"{tuple(boundary_conf.shape)} vs {tuple(speech.shape)}. "
+                        "Set rhythm_v3_allow_prompt_weight_shape_repair=true only for explicit debug repair."
+                    )
+                resized = torch.zeros_like(speech)
+                flat = boundary_conf.reshape(-1)
+                limit = min(int(resized.numel()), int(flat.numel()))
+                resized.reshape(-1)[:limit] = flat[:limit]
+                boundary_conf = resized
+            finite_mask = torch.isfinite(boundary_conf)
+            active = (weight > 0.0) & finite_mask
+            if bool(active.any().item()):
+                active_bc = boundary_conf[active]
+                q50 = float(torch.quantile(active_bc, 0.50).item())
+                q75 = float(torch.quantile(active_bc, 0.75).item())
+                center = q50
+                if min_boundary_confidence is not None:
+                    center = min(center, float(min_boundary_confidence))
+                scale = max(1.0e-3, q75 - q50)
+                logits = ((boundary_conf - center) / scale).clamp(-20.0, 20.0)
+                soft_bc = torch.sigmoid(logits)
+                soft_bc = 0.10 + (0.90 * soft_bc)
+                soft_bc = torch.where(finite_mask, soft_bc, torch.zeros_like(soft_bc))
+                weight = weight * soft_bc
         drop_edge_runs = max(0, int(drop_edge_runs))
         if drop_edge_runs > 0:
             active = torch.nonzero(weight.reshape(-1) > 0.0, as_tuple=False).reshape(-1)
@@ -524,6 +571,7 @@ class StreamingVoiceConversion:
             debounce_min_run_frames=int(self.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
             phrase_boundary_threshold=float(self.hparams.get("rhythm_source_phrase_threshold", 0.55)),
             unit_prior_path=self.hparams.get("rhythm_v3_unit_prior_path"),
+            mel=ref_mel_batch[0].detach(),
         )
         assert_duration_v3_cache_meta_compatible(
             cache.get(DURATION_V3_CACHE_META_KEY),
@@ -583,10 +631,25 @@ class StreamingVoiceConversion:
             device=self.device,
             dtype=torch.float32,
         ).unsqueeze(0)
+        prompt_closed_mask = torch.tensor(
+            cache.get("sealed_mask", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        prompt_boundary_confidence = torch.tensor(
+            cache.get("boundary_confidence", np.zeros_like(cache["dur_anchor_src"], dtype=np.float32)),
+            device=self.device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        out["prompt_closed_mask"] = prompt_closed_mask
+        out["prompt_boundary_confidence"] = prompt_boundary_confidence
         out["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             prompt_run_stability=prompt_run_stability,
             prompt_open_run_mask=prompt_open_run_mask,
+            prompt_closed_mask=prompt_closed_mask,
+            prompt_boundary_confidence=prompt_boundary_confidence,
+            min_boundary_confidence=self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
             drop_edge_runs=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             allow_shape_repair=bool(self.hparams.get("rhythm_v3_allow_prompt_weight_shape_repair", False)),
         )

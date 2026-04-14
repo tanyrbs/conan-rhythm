@@ -28,6 +28,7 @@ from tasks.Conan.rhythm.preflight_support import (
     _compose_hparams_override,
     _inspect_indexed_split_arrays,
     _inspect_indexed_split_files,
+    _inspect_minimal_v1_frontend_surface,
     _inspect_pitch_feature_readiness,
     _inspect_processed_data_dir,
     _run_dataset_and_model_dry_run,
@@ -260,6 +261,139 @@ class PreflightReadinessTests(unittest.TestCase):
         ):
             errors = _run_dataset_and_model_dry_run("train", context=context, run_model=True)
         self.assertTrue(any("did not produce mel_out" in error for error in errors))
+
+    def test_preflight_flags_minimal_v1_frontend_surface_when_silence_and_boundary_contract_are_unreachable(self) -> None:
+        items = [
+            {
+                "item_name": "train_0",
+                "hubert": np.asarray([71, 71, 72, 63], dtype=np.int64),
+                "content_units": np.asarray([71, 72], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2, 2], dtype=np.int64),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                "sep_hint": np.asarray([0.0, 0.0], dtype=np.float32),
+                "boundary_confidence": np.asarray([0.46, 0.48], dtype=np.float32),
+                "source_boundary_cue": np.asarray([0.31, 0.44], dtype=np.float32),
+            }
+        ]
+        summary, warnings, errors = _inspect_minimal_v1_frontend_surface(
+            items,
+            split="train",
+            hparams={
+                "rhythm_enable_v3": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_gate_quality_strict": True,
+                "silent_token": 57,
+                "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+                "rhythm_source_phrase_threshold": 0.55,
+            },
+            profile="minimal_v1",
+            strict_contract=True,
+        )
+        self.assertEqual(warnings, [])
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["raw_silent_token_items"], 0)
+        self.assertEqual(summary["source_silence_items"], 0)
+        self.assertEqual(summary["sep_nonzero_items"], 0)
+        self.assertTrue(any("silent_token=57" in error for error in errors))
+        self.assertTrue(any("min_boundary_confidence_for_g=0.500" in error for error in errors))
+        self.assertTrue(any("source_phrase_threshold=0.550" in error for error in errors))
+
+    def test_preflight_frontend_surface_downgrades_findings_to_warnings_without_strict_gate(self) -> None:
+        items = [
+            {
+                "item_name": "train_0",
+                "hubert": np.asarray([71, 71, 72, 63], dtype=np.int64),
+                "content_units": np.asarray([71, 72], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2, 2], dtype=np.int64),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                "sep_hint": np.asarray([0.0, 0.0], dtype=np.float32),
+                "boundary_confidence": np.asarray([0.46, 0.48], dtype=np.float32),
+                "source_boundary_cue": np.asarray([0.31, 0.44], dtype=np.float32),
+            }
+        ]
+        summary, warnings, errors = _inspect_minimal_v1_frontend_surface(
+            items,
+            split="train",
+            hparams={
+                "rhythm_enable_v3": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_gate_quality_strict": False,
+                "silent_token": 57,
+                "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+                "rhythm_source_phrase_threshold": 0.55,
+            },
+            profile="minimal_v1",
+            strict_contract=False,
+        )
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(summary)
+        self.assertGreaterEqual(len(warnings), 3)
+
+    def test_preflight_frontend_surface_uses_hparam_flag_even_when_profile_is_default(self) -> None:
+        items = [
+            {
+                "item_name": "train_0",
+                "hubert": np.asarray([71, 71, 72, 63], dtype=np.int64),
+                "content_units": np.asarray([71, 72], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2, 2], dtype=np.int64),
+                "source_silence_mask": np.asarray([0.0, 0.0], dtype=np.float32),
+                "sep_hint": np.asarray([0.0, 0.0], dtype=np.float32),
+                "boundary_confidence": np.asarray([0.46, 0.48], dtype=np.float32),
+                "source_boundary_cue": np.asarray([0.31, 0.44], dtype=np.float32),
+            }
+        ]
+        summary, warnings, errors = _inspect_minimal_v1_frontend_surface(
+            items,
+            split="train",
+            hparams={
+                "rhythm_enable_v3": True,
+                "rhythm_v3_minimal_v1_profile": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_gate_quality_strict": False,
+                "silent_token": 57,
+                "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+                "rhythm_source_phrase_threshold": 0.55,
+            },
+            profile="default",
+            strict_contract=False,
+        )
+        self.assertIsNotNone(summary)
+        self.assertEqual(errors, [])
+        self.assertGreaterEqual(len(warnings), 3)
+
+    def test_preflight_frontend_surface_accepts_acoustic_silence_sidecars_without_raw_silent_token(self) -> None:
+        items = [
+            {
+                "item_name": "train_0",
+                "hubert": np.asarray([71, 71, 71, 71, 71, 71], dtype=np.int64),
+                "content_units": np.asarray([71, 71, 71], dtype=np.int64),
+                "dur_anchor_src": np.asarray([2, 2, 2], dtype=np.int64),
+                "source_silence_mask": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+                "sep_hint": np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+                "boundary_confidence": np.asarray([0.70, 0.84, 0.71], dtype=np.float32),
+                "source_boundary_cue": np.asarray([0.62, 0.78, 0.63], dtype=np.float32),
+            }
+        ]
+        summary, warnings, errors = _inspect_minimal_v1_frontend_surface(
+            items,
+            split="train",
+            hparams={
+                "rhythm_enable_v3": True,
+                "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_gate_quality_strict": True,
+                "silent_token": 57,
+                "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+                "rhythm_source_phrase_threshold": 0.55,
+            },
+            profile="minimal_v1",
+            strict_contract=True,
+        )
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["raw_silent_token_items"], 0)
+        self.assertEqual(summary["source_silence_items"], 1)
+        self.assertEqual(summary["sep_nonzero_items"], 1)
+        self.assertEqual(warnings, [])
+        self.assertEqual(errors, [])
 
     def test_set_hparams_reset_ignores_saved_ckpt_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

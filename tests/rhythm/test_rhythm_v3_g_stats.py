@@ -6,6 +6,7 @@ import pytest
 
 from modules.Conan.rhythm_v3.g_stats import (
     build_global_rate_support_mask,
+    build_softclean_weights,
     compute_global_rate,
     masked_weighted_median_batch,
     summarize_global_rate_support,
@@ -213,6 +214,61 @@ def test_compute_global_rate_weighted_median_prefers_high_confidence_support():
     )
 
     assert torch.allclose(g, torch.log(torch.tensor([[2.0]], dtype=torch.float32)))
+
+
+def test_build_softclean_weights_applies_closed_mask_and_boundary_soft_floor():
+    speech_mask = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32)
+    valid_mask = torch.ones_like(speech_mask)
+    closed_mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+    boundary_confidence = torch.tensor([[1.0, 0.2, 0.5]], dtype=torch.float32)
+
+    weights = build_softclean_weights(
+        speech_mask=speech_mask,
+        valid_mask=valid_mask,
+        closed_mask=closed_mask,
+        boundary_confidence=boundary_confidence,
+        weight_floor=0.2,
+    )
+
+    expected = torch.tensor([[1.0, 0.0, 0.6]], dtype=torch.float32)
+    assert torch.allclose(weights, expected)
+
+
+def test_compute_global_rate_softclean_wmed_prefers_high_weight_rows_without_clean_hard_gate():
+    log_dur = torch.log(torch.tensor([[2.0, 10.0, 30.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.tensor([[1.0, 0.0, 0.6]], dtype=torch.float32)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="softclean_wmed",
+        support_mask=torch.ones_like(speech_mask, dtype=torch.bool),
+    )
+
+    assert torch.allclose(g, torch.log(torch.tensor([[2.0]], dtype=torch.float32)))
+
+
+def test_compute_global_rate_softclean_wtmean_uses_weighted_trimmed_mean():
+    log_dur = torch.log(torch.tensor([[2.0, 10.0, 30.0]], dtype=torch.float32))
+    speech_mask = torch.ones_like(log_dur)
+    weight = torch.tensor([[1.0, 0.0, 0.6]], dtype=torch.float32)
+
+    g = compute_global_rate(
+        log_dur=log_dur,
+        speech_mask=speech_mask,
+        weight=weight,
+        variant="softclean_wtmean",
+        trim_ratio=0.0,
+        support_mask=torch.ones_like(speech_mask, dtype=torch.bool),
+    )
+
+    expected = (
+        (torch.log(torch.tensor(2.0)) * 1.0)
+        + (torch.log(torch.tensor(30.0)) * 0.6)
+    ) / 1.6
+    assert torch.allclose(g, expected.reshape(1, 1))
 
 
 def test_compute_global_rate_weighted_median_raises_for_zero_weight_support_by_default():

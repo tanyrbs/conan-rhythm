@@ -7,12 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from .unit_frontend import RhythmUnitFrontend
 from .unitizer import estimate_boundary_confidence, estimate_run_stability
 
 
-DURATION_V3_SOURCE_CACHE_VERSION = 3
+DURATION_V3_SOURCE_CACHE_VERSION = 4
 DURATION_V3_CACHE_META_KEY = "rhythm_v3_cache_meta"
 UNIT_LOG_PRIOR_META_KEY = "rhythm_v3_unit_prior_meta"
 
@@ -193,6 +194,172 @@ def _as_token_list(content_tokens) -> list[int]:
     if torch.is_tensor(content_tokens):
         return [int(x) for x in content_tokens.detach().cpu().reshape(-1).tolist()]
     return [int(x) for x in content_tokens]
+
+
+def _finite_max_or_nan(values) -> float:
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    finite = arr[np.isfinite(arr)]
+    if finite.size <= 0:
+        return float("nan")
+    return float(finite.max())
+
+
+def _coerce_single_mel_tensor(mel) -> torch.Tensor | None:
+    if mel is None:
+        return None
+    if torch.is_tensor(mel):
+        mel_tensor = mel.detach().to(device="cpu", dtype=torch.float32)
+    else:
+        mel_tensor = torch.as_tensor(np.asarray(mel), dtype=torch.float32)
+    if mel_tensor.dim() == 3:
+        if int(mel_tensor.size(0)) != 1:
+            raise ValueError(f"mel must be rank-2 or batch-size-1 rank-3, got {tuple(mel_tensor.shape)}")
+        mel_tensor = mel_tensor[0]
+    if mel_tensor.dim() != 2:
+        raise ValueError(f"mel must be rank-2 [T,C] or [C,T], got {tuple(mel_tensor.shape)}")
+    if mel_tensor.size(-1) == 80:
+        return mel_tensor.contiguous()
+    if mel_tensor.size(0) == 80:
+        return mel_tensor.transpose(0, 1).contiguous()
+    if mel_tensor.size(0) < mel_tensor.size(1):
+        return mel_tensor.transpose(0, 1).contiguous()
+    return mel_tensor.contiguous()
+
+
+def _resize_binary_mask(mask: torch.Tensor, *, target_length: int) -> torch.Tensor:
+    target_length = int(max(0, target_length))
+    if target_length <= 0:
+        return mask.new_zeros((0,), dtype=torch.float32)
+    mask = mask.reshape(-1).float()
+    if int(mask.numel()) == target_length:
+        return mask
+    if int(mask.numel()) <= 0:
+        return mask.new_zeros((target_length,), dtype=torch.float32)
+    resized = F.interpolate(
+        mask.view(1, 1, -1),
+        size=target_length,
+        mode="nearest",
+    ).view(-1)
+    if int(resized.numel()) > target_length:
+        resized = resized[:target_length]
+    return resized.float()
+
+
+def infer_frame_silence_mask_from_mel(
+    mel,
+    *,
+    target_length: int | None = None,
+    pause_energy_threshold_std: float = -0.5,
+    pause_delta_quantile: float = 0.35,
+) -> torch.Tensor:
+    mel_tensor = _coerce_single_mel_tensor(mel)
+    if mel_tensor is None or int(mel_tensor.size(0)) <= 0:
+        target = 0 if target_length is None else int(max(0, target_length))
+        return torch.zeros((target,), dtype=torch.float32)
+    energy = mel_tensor.mean(dim=-1)
+    energy_mean = energy.mean()
+    energy_std = energy.std(unbiased=False).clamp_min(1.0e-6)
+    energy_z = (energy - energy_mean) / energy_std
+    delta = torch.zeros_like(energy)
+    delta[1:] = (energy[1:] - energy[:-1]).abs()
+    delta_threshold = torch.quantile(
+        delta,
+        float(max(0.01, min(0.95, pause_delta_quantile))),
+    )
+    pause_mask = (
+        (energy_z <= float(pause_energy_threshold_std))
+        & (delta <= delta_threshold)
+    ).float()
+    if int(pause_mask.numel()) > 1:
+        kernel = min(3, int(pause_mask.numel()))
+        if kernel % 2 == 0:
+            kernel = max(1, kernel - 1)
+        smoothed = F.max_pool1d(
+            pause_mask.view(1, 1, -1),
+            kernel_size=kernel,
+            stride=1,
+            padding=kernel // 2,
+        ).view(-1)
+        if int(smoothed.numel()) > int(pause_mask.numel()):
+            smoothed = smoothed[: int(pause_mask.numel())]
+        pause_mask = (smoothed >= 0.5).float()
+    if target_length is not None:
+        pause_mask = _resize_binary_mask(pause_mask, target_length=int(target_length))
+    return pause_mask.float()
+
+
+def _resolve_frame_silence_mask(
+    content_tokens,
+    *,
+    silent_token: int | None,
+    frame_silence_mask=None,
+    mel=None,
+) -> torch.Tensor | None:
+    token_list = _as_token_list(content_tokens)
+    target_length = int(len(token_list))
+    token_mask = None
+    if silent_token is not None and target_length > 0:
+        token_mask = torch.tensor(
+            [1.0 if int(token) == int(silent_token) else 0.0 for token in token_list],
+            dtype=torch.float32,
+        )
+    resolved_mask = None
+    if frame_silence_mask is not None:
+        if torch.is_tensor(frame_silence_mask):
+            resolved_mask = frame_silence_mask.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
+        else:
+            resolved_mask = torch.as_tensor(np.asarray(frame_silence_mask), dtype=torch.float32).reshape(-1)
+        resolved_mask = _resize_binary_mask(resolved_mask, target_length=target_length)
+    elif mel is not None:
+        resolved_mask = infer_frame_silence_mask_from_mel(mel, target_length=target_length)
+    if resolved_mask is None:
+        return token_mask
+    resolved_mask = resolved_mask.clamp(0.0, 1.0)
+    if token_mask is not None:
+        resolved_mask = torch.maximum(resolved_mask, token_mask)
+    return resolved_mask
+
+
+def collect_duration_v3_frontend_diagnostics(
+    source,
+    *,
+    silent_token: int | None = None,
+) -> dict[str, float | int]:
+    source_map = source if isinstance(source, Mapping) else {}
+    dur_anchor_src = np.asarray(source_map.get("dur_anchor_src", []), dtype=np.int64).reshape(-1)
+    content_units = np.asarray(source_map.get("content_units", []), dtype=np.int64).reshape(-1)
+    source_silence_mask = np.asarray(
+        source_map.get("source_silence_mask", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    sep_hint = np.asarray(
+        source_map.get("sep_hint", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    boundary_confidence = np.asarray(
+        source_map.get("boundary_confidence", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    source_boundary_cue = np.asarray(
+        source_map.get("source_boundary_cue", np.zeros_like(dur_anchor_src, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    raw_tokens = source_map.get("hubert", source_map.get("content_tokens"))
+    raw_silent_token_count = 0
+    if silent_token is not None:
+        silent_token = int(silent_token)
+        if raw_tokens is not None:
+            raw_silent_token_count = sum(1 for token in _as_token_list(raw_tokens) if int(token) == silent_token)
+        elif dur_anchor_src.size > 0 and content_units.size == dur_anchor_src.size:
+            raw_silent_token_count = int(dur_anchor_src[content_units == silent_token].sum())
+    return {
+        "unit_count": int(dur_anchor_src.size),
+        "raw_silent_token_count": int(raw_silent_token_count),
+        "sep_nonzero_count": int((sep_hint > 0.5).sum()),
+        "source_silence_run_count": int((source_silence_mask > 0.5).sum()),
+        "boundary_confidence_max": _finite_max_or_nan(boundary_confidence),
+        "source_boundary_cue_max": _finite_max_or_nan(source_boundary_cue),
+    }
 
 
 def _coerce_unit_prior_array(value) -> np.ndarray:
@@ -749,7 +916,10 @@ def build_source_rhythm_cache_v3(
     debounce_min_run_frames: int = 2,
     phrase_boundary_threshold: float = 0.55,
     unit_prior_path: str | None = None,
+    mel=None,
+    frame_silence_mask=None,
 ) -> dict[str, np.ndarray]:
+    token_list = _as_token_list(content_tokens)
     frontend = _cached_frontend(
         silent_token=silent_token,
         separator_aware=separator_aware,
@@ -758,12 +928,22 @@ def build_source_rhythm_cache_v3(
         debounce_min_run_frames=debounce_min_run_frames,
     )
     token_tensor = torch.tensor(
-        [_as_token_list(content_tokens)],
+        [token_list],
         dtype=torch.long,
     )
+    resolved_frame_silence_mask = _resolve_frame_silence_mask(
+        token_list,
+        silent_token=silent_token,
+        frame_silence_mask=frame_silence_mask,
+        mel=mel,
+    )
+    frame_silence_tensor = None
+    if resolved_frame_silence_mask is not None:
+        frame_silence_tensor = resolved_frame_silence_mask.reshape(1, -1).to(dtype=torch.float32)
     batch = frontend.from_content_tensor(
         token_tensor,
         mark_last_open=False,
+        frame_silence_mask=frame_silence_tensor,
     )
     source_cache = {
         "content_units": batch.content_units[0].cpu().numpy().astype(np.int64),
@@ -775,6 +955,36 @@ def build_source_rhythm_cache_v3(
         "boundary_confidence": batch.boundary_confidence[0].cpu().numpy().astype(np.float32),
         "source_run_stability": batch.run_stability[0].cpu().numpy().astype(np.float32),
     }
+    if resolved_frame_silence_mask is not None and int(source_cache["dur_anchor_src"].shape[0]) > 0:
+        sep_hint = np.asarray(source_cache["sep_hint"], dtype=np.int64).copy()
+        silence_runs = np.asarray(source_cache["source_silence_mask"], dtype=np.float32) > 0.5
+        silence_indices = np.flatnonzero(silence_runs)
+        for silence_idx in silence_indices.tolist():
+            if silence_idx > 0:
+                sep_hint[silence_idx - 1] = 1
+            if silence_idx < int(sep_hint.shape[0] - 1):
+                sep_hint[silence_idx] = 1
+        source_cache["sep_hint"] = sep_hint.astype(np.int64, copy=False)
+        source_cache["boundary_confidence"] = np.asarray(
+            estimate_boundary_confidence(
+                durations=source_cache["dur_anchor_src"].tolist(),
+                sep_hint=source_cache["sep_hint"].tolist(),
+                open_run_mask=source_cache["open_run_mask"].tolist(),
+            ),
+            dtype=np.float32,
+        )
+        source_cache["source_run_stability"] = np.asarray(
+            estimate_run_stability(
+                durations=source_cache["dur_anchor_src"].tolist(),
+                silence_mask=source_cache["source_silence_mask"].tolist(),
+                open_run_mask=source_cache["open_run_mask"].tolist(),
+                sep_hint=source_cache["sep_hint"].tolist(),
+                boundary_confidence=source_cache["boundary_confidence"].tolist(),
+                min_speech_frames=debounce_min_run_frames,
+                min_silence_frames=debounce_min_run_frames,
+            ),
+            dtype=np.float32,
+        )
     source_cache.update(
         build_source_phrase_cache(
             dur_anchor_src=source_cache["dur_anchor_src"],
@@ -784,6 +994,27 @@ def build_source_rhythm_cache_v3(
             boundary_confidence=source_cache["boundary_confidence"],
             phrase_boundary_threshold=phrase_boundary_threshold,
         )
+    )
+    if resolved_frame_silence_mask is not None:
+        source_cache["source_silence_frame_count"] = np.asarray(
+            [int((resolved_frame_silence_mask > 0.5).sum().item())],
+            dtype=np.int32,
+        )
+    frontend_diag = collect_duration_v3_frontend_diagnostics(
+        {
+            **source_cache,
+            "hubert": np.asarray(token_list, dtype=np.int64),
+        },
+        silent_token=silent_token,
+    )
+    source_cache.update(
+        {
+            "raw_silent_token_count": np.asarray([frontend_diag["raw_silent_token_count"]], dtype=np.int32),
+            "sep_nonzero_count": np.asarray([frontend_diag["sep_nonzero_count"]], dtype=np.int32),
+            "source_silence_run_count": np.asarray([frontend_diag["source_silence_run_count"]], dtype=np.int32),
+            "boundary_confidence_max": np.asarray([frontend_diag["boundary_confidence_max"]], dtype=np.float32),
+            "source_boundary_cue_max": np.asarray([frontend_diag["source_boundary_cue_max"]], dtype=np.float32),
+        }
     )
     source_cache = attach_duration_v3_cache_meta(
         source_cache,
@@ -812,12 +1043,14 @@ __all__ = [
     "attach_duration_v3_cache_meta",
     "build_duration_v3_cache_meta",
     "build_duration_v3_frontend_signature",
+    "collect_duration_v3_frontend_diagnostics",
     "build_source_phrase_cache",
     "build_source_rhythm_cache",
     "build_source_rhythm_cache_v3",
     "duration_v3_cache_meta_signature",
     "estimate_boundary_confidence",
     "estimate_run_stability",
+    "infer_frame_silence_mask_from_mel",
     "load_unit_log_prior_bundle",
     "maybe_attach_unit_log_prior_from_path",
     "resolve_duration_v3_cache_meta",

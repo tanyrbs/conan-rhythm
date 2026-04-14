@@ -215,6 +215,7 @@ class RhythmUnitFrontend:
         *,
         content_lengths: torch.Tensor | None = None,
         mark_last_open: bool = True,
+        frame_silence_mask: torch.Tensor | None = None,
     ) -> RhythmUnitBatch:
         if content.dim() != 2:
             raise ValueError(f"content must be rank-2 [B,T], got {tuple(content.shape)}")
@@ -226,6 +227,32 @@ class RhythmUnitFrontend:
                 dtype=torch.long,
                 device=content.device,
             )
+        if frame_silence_mask is not None:
+            frame_silence_mask = frame_silence_mask.to(device=content.device, dtype=torch.float32)
+            if frame_silence_mask.dim() == 1:
+                frame_silence_mask = frame_silence_mask.unsqueeze(0)
+            if tuple(frame_silence_mask.shape) != tuple(content.shape):
+                raise ValueError(
+                    "frame_silence_mask must match content shape: "
+                    f"{tuple(frame_silence_mask.shape)} vs {tuple(content.shape)}"
+                )
+            compressed_list = []
+            for batch_idx in range(batch_size):
+                valid_len = int(content_lengths[batch_idx].item())
+                valid_len = max(0, min(valid_len, int(total_steps)))
+                compressed_list.append(
+                    build_compressed_sequence(
+                        content[batch_idx, :valid_len].detach().cpu().tolist(),
+                        silent_token=self.silent_token,
+                        separator_aware=self.separator_aware,
+                        tail_open_units=self.tail_open_units,
+                        mark_last_open=mark_last_open,
+                        emit_silence_runs=self.emit_silence_runs,
+                        debounce_min_run_frames=self.unitizer.debounce_min_run_frames,
+                        frame_silence_mask=frame_silence_mask[batch_idx, :valid_len].detach().cpu().tolist(),
+                    )
+                )
+            return self._batch_from_compressed(compressed_list, device=content.device)
         state = self.init_stream_state(batch_size, device=content.device)
         batch, _ = self.step_content_tensor(
             content,

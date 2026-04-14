@@ -6,7 +6,15 @@ import torch
 
 
 EPS = 1.0e-6
-_VALID_G_VARIANTS = {"raw_median", "weighted_median", "trimmed_mean", "unit_norm"}
+_VALID_G_VARIANTS = {
+    "raw_median",
+    "weighted_median",
+    "trimmed_mean",
+    "unit_norm",
+    "softclean_wmed",
+    "softclean_wtmean",
+}
+_SOFTCLEAN_G_VARIANTS = {"softclean_wmed", "softclean_wtmean"}
 _VALID_EVAL_MODES = {"analytic", "coarse_only", "learned"}
 _VALID_INVALID_WEIGHT_BEHAVIORS = {"raise", "nan", "fallback"}
 
@@ -70,6 +78,10 @@ def normalize_global_rate_variant(value) -> str:
         "tmean": "trimmed_mean",
         "trimmed": "trimmed_mean",
         "unit_normalized": "unit_norm",
+        "soft_wmed": "softclean_wmed",
+        "softclean_weighted_median": "softclean_wmed",
+        "soft_wtmean": "softclean_wtmean",
+        "softclean_trimmed_mean": "softclean_wtmean",
     }
     normalized = aliases.get(normalized, normalized)
     if normalized not in _VALID_G_VARIANTS:
@@ -78,6 +90,10 @@ def normalize_global_rate_variant(value) -> str:
             f"Expected one of: {sorted(_VALID_G_VARIANTS)}"
         )
     return normalized
+
+
+def is_softclean_global_rate_variant(value) -> bool:
+    return normalize_global_rate_variant(value) in _SOFTCLEAN_G_VARIANTS
 
 
 def normalize_falsification_eval_mode(value) -> str:
@@ -114,6 +130,34 @@ def normalize_invalid_weight_behavior(value) -> str:
             f"Expected one of: {sorted(_VALID_INVALID_WEIGHT_BEHAVIORS)}"
         )
     return normalized
+
+
+def build_softclean_weights(
+    *,
+    speech_mask: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    closed_mask: torch.Tensor | None = None,
+    boundary_confidence: torch.Tensor | None = None,
+    weight_floor: float = 0.15,
+    weight_power: float = 1.0,
+) -> torch.Tensor:
+    weight_floor = float(max(0.0, min(1.0, weight_floor)))
+    weight_power = float(max(0.0, weight_power))
+    speech = speech_mask.float().clamp(0.0, 1.0)
+    valid = (
+        torch.ones_like(speech)
+        if valid_mask is None
+        else valid_mask.float().clamp(0.0, 1.0)
+    )
+    weights = speech * valid
+    if isinstance(closed_mask, torch.Tensor):
+        weights = weights * closed_mask.float().clamp(0.0, 1.0)
+    if isinstance(boundary_confidence, torch.Tensor):
+        boundary = boundary_confidence.float().clamp(0.0, 1.0)
+        boundary = torch.where(torch.isfinite(boundary), boundary, torch.zeros_like(boundary))
+        boundary_weight = weight_floor + ((1.0 - weight_floor) * boundary.pow(weight_power))
+        weights = weights * boundary_weight
+    return weights
 
 
 def weighted_median_1d(
@@ -159,6 +203,18 @@ def true_median_1d(values: torch.Tensor) -> torch.Tensor:
     if count % 2 == 1:
         return sorted_values[mid]
     return 0.5 * (sorted_values[mid - 1] + sorted_values[mid])
+
+
+def _trimmed_mean_1d(values: torch.Tensor, *, trim_ratio: float) -> torch.Tensor:
+    if values.ndim != 1:
+        raise ValueError("_trimmed_mean_1d expects a 1D tensor.")
+    if values.numel() <= 0:
+        raise ValueError("_trimmed_mean_1d requires at least one value.")
+    sorted_values = values.float().sort().values
+    trim = int(float(max(0.0, min(0.49, trim_ratio))) * int(sorted_values.numel()))
+    if trim > 0 and (2 * trim) < int(sorted_values.numel()):
+        sorted_values = sorted_values[trim:-trim]
+    return sorted_values.mean()
 
 
 def _normalize_drop_edge_runs(value) -> int:
@@ -536,6 +592,52 @@ def _resolve_unit_prior(
     return prior * mask.float()
 
 
+def weighted_trimmed_mean_1d(
+    values: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    trim_ratio: float = 0.2,
+    invalid_weight_behavior: str = "raise",
+) -> torch.Tensor:
+    if values.ndim != 1 or weights.ndim != 1:
+        raise ValueError("weighted_trimmed_mean_1d expects 1D tensors.")
+    if values.numel() <= 0:
+        raise ValueError("weighted_trimmed_mean_1d requires at least one value.")
+    invalid_weight_behavior = normalize_invalid_weight_behavior(invalid_weight_behavior)
+    order = torch.argsort(values)
+    values_sorted = values[order].float()
+    weights_sorted = weights[order].float().clamp_min(0.0)
+    total = weights_sorted.sum()
+    if not torch.isfinite(total) or float(total.item()) <= 0.0:
+        if invalid_weight_behavior == "raise":
+            raise ValueError("weighted_trimmed_mean_1d requires positive finite total weight.")
+        if invalid_weight_behavior == "nan":
+            return values_sorted.new_full((), float("nan"))
+        return _trimmed_mean_1d(values_sorted, trim_ratio=trim_ratio)
+    remaining = weights_sorted.clone()
+    trim_mass = float(max(0.0, min(0.49, trim_ratio))) * float(total.item())
+    left = trim_mass
+    idx = 0
+    while left > 1.0e-8 and idx < int(remaining.numel()):
+        take = min(float(remaining[idx].item()), left)
+        if take > 0.0:
+            remaining[idx] = remaining[idx] - take
+            left -= take
+        idx += 1
+    right = trim_mass
+    idx = int(remaining.numel()) - 1
+    while right > 1.0e-8 and idx >= 0:
+        take = min(float(remaining[idx].item()), right)
+        if take > 0.0:
+            remaining[idx] = remaining[idx] - take
+            right -= take
+        idx -= 1
+    kept = remaining.sum()
+    if not torch.isfinite(kept) or float(kept.item()) <= 0.0:
+        return _trimmed_mean_1d(values_sorted, trim_ratio=trim_ratio)
+    return (values_sorted * remaining).sum() / kept
+
+
 def _compute_single_global_rate(
     *,
     log_dur: torch.Tensor,
@@ -585,12 +687,25 @@ def _compute_single_global_rate(
             weights,
             invalid_weight_behavior=invalid_weight_behavior,
         )
+    if variant == "softclean_wmed":
+        if weights is None:
+            weights = torch.ones_like(values)
+        return weighted_median_1d(
+            values,
+            weights,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     if variant == "trimmed_mean":
-        sorted_values = values.sort().values
-        trim = int(float(max(0.0, min(0.49, trim_ratio))) * int(sorted_values.numel()))
-        if trim > 0 and (2 * trim) < int(sorted_values.numel()):
-            sorted_values = sorted_values[trim:-trim]
-        return sorted_values.mean()
+        return _trimmed_mean_1d(values, trim_ratio=trim_ratio)
+    if variant == "softclean_wtmean":
+        if weights is None:
+            return _trimmed_mean_1d(values, trim_ratio=trim_ratio)
+        return weighted_trimmed_mean_1d(
+            values,
+            weights,
+            trim_ratio=trim_ratio,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     raise ValueError(f"Unsupported g_variant={variant!r}")
 
 
@@ -684,6 +799,49 @@ def masked_weighted_median_batch(
             raw = masked_true_median_batch(values, mask)
             median = torch.where(invalid_total, raw, median)
     return median
+
+
+def masked_weighted_trimmed_mean_batch(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    trim_ratio: float = 0.2,
+    invalid_weight_behavior: str = "raise",
+) -> torch.Tensor:
+    values = values.float()
+    mask = mask.bool()
+    weights = weights.float().clamp_min(0.0)
+    invalid_weight_behavior = normalize_invalid_weight_behavior(invalid_weight_behavior)
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+        mask = mask.unsqueeze(0)
+        weights = weights.unsqueeze(0)
+    if values.ndim != 2 or mask.ndim != 2 or weights.ndim != 2:
+        raise ValueError(
+            "masked_weighted_trimmed_mean_batch expects rank-1 or rank-2 values/mask/weights."
+        )
+    if tuple(values.shape) != tuple(mask.shape) or tuple(values.shape) != tuple(weights.shape):
+        raise ValueError(
+            "masked_weighted_trimmed_mean_batch shape mismatch: "
+            f"values={tuple(values.shape)} mask={tuple(mask.shape)} weights={tuple(weights.shape)}"
+        )
+    support_count = mask.sum(dim=1, keepdim=True)
+    if bool((support_count <= 0).any().item()):
+        raise ValueError("masked_weighted_trimmed_mean_batch requires at least one valid item per batch row.")
+    batch_size = int(values.size(0))
+    out = values.new_zeros((batch_size, 1))
+    for batch_idx in range(batch_size):
+        row_mask = mask[batch_idx]
+        row_values = values[batch_idx][row_mask]
+        row_weights = weights[batch_idx][row_mask]
+        out[batch_idx, 0] = weighted_trimmed_mean_1d(
+            row_values,
+            row_weights,
+            trim_ratio=trim_ratio,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
+    return out
 
 
 def compute_global_rate_1d(
@@ -818,6 +976,16 @@ def compute_global_rate_batch(
             resolved_weight,
             invalid_weight_behavior=invalid_weight_behavior,
         )
+    if variant == "softclean_wmed":
+        if weight is None:
+            return masked_true_median_batch(log_dur, support)
+        resolved_weight = weight.float()
+        return masked_weighted_median_batch(
+            log_dur,
+            support,
+            resolved_weight,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     if variant == "unit_norm":
         normalized = log_dur - resolved_unit_prior.float()
         if weight is None:
@@ -845,6 +1013,15 @@ def compute_global_rate_batch(
         keep_weight = keep_mask.float()
         mean = (sorted_values * keep_weight).sum(dim=1, keepdim=True) / keep_weight.sum(dim=1, keepdim=True).clamp_min(1.0)
         return mean
+    if variant == "softclean_wtmean" and weight is not None:
+        resolved_weight = weight.float()
+        return masked_weighted_trimmed_mean_batch(
+            log_dur,
+            support,
+            resolved_weight,
+            trim_ratio=trim_ratio,
+            invalid_weight_behavior=invalid_weight_behavior,
+        )
     batch_size = int(log_dur.size(0))
     out = log_dur.new_zeros((batch_size, 1))
     for batch_idx in range(batch_size):
@@ -929,14 +1106,18 @@ __all__ = [
     "EPS",
     "GlobalRateSupportStats",
     "build_global_rate_support_mask",
+    "build_softclean_weights",
     "compute_global_rate",
     "compute_global_rate_1d",
     "compute_global_rate_batch",
+    "is_softclean_global_rate_variant",
     "masked_true_median_batch",
     "masked_weighted_median_batch",
+    "masked_weighted_trimmed_mean_batch",
     "normalize_falsification_eval_mode",
     "normalize_global_rate_variant",
     "summarize_global_rate_support",
     "true_median_1d",
     "weighted_median_1d",
+    "weighted_trimmed_mean_1d",
 ]

@@ -23,9 +23,11 @@ import torch
 from modules.Conan.rhythm_v3.source_cache import build_source_phrase_cache, build_source_rhythm_cache_v3
 from tasks.Conan.Conan import ConanTask
 from tasks.Conan.dataset import ConanDataset
+from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
 from utils.plot.rhythm_v3_viz.review import compute_speech_tempo_for_analysis
+from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
 
 
 DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick_gate1.yaml"
@@ -36,58 +38,13 @@ DEFAULT_MIN_REAL_RANGE = 0.01
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
-    "rhythm_v3_minimal_v1_profile=False,"
-    "rhythm_v3_strict_minimal_claim_profile=False,"
+    "rhythm_v3_strict_eval_invalid_g=True,"
     "rhythm_v3_alignment_prefilter_bad_samples=False,"
+    "rhythm_v3_alignment_unmatched_speech_ratio_max=1.0,"
     "rhythm_v3_alignment_local_margin_p10_min=0.0,"
     "rhythm_v3_alignment_mean_local_confidence_speech_min=0.0,"
-    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0,"
-    "rhythm_v3_disallow_same_text_reference=False"
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0"
 )
-
-DEFAULT_CASES = [
-    {
-        "speaker": "aba",
-        "source": "aba_train_arctic_a0010",
-        "refs": {
-            "slow": "aba_train_arctic_a0012",
-            "mid": "aba_train_arctic_a0015",
-            "fast": "aba_train_arctic_a0016",
-            "random_ref": "bdl_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "asi",
-        "source": "asi_train_arctic_a0011",
-        "refs": {
-            "slow": "asi_train_arctic_a0015",
-            "mid": "asi_train_arctic_a0014",
-            "fast": "asi_train_arctic_a0013",
-            "random_ref": "bdl_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "bdl",
-        "source": "bdl_train_arctic_a0014",
-        "refs": {
-            "slow": "bdl_train_arctic_a0012",
-            "mid": "bdl_train_arctic_a0013",
-            "fast": "bdl_train_arctic_a0016",
-            "random_ref": "aba_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "slt",
-        "source": "slt_train_arctic_a0014",
-        "refs": {
-            "slow": "slt_train_arctic_a0010",
-            "mid": "slt_train_arctic_a0013",
-            "fast": "slt_train_arctic_a0016",
-            "random_ref": "aba_train_arctic_a0012",
-        },
-    },
-]
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gate 1 analytic runtime probe with counterfactual prompt-side silent token.")
@@ -116,9 +73,9 @@ def _compose_hparams_override(args: argparse.Namespace) -> str:
     return ",".join(part for part in parts if part)
 
 
-def _load_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
+def _load_cases(args: argparse.Namespace, ds: ConanDataset) -> list[dict[str, Any]]:
     if not args.cases_json:
-        return copy.deepcopy(DEFAULT_CASES)
+        return build_auto_gate1_cases(ds)
     with open(args.cases_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if isinstance(payload, dict):
@@ -261,10 +218,11 @@ def _build_counterfactual_conditioning(
         silent_token=int(candidate_token),
         separator_aware=bool(ds.hparams.get("rhythm_separator_aware", True)),
         tail_open_units=int(ds.hparams.get("rhythm_tail_open_units", 1)),
-        emit_silence_runs=False,
+        emit_silence_runs=bool(ds.hparams.get("rhythm_v3_emit_silence_runs", True)),
         debounce_min_run_frames=int(ds.hparams.get("rhythm_v3_debounce_min_run_frames", 2)),
         phrase_boundary_threshold=float(ds.hparams.get("rhythm_source_phrase_threshold", 0.55)),
         unit_prior_path=None,
+        mel=raw_ref_item.get("mel"),
     )
     cache = _trim_counterfactual_cache_edges(
         ds=ds,
@@ -345,14 +303,36 @@ def _run_condition(
     trim_head_runs: int,
     trim_tail_runs: int,
 ) -> dict[str, Any]:
-    sample, conditioning, raw_ref_item, _ = _build_probe_sample(
-        ds,
-        source_fetch_index=source_fetch_index,
-        ref_local_index=ref_local_index,
-        candidate_token=candidate_token,
-        trim_head_runs=trim_head_runs,
-        trim_tail_runs=trim_tail_runs,
-    )
+    try:
+        sample, conditioning, raw_ref_item, _ = _build_probe_sample(
+            ds,
+            source_fetch_index=source_fetch_index,
+            ref_local_index=ref_local_index,
+            candidate_token=candidate_token,
+            trim_head_runs=trim_head_runs,
+            trim_tail_runs=trim_tail_runs,
+        )
+    except (RhythmDatasetPrefilterDrop, RuntimeError) as exc:
+        raw_ref_item = ds._get_raw_item_cached(ref_local_index)
+        return {
+            "g_domain_valid": 0.0,
+            "gate0_row_dropped": 1.0,
+            "tempo_out": float("nan"),
+            "probe_error": str(exc),
+            "source_name": source_name,
+            "ref_name": ref_name,
+            "ref_condition": ref_condition,
+            "prompt_tempo_ref": float("nan"),
+            "prompt_total_units": 0,
+            "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
+            "same_text_reference": int(source_name == ref_name),
+            "ref_pair_item_name": str(raw_ref_item.get("item_name", ref_name)),
+            "counterfactual_silent_token": int(candidate_token),
+            "counterfactual_clean_count": float("nan"),
+            "counterfactual_domain_valid": 0.0,
+            "trim_head_runs": int(trim_head_runs),
+            "trim_tail_runs": int(trim_tail_runs),
+        }
     raw_source_item = sample.get("_raw_item")
     raw_paired_target_item = sample.get("_raw_paired_target_item")
     batch = ds.collater([sample])
@@ -381,14 +361,26 @@ def _run_condition(
         metadata["paired_target_text_signature"] = ds._extract_text_signature(raw_paired_target_item)
         metadata["tgt_prompt_id"] = str(raw_paired_target_item.get("item_name", ""))
         metadata["tgt_spk"] = str(raw_paired_target_item.get("item_name", "")).split("_", 1)[0]
-    with torch.no_grad():
-        _, output = task.run_model(batch, infer=True, test=True)
-    record = build_debug_records_from_batch(
-        sample=batch,
-        model_output=output,
-        metadata=metadata,
-    )[0]
-    summary = record_summary(record)
+    try:
+        with torch.no_grad():
+            _, output = task.run_model(batch, infer=True, test=True)
+    except ValueError as exc:
+        message = str(exc)
+        if "non-empty closed/boundary-clean support for g" not in message:
+            raise
+        summary = {
+            "g_domain_valid": 0.0,
+            "gate0_row_dropped": 1.0,
+            "tempo_out": float("nan"),
+            "probe_error": message,
+        }
+    else:
+        record = build_debug_records_from_batch(
+            sample=batch,
+            model_output=output,
+            metadata=metadata,
+        )[0]
+        summary = record_summary(record)
     summary.update(
         {
             "source_name": source_name,
@@ -533,8 +525,8 @@ def main() -> None:
         print_hparams=False,
         reset=True,
     )
-    cases = _load_cases(args)
     ds = ConanDataset(prefix=args.split, shuffle=False)
+    cases = _load_cases(args, ds)
     task = ConanTask()
     task.build_tts_model()
     task.global_step = 0

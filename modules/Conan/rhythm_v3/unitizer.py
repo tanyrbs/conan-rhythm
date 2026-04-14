@@ -67,23 +67,53 @@ def compress_token_sequence(
     silent_token: int | None = None,
     separator_aware: bool = False,
     emit_silence_runs: bool = False,
+    frame_silence_mask: Sequence[int] | Sequence[float] | torch.Tensor | None = None,
 ) -> tuple[list[int], list[int], list[int], list[int]]:
     units: list[int] = []
     durations: list[int] = []
     silence_mask: list[int] = []
     sep_hint: list[int] = []
     prev_token: int | None = None
+    prev_is_silence: bool | None = None
     saw_separator = False
-    for token in token_sequence:
+    frame_silence_flags: list[bool] | None = None
+    if frame_silence_mask is not None:
+        if isinstance(frame_silence_mask, torch.Tensor):
+            flat_mask = frame_silence_mask.detach().to(device="cpu", dtype=torch.float32).reshape(-1).tolist()
+        else:
+            flat_mask = [float(value) for value in frame_silence_mask]
+        if len(flat_mask) != len(token_sequence):
+            raise ValueError(
+                "frame_silence_mask must match token_sequence length: "
+                f"got {len(flat_mask)} vs {len(token_sequence)}"
+            )
+        frame_silence_flags = [float(value) > 0.5 for value in flat_mask]
+    for idx, token in enumerate(token_sequence):
         token = int(token)
         if token < 0:
             continue
-        is_silence = silent_token is not None and token == int(silent_token)
+        explicit_silence = (
+            bool(frame_silence_flags[idx])
+            if frame_silence_flags is not None
+            else False
+        )
+        token_silence = silent_token is not None and token == int(silent_token)
+        is_silence = bool(explicit_silence or token_silence)
         if is_silence and not emit_silence_runs:
             if separator_aware and len(units) > 0:
                 saw_separator = True
             continue
-        start_new = len(units) == 0 or token != prev_token or (separator_aware and saw_separator)
+        transition_split = (
+            frame_silence_flags is not None
+            and prev_is_silence is not None
+            and bool(is_silence != prev_is_silence)
+        )
+        start_new = (
+            len(units) == 0
+            or token != prev_token
+            or transition_split
+            or (separator_aware and saw_separator)
+        )
         if start_new:
             if saw_separator and separator_aware and len(sep_hint) > 0:
                 sep_hint[-1] = 1
@@ -94,6 +124,7 @@ def compress_token_sequence(
         else:
             durations[-1] += 1
         prev_token = token
+        prev_is_silence = bool(is_silence)
         saw_separator = False
     return units, durations, silence_mask, sep_hint
 
@@ -309,9 +340,12 @@ def _estimate_boundary_confidence_tensor(
     next_anchor = F.pad(log_anchor[1:], (0, 1))
     local_peak = torch.relu(log_anchor - 0.5 * (prev_anchor + next_anchor))
     local_jump = 0.5 * (torch.abs(log_anchor - prev_anchor) + torch.abs(next_anchor - log_anchor))
-    cue = 0.30 * torch.sigmoid(_standardize_1d(local_peak))
-    cue = cue + 0.20 * torch.sigmoid(_standardize_1d(local_jump))
-    cue = cue + 0.55 * sep
+    local_cue = 0.60 * torch.sigmoid(_standardize_1d(local_peak))
+    local_cue = local_cue + 0.40 * torch.sigmoid(_standardize_1d(local_jump))
+    if bool((sep > 0.5).any().item()):
+        cue = (0.65 * local_cue) + (0.35 * sep.clamp(0.0, 1.0))
+    else:
+        cue = local_cue
     cue = cue * (1.0 - 0.25 * open_mask)
     return cue.clamp(0.0, 1.0)
 
@@ -398,12 +432,14 @@ def _compress_sequence_lists(
     mark_last_open: bool = True,
     emit_silence_runs: bool = False,
     debounce_min_run_frames: int = 1,
+    frame_silence_mask: Sequence[int] | Sequence[float] | torch.Tensor | None = None,
 ) -> tuple[list[int], list[int], list[int], list[int], int]:
     units, durations, silence_mask, sep_hint = compress_token_sequence(
         token_sequence,
         silent_token=silent_token,
         separator_aware=separator_aware,
         emit_silence_runs=emit_silence_runs,
+        frame_silence_mask=frame_silence_mask,
     )
     open_tail = min(len(units), max(0, int(tail_open_units)) if mark_last_open else 0)
     sealed_limit = max(0, len(units) - open_tail)
@@ -443,6 +479,7 @@ def build_compressed_sequence(
     mark_last_open: bool = True,
     emit_silence_runs: bool = False,
     debounce_min_run_frames: int = 1,
+    frame_silence_mask: Sequence[int] | Sequence[float] | torch.Tensor | None = None,
 ) -> CompressedUnitSequence:
     units, durations, silence_mask, sep_hint, open_tail = _compress_sequence_lists(
         token_sequence,
@@ -452,6 +489,7 @@ def build_compressed_sequence(
         mark_last_open=mark_last_open,
         emit_silence_runs=emit_silence_runs,
         debounce_min_run_frames=debounce_min_run_frames,
+        frame_silence_mask=frame_silence_mask,
     )
     open_run_mask = [0 for _ in units]
     if mark_last_open and len(open_run_mask) > 0:
@@ -493,6 +531,7 @@ def build_compressed_sequence_tensor(
     emit_silence_runs: bool = False,
     debounce_min_run_frames: int = 1,
     device: torch.device | None = None,
+    frame_silence_mask: Sequence[int] | Sequence[float] | torch.Tensor | None = None,
 ) -> CompressedUnitSequenceTensor:
     units, durations, silence_mask, sep_hint, open_tail = _compress_sequence_lists(
         token_sequence,
@@ -502,6 +541,7 @@ def build_compressed_sequence_tensor(
         mark_last_open=mark_last_open,
         emit_silence_runs=emit_silence_runs,
         debounce_min_run_frames=debounce_min_run_frames,
+        frame_silence_mask=frame_silence_mask,
     )
     target_device = device if device is not None else torch.device("cpu")
     units_tensor = torch.tensor(units, dtype=torch.long, device=target_device)

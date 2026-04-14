@@ -26,6 +26,7 @@ from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
 from utils.plot.rhythm_v3_viz.review import compute_speech_tempo_for_analysis
+from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
 
 
 DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick_gate1.yaml"
@@ -36,58 +37,13 @@ DEFAULT_MIN_REAL_RANGE = 0.01
 DEFAULT_RELAXED_HPARAMS = (
     "use_pitch_embed=False,"
     "rhythm_v3_gate_quality_strict=False,"
-    "rhythm_v3_minimal_v1_profile=False,"
-    "rhythm_v3_strict_minimal_claim_profile=False,"
+    "rhythm_v3_strict_eval_invalid_g=True,"
     "rhythm_v3_alignment_prefilter_bad_samples=False,"
+    "rhythm_v3_alignment_unmatched_speech_ratio_max=1.0,"
     "rhythm_v3_alignment_local_margin_p10_min=0.0,"
     "rhythm_v3_alignment_mean_local_confidence_speech_min=0.0,"
-    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0,"
-    "rhythm_v3_disallow_same_text_reference=False"
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min=0.0"
 )
-
-
-DEFAULT_CASES = [
-    {
-        "speaker": "aba",
-        "source": "aba_train_arctic_a0010",
-        "refs": {
-            "slow": "aba_train_arctic_a0012",
-            "mid": "aba_train_arctic_a0015",
-            "fast": "aba_train_arctic_a0016",
-            "random_ref": "bdl_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "asi",
-        "source": "asi_train_arctic_a0011",
-        "refs": {
-            "slow": "asi_train_arctic_a0015",
-            "mid": "asi_train_arctic_a0014",
-            "fast": "asi_train_arctic_a0013",
-            "random_ref": "bdl_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "bdl",
-        "source": "bdl_train_arctic_a0014",
-        "refs": {
-            "slow": "bdl_train_arctic_a0012",
-            "mid": "bdl_train_arctic_a0013",
-            "fast": "bdl_train_arctic_a0016",
-            "random_ref": "aba_train_arctic_a0012",
-        },
-    },
-    {
-        "speaker": "slt",
-        "source": "slt_train_arctic_a0014",
-        "refs": {
-            "slow": "slt_train_arctic_a0010",
-            "mid": "slt_train_arctic_a0013",
-            "fast": "slt_train_arctic_a0016",
-            "random_ref": "aba_train_arctic_a0012",
-        },
-    },
-]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -119,9 +75,9 @@ def _compose_hparams_override(args: argparse.Namespace) -> str:
     return ",".join(part for part in parts if part)
 
 
-def _load_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
+def _load_cases(args: argparse.Namespace, ds: ConanDataset) -> list[dict[str, Any]]:
     if not args.cases_json:
-        return copy.deepcopy(DEFAULT_CASES)
+        return build_auto_gate1_cases(ds)
     with open(args.cases_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, list):
@@ -224,7 +180,7 @@ def _run_condition(
             source_fetch_index=source_fetch_index,
             ref_local_index=ref_local_index,
         )
-    except RhythmDatasetPrefilterDrop as exc:
+    except (RhythmDatasetPrefilterDrop, RuntimeError) as exc:
         raw_ref_item = ds._get_raw_item_cached(ref_local_index)
         summary = {
             "g_domain_valid": 0.0,
@@ -395,8 +351,8 @@ def main() -> None:
         print_hparams=False,
         reset=True,
     )
-    cases = _load_cases(args)
     ds = ConanDataset(prefix=args.split, shuffle=False)
+    cases = _load_cases(args, ds)
     task = ConanTask()
     task.build_tts_model()
     task.global_step = 0

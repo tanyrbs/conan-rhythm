@@ -15,7 +15,24 @@ rhythm_enable_v3: true
 rhythm_minimal_style_only: true
 rhythm_public_inputs: [content_units, dur_anchor_src, unit_anchor_base, source_silence_mask, source_boundary_cue, source_run_stability, prompt_content_units, prompt_duration_obs, prompt_unit_mask, prompt_speech_mask]
 rhythm_public_outputs: [unit_duration_exec, speech_duration_exec, rhythm_frame_plan, commit_frontier, rhythm_state_next]
-rhythm_public_losses: [rhythm_total, rhythm_v3_dur, rhythm_v3_bias, rhythm_v3_pref, rhythm_v3_cons]
+rhythm_public_losses:
+  [
+    rhythm_total,
+    rhythm_v3_dur,
+    rhythm_v3_bias,
+    rhythm_v3_pref,
+    rhythm_v3_cons,
+    rhythm_v3_summary,
+    L_exec_speech,
+    L_exec_stretch,
+    L_exec_pause,
+    L_exec_pause_value,
+    L_budget,
+    L_prefix_state,
+    L_base,
+    L_rhythm_exec,
+    L_stream_state,
+  ]
 
 content_vocab_size: 102
 rhythm_hidden_size: 256
@@ -127,6 +144,7 @@ rhythm_v3_src_rate_init_value: 0.0
 rhythm_v3_boundary_offset_decay: 0.60
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
+rhythm_source_phrase_threshold: 0.55
 rhythm_allow_eos_tail_flush_fallback: false
 rhythm_v3_disallow_same_text_reference: true
 rhythm_v3_disallow_same_text_paired_target: false

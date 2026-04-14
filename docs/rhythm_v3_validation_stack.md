@@ -18,15 +18,18 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414/full_split_boundary_audit_report.json`
-- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_report.json`
-- `tmp/gate_reaudit_20260414/counterfactual_static_gate0_direction_report.json`
-- `tmp/gate_reaudit_20260414/gate1_analytic_summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/boundary_summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_raw/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate0_softclean/report.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_raw/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean/summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean_wtmean/summary.json`
 
 Current verdict on the local quick-ARCTIC surface:
 
-- Gate 0 fails on the maintained domain contract
-- Gate 1 fails because no strict-valid analytic triplet survives
+- prompt-domain support is repaired on the rebuilt cache surface
+- Gate 0 still fails because the total static signal slope stays flat
+- Gate 1 still fails because runtime push is flat for most sources
 - Gate 2 and Gate 3 remain blocked
 
 So this validation stack should currently be read as a **stop surface**, not as
@@ -125,9 +128,15 @@ The project was intentionally simplified here:
 - review logic should live in the util layer, not be copied across scripts
 - local `g` reconstruction should call the shared speech-only support path,
   including `rhythm_v3_drop_edge_runs_for_g` when the experiment enables it
-- the maintained CLI should stay singular: `scripts/rhythm_v3_debug_records.py`
-  exports the shared review/gate bundle, while narrower gate inspection should
-  come from the emitted CSVs or direct util calls instead of extra wrapper CLIs
+- the maintained export CLI should stay singular:
+  `scripts/rhythm_v3_debug_records.py` exports the shared review/gate bundle
+- narrower gate inspection is still allowed, but only through a small set of
+  targeted zero-train helpers:
+  `audit_rhythm_v3_boundary_support.py`,
+  `audit_rhythm_v3_counterfactual_static_gate0.py`,
+  `probe_rhythm_v3_gate1_analytic.py`,
+  `probe_rhythm_v3_gate1_silent_counterfactual.py`, and
+  `rhythm_v3_probe_cases.py`
 - the old standalone `scripts/smoke_test_rhythm_v3.py` wrapper is retired;
   structural smoke coverage now comes from targeted tests plus short task-level
   smoke runs
@@ -136,7 +145,7 @@ Some earlier implementation suggestions are therefore already outdated in this
 workspace:
 
 - no new `g_stats.py` is needed because the shared helper already exists
-- no separate per-gate wrapper CLIs are kept anymore
+- no second layer of posthoc reducer CLIs is kept anymore
 - no second runtime surface is needed because `analytic / coarse_only / learned`
   already switch inside the maintained `rhythm_v3` path
 
@@ -202,6 +211,7 @@ Important convenience fields now emitted by the single export path:
   `projector_boundary_decay_rate`
 - monotonicity table: `sample_id`, `pair_id`, `tempo_delta`, `mono_triplet_ok`
 - ladder table: `tempo_transfer_slope`
+- ladder table: `analytic_signal_slope`, `prefix_signal_explainability_slope`
 - gate status: `analytic_negative_control_gap`, `analytic_same_text_gap`,
   `alignment_mean_local_confidence_speech`,
   `alignment_mean_coarse_confidence_speech`
@@ -220,6 +230,11 @@ Gate-0 is also now tied to the maintained runtime support surface:
 - prompt speech-ratio auditing is duration-weighted, matching dataset/runtime
 - strict gate fails on low alignment confidence means and low
   `alignment_local_margin_p10`, not just on missing metadata
+- Gate-0 static audit now separates:
+  `delta_g -> total_signal`,
+  `delta_g -> analytic_signal`,
+  `delta_g -> coarse_residual`,
+  plus a prefix-baseline comparison
 
 ## 4. Review util entry points
 

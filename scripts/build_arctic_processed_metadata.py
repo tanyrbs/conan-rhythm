@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import soundfile as sf
 import torch
 from tqdm import tqdm
 
@@ -188,6 +189,40 @@ def _pick_majority_text_items(
             "majority_count": majority_count,
             "text_variants": len(counts),
         }
+    return kept, stats
+
+
+def _filter_prompt_items_by_duration(
+    prompt_items: dict[str, list[RawItem]],
+    *,
+    min_duration_sec: float,
+    max_duration_sec: float,
+) -> tuple[dict[str, list[RawItem]], dict[str, dict[str, float | int | list[float]]]]:
+    min_duration = float(max(0.0, min_duration_sec))
+    max_duration = float(max(0.0, max_duration_sec))
+    if min_duration <= 0.0 and max_duration <= 0.0:
+        return prompt_items, {}
+    kept: dict[str, list[RawItem]] = {}
+    stats: dict[str, dict[str, float | int | list[float]]] = {}
+    for prompt_id, items in prompt_items.items():
+        durations: list[float] = []
+        dropped = False
+        for item in items:
+            info = sf.info(str(item.wav_path))
+            duration = float(info.frames) / float(max(1, info.samplerate))
+            durations.append(round(duration, 6))
+            if duration < min_duration:
+                dropped = True
+            if max_duration > 0.0 and duration > max_duration:
+                dropped = True
+        stats[prompt_id] = {
+            "min_duration_sec": min(durations) if durations else float("nan"),
+            "max_duration_sec": max(durations) if durations else float("nan"),
+            "all_durations_sec": durations,
+            "duration_valid": int(not dropped),
+        }
+        if not dropped:
+            kept[prompt_id] = items
     return kept, stats
 
 
@@ -385,6 +420,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--test_prompt_count", type=int, default=16)
     parser.add_argument("--train_prompt_count", type=int, default=0, help="0 means use all remaining prompts.")
     parser.add_argument("--min_shared_speakers", type=int, default=2)
+    parser.add_argument("--min_duration_sec", type=float, default=3.0)
+    parser.add_argument("--max_duration_sec", type=float, default=8.0)
     parser.add_argument("--min_mel_frames", type=int, default=32)
     parser.add_argument("--max_mel_frames", type=int, default=600)
     return parser
@@ -430,6 +467,11 @@ def main() -> None:
     prompt_items, prompt_stats = _pick_majority_text_items(
         items_by_prompt,
         min_shared_speakers=int(args.min_shared_speakers),
+    )
+    prompt_items, duration_stats = _filter_prompt_items_by_duration(
+        prompt_items,
+        min_duration_sec=float(args.min_duration_sec),
+        max_duration_sec=float(args.max_duration_sec),
     )
     eligible_prompt_ids = sorted(prompt_items, key=_natural_key)
     if not eligible_prompt_ids:
@@ -498,7 +540,13 @@ def main() -> None:
                     split: sorted(prompt_ids, key=_natural_key)
                     for split, prompt_ids in split_prompt_ids.items()
                 },
+                "duration_filter": {
+                    "min_duration_sec": float(args.min_duration_sec),
+                    "max_duration_sec": float(args.max_duration_sec),
+                    "eligible_prompt_count": len(eligible_prompt_ids),
+                },
                 "prompt_stats": prompt_stats,
+                "duration_stats": duration_stats,
                 "hubert_stats": hubert_stats,
                 "pair_stats": pair_stats,
                 "paths": {

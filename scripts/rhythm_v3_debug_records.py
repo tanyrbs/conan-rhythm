@@ -38,6 +38,8 @@ _GATE1_TRANSFER_SLOPE_MIN = 0.10
 _GATE1_TIE_RATE_MAX = 0.05
 _GATE1_INVALID_G_RATE_MAX = 0.0
 _GATE1_ANTI_MONO_RATE_MAX = 0.10
+_GATE0_VALID_ITEMS_MIN = 50
+_GATE1_TRIPLETS_MIN = 30
 _GATE0_ALIGNMENT_LOCAL_MARGIN_P10_MIN = 0.02
 _ALIGNMENT_MEAN_LOCAL_CONF_MIN = 0.55
 _ALIGNMENT_MEAN_COARSE_CONF_MIN = 0.60
@@ -246,6 +248,25 @@ def collect_gate_issues(frame) -> list[str]:
             for mode in frame["eval_mode"].dropna().tolist()
             if str(mode).strip() and str(mode).strip().lower() != "nan"
         }
+        analytic_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == "analytic"
+        analytic_valid_items = (
+            int(frame.loc[analytic_mask, "sample_id"].dropna().nunique())
+            if "sample_id" in frame.columns
+            else int(analytic_mask.sum())
+        )
+        analytic_triplet_count = (
+            int(frame.loc[analytic_mask, "triplet_id"].dropna().nunique())
+            if "triplet_id" in frame.columns
+            else 0
+        )
+        if analytic_valid_items < _GATE0_VALID_ITEMS_MIN:
+            quality_issues.append(
+                f"analytic_valid_items={analytic_valid_items}<{_GATE0_VALID_ITEMS_MIN}"
+            )
+        if analytic_triplet_count < _GATE1_TRIPLETS_MIN:
+            quality_issues.append(
+                f"analytic_triplet_count={analytic_triplet_count}<{_GATE1_TRIPLETS_MIN}"
+            )
         missing_modes = [mode for mode in ("analytic", "coarse_only", "learned") if mode not in observed_modes]
         if missing_modes:
             quality_issues.append("missing_eval_modes=" + "|".join(missing_modes))
@@ -483,6 +504,8 @@ def build_gate_status(frame) -> dict[str, object]:
             "analytic_tempo_tie_rate": float("nan"),
             "analytic_invalid_g_rate": float("nan"),
             "analytic_anti_monotonicity_rate": float("nan"),
+            "analytic_valid_items": 0,
+            "analytic_triplet_count": 0,
             "alignment_mean_local_confidence_speech": float("nan"),
             "alignment_mean_coarse_confidence_speech": float("nan"),
             "unmatched_speech_ratio_p95": float("nan"),
@@ -520,6 +543,8 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_tempo_tie_rate = float("nan")
     analytic_invalid_g_rate = float("nan")
     analytic_anti_monotonicity_rate = float("nan")
+    analytic_valid_items = 0
+    analytic_triplet_count = 0
     alignment_mean_local_confidence_speech = float("nan")
     alignment_mean_coarse_confidence_speech = float("nan")
     unmatched_speech_ratio_p95 = float("nan")
@@ -578,6 +603,18 @@ def build_gate_status(frame) -> dict[str, object]:
         for mode in frame.get("eval_mode", []).dropna().tolist()
         if str(mode).strip() and str(mode).strip().lower() != "nan"
     } if "eval_mode" in frame.columns else set()
+    if "eval_mode" in frame.columns:
+        analytic_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == "analytic"
+        analytic_valid_items = (
+            int(frame.loc[analytic_mask, "sample_id"].dropna().nunique())
+            if "sample_id" in frame.columns
+            else int(analytic_mask.sum())
+        )
+        analytic_triplet_count = (
+            int(frame.loc[analytic_mask, "triplet_id"].dropna().nunique())
+            if "triplet_id" in frame.columns
+            else 0
+        )
     if "analytic" in observed_modes:
         signal_column = _resolve_gate0_signal_column(frame)
         analytic_signal_explainability_slope = _mean_for_eval_mode(
@@ -691,6 +728,8 @@ def build_gate_status(frame) -> dict[str, object]:
         eval_mode="learned",
     )
     gate0_pass = (
+        analytic_valid_items >= _GATE0_VALID_ITEMS_MIN
+        and
         np.isfinite(g_domain_valid_mean)
         and g_domain_valid_mean >= 0.95
         and np.isfinite(gate0_drop_rate)
@@ -708,6 +747,7 @@ def build_gate_status(frame) -> dict[str, object]:
     )
     gate1_criteria_pass = (
         "analytic" in observed_modes
+        and analytic_triplet_count >= _GATE1_TRIPLETS_MIN
         and incomplete_triplets == 0
         and not missing_controls
         and np.isfinite(analytic_tempo_monotonicity_rate)
@@ -796,6 +836,8 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_tempo_tie_rate": analytic_tempo_tie_rate,
         "analytic_invalid_g_rate": analytic_invalid_g_rate,
         "analytic_anti_monotonicity_rate": analytic_anti_monotonicity_rate,
+        "analytic_valid_items": int(analytic_valid_items),
+        "analytic_triplet_count": int(analytic_triplet_count),
         "alignment_mean_local_confidence_speech": alignment_mean_local_confidence_speech,
         "alignment_mean_coarse_confidence_speech": alignment_mean_coarse_confidence_speech,
         "unmatched_speech_ratio_p95": unmatched_speech_ratio_p95,
@@ -1032,9 +1074,15 @@ def main() -> None:
                 "signal_explainability_spearman",
                 "signal_explainability_slope",
                 "signal_explainability_r2_like",
+                "analytic_signal_spearman",
+                "analytic_signal_slope",
+                "analytic_signal_r2_like",
                 "coarse_residual_spearman",
                 "coarse_residual_slope",
                 "coarse_residual_r2_like",
+                "prefix_signal_explainability_spearman",
+                "prefix_signal_explainability_slope",
+                "prefix_signal_explainability_r2_like",
                 "explainability_spearman",
                 "explainability_slope",
                 "explainability_r2_like",

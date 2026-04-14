@@ -11,6 +11,26 @@ is a **three-gate falsification loop** over the maintained `rhythm_v3` line:
 2. Gate 1: analytic monotonicity
 3. Gate 2: coarse-only vs learned stability trade-off
 
+## Current local status
+
+Latest checked local rerun:
+
+- `2026-04-14`
+- artifacts: `tmp/gate_reaudit_20260414_rebuilt2/`
+
+Current reading on the quick-ARCTIC surface:
+
+- frontend/cache support-domain collapse has been repaired
+- maintained `raw_median` is still not qualified on this local surface
+- `weighted_median` and `trimmed_mean` stay flat in Gate 0 / Gate 1
+- `softclean_wmed` and `softclean_wtmean` recover some push, but only for `1/4`
+  Gate-1 probe sources and therefore still fail qualification
+- Gate 2 / Gate 3 training remain blocked
+
+So the present blocker is no longer "prompt domain dies before `g` exists".
+The blocker is now "a usable prompt domain exists, but the current single-scalar
+control still has weak or unstable runtime push".
+
 ## Current maintained default
 
 Use:
@@ -35,8 +55,8 @@ In that default path, the writer is:
 
 where:
 
-- `g_ref`: speech-only prompt global tempo statistic on raw log-duration
-- `g_src_prefix,i`: strict-causal source prefix tempo EMA on raw source log-duration before unit `i`
+- `g_ref`: speech-only prompt global duration-level statistic on raw log-duration
+- `g_src_prefix,i`: strict-causal source prefix duration-level baseline on raw source log-duration before unit `i`
 - `c_hat_i`: small utterance-level coarse scalar, conditioned on speaker and, only in ablation/diagnostic modes, optional static prompt summary
 - `r_hat_i`: bounded local speech-run residual
 
@@ -291,19 +311,30 @@ Recommended default weights in `egs/conan_emformer_rhythm_v3.yaml` currently kee
 
 ## Falsification-first scripts
 
-The maintained evaluation surface is now intentionally reduced to one export
-script plus one explicit health check:
+The maintained `rhythm_v3` script surface now has two tiers instead of a long
+chain of ad-hoc posthoc reducers.
+
+Core maintained entrypoints:
 
 - `scripts/preflight_rhythm_v3.py`
 - `scripts/rhythm_v3_debug_records.py`
 
-`scripts/rhythm_v3_debug_records.py` is the single maintained review/export
-entrypoint. It writes the row summary CSV, the retained five-figure bundle, and
-the gate-oriented tables/figures from the same `utils/plot/rhythm_v3_viz/`
-util layer instead of keeping separate per-gate wrapper CLIs.
-The remaining maintained helper stays on purpose:
+Supported zero-train diagnostic helpers on the same maintained runtime surface:
 
-- `preflight_rhythm_v3.py`: config/data/cache contract checks
+- `scripts/audit_rhythm_v3_boundary_support.py`
+- `scripts/audit_rhythm_v3_counterfactual_static_gate0.py`
+- `scripts/probe_rhythm_v3_gate1_analytic.py`
+- `scripts/probe_rhythm_v3_gate1_silent_counterfactual.py`
+- `scripts/rhythm_v3_probe_cases.py`
+
+`scripts/rhythm_v3_debug_records.py` remains the single maintained
+review/export entrypoint. It writes the row summary CSV, the retained
+five-figure bundle, and the gate-oriented tables/figures from the same
+`utils/plot/rhythm_v3_viz/` util layer.
+
+The narrower helper CLIs are kept only for zero-train gate diagnosis on the
+same runtime path. Older second-order reducers that only re-aggregated `tmp/`
+JSON outputs have been retired to keep the maintained surface small.
 
 The old zero-data standalone smoke script has been retired from the maintained
 surface. Structural smoke coverage now lives in focused entrypoint tests and

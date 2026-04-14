@@ -16,9 +16,11 @@ from modules.Conan.rhythm_v3.source_cache import (
     attach_unit_log_prior_to_source_cache,
     build_duration_v3_frontend_signature,
     build_source_rhythm_cache_v3,
+    collect_duration_v3_frontend_diagnostics,
     duration_v3_cache_meta_signature,
     load_unit_log_prior_bundle,
 )
+from modules.Conan.rhythm_v3.unitizer import estimate_boundary_confidence
 
 
 def test_build_source_rhythm_cache_v3_emits_meta_contract():
@@ -32,7 +34,7 @@ def test_build_source_rhythm_cache_v3_emits_meta_contract():
         phrase_boundary_threshold=0.61,
     )
     meta = cache[DURATION_V3_CACHE_META_KEY]
-    assert meta["cache_version"] == 3
+    assert meta["cache_version"] == 4
     assert meta["silent_token"] == 57
     assert meta["separator_aware"] is True
     assert meta["tail_open_units"] == 2
@@ -73,6 +75,51 @@ def test_build_source_rhythm_cache_v3_defaults_follow_mainline_surface():
     assert meta["emit_silence_runs"] is True
     assert meta["debounce_min_run_frames"] == 2
     assert cache["source_silence_mask"].tolist() == [0.0, 1.0, 0.0]
+
+
+def test_collect_duration_v3_frontend_diagnostics_reports_cached_surface_stats():
+    cache = build_source_rhythm_cache_v3(
+        [1, 1, 57, 57, 2, 2],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=2,
+    )
+    diag = collect_duration_v3_frontend_diagnostics(cache, silent_token=57)
+    assert diag["unit_count"] == 3
+    assert diag["raw_silent_token_count"] == 2
+    assert diag["source_silence_run_count"] == 1
+    assert diag["sep_nonzero_count"] >= 1
+    assert np.isfinite(diag["boundary_confidence_max"])
+    assert np.isfinite(diag["source_boundary_cue_max"])
+    np.testing.assert_array_equal(cache["raw_silent_token_count"], np.asarray([2], dtype=np.int32))
+    np.testing.assert_array_equal(cache["source_silence_run_count"], np.asarray([1], dtype=np.int32))
+
+
+def test_boundary_confidence_reaches_local_dynamic_range_without_sep_hint():
+    confidence = estimate_boundary_confidence(
+        durations=[2, 8, 2],
+        sep_hint=[0, 0, 0],
+        open_run_mask=[0, 0, 0],
+    )
+
+    assert max(confidence) > 0.5
+
+
+def test_build_source_rhythm_cache_v3_uses_acoustic_silence_when_silent_token_is_absent():
+    mel = np.ones((6, 80), dtype=np.float32)
+    mel[2:4, :] = -8.0
+    cache = build_source_rhythm_cache_v3(
+        [71, 71, 71, 71, 71, 71],
+        silent_token=57,
+        emit_silence_runs=True,
+        debounce_min_run_frames=1,
+        mel=mel,
+    )
+    assert int(cache["raw_silent_token_count"].reshape(-1)[0]) == 0
+    assert int(cache["source_silence_frame_count"].reshape(-1)[0]) >= 2
+    assert int(cache["source_silence_run_count"].reshape(-1)[0]) >= 1
+    assert float(np.asarray(cache["source_silence_mask"], dtype=np.float32).sum()) > 0.0
+    assert float(np.asarray(cache["sep_hint"], dtype=np.float32).sum()) > 0.0
 
 
 def test_build_frame_sidecars_from_source_cache_expands_runs_to_frames():
@@ -183,7 +230,7 @@ def test_attach_unit_log_prior_to_source_cache_rejects_frontend_signature_mismat
     )
     mismatched_signature = duration_v3_cache_meta_signature(
         {
-            "cache_version": 3,
+            "cache_version": 4,
             "silent_token": 57,
             "separator_aware": True,
             "tail_open_units": 1,
@@ -489,7 +536,7 @@ def test_build_unit_log_prior_script_writes_global_default_metadata(tmp_path):
             "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
             "source_run_stability": np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
             DURATION_V3_CACHE_META_KEY: {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
@@ -569,7 +616,7 @@ def test_build_unit_log_prior_script_filters_low_stability_runs(tmp_path):
             "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
             "source_run_stability": np.asarray([0.2, 0.9, 0.9], dtype=np.float32),
             DURATION_V3_CACHE_META_KEY: {
-                "cache_version": 3,
+                "cache_version": 4,
                 "silent_token": 57,
                 "separator_aware": True,
                 "tail_open_units": 1,
