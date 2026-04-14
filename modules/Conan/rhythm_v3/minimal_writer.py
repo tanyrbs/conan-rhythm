@@ -3,8 +3,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .g_stats import normalize_falsification_eval_mode
-from .math_utils import apply_analytic_gap_clip, build_causal_local_rate_seq
+from .g_stats import normalize_falsification_eval_mode, normalize_global_rate_variant
+from .math_utils import (
+    apply_analytic_gap_clip,
+    build_causal_source_prefix_rate_seq,
+    first_valid_speech_init,
+    normalize_src_prefix_stat_mode,
+)
 from .silence_surface import build_silence_tau_surface_meta
 from .run_encoder import CausalUnitRunEncoder
 
@@ -16,16 +21,6 @@ def _masked_median_2d(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         keep = mask[batch_idx] > 0.5
         if bool(keep.any().item()):
             out[batch_idx, 0] = values[batch_idx][keep].median()
-    return out
-
-
-def _first_valid_speech_init(observed_log: torch.Tensor, speech_mask: torch.Tensor) -> torch.Tensor:
-    batch_size = int(observed_log.size(0))
-    out = observed_log.new_zeros((batch_size, 1))
-    for batch_idx in range(batch_size):
-        keep = torch.nonzero(speech_mask[batch_idx] > 0.5, as_tuple=False).reshape(-1)
-        if int(keep.numel()) > 0:
-            out[batch_idx, 0] = observed_log[batch_idx, int(keep[0].item())]
     return out
 
 
@@ -60,6 +55,12 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         src_rate_init_mode: str = "first_speech",
         src_rate_init_value: float = 0.0,
         freeze_src_rate_init: bool = False,
+        g_variant: str = "raw_median",
+        g_trim_ratio: float = 0.2,
+        src_prefix_stat_mode: str = "ema",
+        src_prefix_min_support: int = 3,
+        g_drop_edge_runs: int = 0,
+        min_boundary_confidence_for_g: float | None = None,
         codebook=None,
     ) -> None:
         super().__init__()
@@ -120,6 +121,14 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.coarse_delta_scale = float(max(0.0, coarse_delta_scale))
         self.local_residual_scale = float(max(0.0, local_residual_scale))
         self.src_rate_init_mode = normalized_src_rate_init_mode
+        self.g_variant = normalize_global_rate_variant(g_variant)
+        self.g_trim_ratio = float(max(0.0, min(0.49, g_trim_ratio)))
+        self.src_prefix_stat_mode = normalize_src_prefix_stat_mode(src_prefix_stat_mode)
+        self.src_prefix_min_support = int(max(1, src_prefix_min_support))
+        self.g_drop_edge_runs = int(max(0, g_drop_edge_runs))
+        self.min_boundary_confidence_for_g = (
+            None if min_boundary_confidence_for_g is None else float(min_boundary_confidence_for_g)
+        )
         init_tensor = torch.full((1,), float(src_rate_init_value))
         if freeze_src_rate_init:
             self.register_buffer("src_rate_init", init_tensor)
@@ -197,13 +206,31 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             if self.src_rate_init_mode == "zero":
                 default_init_rate = log_anchor.new_zeros((mask.size(0), 1))
             elif self.src_rate_init_mode == "first_speech":
-                default_init_rate = _first_valid_speech_init(log_anchor.float(), speech_mask)
-        local_rate_seq, local_rate_final = build_causal_local_rate_seq(
+                default_init_rate = first_valid_speech_init(log_anchor.float(), speech_mask)
+        prefix_weight = None
+        if (
+            self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            and isinstance(run_stability, torch.Tensor)
+        ):
+            prefix_weight = runtime_stability * speech_mask
+        local_rate_seq, local_rate_final = build_causal_source_prefix_rate_seq(
             observed_log=log_anchor.float(),
             speech_mask=speech_mask,
             init_rate=init_local_rate,
             default_init_rate=default_init_rate,
+            stat_mode=self.src_prefix_stat_mode,
             decay=self.local_rate_decay,
+            variant=self.g_variant,
+            trim_ratio=self.g_trim_ratio,
+            min_support=self.src_prefix_min_support,
+            weight=prefix_weight,
+            valid_mask=mask,
+            closed_mask=sealed,
+            boundary_confidence=edge_cue.float() * mask,
+            min_boundary_confidence=self.min_boundary_confidence_for_g,
+            drop_edge_runs=self.g_drop_edge_runs,
+            min_speech_ratio=0.0,
+            unit_ids=content_units.long(),
         )
         query = self.query_encoder(
             unit_ids=content_units.long(),
@@ -240,11 +267,18 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         else:
             spk_ctx = query.new_zeros((batch_size, self.query_dim))
 
+        analytic_gap_preclip = g_ref_col - local_rate_seq.float()
         analytic_gap = apply_analytic_gap_clip(
-            g_ref_col - local_rate_seq.float(),
+            analytic_gap_preclip,
             self.analytic_gap_clip,
         )
         global_shift_analytic = analytic_gap * commit_valid_mask
+        if self.analytic_gap_clip > 0.0:
+            analytic_saturation = (
+                analytic_gap_preclip.abs() >= (float(self.analytic_gap_clip) - 1.0e-6)
+            ).float() * speech_mask
+        else:
+            analytic_saturation = torch.zeros_like(speech_mask)
         if self.use_src_gap_in_coarse_head:
             g_src_utt = _masked_median_2d(local_rate_seq.float(), speech_mask)
             delta_g_utt = (g_ref_col - g_src_utt).detach()
@@ -331,6 +365,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             "unit_global_shift_analytic": analytic_term,
             "unit_analytic_gap": analytic_term,
             "unit_analytic_logstretch": analytic_term,
+            "unit_analytic_gap_preclip": analytic_gap_preclip * commit_valid_mask,
+            "unit_analytic_gap_saturation": analytic_saturation * mask,
+            "analytic_gap_clip_value": mask.new_full((mask.size(0), 1), float(self.analytic_gap_clip)),
+            "src_prefix_stat_mode": self.src_prefix_stat_mode,
             "global_bias_scalar": global_bias_scalar,
             "unit_coarse_logstretch": coarse_path,
             "unit_coarse_path_logstretch": coarse_path,

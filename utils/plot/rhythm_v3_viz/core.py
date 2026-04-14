@@ -7,7 +7,10 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import numpy as np
 import torch
 
-from modules.Conan.rhythm_v3.math_utils import build_causal_local_rate_seq
+from modules.Conan.rhythm_v3.math_utils import (
+    build_causal_source_prefix_rate_seq,
+    normalize_src_prefix_stat_mode,
+)
 
 
 DEFAULT_UNIT_STEP_MS = 20.0
@@ -345,6 +348,9 @@ class RhythmV3DebugRecord:
     unit_logstretch_raw: Optional[np.ndarray] = None
     unit_duration_exec: Optional[np.ndarray] = None
     unit_duration_raw: Optional[np.ndarray] = None
+    projector_preclamp_exec: Optional[np.ndarray] = None
+    projector_clamp_delta: Optional[np.ndarray] = None
+    projector_clamp_mass: Optional[np.ndarray] = None
     prefix_unit_offset: Optional[np.ndarray] = None
     projector_prefix_drift: Optional[np.ndarray] = None
     projector_rounding_residual: Optional[np.ndarray] = None
@@ -355,6 +361,7 @@ class RhythmV3DebugRecord:
     projector_boundary_decay_applied: Optional[np.ndarray] = None
     coarse_scalar_raw: Optional[np.ndarray] = None
     global_term_before_local: Optional[np.ndarray] = None
+    analytic_gap_clip_value: Optional[np.ndarray] = None
     residual_gate_mean: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -719,6 +726,15 @@ def build_debug_record(
         unit_logstretch_raw=_as_optional_vector(_extract_attr_or_key(execution, "unit_logstretch_raw", batch_index)),
         unit_duration_exec=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_exec", batch_index)),
         unit_duration_raw=_as_optional_vector(_extract_attr_or_key(execution, "unit_duration_raw", batch_index)),
+        projector_preclamp_exec=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_preclamp_exec", batch_index)
+        ),
+        projector_clamp_delta=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_clamp_delta", batch_index)
+        ),
+        projector_clamp_mass=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_clamp_mass", batch_index)
+        ),
         prefix_unit_offset=_as_optional_vector(_extract_attr_or_key(execution, "prefix_unit_offset", batch_index)),
         projector_prefix_drift=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_prefix_drift", batch_index)
@@ -756,6 +772,9 @@ def build_debug_record(
             _extract_attr_or_key(execution, "global_term_before_local", batch_index)
             if _extract_attr_or_key(execution, "global_term_before_local", batch_index) is not None
             else _extract_attr_or_key(execution, "unit_global_term_before_local", batch_index)
+        ),
+        analytic_gap_clip_value=_as_optional_vector(
+            _extract_attr_or_key(execution, "analytic_gap_clip_value", batch_index)
         ),
         residual_gate_mean=_as_optional_vector(_extract_attr_or_key(execution, "residual_gate_mean", batch_index)),
     )
@@ -836,12 +855,73 @@ def derive_record(
     if source_rate_seq is None and source_logdur is not None:
         obs = torch.from_numpy(source_logdur.reshape(1, -1))
         speech = torch.from_numpy(speech_mask.reshape(1, -1))
-        source_rate_seq_t, _ = build_causal_local_rate_seq(
+        unit_mask_np = _ensure_1d_mask(record.unit_mask, source_logdur)
+        sealed_mask_np = _ensure_1d_mask(record.sealed_mask, source_logdur)
+        boundary_np = (
+            None
+            if record.source_boundary_cue is None
+            else np.asarray(record.source_boundary_cue, dtype=np.float32).reshape(1, -1)
+        )
+        stability_np = (
+            None
+            if record.source_run_stability is None
+            else np.asarray(record.source_run_stability, dtype=np.float32).reshape(1, -1)
+        )
+        g_variant_meta = str(meta.get("g_variant", "raw_median"))
+        g_trim_ratio_meta = _as_float(meta.get("g_trim_ratio"), default=0.2)
+        src_prefix_min_support = int(
+            round(
+                _as_float(
+                    meta.get("src_prefix_min_support", meta.get("rhythm_v3_src_prefix_min_support")),
+                    default=3.0,
+                )
+            )
+        )
+        src_prefix_stat_mode = normalize_src_prefix_stat_mode(
+            meta.get("src_prefix_stat_mode", meta.get("rhythm_v3_src_prefix_stat_mode", "ema"))
+        )
+        min_boundary_confidence = meta.get(
+            "min_boundary_confidence_for_g",
+            meta.get("rhythm_v3_min_boundary_confidence_for_g"),
+        )
+        min_boundary_confidence = (
+            None if min_boundary_confidence is None else float(min_boundary_confidence)
+        )
+        drop_edge_runs = int(
+            round(
+                _as_float(
+                    meta.get("drop_edge_runs_for_g", meta.get("rhythm_v3_drop_edge_runs_for_g")),
+                    default=0.0,
+                )
+            )
+        )
+        prefix_weight_t = None
+        if stability_np is not None and g_variant_meta in {"weighted_median", "softclean_wmed", "softclean_wtmean"}:
+            prefix_weight_t = torch.from_numpy(stability_np) * speech
+        source_rate_seq_t, _ = build_causal_source_prefix_rate_seq(
             observed_log=obs,
             speech_mask=speech,
             init_rate=None,
             default_init_rate=None,
+            stat_mode=src_prefix_stat_mode,
             decay=float(local_rate_decay),
+            variant=g_variant_meta,
+            trim_ratio=float(g_trim_ratio_meta),
+            min_support=max(1, src_prefix_min_support),
+            weight=prefix_weight_t,
+            valid_mask=torch.from_numpy(unit_mask_np.reshape(1, -1)),
+            closed_mask=torch.from_numpy(sealed_mask_np.reshape(1, -1)),
+            boundary_confidence=(
+                None if boundary_np is None else torch.from_numpy(boundary_np)
+            ),
+            min_boundary_confidence=min_boundary_confidence,
+            drop_edge_runs=max(0, drop_edge_runs),
+            min_speech_ratio=0.0,
+            unit_ids=(
+                None
+                if record.source_content_units is None
+                else torch.from_numpy(np.asarray(record.source_content_units, dtype=np.int64).reshape(1, -1))
+            ),
         )
         source_rate_seq = source_rate_seq_t[0].detach().cpu().numpy().astype(np.float32)
 
@@ -1005,6 +1085,19 @@ def record_summary(
         drop_edge_runs=drop_edge_runs,
         source_unit_ids=record.source_content_units,
     )
+    continuous_duration = _as_optional_vector(
+        record.projector_preclamp_exec if record.projector_preclamp_exec is not None else record.unit_duration_raw,
+        dtype=np.float32,
+    )
+    tempo_out_continuous = compute_speech_tempo_for_analysis(
+        source_duration_obs=continuous_duration,
+        source_speech_mask=derived.speech_mask,
+        source_valid_mask=source_valid_mask,
+        g_variant=g_variant,
+        g_trim_ratio=g_trim_ratio,
+        drop_edge_runs=drop_edge_runs,
+        source_unit_ids=record.source_content_units,
+    )
     tempo_out = compute_speech_tempo_for_analysis(
         source_duration_obs=record.unit_duration_exec,
         source_speech_mask=derived.speech_mask,
@@ -1014,11 +1107,91 @@ def record_summary(
         drop_edge_runs=drop_edge_runs,
         source_unit_ids=record.source_content_units,
     )
+    source_duration_arr = _as_optional_vector(record.source_duration_obs, dtype=np.float32)
+
+    def _speech_exec_surface(duration_arr: np.ndarray | None) -> tuple[float, float]:
+        if duration_arr is None or source_duration_arr is None or not bool(np.any(speech_valid)):
+            return float("nan"), float("nan")
+        width = min(
+            int(duration_arr.shape[0]),
+            int(source_duration_arr.shape[0]),
+            int(speech_valid.shape[0]),
+        )
+        if width <= 0 or not bool(np.any(speech_valid[:width])):
+            return float("nan"), float("nan")
+        src = source_duration_arr[:width].astype(np.float32)
+        dst = duration_arr[:width].astype(np.float32)
+        speech_row = speech_valid[:width]
+        src_speech = src[speech_row]
+        dst_speech = dst[speech_row]
+        total_src = float(np.sum(src_speech))
+        total_dst = float(np.sum(dst_speech))
+        ratio = float("nan") if total_src <= 1.0e-3 else float(total_dst / total_src)
+        weights = np.clip(src_speech, 1.0e-3, None)
+        logstretch = np.log(np.clip(dst_speech, 1.0e-3, None)) - np.log(weights)
+        mean_logstretch = float(np.sum(logstretch * weights) / np.sum(weights))
+        return ratio, mean_logstretch
+
+    speech_exec_ratio_continuous, mean_speech_logstretch_continuous = _speech_exec_surface(
+        continuous_duration
+    )
+    speech_exec_ratio_projected, mean_speech_logstretch_projected = _speech_exec_surface(
+        _as_optional_vector(record.unit_duration_exec, dtype=np.float32)
+    )
+    analytic_gap_clip_value = _as_float(
+        record.analytic_gap_clip_value,
+        default=_as_float(meta.get("analytic_gap_clip"), default=0.35),
+    )
+    analytic_gap_preclip_abs_mean = np.nan
+    analytic_saturation_rate = np.nan
+    tempo_out_preclip = float("nan")
+    if derived.source_rate_seq is not None and np.isfinite(g_ref) and bool(np.any(speech_valid)):
+        analytic_gap_preclip = (float(g_ref) - derived.source_rate_seq).astype(np.float32)
+        analytic_gap_preclip_abs_mean = float(np.mean(np.abs(analytic_gap_preclip[speech_valid])))
+        if np.isfinite(analytic_gap_clip_value) and analytic_gap_clip_value > 0.0:
+            analytic_saturation_rate = float(
+                np.mean(np.abs(analytic_gap_preclip[speech_valid]) >= (analytic_gap_clip_value - 1.0e-6))
+            )
+        else:
+            analytic_saturation_rate = 0.0
+        if source_duration_arr is not None:
+            width = min(
+                int(source_duration_arr.shape[0]),
+                int(analytic_gap_preclip.shape[0]),
+                int(derived.speech_mask.shape[0]),
+            )
+            preclip_duration = source_duration_arr[:width].astype(np.float32, copy=True)
+            speech_prefix = (derived.speech_mask[:width] > 0.5)
+            preclip_duration[speech_prefix] = (
+                preclip_duration[speech_prefix] * np.exp(analytic_gap_preclip[:width][speech_prefix])
+            ).astype(np.float32)
+            valid_prefix_mask = None if source_valid_mask is None else np.asarray(source_valid_mask, dtype=np.float32).reshape(-1)[:width]
+            tempo_out_preclip = compute_speech_tempo_for_analysis(
+                source_duration_obs=preclip_duration,
+                source_speech_mask=derived.speech_mask[:width],
+                source_valid_mask=valid_prefix_mask,
+                g_variant=g_variant,
+                g_trim_ratio=g_trim_ratio,
+                drop_edge_runs=drop_edge_runs,
+                source_unit_ids=(
+                    None
+                    if record.source_content_units is None
+                    else np.asarray(record.source_content_units).reshape(-1)[:width]
+                ),
+            )
     analytic_gap_abs_mean = (
         float(np.mean(np.abs(derived.analytic_shift[speech_valid])))
         if derived.analytic_shift is not None and bool(np.any(speech_valid))
         else np.nan
     )
+    projector_bucket_count = np.nan
+    projected_duration_arr = _as_optional_vector(record.unit_duration_exec, dtype=np.float32)
+    if projected_duration_arr is not None and bool(np.any(speech_valid)):
+        width = min(int(projected_duration_arr.shape[0]), int(speech_valid.shape[0]))
+        if width > 0 and bool(np.any(speech_valid[:width])):
+            projector_bucket_count = float(
+                np.unique(np.round(projected_duration_arr[:width][speech_valid[:width]]).astype(np.int32)).size
+            )
     coarse_bias_abs_mean = np.nan
     if record.coarse_correction is not None and bool(np.any(speech_valid)):
         coarse_arr = np.asarray(record.coarse_correction, dtype=np.float32).reshape(-1)
@@ -1183,6 +1356,9 @@ def record_summary(
         "eval_mode": str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", ""))),
         "ref_bin": str(meta.get("ref_bin", meta.get("tempo_bin", ""))),
         "g_variant": str(meta.get("g_variant", g_variant)),
+        "src_prefix_stat_mode": str(
+            meta.get("src_prefix_stat_mode", meta.get("rhythm_v3_src_prefix_stat_mode", ""))
+        ),
         "g_ref": g_ref,
         "g_compute_status": g_compute_status,
         "g_src_utt": g_src_utt,
@@ -1243,7 +1419,17 @@ def record_summary(
         "c_star": c_star,
         "zbar_sp_star": zbar_sp_star,
         "tempo_src": tempo_src,
+        "tempo_out_preclip": tempo_out_preclip,
+        "tempo_out_continuous": tempo_out_continuous,
+        "tempo_out_preprojector": tempo_out_continuous,
+        "tempo_out_projected": tempo_out,
         "tempo_out": tempo_out,
+        "speech_exec_ratio_continuous": speech_exec_ratio_continuous,
+        "speech_exec_ratio_projected": speech_exec_ratio_projected,
+        "speech_exec_ratio": speech_exec_ratio_projected,
+        "mean_speech_logstretch_continuous": mean_speech_logstretch_continuous,
+        "mean_speech_logstretch_projected": mean_speech_logstretch_projected,
+        "mean_speech_logstretch_exec": mean_speech_logstretch_projected,
         "tempo_delta": (
             float(tempo_out - tempo_src)
             if np.isfinite(tempo_out) and np.isfinite(tempo_src)
@@ -1263,7 +1449,11 @@ def record_summary(
         "target_duration_surface": str(meta.get("target_duration_surface", "")),
         "ref_condition": str(meta.get("ref_condition", "")),
         "lexical_mismatch": lexical_mismatch,
+        "analytic_gap_clip_value": analytic_gap_clip_value,
+        "analytic_gap_preclip_abs_mean": analytic_gap_preclip_abs_mean,
+        "analytic_gap_runtime_abs_mean": analytic_gap_abs_mean,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
+        "analytic_saturation_rate": analytic_saturation_rate,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,
         "coarse_scalar_raw": coarse_scalar_raw,
         "coarse_target_abs_err": (
@@ -1297,6 +1487,7 @@ def record_summary(
             and record.projector_boundary_decay_applied.size > 0
             else np.nan
         ),
+        "projector_bucket_count": projector_bucket_count,
         "cumulative_drift": cumulative_prefix_drift,
         "item_name": record.item_name or "",
         "split": record.split or "",

@@ -1,87 +1,143 @@
 # rhythm_v3 falsification log
 
-## 2026-04-14 local rerun
+## 2026-04-14 runtime-clean rerun
 
 ### Scope
 
 - maintained `rhythm_v3` minimal-V1 only
 - local quick-ARCTIC only
-- zero-train Gate0 / Gate1 rerun after cache rebuild and frontend repair
+- zero-train Gate0 / Gate1 rerun after runtime-contract cleanup
+- frozen falsification family:
+  - `raw_median`
+  - `weighted_median`
+  - `trimmed_mean`
 
-### What was repaired first
+### Protocol cleanup in this pass
 
-- prompt/source silence sidecars now come from acoustic silence when raw
-  `silent_token` evidence is absent
-- processed metadata now filters prompt references to the maintained
-  `3.0s-8.0s` contract before split construction
-- source cache version was bumped so stale binaries cannot be silently reused
-- probe-case selection is now generated from the current split instead of stale
-  hand-maintained ids
+- Gate1 case selection and monotonicity ordering now use runtime-equivalent
+  `prompt_g_ref`, not display-only `prompt_tempo_ref`
+- Gate0 source-prefix audit now uses the shared source-prefix contract, and this
+  rerun fixes the prefix mode at `exact_global_family`
+- Gate0 now reports:
+  - hostile vs clean protocol slices
+  - mean-based and median-based totals
+  - runtime-clipped analytic/residual views
+- Gate1 now reports three runtime layers:
+  - `tempo_out_preclip`
+  - `tempo_out_continuous`
+  - `tempo_out_projected`
+- silent counterfactual probe now uses the same `prompt_g_ref` ordering
 
-### What is no longer true
+### What is no longer a valid explanation
 
-The old statement below is no longer valid on the rebuilt local surface:
+The repaired local surface still contradicts the old explanation:
 
-- "Gate fails because boundary-clean support collapses first"
+- "Gate fails because support collapses before `g` exists"
 
-Current evidence contradicting that old claim:
+Current evidence:
 
-- boundary support at `min_boundary_confidence_for_g=0.5` is now
-  `32/32` train, `16/16` valid, `16/16` test
-- Gate0 prompt-domain validity is `63/64` for every tested `g` variant
+- Gate0 valid prompt-domain rows remain `63/64`
+- `mean_support_count = 4.8281`
+- Gate0 / Gate1 still fail after contract cleanup
 
 ### Current Gate0 result
 
-Support exists, but total-signal explainability remains flat.
+This local surface has no clean total-claim rows:
 
-Summary from `tmp/gate_reaudit_20260414_rebuilt2/gate0_*/report.json`:
+- `clean_total_claim_items = 0/64`
+- `protocol_misaligned_items = 64/64`
 
-| Variant | total slope | analytic slope | residual slope |
-| --- | ---: | ---: | ---: |
-| `raw_median` | `0.0000` | `0.5316` | `-0.6329` |
-| `weighted_median` | `0.0000` | `0.5316` | `-0.6329` |
-| `trimmed_mean` | `-0.0000` | `0.5857` | `-0.6601` |
-| `softclean_wmed` | `0.0000` | `0.3833` | `-0.6666` |
-| `softclean_wtmean` | `0.0000` | `0.5615` | `-0.6852` |
+So the current Gate0 reading comes entirely from the hostile slice
+`cross_text_prompt_vs_cross_speaker_target`.
+
+Summary from `tmp/gate_reaudit_20260414_runtime_clean/gate0_*/report.json`:
+
+| Variant | total median slope | total mean slope | analytic median slope | analytic runtime mean slope | residual runtime mean slope |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `raw_median` | `0.0000` | `-0.0253` | `0.8418` | `0.0415` | `-0.2082` |
+| `weighted_median` | `0.0000` | `-0.0253` | `0.7019` | `0.0612` | `-0.2070` |
+| `trimmed_mean` | `-0.0000` | `-0.0351` | `0.9757` | `0.0369` | `-0.2545` |
+
+Additional context:
+
+- `valid_zero_total_median_items = 42/63`
+- runtime analytic saturation remains high:
+  - `raw_median`: `0.7891`
+  - `weighted_median`: `0.7741`
+  - `trimmed_mean`: `0.8340`
 
 Reading:
 
-- the analytic component is present
-- the total target signal still does not move with `Δg`
-- residual decomposition remains anti-aligned
+- unclipped analytic signal is real
+- runtime-aligned analytic signal becomes weak
+- runtime residual stays negative
+- total signal remains flat or slightly inverse on the only local slice we have
+
+This is enough to reject the maintained engineering claim on this surface.
+It is not, by itself, a clean theory-terminal falsifier, because the local
+surface provides no `clean_total_claim` rows.
 
 ### Current Gate1 result
 
-Summary from `tmp/gate_reaudit_20260414_rebuilt2/gate1_*/summary.json`:
+Summary from `tmp/gate_reaudit_20260414_runtime_clean/gate1_*/summary.json`:
 
-| Variant | monotone sources | mean transfer slope | mean real tempo range |
-| --- | ---: | ---: | ---: |
-| `raw_median` | `0/4` | `~0.0000` | `0.0000` |
-| `weighted_median` | `0/4` | `~0.0000` | `0.0000` |
-| `trimmed_mean` | `0/4` | `~0.0000` | `0.0000` |
-| `softclean_wmed` | `1/4` | `0.1068` | `0.0393` |
-| `softclean_wtmean` | `1/4` | `0.1000` | `0.0333` |
+| Variant | preclip pass | continuous pass | projected pass | mean preclip slope | mean projected slope | mean projected range |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `raw_median` | `0/4` | `0/4` | `0/4` | `-0.1322` | `-0.0290` | `0.0333` |
+| `weighted_median` | `0/4` | `0/4` | `0/4` | `-0.1721` | `-0.0743` | `0.1233` |
+| `trimmed_mean` | `0/4` | `0/4` | `0/4` | `-0.2438` | `-0.0726` | `0.0646` |
 
-Single positive source:
+Supporting telemetry:
 
-- `asi_train_arctic_a0019`
+- mean analytic saturation:
+  - `raw_median`: `0.8067`
+  - `weighted_median`: `0.6597`
+  - `trimmed_mean`: `0.7990`
+- mean projector boundary-hit rate:
+  - `raw_median`: `0.3245`
+  - `weighted_median`: `0.3810`
+  - `trimmed_mean`: `0.3144`
+- projected exec-ratio / exec-logstretch slopes stay positive on average
 
 Reading:
 
-- `weighted_median` and `trimmed_mean` do not rescue runtime control
-- softclean weighting helps, but only on one source and is not stable enough for
-  a maintained claim
+- Gate1 is not failing only because of projector quantization
+- `preclip` already fails, so the analytic operational cue is wrong-signed or
+  collapsed before projection
+- projector and discrete readout still compress the signal further, but they
+  are downstream amplifiers of an earlier failure
+
+### Silent counterfactual regression
+
+Summary from `tmp/gate_reaudit_20260414_runtime_clean/gate1_silent_raw/summary.json`:
+
+- the script now uses the same `prompt_g_ref` contract
+- two sources remain anti-monotone
+- two sources collapse to zero-range outputs
+- `monotone_by_neg_delta_g` passes on all four sources
+
+Reading:
+
+- the old Gate1 helper mismatch is no longer the best explanation
+- the remaining failure is consistent with sign inversion or collapse
 
 ### Current conclusion
 
-The maintained conclusion after this rerun is:
+The maintained conclusion after this runtime-clean rerun is:
 
 - keep Gate 2 blocked
 - keep Gate 3 blocked
 - keep formal training blocked on this local surface
 - stop describing the failure as support-domain collapse
-- describe the failure as weak or unstable single-scalar control after frontend
-  repair
+- state the narrower conclusion:
+  the maintained single-scalar raw-duration mainline fails under a sharper
+  runtime-aligned protocol
+
+The important caveat is also fixed in writing:
+
+- this local rerun does not provide a clean total-claim slice
+- so it is strong evidence against the maintained line, not a universal proof
+  that every single-scalar mixed global cue is dead
 
 ### Retained script surface
 
@@ -94,10 +150,3 @@ The maintained zero-train diagnostics are now:
 - `scripts/probe_rhythm_v3_gate1_silent_counterfactual.py`
 - `scripts/rhythm_v3_probe_cases.py`
 - `scripts/rhythm_v3_debug_records.py`
-
-Removed in this cleanup pass:
-
-- token-guessing silent-token sweep helpers
-- support-degeneracy reducer tied to the old token-candidate debugging path
-- earlier one-off counterfactual reducer scripts already deleted in the same
-  cleanup line

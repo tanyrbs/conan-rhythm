@@ -25,7 +25,11 @@ from .g_stats import (
     normalize_falsification_eval_mode,
     normalize_global_rate_variant,
 )
-from .math_utils import build_causal_local_rate_seq
+from .math_utils import (
+    build_causal_source_prefix_rate_seq,
+    first_valid_speech_init,
+    normalize_src_prefix_stat_mode,
+)
 from .global_condition import PromptGlobalConditionEncoderV1G
 from .minimal_writer import MinimalStreamingDurationHeadV1G, MinimalStreamingDurationWriterV1G
 from .summary_memory import (
@@ -693,6 +697,21 @@ class MixedEffectsDurationModule(nn.Module):
                 unused_kwargs.pop("rhythm_v3_freeze_src_rate_init", bool(self.minimal_v1_profile)),
             )
         )
+        self.src_prefix_min_support = int(
+            max(
+                1,
+                unused_kwargs.pop(
+                    "src_prefix_min_support",
+                    unused_kwargs.pop("rhythm_v3_src_prefix_min_support", 3),
+                ),
+            )
+        )
+        self.src_prefix_stat_mode = normalize_src_prefix_stat_mode(
+            unused_kwargs.pop(
+                "src_prefix_stat_mode",
+                unused_kwargs.pop("rhythm_v3_src_prefix_stat_mode", "ema"),
+            )
+        )
         self.strict_eval_invalid_g = bool(
             unused_kwargs.pop(
                 "strict_eval_invalid_g",
@@ -852,6 +871,12 @@ class MixedEffectsDurationModule(nn.Module):
                     src_rate_init_mode=self.src_rate_init_mode,
                     src_rate_init_value=self.src_rate_init_value,
                     freeze_src_rate_init=self.freeze_src_rate_init,
+                    g_variant=self.g_variant,
+                    g_trim_ratio=self.g_trim_ratio,
+                    src_prefix_stat_mode=self.src_prefix_stat_mode,
+                    src_prefix_min_support=self.src_prefix_min_support,
+                    g_drop_edge_runs=self.g_drop_edge_runs,
+                    min_boundary_confidence_for_g=self.min_boundary_confidence_for_g,
                 )
             else:
                 summary_codebook = SharedSummaryCodebook(num_slots=summary_slots, dim=summary_dim)
@@ -927,6 +952,18 @@ class MixedEffectsDurationModule(nn.Module):
                     duration_head_kwargs["src_rate_init_value"] = self.src_rate_init_value
                 if _init_accepts_kwarg(StreamingDurationHead, "freeze_src_rate_init"):
                     duration_head_kwargs["freeze_src_rate_init"] = self.freeze_src_rate_init
+                if _init_accepts_kwarg(StreamingDurationHead, "g_variant"):
+                    duration_head_kwargs["g_variant"] = self.g_variant
+                if _init_accepts_kwarg(StreamingDurationHead, "g_trim_ratio"):
+                    duration_head_kwargs["g_trim_ratio"] = self.g_trim_ratio
+                if _init_accepts_kwarg(StreamingDurationHead, "src_prefix_stat_mode"):
+                    duration_head_kwargs["src_prefix_stat_mode"] = self.src_prefix_stat_mode
+                if _init_accepts_kwarg(StreamingDurationHead, "src_prefix_min_support"):
+                    duration_head_kwargs["src_prefix_min_support"] = self.src_prefix_min_support
+                if _init_accepts_kwarg(StreamingDurationHead, "g_drop_edge_runs"):
+                    duration_head_kwargs["g_drop_edge_runs"] = self.g_drop_edge_runs
+                if _init_accepts_kwarg(StreamingDurationHead, "min_boundary_confidence_for_g"):
+                    duration_head_kwargs["min_boundary_confidence_for_g"] = self.min_boundary_confidence_for_g
                 self.duration_head = StreamingDurationHead(**duration_head_kwargs)
             self.duration_head.rate_mode = self.rate_mode
             self.duration_head.simple_global_stats = self.simple_global_stats
@@ -936,6 +973,18 @@ class MixedEffectsDurationModule(nn.Module):
             self.duration_head.eval_mode = self.eval_mode
             self.duration_head.disable_local_residual = self.disable_local_residual
             self.duration_head.disable_coarse_bias = self.disable_coarse_bias
+            if hasattr(self.duration_head, "g_variant"):
+                self.duration_head.g_variant = self.g_variant
+            if hasattr(self.duration_head, "g_trim_ratio"):
+                self.duration_head.g_trim_ratio = self.g_trim_ratio
+            if hasattr(self.duration_head, "src_prefix_stat_mode"):
+                self.duration_head.src_prefix_stat_mode = self.src_prefix_stat_mode
+            if hasattr(self.duration_head, "src_prefix_min_support"):
+                self.duration_head.src_prefix_min_support = self.src_prefix_min_support
+            if hasattr(self.duration_head, "g_drop_edge_runs"):
+                self.duration_head.g_drop_edge_runs = self.g_drop_edge_runs
+            if hasattr(self.duration_head, "min_boundary_confidence_for_g"):
+                self.duration_head.min_boundary_confidence_for_g = self.min_boundary_confidence_for_g
         if self.backbone_mode == "global_only" and self.warp_mode == "progress":
             self.backbone = ProgressWarpBackbone()
         elif self.backbone_mode == "global_only" and self.warp_mode == "detector":
@@ -1404,12 +1453,54 @@ class MixedEffectsDurationModule(nn.Module):
             if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
             else None
         )
-        source_rate_seq, source_rate_final = build_causal_local_rate_seq(
+        default_init_rate = getattr(
+            self.duration_head,
+            "src_rate_init",
+            observed_log.new_zeros((valid_mask.size(0), 1)),
+        )
+        if self.src_rate_init_mode == "zero":
+            default_init_rate = observed_log.new_zeros((valid_mask.size(0), 1))
+        elif self.src_rate_init_mode == "first_speech":
+            default_init_rate = first_valid_speech_init(
+                observed_log,
+                speech_commit_mask.float() * valid_mask,
+            )
+        prefix_weight = None
+        if (
+            self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            and isinstance(getattr(source_batch, "source_run_stability", None), torch.Tensor)
+        ):
+            prefix_weight = (
+                source_batch.source_run_stability.float().clamp(0.0, 1.0)
+                * speech_commit_mask.float()
+                * valid_mask
+            )
+        source_rate_seq, source_rate_final = build_causal_source_prefix_rate_seq(
             observed_log=observed_log,
             speech_mask=speech_commit_mask.float() * valid_mask,
             init_rate=init_rate,
-            default_init_rate=0.0,
+            default_init_rate=default_init_rate,
+            stat_mode=self.src_prefix_stat_mode,
             decay=float(getattr(self.duration_head, "local_rate_decay", 0.95)),
+            variant=self.g_variant,
+            trim_ratio=self.g_trim_ratio,
+            min_support=self.src_prefix_min_support,
+            weight=prefix_weight,
+            valid_mask=valid_mask,
+            closed_mask=(
+                source_batch.sealed_mask.float()
+                if isinstance(getattr(source_batch, "sealed_mask", None), torch.Tensor)
+                else None
+            ),
+            boundary_confidence=(
+                source_batch.source_boundary_cue.float() * valid_mask
+                if isinstance(getattr(source_batch, "source_boundary_cue", None), torch.Tensor)
+                else None
+            ),
+            min_boundary_confidence=self.min_boundary_confidence_for_g,
+            drop_edge_runs=self.g_drop_edge_runs,
+            min_speech_ratio=0.0,
+            unit_ids=source_batch.content_units.long(),
         )
         return source_rate_seq * valid_mask, source_rate_final
 
@@ -1681,6 +1772,7 @@ class MixedEffectsDurationModule(nn.Module):
             )
             execution.coarse_scalar_raw = role_plan.get("coarse_scalar_raw")
             execution.global_term_before_local = role_plan.get("unit_global_term_before_local")
+            execution.analytic_gap_clip_value = role_plan.get("analytic_gap_clip_value")
             execution.unit_residual_gate = role_plan.get("unit_residual_gate")
             execution.unit_residual_cold_gate = role_plan.get("unit_residual_cold_gate")
             execution.unit_residual_short_gate = role_plan.get("unit_residual_short_gate")

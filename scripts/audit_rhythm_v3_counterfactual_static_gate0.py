@@ -21,6 +21,11 @@ import numpy as np
 import torch
 
 from modules.Conan.rhythm_v3.g_stats import summarize_global_rate_support
+from modules.Conan.rhythm_v3.math_utils import (
+    build_causal_source_prefix_rate_seq,
+    first_valid_speech_init,
+    normalize_src_prefix_stat_mode,
+)
 from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3
 from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
@@ -145,6 +150,32 @@ def _weighted_speech_stat(
     return float(weighted_median_np(row_values[keep], None if row_weight is None else row_weight[keep]))
 
 
+def _weighted_speech_mean_stat(
+    values: np.ndarray | None,
+    *,
+    speech_valid: np.ndarray,
+    confidence: np.ndarray | None,
+) -> float:
+    if values is None:
+        return float("nan")
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    width = min(int(values.shape[0]), int(speech_valid.shape[0]))
+    if width <= 0:
+        return float("nan")
+    keep = speech_valid[:width]
+    if not bool(np.any(keep)):
+        return float("nan")
+    row_values = values[:width][keep]
+    if confidence is None:
+        return float(np.mean(row_values, dtype=np.float64))
+    row_weight = np.asarray(confidence, dtype=np.float32).reshape(-1)[:width][keep]
+    row_weight = np.clip(row_weight, 0.0, None)
+    weight_sum = float(np.sum(row_weight, dtype=np.float64))
+    if weight_sum <= 1.0e-6:
+        return float(np.mean(row_values, dtype=np.float64))
+    return float(np.sum(row_values * row_weight, dtype=np.float64) / weight_sum)
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = sorted({key for row in rows for key in row.keys()})
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +244,12 @@ def _compute_pair_row(
     try:
         sample = copy.deepcopy(ds[fetch_index])
     except RuntimeError as exc:
+        protocol_misaligned = int(
+            same_text_reference == 0
+            and same_text_target == 1
+            and same_speaker_reference == 1
+            and same_speaker_target == 0
+        )
         return {
             "split": str(split),
             "sample_id": f"{split}:{fetch_index}",
@@ -230,6 +267,13 @@ def _compute_pair_row(
             "same_text_target": same_text_target,
             "same_speaker_reference": same_speaker_reference,
             "same_speaker_target": same_speaker_target,
+            "protocol_misaligned": int(protocol_misaligned),
+            "protocol_slice": (
+                "cross_text_prompt_vs_cross_speaker_target"
+                if protocol_misaligned > 0
+                else "clean_total_claim"
+            ),
+            "src_prefix_stat_mode": str(ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")),
             "g_ref": float("nan"),
             "g_ref_status": "sample_fetch_error",
             "g_src_utt": float("nan"),
@@ -239,8 +283,12 @@ def _compute_pair_row(
             "delta_g_ref_minus_src_utt": float("nan"),
             "delta_g_ref_minus_src_prefix": float("nan"),
             "abar_sp_star": float("nan"),
+            "abar_sp_star_runtime": float("nan"),
             "c_star": float("nan"),
+            "c_star_runtime": float("nan"),
             "zbar_sp_star": float("nan"),
+            "analytic_gap_clip": float("nan"),
+            "analytic_saturation_rate": float("nan"),
             "support_seed_count": 0.0,
             "support_count": 0.0,
             "clean_count": 0.0,
@@ -265,6 +313,12 @@ def _compute_pair_row(
             candidate_token=int(candidate_token),
         )
     except (RhythmDatasetPrefilterDrop, Exception) as exc:
+        protocol_misaligned = int(
+            same_text_reference == 0
+            and same_text_target == 1
+            and same_speaker_reference == 1
+            and same_speaker_target == 0
+        )
         return {
             "split": str(split),
             "sample_id": f"{split}:{fetch_index}",
@@ -282,6 +336,13 @@ def _compute_pair_row(
             "same_text_target": same_text_target,
             "same_speaker_reference": same_speaker_reference,
             "same_speaker_target": same_speaker_target,
+            "protocol_misaligned": int(protocol_misaligned),
+            "protocol_slice": (
+                "cross_text_prompt_vs_cross_speaker_target"
+                if protocol_misaligned > 0
+                else "clean_total_claim"
+            ),
+            "src_prefix_stat_mode": str(ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")),
             "g_ref": float("nan"),
             "g_ref_status": f"conditioning_error:{type(exc).__name__}",
             "g_src_utt": float("nan"),
@@ -291,8 +352,12 @@ def _compute_pair_row(
             "delta_g_ref_minus_src_utt": float("nan"),
             "delta_g_ref_minus_src_prefix": float("nan"),
             "abar_sp_star": float("nan"),
+            "abar_sp_star_runtime": float("nan"),
             "c_star": float("nan"),
+            "c_star_runtime": float("nan"),
             "zbar_sp_star": float("nan"),
+            "analytic_gap_clip": float("nan"),
+            "analytic_saturation_rate": float("nan"),
             "support_seed_count": 0.0,
             "support_count": 0.0,
             "clean_count": 0.0,
@@ -344,6 +409,12 @@ def _compute_pair_row(
 
     g_variant = str(ds.hparams.get("rhythm_v3_g_variant", "raw_median"))
     g_trim_ratio = float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2)
+    src_prefix_stat_mode = normalize_src_prefix_stat_mode(
+        ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")
+    )
+    src_prefix_min_support = int(ds.hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3)
+    local_rate_decay = float(ds.hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95)
+    src_rate_init_mode = str(ds.hparams.get("rhythm_v3_src_rate_init_mode", "first_speech") or "first_speech").strip().lower()
     min_boundary_confidence = ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
     if min_boundary_confidence is not None:
         min_boundary_confidence = float(min_boundary_confidence)
@@ -396,6 +467,58 @@ def _compute_pair_row(
         drop_edge_runs=int(drop_edge_runs),
         return_status=True,
     )
+    observed_log = torch.log(
+        torch.as_tensor(record.source_duration_obs, dtype=torch.float32).reshape(1, -1).clamp_min(1.0e-4)
+    ) * torch.as_tensor(source_valid_mask, dtype=torch.float32).reshape(1, -1)
+    speech_tensor = torch.as_tensor(speech_mask, dtype=torch.float32).reshape(1, -1)
+    valid_tensor = torch.as_tensor(source_valid_mask, dtype=torch.float32).reshape(1, -1)
+    default_init_rate = None
+    if src_rate_init_mode == "zero":
+        default_init_rate = observed_log.new_zeros((1, 1))
+    elif src_rate_init_mode == "first_speech":
+        default_init_rate = first_valid_speech_init(observed_log, speech_tensor * valid_tensor)
+    prefix_weight = None
+    if (
+        g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+        and record.source_run_stability is not None
+    ):
+        prefix_weight = (
+            torch.as_tensor(record.source_run_stability, dtype=torch.float32).reshape(1, -1).clamp(0.0, 1.0)
+            * speech_tensor
+            * valid_tensor
+        )
+    source_rate_seq_t, _ = build_causal_source_prefix_rate_seq(
+        observed_log=observed_log,
+        speech_mask=speech_tensor * valid_tensor,
+        init_rate=None,
+        default_init_rate=default_init_rate,
+        stat_mode=src_prefix_stat_mode,
+        decay=local_rate_decay,
+        variant=g_variant,
+        trim_ratio=g_trim_ratio,
+        min_support=src_prefix_min_support,
+        weight=prefix_weight,
+        valid_mask=valid_tensor,
+        closed_mask=(
+            torch.as_tensor(record.sealed_mask, dtype=torch.float32).reshape(1, -1)
+            if record.sealed_mask is not None
+            else None
+        ),
+        boundary_confidence=(
+            torch.as_tensor(record.source_boundary_cue, dtype=torch.float32).reshape(1, -1) * valid_tensor
+            if record.source_boundary_cue is not None
+            else None
+        ),
+        min_boundary_confidence=min_boundary_confidence,
+        drop_edge_runs=int(drop_edge_runs),
+        min_speech_ratio=0.0,
+        unit_ids=(
+            None
+            if record.source_content_units is None
+            else torch.as_tensor(record.source_content_units, dtype=torch.long).reshape(1, -1)
+        ),
+    )
+    source_rate_seq = source_rate_seq_t[0].detach().cpu().numpy().astype(np.float32)
     delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
     g_src_prefix_mean = float("nan")
     if source_rate_seq is not None and bool(np.any(speech_valid)):
@@ -407,8 +530,17 @@ def _compute_pair_row(
     )
 
     abar_sp_star = float("nan")
+    abar_sp_star_runtime = float("nan")
+    amean_sp_star = float("nan")
+    amean_sp_star_runtime = float("nan")
     c_star = float("nan")
+    c_star_runtime = float("nan")
+    cmean_sp_star = float("nan")
+    cmean_sp_star_runtime = float("nan")
     zbar_sp_star = float("nan")
+    zmean_sp_star = float("nan")
+    analytic_saturation_rate = float("nan")
+    analytic_gap_clip = float(ds.hparams.get("rhythm_v3_analytic_gap_clip", 0.35) or 0.0)
     if (
         target_logstretch is not None
         and source_rate_seq is not None
@@ -428,10 +560,38 @@ def _compute_pair_row(
             confidence = np.asarray(record.unit_confidence_coarse_tgt, dtype=np.float32).reshape(-1)[:width]
         elif record.unit_confidence_tgt is not None:
             confidence = np.asarray(record.unit_confidence_tgt, dtype=np.float32).reshape(-1)[:width]
-        analytic_shift = (float(g_ref) - source_rate_seq).astype(np.float32)
-        residual = target_logstretch - analytic_shift
+        analytic_shift_preclip = (float(g_ref) - source_rate_seq).astype(np.float32)
+        if analytic_gap_clip > 0.0:
+            analytic_shift_runtime = np.clip(
+                analytic_shift_preclip,
+                -analytic_gap_clip,
+                analytic_gap_clip,
+            ).astype(np.float32)
+            analytic_saturation_rate = float(
+                np.mean(np.abs(analytic_shift_preclip[speech_valid]) >= (analytic_gap_clip - 1.0e-6))
+            )
+        else:
+            analytic_shift_runtime = analytic_shift_preclip
+            analytic_saturation_rate = 0.0
+        residual = target_logstretch - analytic_shift_preclip
+        residual_runtime = target_logstretch - analytic_shift_runtime
         abar_sp_star = _weighted_speech_stat(
-            analytic_shift,
+            analytic_shift_preclip,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        abar_sp_star_runtime = _weighted_speech_stat(
+            analytic_shift_runtime,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        amean_sp_star = _weighted_speech_mean_stat(
+            analytic_shift_preclip,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        amean_sp_star_runtime = _weighted_speech_mean_stat(
+            analytic_shift_runtime,
             speech_valid=speech_valid,
             confidence=confidence,
         )
@@ -440,7 +600,27 @@ def _compute_pair_row(
             speech_valid=speech_valid,
             confidence=confidence,
         )
+        c_star_runtime = _weighted_speech_stat(
+            residual_runtime,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        cmean_sp_star = _weighted_speech_mean_stat(
+            residual,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        cmean_sp_star_runtime = _weighted_speech_mean_stat(
+            residual_runtime,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
         zbar_sp_star = _weighted_speech_stat(
+            target_logstretch,
+            speech_valid=speech_valid,
+            confidence=confidence,
+        )
+        zmean_sp_star = _weighted_speech_mean_stat(
             target_logstretch,
             speech_valid=speech_valid,
             confidence=confidence,
@@ -466,6 +646,17 @@ def _compute_pair_row(
         and speech_ratio_valid
         and ref_len_valid
     )
+    protocol_misaligned = int(
+        int(metadata["same_text_reference"]) == 0
+        and int(metadata["same_text_target"]) == 1
+        and int(metadata["same_speaker_reference"]) == 1
+        and int(metadata["same_speaker_target"]) == 0
+    )
+    protocol_slice = (
+        "cross_text_prompt_vs_cross_speaker_target"
+        if protocol_misaligned > 0
+        else "clean_total_claim"
+    )
 
     return {
         "split": split,
@@ -483,6 +674,9 @@ def _compute_pair_row(
         "same_text_target": int(metadata["same_text_target"]),
         "same_speaker_reference": int(metadata["same_speaker_reference"]),
         "same_speaker_target": int(metadata["same_speaker_target"]),
+        "protocol_misaligned": int(protocol_misaligned),
+        "protocol_slice": str(protocol_slice),
+        "src_prefix_stat_mode": str(src_prefix_stat_mode),
         "g_ref": float(g_ref),
         "g_ref_status": str(g_ref_status),
         "g_src_utt": float(g_src_utt),
@@ -492,8 +686,17 @@ def _compute_pair_row(
         "delta_g_ref_minus_src_utt": float(delta_g),
         "delta_g_ref_minus_src_prefix": float(delta_g_ref_minus_src_prefix),
         "abar_sp_star": float(abar_sp_star),
+        "abar_sp_star_runtime": float(abar_sp_star_runtime),
+        "amean_sp_star": float(amean_sp_star),
+        "amean_sp_star_runtime": float(amean_sp_star_runtime),
         "c_star": float(c_star),
+        "c_star_runtime": float(c_star_runtime),
+        "cmean_sp_star": float(cmean_sp_star),
+        "cmean_sp_star_runtime": float(cmean_sp_star_runtime),
         "zbar_sp_star": float(zbar_sp_star),
+        "zmean_sp_star": float(zmean_sp_star),
+        "analytic_gap_clip": float(analytic_gap_clip),
+        "analytic_saturation_rate": float(analytic_saturation_rate),
         "support_seed_count": support_seed_count,
         "support_count": support_count,
         "clean_count": clean_count,
@@ -515,7 +718,8 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return [row for row in frame if predicate(row)]
 
     def _metric(subset: list[dict[str, Any]], *, x_key: str, y_key: str) -> dict[str, float]:
-        if not subset:
+        filtered = [row for row in subset if x_key in row and y_key in row]
+        if not filtered:
             return {
                 "spearman": float("nan"),
                 "robust_slope": float("nan"),
@@ -523,30 +727,77 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "count": 0.0,
             }
         return tempo_explainability(
-            [row[x_key] for row in subset],
-            [row[y_key] for row in subset],
+            [row[x_key] for row in filtered],
+            [row[y_key] for row in filtered],
         )
 
     valid_rows = _subset(lambda row: int(row["g_domain_valid"]) > 0)
     cross_rows = _subset(lambda row: int(row["same_text_reference"]) == 0)
     valid_cross_rows = _subset(lambda row: int(row["g_domain_valid"]) > 0 and int(row["same_text_reference"]) == 0)
     same_rows = _subset(lambda row: int(row["same_text_reference"]) > 0)
+    clean_total_claim_rows = _subset(lambda row: str(row.get("protocol_slice", "")) == "clean_total_claim")
+    valid_clean_total_claim_rows = _subset(
+        lambda row: int(row["g_domain_valid"]) > 0 and str(row.get("protocol_slice", "")) == "clean_total_claim"
+    )
+    hostile_protocol_rows = _subset(
+        lambda row: str(row.get("protocol_slice", "")) == "cross_text_prompt_vs_cross_speaker_target"
+    )
+    valid_hostile_protocol_rows = _subset(
+        lambda row: int(row["g_domain_valid"]) > 0 and str(row.get("protocol_slice", "")) == "cross_text_prompt_vs_cross_speaker_target"
+    )
 
     overall_total = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
     valid_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    overall_total_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="zmean_sp_star")
+    valid_total_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="zmean_sp_star")
     cross_total = _metric(cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
     valid_cross_total = _metric(valid_cross_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
     same_total = _metric(same_rows, x_key="delta_g_ref_minus_src_utt", y_key="zbar_sp_star")
+    clean_total_claim_total = _metric(
+        clean_total_claim_rows,
+        x_key="delta_g_ref_minus_src_utt",
+        y_key="zbar_sp_star",
+    )
+    valid_clean_total_claim_total = _metric(
+        valid_clean_total_claim_rows,
+        x_key="delta_g_ref_minus_src_utt",
+        y_key="zbar_sp_star",
+    )
+    hostile_protocol_total = _metric(
+        hostile_protocol_rows,
+        x_key="delta_g_ref_minus_src_utt",
+        y_key="zbar_sp_star",
+    )
+    valid_hostile_protocol_total = _metric(
+        valid_hostile_protocol_rows,
+        x_key="delta_g_ref_minus_src_utt",
+        y_key="zbar_sp_star",
+    )
     overall_analytic = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star")
     valid_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star")
+    overall_analytic_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="amean_sp_star")
+    valid_analytic_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="amean_sp_star")
+    overall_analytic_runtime = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star_runtime")
+    valid_analytic_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="abar_sp_star_runtime")
+    overall_analytic_runtime_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="amean_sp_star_runtime")
+    valid_analytic_runtime_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="amean_sp_star_runtime")
     overall_residual = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
     valid_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star")
+    overall_residual_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star")
+    valid_residual_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star")
+    overall_residual_runtime = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="c_star_runtime")
+    valid_residual_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="c_star_runtime")
+    overall_residual_runtime_mean = _metric(frame, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star_runtime")
+    valid_residual_runtime_mean = _metric(valid_rows, x_key="delta_g_ref_minus_src_utt", y_key="cmean_sp_star_runtime")
     valid_prefix_total = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="zbar_sp_star")
     valid_prefix_analytic = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="abar_sp_star")
+    valid_prefix_analytic_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="abar_sp_star_runtime")
     valid_prefix_residual = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="c_star")
+    valid_prefix_residual_runtime = _metric(valid_rows, x_key="delta_g_ref_minus_src_prefix", y_key="c_star_runtime")
     return {
         "candidate_token": int(frame[0]["candidate_token"]),
         "drop_edge_runs_for_g": int(frame[0]["drop_edge_runs_for_g"]),
+        "src_prefix_stat_mode": str(frame[0].get("src_prefix_stat_mode", "")),
         "item_count": len(frame),
         "finite_pairs_signal": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["zbar_sp_star"])))),
         "finite_pairs_analytic": int(sum(1 for row in frame if np.isfinite(float(row["delta_g_ref_minus_src_utt"])) and np.isfinite(float(row["abar_sp_star"])))),
@@ -554,6 +805,10 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "g_domain_valid_items": int(sum(1 for row in frame if int(row["g_domain_valid"]) > 0)),
         "same_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) > 0)),
         "cross_text_items": int(sum(1 for row in frame if int(row["same_text_reference"]) == 0)),
+        "clean_total_claim_items": len(clean_total_claim_rows),
+        "valid_clean_total_claim_items": len(valid_clean_total_claim_rows),
+        "protocol_misaligned_items": len(hostile_protocol_rows),
+        "valid_protocol_misaligned_items": len(valid_hostile_protocol_rows),
         "mean_support_count": float(np.mean([float(row["support_count"]) for row in frame])),
         "mean_clean_count": float(np.mean([float(row["clean_count"]) for row in frame])),
         "mean_prompt_speech_ratio": float(np.nanmean(np.asarray([row["prompt_speech_ratio"] for row in frame], dtype=np.float32))),
@@ -565,6 +820,14 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_total_signal_robust_slope": float(valid_total["robust_slope"]),
         "valid_total_signal_r2_like": float(valid_total["r2_like"]),
         "valid_total_signal_count": float(valid_total["count"]),
+        "overall_total_mean_signal_spearman": float(overall_total_mean["spearman"]),
+        "overall_total_mean_signal_robust_slope": float(overall_total_mean["robust_slope"]),
+        "overall_total_mean_signal_r2_like": float(overall_total_mean["r2_like"]),
+        "overall_total_mean_signal_count": float(overall_total_mean["count"]),
+        "valid_total_mean_signal_spearman": float(valid_total_mean["spearman"]),
+        "valid_total_mean_signal_robust_slope": float(valid_total_mean["robust_slope"]),
+        "valid_total_mean_signal_r2_like": float(valid_total_mean["r2_like"]),
+        "valid_total_mean_signal_count": float(valid_total_mean["count"]),
         "cross_total_signal_spearman": float(cross_total["spearman"]),
         "cross_total_signal_robust_slope": float(cross_total["robust_slope"]),
         "cross_total_signal_r2_like": float(cross_total["r2_like"]),
@@ -577,6 +840,22 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "same_total_signal_robust_slope": float(same_total["robust_slope"]),
         "same_total_signal_r2_like": float(same_total["r2_like"]),
         "same_total_signal_count": float(same_total["count"]),
+        "clean_total_claim_signal_spearman": float(clean_total_claim_total["spearman"]),
+        "clean_total_claim_signal_robust_slope": float(clean_total_claim_total["robust_slope"]),
+        "clean_total_claim_signal_r2_like": float(clean_total_claim_total["r2_like"]),
+        "clean_total_claim_signal_count": float(clean_total_claim_total["count"]),
+        "valid_clean_total_claim_signal_spearman": float(valid_clean_total_claim_total["spearman"]),
+        "valid_clean_total_claim_signal_robust_slope": float(valid_clean_total_claim_total["robust_slope"]),
+        "valid_clean_total_claim_signal_r2_like": float(valid_clean_total_claim_total["r2_like"]),
+        "valid_clean_total_claim_signal_count": float(valid_clean_total_claim_total["count"]),
+        "protocol_misaligned_signal_spearman": float(hostile_protocol_total["spearman"]),
+        "protocol_misaligned_signal_robust_slope": float(hostile_protocol_total["robust_slope"]),
+        "protocol_misaligned_signal_r2_like": float(hostile_protocol_total["r2_like"]),
+        "protocol_misaligned_signal_count": float(hostile_protocol_total["count"]),
+        "valid_protocol_misaligned_signal_spearman": float(valid_hostile_protocol_total["spearman"]),
+        "valid_protocol_misaligned_signal_robust_slope": float(valid_hostile_protocol_total["robust_slope"]),
+        "valid_protocol_misaligned_signal_r2_like": float(valid_hostile_protocol_total["r2_like"]),
+        "valid_protocol_misaligned_signal_count": float(valid_hostile_protocol_total["count"]),
         "overall_analytic_signal_spearman": float(overall_analytic["spearman"]),
         "overall_analytic_signal_robust_slope": float(overall_analytic["robust_slope"]),
         "overall_analytic_signal_r2_like": float(overall_analytic["r2_like"]),
@@ -585,6 +864,30 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_analytic_signal_robust_slope": float(valid_analytic["robust_slope"]),
         "valid_analytic_signal_r2_like": float(valid_analytic["r2_like"]),
         "valid_analytic_signal_count": float(valid_analytic["count"]),
+        "overall_analytic_mean_signal_spearman": float(overall_analytic_mean["spearman"]),
+        "overall_analytic_mean_signal_robust_slope": float(overall_analytic_mean["robust_slope"]),
+        "overall_analytic_mean_signal_r2_like": float(overall_analytic_mean["r2_like"]),
+        "overall_analytic_mean_signal_count": float(overall_analytic_mean["count"]),
+        "valid_analytic_mean_signal_spearman": float(valid_analytic_mean["spearman"]),
+        "valid_analytic_mean_signal_robust_slope": float(valid_analytic_mean["robust_slope"]),
+        "valid_analytic_mean_signal_r2_like": float(valid_analytic_mean["r2_like"]),
+        "valid_analytic_mean_signal_count": float(valid_analytic_mean["count"]),
+        "overall_analytic_runtime_signal_spearman": float(overall_analytic_runtime["spearman"]),
+        "overall_analytic_runtime_signal_robust_slope": float(overall_analytic_runtime["robust_slope"]),
+        "overall_analytic_runtime_signal_r2_like": float(overall_analytic_runtime["r2_like"]),
+        "overall_analytic_runtime_signal_count": float(overall_analytic_runtime["count"]),
+        "valid_analytic_runtime_signal_spearman": float(valid_analytic_runtime["spearman"]),
+        "valid_analytic_runtime_signal_robust_slope": float(valid_analytic_runtime["robust_slope"]),
+        "valid_analytic_runtime_signal_r2_like": float(valid_analytic_runtime["r2_like"]),
+        "valid_analytic_runtime_signal_count": float(valid_analytic_runtime["count"]),
+        "overall_analytic_runtime_mean_signal_spearman": float(overall_analytic_runtime_mean["spearman"]),
+        "overall_analytic_runtime_mean_signal_robust_slope": float(overall_analytic_runtime_mean["robust_slope"]),
+        "overall_analytic_runtime_mean_signal_r2_like": float(overall_analytic_runtime_mean["r2_like"]),
+        "overall_analytic_runtime_mean_signal_count": float(overall_analytic_runtime_mean["count"]),
+        "valid_analytic_runtime_mean_signal_spearman": float(valid_analytic_runtime_mean["spearman"]),
+        "valid_analytic_runtime_mean_signal_robust_slope": float(valid_analytic_runtime_mean["robust_slope"]),
+        "valid_analytic_runtime_mean_signal_r2_like": float(valid_analytic_runtime_mean["r2_like"]),
+        "valid_analytic_runtime_mean_signal_count": float(valid_analytic_runtime_mean["count"]),
         "overall_residual_signal_spearman": float(overall_residual["spearman"]),
         "overall_residual_signal_robust_slope": float(overall_residual["robust_slope"]),
         "overall_residual_signal_r2_like": float(overall_residual["r2_like"]),
@@ -593,6 +896,30 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_residual_signal_robust_slope": float(valid_residual["robust_slope"]),
         "valid_residual_signal_r2_like": float(valid_residual["r2_like"]),
         "valid_residual_signal_count": float(valid_residual["count"]),
+        "overall_residual_mean_signal_spearman": float(overall_residual_mean["spearman"]),
+        "overall_residual_mean_signal_robust_slope": float(overall_residual_mean["robust_slope"]),
+        "overall_residual_mean_signal_r2_like": float(overall_residual_mean["r2_like"]),
+        "overall_residual_mean_signal_count": float(overall_residual_mean["count"]),
+        "valid_residual_mean_signal_spearman": float(valid_residual_mean["spearman"]),
+        "valid_residual_mean_signal_robust_slope": float(valid_residual_mean["robust_slope"]),
+        "valid_residual_mean_signal_r2_like": float(valid_residual_mean["r2_like"]),
+        "valid_residual_mean_signal_count": float(valid_residual_mean["count"]),
+        "overall_residual_runtime_signal_spearman": float(overall_residual_runtime["spearman"]),
+        "overall_residual_runtime_signal_robust_slope": float(overall_residual_runtime["robust_slope"]),
+        "overall_residual_runtime_signal_r2_like": float(overall_residual_runtime["r2_like"]),
+        "overall_residual_runtime_signal_count": float(overall_residual_runtime["count"]),
+        "valid_residual_runtime_signal_spearman": float(valid_residual_runtime["spearman"]),
+        "valid_residual_runtime_signal_robust_slope": float(valid_residual_runtime["robust_slope"]),
+        "valid_residual_runtime_signal_r2_like": float(valid_residual_runtime["r2_like"]),
+        "valid_residual_runtime_signal_count": float(valid_residual_runtime["count"]),
+        "overall_residual_runtime_mean_signal_spearman": float(overall_residual_runtime_mean["spearman"]),
+        "overall_residual_runtime_mean_signal_robust_slope": float(overall_residual_runtime_mean["robust_slope"]),
+        "overall_residual_runtime_mean_signal_r2_like": float(overall_residual_runtime_mean["r2_like"]),
+        "overall_residual_runtime_mean_signal_count": float(overall_residual_runtime_mean["count"]),
+        "valid_residual_runtime_mean_signal_spearman": float(valid_residual_runtime_mean["spearman"]),
+        "valid_residual_runtime_mean_signal_robust_slope": float(valid_residual_runtime_mean["robust_slope"]),
+        "valid_residual_runtime_mean_signal_r2_like": float(valid_residual_runtime_mean["r2_like"]),
+        "valid_residual_runtime_mean_signal_count": float(valid_residual_runtime_mean["count"]),
         "valid_prefix_total_signal_spearman": float(valid_prefix_total["spearman"]),
         "valid_prefix_total_signal_robust_slope": float(valid_prefix_total["robust_slope"]),
         "valid_prefix_total_signal_r2_like": float(valid_prefix_total["r2_like"]),
@@ -601,10 +928,21 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_prefix_analytic_signal_robust_slope": float(valid_prefix_analytic["robust_slope"]),
         "valid_prefix_analytic_signal_r2_like": float(valid_prefix_analytic["r2_like"]),
         "valid_prefix_analytic_signal_count": float(valid_prefix_analytic["count"]),
+        "valid_prefix_analytic_runtime_signal_spearman": float(valid_prefix_analytic_runtime["spearman"]),
+        "valid_prefix_analytic_runtime_signal_robust_slope": float(valid_prefix_analytic_runtime["robust_slope"]),
+        "valid_prefix_analytic_runtime_signal_r2_like": float(valid_prefix_analytic_runtime["r2_like"]),
+        "valid_prefix_analytic_runtime_signal_count": float(valid_prefix_analytic_runtime["count"]),
         "valid_prefix_residual_signal_spearman": float(valid_prefix_residual["spearman"]),
         "valid_prefix_residual_signal_robust_slope": float(valid_prefix_residual["robust_slope"]),
         "valid_prefix_residual_signal_r2_like": float(valid_prefix_residual["r2_like"]),
         "valid_prefix_residual_signal_count": float(valid_prefix_residual["count"]),
+        "valid_prefix_residual_runtime_signal_spearman": float(valid_prefix_residual_runtime["spearman"]),
+        "valid_prefix_residual_runtime_signal_robust_slope": float(valid_prefix_residual_runtime["robust_slope"]),
+        "valid_prefix_residual_runtime_signal_r2_like": float(valid_prefix_residual_runtime["r2_like"]),
+        "valid_prefix_residual_runtime_signal_count": float(valid_prefix_residual_runtime["count"]),
+        "mean_analytic_gap_clip": float(np.nanmean(np.asarray([row["analytic_gap_clip"] for row in frame], dtype=np.float32))),
+        "mean_analytic_saturation_rate": float(np.nanmean(np.asarray([row["analytic_saturation_rate"] for row in frame], dtype=np.float32))),
+        "valid_mean_analytic_saturation_rate": float(np.nanmean(np.asarray([row["analytic_saturation_rate"] for row in valid_rows], dtype=np.float32))) if valid_rows else float("nan"),
         "overall_signal_spearman": float(overall_total["spearman"]),
         "overall_signal_robust_slope": float(overall_total["robust_slope"]),
         "overall_signal_r2_like": float(overall_total["r2_like"]),
@@ -637,6 +975,7 @@ def _summarize_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_prefix_signal_robust_slope": float(valid_prefix_total["robust_slope"]),
         "valid_prefix_signal_r2_like": float(valid_prefix_total["r2_like"]),
         "valid_prefix_signal_count": float(valid_prefix_total["count"]),
+        "valid_zero_total_median_items": int(sum(1 for row in valid_rows if abs(float(row.get("zbar_sp_star", float("nan")))) <= 1.0e-9)),
     }
 
 
@@ -711,7 +1050,9 @@ def main() -> None:
             f"valid={int(row['g_domain_valid_items'])}/{int(row['item_count'])} "
             f"overall_signal_slope={float(row['overall_signal_robust_slope']):.4f} "
             f"valid_signal_slope={float(row['valid_signal_robust_slope']):.4f} "
-            f"valid_prefix_signal_slope={float(row['valid_prefix_signal_robust_slope']):.4f}"
+            f"valid_prefix_signal_slope={float(row['valid_prefix_signal_robust_slope']):.4f} "
+            f"clean_total_claim_slope={float(row['valid_clean_total_claim_signal_robust_slope']):.4f} "
+            f"hostile_slice_slope={float(row['valid_protocol_misaligned_signal_robust_slope']):.4f}"
         )
 
 

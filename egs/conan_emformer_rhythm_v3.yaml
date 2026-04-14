@@ -23,15 +23,10 @@ rhythm_public_losses:
     rhythm_v3_pref,
     rhythm_v3_cons,
     rhythm_v3_summary,
-    L_exec_speech,
-    L_exec_stretch,
     L_exec_pause,
     L_exec_pause_value,
     L_budget,
-    L_prefix_state,
     L_base,
-    L_rhythm_exec,
-    L_stream_state,
   ]
 
 content_vocab_size: 102
@@ -138,6 +133,8 @@ rhythm_v3_use_src_gap_in_coarse_head: false
 rhythm_v3_detach_global_term_in_local_head: true
 rhythm_v3_freeze_src_rate_init: true  # frozen mode stores src_rate_init as module state, not an optimizer parameter
 rhythm_v3_src_rate_init_mode: first_speech
+rhythm_v3_src_prefix_stat_mode: ema
+rhythm_v3_src_prefix_min_support: 3
 rhythm_v3_src_rate_init_value: 0.0
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
 # shaping remain non-minimal-only knobs and are intentionally omitted here.

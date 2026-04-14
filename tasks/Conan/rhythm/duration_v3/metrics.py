@@ -202,7 +202,9 @@ def silence_leakage(delta_z: Any, speech_mask: Any, silence_mask: Any) -> torch.
     speech = _to_tensor(speech_mask).float()
     silence = _to_tensor(silence_mask).float()
     numerator = (dz.abs() * silence).sum()
-    denominator = (dz.abs() * speech).sum().clamp_min(1.0e-6)
+    denominator = (dz.abs() * speech).sum()
+    if not torch.isfinite(denominator) or float(denominator.item()) <= 1.0e-3:
+        return torch.tensor(float("nan"), device=dz.device)
     return numerator / denominator
 
 
@@ -317,7 +319,9 @@ def local_silence_delta_share(
     silence = _to_tensor(silence_mask).float()
     delta = (learned - coarse).abs()
     num = (delta * silence).sum()
-    den = (delta * speech).sum().clamp_min(1.0e-6)
+    den = (delta * speech).sum()
+    if not torch.isfinite(den) or float(den.item()) <= 1.0e-3:
+        return torch.tensor(float("nan"), device=delta.device)
     return num / den
 
 

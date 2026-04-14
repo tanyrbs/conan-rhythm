@@ -462,6 +462,7 @@ class DurationExecution:
     source_prefix_cumsum: Optional[torch.Tensor] = None
     coarse_scalar_raw: Optional[torch.Tensor] = None
     global_term_before_local: Optional[torch.Tensor] = None
+    analytic_gap_clip_value: Optional[torch.Tensor] = None
     unit_residual_gate: Optional[torch.Tensor] = None
     unit_residual_cold_gate: Optional[torch.Tensor] = None
     unit_residual_short_gate: Optional[torch.Tensor] = None

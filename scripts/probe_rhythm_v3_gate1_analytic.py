@@ -25,7 +25,10 @@ from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
-from utils.plot.rhythm_v3_viz.review import compute_speech_tempo_for_analysis
+from utils.plot.rhythm_v3_viz.review import (
+    compute_source_global_rate_for_analysis,
+    compute_speech_tempo_for_analysis,
+)
 from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
 
 
@@ -164,6 +167,24 @@ def _conditioning_tempo(conditioning: dict[str, np.ndarray]) -> float:
     )
 
 
+def _conditioning_g(ds: ConanDataset, conditioning: dict[str, np.ndarray]) -> tuple[float, str]:
+    return compute_source_global_rate_for_analysis(
+        source_duration_obs=conditioning.get("prompt_duration_obs"),
+        source_speech_mask=conditioning.get("prompt_speech_mask"),
+        source_valid_mask=conditioning.get("prompt_valid_mask"),
+        source_weight=conditioning.get("prompt_global_weight"),
+        source_unit_ids=conditioning.get("prompt_content_units"),
+        source_closed_mask=conditioning.get("prompt_closed_mask"),
+        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
+        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
+        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
+        require_explicit_speech_mask=False,
+        return_status=True,
+    )
+
+
 def _run_condition(
     *,
     ds: ConanDataset,
@@ -191,10 +212,13 @@ def _run_condition(
             "ref_name": ref_name,
             "ref_condition": ref_condition,
             "prompt_tempo_ref": float("nan"),
+            "prompt_g_ref": float("nan"),
+            "prompt_g_status": "conditioning_error",
             "prompt_total_units": int(np.asarray(raw_ref_item.get("dur_anchor_src", [])).reshape(-1).shape[0]),
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
             "ref_pair_item_name": str(raw_ref_item.get("item_name", ref_name)),
+            "src_prefix_stat_mode": str(ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")),
         }
         return summary
     raw_source_item = sample.get("_raw_item")
@@ -252,16 +276,23 @@ def _run_condition(
             metadata=metadata,
         )[0]
         summary = record_summary(record)
+    prompt_g_ref, prompt_g_status = _conditioning_g(ds, conditioning)
     summary.update(
         {
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
             "prompt_tempo_ref": _conditioning_tempo(conditioning),
+            "prompt_g_ref": float(prompt_g_ref),
+            "prompt_g_status": str(prompt_g_status),
             "prompt_total_units": int(np.asarray(conditioning["prompt_duration_obs"]).reshape(-1).shape[0]),
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
             "ref_pair_item_name": str(raw_ref_item.get("item_name", ref_name)),
+            "src_prefix_stat_mode": str(
+                summary.get("src_prefix_stat_mode")
+                or ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")
+            ),
         }
     )
     return summary
@@ -281,19 +312,22 @@ def _row_domain_valid(row: dict[str, Any]) -> bool:
     return bool(gate0_row_dropped <= 0.5)
 
 
-def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) -> dict[str, Any]:
-    all_real_rows = [row for row in rows if row["ref_condition"] in {"slow", "mid", "fast"}]
-    real_rows = [row for row in all_real_rows if _row_domain_valid(row)]
-    real_rows = sorted(real_rows, key=lambda row: float(row["prompt_tempo_ref"]))
-    tempo_ref = [float(row["prompt_tempo_ref"]) for row in real_rows]
-    tempo_out = [float(row["tempo_out"]) for row in real_rows]
-    monotone = len(real_rows) >= 3
+def _tempo_curve_summary(
+    rows: list[dict[str, Any]],
+    *,
+    x_key: str,
+    tempo_key: str,
+    min_real_range: float,
+) -> dict[str, Any]:
+    tempo_ref = [float(row.get(x_key, float("nan"))) for row in rows]
+    tempo_out = [float(row.get(tempo_key, float("nan"))) for row in rows]
+    monotone = len(rows) >= 3
     for left, right in zip(tempo_out, tempo_out[1:]):
         if not (np.isfinite(left) and np.isfinite(right) and right >= (left - 1.0e-6)):
             monotone = False
             break
     slope = float("nan")
-    if len(real_rows) >= 2:
+    if len(rows) >= 2:
         x = np.asarray(tempo_ref, dtype=np.float32)
         y = np.asarray(tempo_out, dtype=np.float32)
         if np.all(np.isfinite(x)) and np.all(np.isfinite(y)) and float(np.max(x) - np.min(x)) > 1.0e-6:
@@ -303,12 +337,7 @@ def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) 
         y = np.asarray(tempo_out, dtype=np.float32)
         if np.all(np.isfinite(y)):
             real_range = float(np.max(y) - np.min(y))
-    controls = {
-        row["ref_condition"]: float(row["tempo_out"])
-        for row in rows
-        if row["ref_condition"] not in {"slow", "mid", "fast"}
-    }
-    prompt_control_response = bool(
+    passed = bool(
         monotone
         and np.isfinite(slope)
         and slope > 0.0
@@ -316,16 +345,103 @@ def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) 
         and real_range >= float(min_real_range)
     )
     return {
+        "x_sorted": tempo_ref,
+        "tempo_out_sorted": tempo_out,
+        "order_monotone": bool(monotone),
+        "pass": passed,
+        "transfer_slope": slope,
+        "real_tempo_range": real_range,
+    }
+
+
+def _monotonicity_summary(rows: list[dict[str, Any]], *, min_real_range: float) -> dict[str, Any]:
+    all_real_rows = [row for row in rows if row["ref_condition"] in {"slow", "mid", "fast"}]
+    real_rows = [row for row in all_real_rows if _row_domain_valid(row)]
+    real_rows = sorted(real_rows, key=lambda row: float(row.get("prompt_g_ref", float("nan"))))
+    controls = {
+        row["ref_condition"]: float(row["tempo_out_projected"] if "tempo_out_projected" in row else row["tempo_out"])
+        for row in rows
+        if row["ref_condition"] not in {"slow", "mid", "fast"}
+    }
+    preclip = _tempo_curve_summary(real_rows, x_key="prompt_g_ref", tempo_key="tempo_out_preclip", min_real_range=min_real_range)
+    continuous = _tempo_curve_summary(real_rows, x_key="prompt_g_ref", tempo_key="tempo_out_continuous", min_real_range=min_real_range)
+    projected = _tempo_curve_summary(real_rows, x_key="prompt_g_ref", tempo_key="tempo_out_projected", min_real_range=min_real_range)
+    count_ratio_continuous = _tempo_curve_summary(
+        real_rows,
+        x_key="prompt_g_ref",
+        tempo_key="speech_exec_ratio_continuous",
+        min_real_range=0.0,
+    )
+    count_ratio_projected = _tempo_curve_summary(
+        real_rows,
+        x_key="prompt_g_ref",
+        tempo_key="speech_exec_ratio_projected",
+        min_real_range=0.0,
+    )
+    logstretch_continuous = _tempo_curve_summary(
+        real_rows,
+        x_key="prompt_g_ref",
+        tempo_key="mean_speech_logstretch_continuous",
+        min_real_range=0.0,
+    )
+    logstretch_projected = _tempo_curve_summary(
+        real_rows,
+        x_key="prompt_g_ref",
+        tempo_key="mean_speech_logstretch_projected",
+        min_real_range=0.0,
+    )
+    mean_saturation = float(
+        np.nanmean(np.asarray([row.get("analytic_saturation_rate", float("nan")) for row in real_rows], dtype=np.float32))
+    ) if real_rows else float("nan")
+    mean_boundary_hit = float(
+        np.nanmean(np.asarray([row.get("projector_boundary_hit_rate", float("nan")) for row in real_rows], dtype=np.float32))
+    ) if real_rows else float("nan")
+    mean_bucket_count = float(
+        np.nanmean(np.asarray([row.get("projector_bucket_count", float("nan")) for row in real_rows], dtype=np.float32))
+    ) if real_rows else float("nan")
+    return {
         "source_name": rows[0]["source_name"] if rows else "",
+        "src_prefix_stat_mode": rows[0].get("src_prefix_stat_mode", "") if rows else "",
         "total_real_row_count": len(all_real_rows),
         "valid_real_row_count": len(real_rows),
         "all_real_domain_valid": bool(len(real_rows) == len(all_real_rows) and len(all_real_rows) > 0),
-        "order_monotone_by_prompt_tempo": bool(monotone),
-        "monotone_by_prompt_tempo": prompt_control_response,
-        "transfer_slope": slope,
-        "real_tempo_range": real_range,
-        "tempo_ref_sorted": tempo_ref,
-        "tempo_out_sorted": tempo_out,
+        "g_ref_sorted": projected["x_sorted"],
+        "prompt_tempo_ref_sorted": [float(row.get("prompt_tempo_ref", float("nan"))) for row in real_rows],
+        "order_monotone_by_prompt_g": projected["order_monotone"],
+        "monotone_by_prompt_g": projected["pass"],
+        "order_monotone_by_prompt_tempo": projected["order_monotone"],
+        "monotone_by_prompt_tempo": projected["pass"],
+        "transfer_slope": projected["transfer_slope"],
+        "real_tempo_range": projected["real_tempo_range"],
+        "tempo_ref_sorted": projected["x_sorted"],
+        "tempo_out_sorted": projected["tempo_out_sorted"],
+        "preclip_monotone_by_prompt_tempo": preclip["pass"],
+        "preclip_transfer_slope": preclip["transfer_slope"],
+        "preclip_real_tempo_range": preclip["real_tempo_range"],
+        "tempo_out_preclip_sorted": preclip["tempo_out_sorted"],
+        "continuous_monotone_by_prompt_tempo": continuous["pass"],
+        "continuous_transfer_slope": continuous["transfer_slope"],
+        "continuous_real_tempo_range": continuous["real_tempo_range"],
+        "tempo_out_continuous_sorted": continuous["tempo_out_sorted"],
+        "projected_monotone_by_prompt_tempo": projected["pass"],
+        "projected_transfer_slope": projected["transfer_slope"],
+        "projected_real_tempo_range": projected["real_tempo_range"],
+        "tempo_out_projected_sorted": projected["tempo_out_sorted"],
+        "continuous_exec_ratio_slope": count_ratio_continuous["transfer_slope"],
+        "continuous_exec_ratio_range": count_ratio_continuous["real_tempo_range"],
+        "continuous_exec_ratio_sorted": count_ratio_continuous["tempo_out_sorted"],
+        "projected_exec_ratio_slope": count_ratio_projected["transfer_slope"],
+        "projected_exec_ratio_range": count_ratio_projected["real_tempo_range"],
+        "projected_exec_ratio_sorted": count_ratio_projected["tempo_out_sorted"],
+        "continuous_exec_logstretch_slope": logstretch_continuous["transfer_slope"],
+        "continuous_exec_logstretch_range": logstretch_continuous["real_tempo_range"],
+        "continuous_exec_logstretch_sorted": logstretch_continuous["tempo_out_sorted"],
+        "projected_exec_logstretch_slope": logstretch_projected["transfer_slope"],
+        "projected_exec_logstretch_range": logstretch_projected["real_tempo_range"],
+        "projected_exec_logstretch_sorted": logstretch_projected["tempo_out_sorted"],
+        "mean_analytic_saturation_rate": mean_saturation,
+        "mean_projector_boundary_hit_rate": mean_boundary_hit,
+        "mean_projector_bucket_count": mean_bucket_count,
         "controls": controls,
     }
 
@@ -413,9 +529,20 @@ def main() -> None:
         monotone = "PASS" if row["monotone_by_prompt_tempo"] else "FAIL"
         slope = row["transfer_slope"]
         slope_str = "nan" if not np.isfinite(slope) else f"{slope:.4f}"
+        cont_slope = row.get("continuous_transfer_slope", float("nan"))
+        cont_slope_str = "nan" if not np.isfinite(cont_slope) else f"{cont_slope:.4f}"
+        preclip_slope = row.get("preclip_transfer_slope", float("nan"))
+        preclip_slope_str = "nan" if not np.isfinite(preclip_slope) else f"{preclip_slope:.4f}"
+        exec_ratio_slope = row.get("projected_exec_ratio_slope", float("nan"))
+        exec_ratio_slope_str = "nan" if not np.isfinite(exec_ratio_slope) else f"{exec_ratio_slope:.4f}"
+        exec_logstretch_slope = row.get("projected_exec_logstretch_slope", float("nan"))
+        exec_logstretch_slope_str = "nan" if not np.isfinite(exec_logstretch_slope) else f"{exec_logstretch_slope:.4f}"
         print(
             f"[gate1-probe] {source_name} monotone={monotone} "
-            f"slope={slope_str} range={row['real_tempo_range']:.4f} "
+            f"preclip_slope={preclip_slope_str} continuous_slope={cont_slope_str} projected_slope={slope_str} "
+            f"projected_exec_ratio_slope={exec_ratio_slope_str} "
+            f"projected_exec_logstretch_slope={exec_logstretch_slope_str} "
+            f"projected_range={row['real_tempo_range']:.4f} saturation={row.get('mean_analytic_saturation_rate', float('nan')):.4f} "
             f"valid_real={row['valid_real_row_count']}/{row['total_real_row_count']} "
             f"tempo_ref={row['tempo_ref_sorted']} tempo_out={row['tempo_out_sorted']}"
         )

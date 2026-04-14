@@ -195,6 +195,8 @@ class ConanDurationAdapter(nn.Module):
             coarse_delta_scale=float(hparams.get("rhythm_v3_coarse_delta_scale", 0.20) or 0.0),
             local_residual_scale=float(hparams.get("rhythm_v3_local_residual_scale", 0.35) or 0.0),
             src_rate_init_mode=str(hparams.get("rhythm_v3_src_rate_init_mode", "auto") or "auto"),
+            src_prefix_stat_mode=str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema"),
+            src_prefix_min_support=int(hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3),
             src_rate_init_value=float(hparams.get("rhythm_v3_src_rate_init_value", 0.0) or 0.0),
             freeze_src_rate_init=bool(
                 hparams.get(
@@ -701,6 +703,12 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
         ret["rhythm_v3_g_variant"] = self.module.g_variant
         ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
+        ret["rhythm_v3_src_prefix_stat_mode"] = str(
+            getattr(self.module, "src_prefix_stat_mode", "ema")
+        )
+        ret["rhythm_v3_src_prefix_min_support"] = float(
+            getattr(self.module, "src_prefix_min_support", 3)
+        )
         ret["rhythm_v3_detach_global_term_in_local_head"] = float(
             bool(getattr(self.module, "detach_global_term_in_local_head", False))
         )
@@ -1015,6 +1023,8 @@ class ConanDurationAdapter(nn.Module):
             debug_bundle = {
                 "g_variant": self.module.g_variant,
                 "g_trim_ratio": float(getattr(self.module, "g_trim_ratio", 0.2)),
+                "src_prefix_stat_mode": str(getattr(self.module, "src_prefix_stat_mode", "ema")),
+                "src_prefix_min_support": float(getattr(self.module, "src_prefix_min_support", 3)),
                 "prompt_g_support_ratio_vs_speech": support_ratio_vs_speech.detach(),
                 "prompt_g_support_ratio_vs_valid": support_ratio_vs_valid.detach(),
                 "prompt_g_clean_ratio_vs_speech": clean_ratio_vs_speech.detach(),

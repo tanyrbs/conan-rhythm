@@ -18,18 +18,21 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414_rebuilt2/boundary_summary.json`
-- `tmp/gate_reaudit_20260414_rebuilt2/gate0_raw/report.json`
-- `tmp/gate_reaudit_20260414_rebuilt2/gate0_softclean/report.json`
-- `tmp/gate_reaudit_20260414_rebuilt2/gate1_raw/summary.json`
-- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean/summary.json`
-- `tmp/gate_reaudit_20260414_rebuilt2/gate1_softclean_wtmean/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate0_raw/report.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate0_weighted/report.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate0_trimmed/report.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate1_raw/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate1_weighted/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate1_trimmed/summary.json`
+- `tmp/gate_reaudit_20260414_runtime_clean/gate1_silent_raw/summary.json`
 
 Current verdict on the local quick-ARCTIC surface:
 
 - prompt-domain support is repaired on the rebuilt cache surface
-- Gate 0 still fails because the total static signal slope stays flat
-- Gate 1 still fails because runtime push is flat for most sources
+- Gate 0 still fails, but the current local surface exposes only the hostile
+  protocol slice; total mean/median remain flat there
+- Gate 1 now fails under `prompt_g_ref` ordering and `exact_global_family`
+  prefix baseline already at the `preclip` layer
 - Gate 2 and Gate 3 remain blocked
 
 So this validation stack should currently be read as a **stop surface**, not as
@@ -235,6 +238,26 @@ Gate-0 is also now tied to the maintained runtime support surface:
   `delta_g -> analytic_signal`,
   `delta_g -> coarse_residual`,
   plus a prefix-baseline comparison
+- Gate-0 static audit now also reports:
+  - `clean_total_claim` vs
+    `cross_text_prompt_vs_cross_speaker_target`
+  - median-based and mean-based totals
+  - runtime-clipped analytic/residual views aligned with writer clip
+- current falsification runs fix `rhythm_v3_src_prefix_stat_mode=exact_global_family`
+  for Gate0 / Gate1 to remove the old EMA-only prefix mismatch
+
+Gate-1 is now tied to the same runtime `g` contract:
+
+- probe-case selection uses runtime-equivalent `prompt_g_ref`
+- monotonicity ordering uses `prompt_g_ref`, not display-only
+  `prompt_tempo_ref`
+- Gate-1 reports layered readouts:
+  - `tempo_out_preclip`
+  - `tempo_out_continuous`
+  - `tempo_out_projected`
+- Gate-1 also reports continuous count/logstretch readouts in parallel with the
+  discrete tempo readout so projector/readout collapse can be separated from
+  earlier writer failure
 
 ## 4. Review util entry points
 

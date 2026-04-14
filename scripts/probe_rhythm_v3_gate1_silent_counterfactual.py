@@ -26,7 +26,10 @@ from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
-from utils.plot.rhythm_v3_viz.review import compute_speech_tempo_for_analysis
+from utils.plot.rhythm_v3_viz.review import (
+    compute_source_global_rate_for_analysis,
+    compute_speech_tempo_for_analysis,
+)
 from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases
 
 
@@ -290,6 +293,24 @@ def _conditioning_tempo(conditioning: dict[str, Any]) -> float:
     )
 
 
+def _conditioning_g(ds: ConanDataset, conditioning: dict[str, Any]) -> tuple[float, str]:
+    return compute_source_global_rate_for_analysis(
+        source_duration_obs=conditioning.get("prompt_duration_obs"),
+        source_speech_mask=conditioning.get("prompt_speech_mask"),
+        source_valid_mask=conditioning.get("prompt_valid_mask"),
+        source_weight=conditioning.get("prompt_global_weight"),
+        source_unit_ids=conditioning.get("prompt_content_units"),
+        source_closed_mask=conditioning.get("prompt_closed_mask"),
+        source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
+        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
+        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
+        require_explicit_speech_mask=False,
+        return_status=True,
+    )
+
+
 def _run_condition(
     *,
     ds: ConanDataset,
@@ -323,6 +344,8 @@ def _run_condition(
             "ref_name": ref_name,
             "ref_condition": ref_condition,
             "prompt_tempo_ref": float("nan"),
+            "prompt_g_ref": float("nan"),
+            "prompt_g_status": "conditioning_error",
             "prompt_total_units": 0,
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
@@ -332,6 +355,7 @@ def _run_condition(
             "counterfactual_domain_valid": 0.0,
             "trim_head_runs": int(trim_head_runs),
             "trim_tail_runs": int(trim_tail_runs),
+            "src_prefix_stat_mode": str(ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")),
         }
     raw_source_item = sample.get("_raw_item")
     raw_paired_target_item = sample.get("_raw_paired_target_item")
@@ -381,12 +405,15 @@ def _run_condition(
             metadata=metadata,
         )[0]
         summary = record_summary(record)
+    prompt_g_ref, prompt_g_status = _conditioning_g(ds, conditioning)
     summary.update(
         {
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
             "prompt_tempo_ref": _conditioning_tempo(conditioning),
+            "prompt_g_ref": float(prompt_g_ref),
+            "prompt_g_status": str(prompt_g_status),
             "prompt_total_units": int(np.asarray(conditioning["prompt_duration_obs"]).reshape(-1).shape[0]),
             "same_speaker_reference": int(source_name.split("_", 1)[0] == ref_name.split("_", 1)[0]),
             "same_text_reference": int(source_name == ref_name),
@@ -396,6 +423,10 @@ def _run_condition(
             "counterfactual_domain_valid": float(summary.get("g_domain_valid", float("nan"))),
             "trim_head_runs": int(trim_head_runs),
             "trim_tail_runs": int(trim_tail_runs),
+            "src_prefix_stat_mode": str(
+                summary.get("src_prefix_stat_mode")
+                or ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")
+            ),
         }
     )
     return summary
@@ -444,7 +475,7 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "transfer_slope": slope,
         }
 
-    prompt_control = _ordered_control_summary("prompt_tempo_ref", flip_sign=False)
+    prompt_control = _ordered_control_summary("prompt_g_ref", flip_sign=False)
     delta_g_control = _ordered_control_summary("delta_g", flip_sign=False)
     anti_control = _ordered_control_summary("delta_g", flip_sign=True)
     tempo_ref = list(prompt_control["x_sorted"])
@@ -476,12 +507,19 @@ def _monotonicity_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "source_name": rows[0]["source_name"] if rows else "",
+        "src_prefix_stat_mode": rows[0].get("src_prefix_stat_mode", "") if rows else "",
         "counterfactual_silent_token": rows[0]["counterfactual_silent_token"] if rows else None,
         "trim_head_runs": rows[0]["trim_head_runs"] if rows else 0,
         "trim_tail_runs": rows[0]["trim_tail_runs"] if rows else 0,
         "total_real_row_count": len(all_real_rows),
         "valid_real_row_count": len(real_rows),
         "all_real_domain_valid": bool(len(real_rows) == len(all_real_rows) and len(all_real_rows) > 0),
+        "g_ref_sorted": tempo_ref,
+        "prompt_tempo_ref_sorted": [
+            float(row.get("prompt_tempo_ref", float("nan")))
+            for row in sorted(real_rows, key=lambda row: float(row.get("prompt_g_ref", float("nan"))))
+        ],
+        "monotone_by_prompt_g": bool(monotone),
         "monotone_by_prompt_tempo": bool(monotone),
         "transfer_slope": slope,
         "tempo_ref_sorted": tempo_ref,
