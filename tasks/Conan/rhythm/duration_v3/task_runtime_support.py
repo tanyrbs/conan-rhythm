@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..common.task_runtime_support import CommonTaskRuntimeSupport
+from modules.Conan.rhythm_v3.math_utils import normalize_src_rate_init_mode
 from utils.commons.hparams import hparams
 
 from .targets import DurationV3TargetBuildConfig
@@ -33,6 +34,7 @@ class DurationV3TaskRuntimeSupportMixin:
         use_log_base_rate = bool(hparams.get("rhythm_v3_use_log_base_rate", False))
         if rate_mode == "simple_global" or simple_global_stats:
             use_log_base_rate = False
+        src_rate_init_mode_default = "first_speech" if minimal_v1_profile else "learned"
         return DurationV3TargetBuildConfig(
             lambda_dur=max(0.0, float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0)),
             lambda_op=max(0.0, float(lambda_op or 0.0)),
@@ -72,6 +74,10 @@ class DurationV3TaskRuntimeSupportMixin:
             g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
             src_prefix_stat_mode=str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema"),
             src_prefix_min_support=int(hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3),
+            src_rate_init_mode=normalize_src_rate_init_mode(
+                hparams.get("rhythm_v3_src_rate_init_mode", "auto"),
+                auto_fallback=src_rate_init_mode_default,
+            ),
             g_drop_edge_runs=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             min_boundary_confidence_for_g=(
                 None

@@ -8,9 +8,9 @@ Gate0 contract-repair pass.
 - maintained `rhythm_v3` minimal-V1 path only
 - local quick-ARCTIC configs only
 - zero-train Gate0 / Gate1 reruns only in this pass
-- local execution is still CPU-only in this workspace:
-  the host machine has `GTX 1050 Ti`, but the repo `.venv` currently ships
-  `torch 2.5.1+cpu`, so no CUDA path was available for this round
+- this snapshot was produced on a CPU-only `.venv` in this workspace:
+  the host machine has `GTX 1050 Ti`, but no CUDA-enabled PyTorch runtime was
+  available during the rerun that produced these numbers
 - frozen family used in the latest reruns:
   - `raw_median`
   - `weighted_median`
@@ -40,22 +40,22 @@ This means the latest Gate0 rerun is materially cleaner than the earlier
 
 ## 3. Current artifacts
 
-Latest final artifacts live in:
+Checked-in machine-readable status snapshots:
 
-- `tmp/gate_reaudit_20260414_gate0_final/`
+- official training gate:
+  `egs/overrides/rhythm_v3_gate_status.json`
+- latest local strongest-contract candidate:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
 
-Primary files:
+Tracked historical comparison bundles that still live in the repo:
 
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_weighted_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_raw_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_trimmed_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate1_weighted_summary.json`
+- `tmp/gate_reaudit_20260414_rebuilt2/`
+- `tmp/gate_reaudit_20260414_runtime_clean/`
+- `tmp/gate_reaudit_20260414_runtime_fixed/`
 
-Earlier comparison artifacts still matter for history:
-
-- `tmp/gate_reaudit_20260414_followup/`
-- `tmp/gate_reaudit_20260414_deep/`
-- `tmp/gate1_runtime_probe/`
+The ephemeral `gate0_final` rerun bundle that produced the latest local
+candidate result is summarized into the checked-in local-candidate JSON and the
+numbers below instead of being kept as another checked-in `tmp/` tree.
 
 ## 4. Gate verdict
 
@@ -139,6 +139,9 @@ This confirms:
   current local contract
 - runtime saturation and projector compression still exist, but they no longer
   erase monotonic ordering on this fixed surface
+- `exact_global_family` should still be read here as a local/offline gate
+  contract; the maintained online runtime state still stores only a scalar
+  prefix state and is not yet a strict full-history exact-prefix contract
 
 ## 7. Current reading
 
@@ -161,5 +164,7 @@ So the maintained conclusion for this local zero-train surface is now:
 - the strongest local fixed contract is now
   `weighted_median + exact_global_family + target_as_ref`
 - Gate0 and Gate1 both survive on that local surface
+- this does not yet promote `exact_global_family` to the maintained strict
+  online runtime default
 - this is still not a claim that the broader V1 line is universally solved,
   because this pass did not rerun full training or reopen Gate2 / Gate3

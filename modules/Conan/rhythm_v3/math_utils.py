@@ -34,6 +34,44 @@ def first_valid_speech_init(observed_log: torch.Tensor, speech_mask: torch.Tenso
     return out
 
 
+def normalize_src_rate_init_mode(
+    value: str | None,
+    *,
+    auto_fallback: str = "first_speech",
+) -> str:
+    normalized = str(value or auto_fallback).strip().lower()
+    if normalized in {"", "auto"}:
+        normalized = str(auto_fallback or "first_speech").strip().lower()
+    valid = {"learned", "zero", "first_speech"}
+    if normalized not in valid:
+        raise ValueError(
+            f"Unsupported src_rate_init_mode={value!r}. Expected one of: {sorted(valid)}"
+        )
+    return normalized
+
+
+def resolve_default_source_rate_init(
+    *,
+    observed_log: torch.Tensor,
+    speech_mask: torch.Tensor,
+    src_rate_init_mode: str | None,
+    learned_init_rate: torch.Tensor | float | None = None,
+    auto_fallback: str = "first_speech",
+) -> torch.Tensor | float | None:
+    resolved_mode = normalize_src_rate_init_mode(
+        src_rate_init_mode,
+        auto_fallback=auto_fallback,
+    )
+    if resolved_mode == "zero":
+        return observed_log.new_zeros((observed_log.size(0), 1))
+    if resolved_mode == "first_speech":
+        return first_valid_speech_init(
+            observed_log.float(),
+            speech_mask.float(),
+        )
+    return learned_init_rate
+
+
 def _resolve_initial_rate_column(
     *,
     observed_log: torch.Tensor,
@@ -141,6 +179,10 @@ def normalize_src_prefix_stat_mode(value: str | None) -> str:
             f"Unsupported src_prefix_stat_mode={value!r}. Expected one of: {sorted(valid)}"
         )
     return normalized
+
+
+def src_prefix_stat_mode_requires_full_history(value: str | None) -> bool:
+    return normalize_src_prefix_stat_mode(value) == "exact_global_family"
 
 
 def _compute_prefix_center_1d(
@@ -417,6 +459,9 @@ def build_causal_source_prefix_rate_seq(
             decay=decay,
         )
     if resolved_mode == "exact_global_family":
+        # This path is exact only when the caller can replay the full observed
+        # prefix. A scalar carried state is not sufficient to preserve the
+        # underlying robust-prefix distribution across chunk continuation.
         return build_causal_prefix_global_rate_seq_exact(
             observed_log=observed_log,
             speech_mask=speech_mask,
@@ -459,5 +504,8 @@ __all__ = [
     "build_causal_prefix_global_rate_seq_exact",
     "build_causal_source_prefix_rate_seq",
     "first_valid_speech_init",
+    "normalize_src_rate_init_mode",
     "normalize_src_prefix_stat_mode",
+    "resolve_default_source_rate_init",
+    "src_prefix_stat_mode_requires_full_history",
 ]

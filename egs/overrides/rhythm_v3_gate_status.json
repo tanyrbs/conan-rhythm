@@ -1,32 +1,29 @@
 {
   "updated_at": "2026-04-14",
+  "scope": "official_training_gate",
   "status": "blocked_before_training",
-  "basis": "tmp/gate_reaudit_20260414_rebuilt2",
+  "basis": "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json",
+  "local_candidate_status_json": "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json",
   "gate0_pass": false,
   "gate1_pass": false,
   "gate2_pass": false,
   "gate3_pass": false,
   "gate0_summary": {
-    "configured_min_boundary_confidence_for_g": 0.5,
-    "boundary_support_train": "32/32",
-    "boundary_support_valid": "16/16",
-    "boundary_support_test": "16/16",
-    "gate0_prompt_domain_valid_items": "63/64",
-    "raw_total_signal_slope": 0.0,
-    "raw_analytic_signal_slope": 0.5315858721733093,
-    "raw_residual_signal_slope": -0.6328656673431396
+    "official_contract": "checked-in maintained baseline remains raw_median + ema + learned runtime default",
+    "latest_local_candidate": "weighted_median + exact_global_family + target_as_ref",
+    "official_unblock_reason": "latest local candidate has not been promoted to the official training gate"
   },
   "gate1_summary": {
-    "probe_sources": 4,
-    "raw_monotone_sources": "0/4",
-    "raw_mean_transfer_slope": 0.0,
-    "softclean_wmed_monotone_sources": "1/4",
-    "softclean_wmed_positive_source": "asi_train_arctic_a0019",
-    "softclean_wmed_mean_transfer_slope": 0.10680171253489491
+    "official_contract": "blocked at official training gate",
+    "latest_local_candidate": "local strongest-contract candidate passes Gate0/Gate1 only",
+    "promotion_blockers": [
+      "Gate2 and Gate3 were not rerun",
+      "exact_global_family is currently a local/offline gate contract, not a strict online maintained runtime contract"
+    ]
   },
   "warnings": [
-    "prompt-domain support is repaired on the rebuilt local surface, but total-signal Gate-0 slope remains flat",
-    "softclean variants recover runtime push only on a narrow subset and do not qualify the maintained claim",
-    "Gate-2 / Gate-3 training remain blocked"
+    "Official training remains blocked in this checked-in gate status.",
+    "See egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json for the latest local strongest-contract zero-train result.",
+    "Do not treat the local candidate status as official training unblock."
   ]
 }

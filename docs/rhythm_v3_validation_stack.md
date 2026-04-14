@@ -18,14 +18,12 @@ Canonical status snapshot:
 
 Latest exported local artifacts:
 
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_weighted_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_raw_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate0_trimmed_report.json`
-- `tmp/gate_reaudit_20260414_gate0_final/gate1_weighted_summary.json`
+- `egs/overrides/rhythm_v3_gate_status.json`
+- `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
 - supporting comparison artifacts:
-  - `tmp/gate_reaudit_20260414_followup/`
-  - `tmp/gate_reaudit_20260414_deep/`
-  - `tmp/gate1_runtime_probe/`
+  - `tmp/gate_reaudit_20260414_rebuilt2/`
+  - `tmp/gate_reaudit_20260414_runtime_clean/`
+  - `tmp/gate_reaudit_20260414_runtime_fixed/`
 
 Current verdict on the local quick-ARCTIC surface:
 
@@ -39,6 +37,9 @@ Current verdict on the local quick-ARCTIC surface:
 So this validation stack should currently be read as a repaired
 **zero-train gate surface**, not as evidence that the repository is ready for
 new official training.
+The checked-in local candidate JSON is therefore a machine-readable summary of
+the latest strongest-contract local result, not an official training-unblock
+artifact.
 
 ## 1. What we validate first
 
@@ -265,6 +266,10 @@ Gate-0 is also now tied to the maintained runtime support surface:
 - training target construction now carries the same `g` / prefix contract
   fields used by Gate0 and Gate1, avoiding silent fallback to default
   `g_variant` / `ema` target settings
+- `exact_global_family` should still be read here as a local/offline gate
+  contract: current strict online continuation still carries only a scalar
+  prefix state, so full-history exact robust-prefix semantics are not yet a
+  maintained runtime guarantee
 
 Gate-1 is now tied to the same runtime `g` contract:
 

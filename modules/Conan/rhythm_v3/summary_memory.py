@@ -9,8 +9,9 @@ import torch.nn.functional as F
 from .math_utils import (
     apply_analytic_gap_clip,
     build_causal_source_prefix_rate_seq,
-    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
+    normalize_src_rate_init_mode,
+    resolve_default_source_rate_init,
 )
 from .silence_surface import build_silence_tau_surface_meta
 from .g_stats import (
@@ -606,13 +607,10 @@ class StreamingDurationHead(nn.Module):
         self.codebook = codebook if codebook is not None else SharedSummaryCodebook(num_slots=num_slots, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
         self.spk_proj = nn.Linear(self.spk_dim, self.query_dim)
-        normalized_src_rate_init_mode = str(src_rate_init_mode or "learned").strip().lower()
-        if normalized_src_rate_init_mode in {"", "auto"}:
-            normalized_src_rate_init_mode = "learned"
-        if normalized_src_rate_init_mode not in {"learned", "zero", "first_speech"}:
-            raise ValueError(
-                "StreamingDurationHead.src_rate_init_mode must be one of: learned, zero, first_speech."
-            )
+        normalized_src_rate_init_mode = normalize_src_rate_init_mode(
+            src_rate_init_mode,
+            auto_fallback="learned",
+        )
         self.coarse_head = nn.Sequential(
             nn.Linear((self.query_dim * 2) + 1, self.query_dim),
             nn.GELU(),
@@ -696,11 +694,13 @@ class StreamingDurationHead(nn.Module):
             if (self.use_log_base_rate and isinstance(log_base, torch.Tensor))
             else log_anchor.float()
         )
-        default_init_rate = self.src_rate_init
-        if self.src_rate_init_mode == "zero":
-            default_init_rate = observed_log_anchor.new_zeros((mask.size(0), 1))
-        elif self.src_rate_init_mode == "first_speech":
-            default_init_rate = first_valid_speech_init(observed_log_anchor.float(), speech_mask)
+        default_init_rate = resolve_default_source_rate_init(
+            observed_log=observed_log_anchor.float(),
+            speech_mask=speech_mask,
+            src_rate_init_mode=self.src_rate_init_mode,
+            learned_init_rate=self.src_rate_init,
+            auto_fallback="learned",
+        )
         prefix_weight = None
         if (
             self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}

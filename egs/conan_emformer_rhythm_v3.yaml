@@ -60,7 +60,7 @@ rhythm_v3_min_prompt_ref_len_sec: 3.0
 rhythm_v3_max_prompt_ref_len_sec: 8.0
 rhythm_v3_min_boundary_confidence_for_g: 0.5
 rhythm_v3_gate_quality_strict: true  # strict gate enforcement now baked into config validation
-rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # replace with scripts/rhythm_v3_debug_records.py output before training
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # checked-in official training gate; latest local candidate lives in rhythm_v3_gate_status_local_candidate_20260414.json and must not be treated as official unblock
 rhythm_v3_strict_eval_invalid_g: true
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
@@ -133,7 +133,7 @@ rhythm_v3_use_src_gap_in_coarse_head: false
 rhythm_v3_detach_global_term_in_local_head: true
 rhythm_v3_freeze_src_rate_init: true  # frozen mode stores src_rate_init as module state, not an optimizer parameter
 rhythm_v3_src_rate_init_mode: first_speech
-rhythm_v3_src_prefix_stat_mode: ema
+rhythm_v3_src_prefix_stat_mode: ema  # maintained online default; exact_global_family is kept as a local/offline gate candidate until prefix history becomes state-safe across chunk continuation
 rhythm_v3_src_prefix_min_support: 3
 rhythm_v3_src_rate_init_value: 0.0
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence

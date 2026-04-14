@@ -23,8 +23,8 @@ import torch
 from modules.Conan.rhythm_v3.g_stats import summarize_global_rate_support
 from modules.Conan.rhythm_v3.math_utils import (
     build_causal_source_prefix_rate_seq,
-    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
+    resolve_default_source_rate_init,
 )
 from modules.Conan.rhythm_v3.source_cache import build_source_rhythm_cache_v3
 from tasks.Conan.dataset import ConanDataset
@@ -635,11 +635,13 @@ def _compute_pair_row(
         ) * torch.as_tensor(source_valid_mask, dtype=torch.float32).reshape(1, -1)
         speech_tensor = torch.as_tensor(speech_mask, dtype=torch.float32).reshape(1, -1)
         valid_tensor = torch.as_tensor(source_valid_mask, dtype=torch.float32).reshape(1, -1)
-        default_init_rate = None
-        if src_rate_init_mode == "zero":
-            default_init_rate = observed_log.new_zeros((1, 1))
-        elif src_rate_init_mode == "first_speech":
-            default_init_rate = first_valid_speech_init(observed_log, speech_tensor * valid_tensor)
+        default_init_rate = resolve_default_source_rate_init(
+            observed_log=observed_log,
+            speech_mask=speech_tensor * valid_tensor,
+            src_rate_init_mode=src_rate_init_mode,
+            learned_init_rate=None,
+            auto_fallback="first_speech",
+        )
         prefix_weight = None
         if (
             g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}

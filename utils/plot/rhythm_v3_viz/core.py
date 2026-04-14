@@ -9,8 +9,8 @@ import torch
 
 from modules.Conan.rhythm_v3.math_utils import (
     build_causal_source_prefix_rate_seq,
-    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
+    resolve_default_source_rate_init,
 )
 
 
@@ -584,6 +584,18 @@ def build_debug_record(
                 "src_rate_init_mode",
                 _as_object_scalar(model_output.get("rhythm_v3_src_rate_init_mode")),
             )
+        if model_output.get("rhythm_v3_src_prefix_contract_scope") is not None:
+            _maybe_set_meta(
+                meta,
+                "src_prefix_contract_scope",
+                _as_object_scalar(model_output.get("rhythm_v3_src_prefix_contract_scope")),
+            )
+        if model_output.get("rhythm_v3_src_prefix_requires_full_history") is not None:
+            _maybe_set_meta(
+                meta,
+                "src_prefix_requires_full_history",
+                _as_object_scalar(model_output.get("rhythm_v3_src_prefix_requires_full_history")),
+            )
 
     return RhythmV3DebugRecord(
         item_name=None if item_name is None else str(item_name),
@@ -921,18 +933,21 @@ def derive_record(
         prefix_weight_t = None
         if stability_np is not None and g_variant_meta in {"weighted_median", "softclean_wmed", "softclean_wtmean"}:
             prefix_weight_t = torch.from_numpy(stability_np) * speech
-        default_init_rate = None
-        if src_rate_init_mode == "zero":
-            default_init_rate = obs.new_zeros((1, 1))
-        elif src_rate_init_mode == "first_speech":
-            default_init_rate = first_valid_speech_init(obs.float(), speech.float())
-        elif record.source_rate_init_value is not None:
+        learned_init_rate = None
+        if record.source_rate_init_value is not None:
             init_np = np.asarray(record.source_rate_init_value, dtype=np.float32).reshape(-1)
             if init_np.size > 0 and np.isfinite(float(init_np[0])):
-                default_init_rate = torch.as_tensor(
+                learned_init_rate = torch.as_tensor(
                     init_np[:1].reshape(1, 1),
                     dtype=torch.float32,
                 )
+        default_init_rate = resolve_default_source_rate_init(
+            observed_log=obs.float(),
+            speech_mask=speech.float(),
+            src_rate_init_mode=src_rate_init_mode,
+            learned_init_rate=learned_init_rate,
+            auto_fallback="first_speech",
+        )
         source_rate_seq_t, _ = build_causal_source_prefix_rate_seq(
             observed_log=obs,
             speech_mask=speech,

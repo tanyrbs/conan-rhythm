@@ -17,6 +17,7 @@ from .contracts import (
 from .bridge import resolve_rhythm_apply_mode
 from .frame_plan import RhythmFramePlan, build_frame_plan_from_execution
 from .g_stats import compute_duration_weighted_speech_ratio, summarize_global_rate_support
+from .math_utils import src_prefix_stat_mode_requires_full_history
 from .module import MixedEffectsDurationModule
 from .renderer import RenderedRhythmSequence, render_rhythm_sequence
 from .source_cache import (
@@ -290,6 +291,17 @@ class ConanDurationAdapter(nn.Module):
         state=None,
         return_state: bool = False,
     ):
+        if (
+            state is not None
+            and src_prefix_stat_mode_requires_full_history(
+                getattr(self.module, "src_prefix_stat_mode", "ema")
+            )
+        ):
+            raise ValueError(
+                "rhythm_v3 src_prefix_stat_mode=exact_global_family is currently a local/offline gate contract only. "
+                "Chunk-continuation runtime requires a compressed prefix state, but exact_global_family still depends "
+                "on full-history robust-prefix support. Use ema/family_hybrid for strict online continuation."
+            )
         precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
         if precomputed_cache is not None:
             raw_cache_meta = rhythm_source_cache.get(DURATION_V3_CACHE_META_KEY) if isinstance(rhythm_source_cache, Mapping) else None
@@ -703,8 +715,15 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
         ret["rhythm_v3_g_variant"] = self.module.g_variant
         ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
-        ret["rhythm_v3_src_prefix_stat_mode"] = str(
-            getattr(self.module, "src_prefix_stat_mode", "ema")
+        src_prefix_stat_mode = str(getattr(self.module, "src_prefix_stat_mode", "ema"))
+        ret["rhythm_v3_src_prefix_stat_mode"] = src_prefix_stat_mode
+        ret["rhythm_v3_src_prefix_requires_full_history"] = float(
+            src_prefix_stat_mode_requires_full_history(src_prefix_stat_mode)
+        )
+        ret["rhythm_v3_src_prefix_contract_scope"] = (
+            "local_offline_candidate_only"
+            if src_prefix_stat_mode_requires_full_history(src_prefix_stat_mode)
+            else "state_safe_runtime"
         )
         ret["rhythm_v3_src_rate_init_mode"] = str(
             getattr(self.module, "src_rate_init_mode", "first_speech")

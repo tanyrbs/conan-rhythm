@@ -11,6 +11,7 @@ from modules.Conan.rhythm_v3.math_utils import (
     apply_analytic_gap_clip,
     build_causal_local_rate_seq,
     build_causal_source_prefix_rate_seq,
+    resolve_default_source_rate_init,
 )
 from modules.Conan.rhythm_v3.silence_surface import build_silence_tau_surface
 from .losses_impl import DurationV3LossTargets, RhythmLossTargets
@@ -113,6 +114,7 @@ class DurationV3TargetBuildConfig:
     g_trim_ratio: float = 0.2
     src_prefix_stat_mode: str = "ema"
     src_prefix_min_support: int = 3
+    src_rate_init_mode: str = "auto"
     g_drop_edge_runs: int = 0
     min_boundary_confidence_for_g: float | None = None
 
@@ -1050,7 +1052,6 @@ def build_duration_v3_loss_targets(
     consistency_logstretch_tgt = None
     state_prev = output.get("rhythm_state_prev")
     init_local_rate = None
-    default_init_rate = output.get("rhythm_v3_source_rate_init")
     if state_prev is not None and isinstance(getattr(state_prev, "local_rate_ema", None), torch.Tensor):
         init_local_rate = state_prev.local_rate_ema.float().detach()
     if isinstance(prompt_targets["global_rate"], torch.Tensor):
@@ -1074,6 +1075,15 @@ def build_duration_v3_loss_targets(
             if isinstance(log_rate_base, torch.Tensor)
             else log_anchor * unit_mask.float()
         )
+        default_init_rate = output.get("rhythm_v3_source_rate_init")
+        if init_local_rate is None:
+            default_init_rate = resolve_default_source_rate_init(
+                observed_log=observed_log_anchor,
+                speech_mask=committed_speech_mask.float(),
+                src_rate_init_mode=getattr(config, "src_rate_init_mode", "auto"),
+                learned_init_rate=default_init_rate,
+                auto_fallback="first_speech",
+            )
         g_variant_tgt = str(getattr(config, "g_variant", "raw_median") or "raw_median")
         prefix_weight_tgt = None
         if (

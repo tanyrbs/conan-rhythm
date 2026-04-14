@@ -1,0 +1,39 @@
+{
+  "updated_at": "2026-04-14",
+  "scope": "local_zero_train_strongest_contract",
+  "status": "candidate_gate0_gate1_pass_gate2_gate3_pending",
+  "basis": "docs/rhythm_v3_local_status_2026-04-14.md",
+  "evidence_surface": "local_quick_arctic_zero_train",
+  "official_training_ready": false,
+  "contract": {
+    "g_variant": "weighted_median",
+    "src_prefix_stat_mode": "exact_global_family",
+    "reference_mode": "target_as_ref",
+    "drop_edge_runs_for_g": 1,
+    "min_boundary_confidence_for_g": 0.5,
+    "contract_scope": "local_offline_candidate_only"
+  },
+  "gate0_pass": true,
+  "gate1_pass": true,
+  "gate2_pass": false,
+  "gate3_pass": false,
+  "gate0_summary": {
+    "clean_exact_positive_cells": "8/8",
+    "best_valid_total_slope": 0.4796249270439148,
+    "best_valid_total_logratio_slope": 0.17225806415081024
+  },
+  "gate1_summary": {
+    "projected_monotone_sources": "4/4",
+    "projected_mean_transfer_slopes": [
+      -0.03975012741671962,
+      -0.12226397145252856,
+      -0.04863111969251851,
+      -0.0866137892247551
+    ]
+  },
+  "warnings": [
+    "Local zero-train evidence only.",
+    "Gate2 and Gate3 were not rerun.",
+    "exact_global_family currently remains a local/offline gate contract because strict online continuation still stores only a scalar prefix state."
+  ]
+}

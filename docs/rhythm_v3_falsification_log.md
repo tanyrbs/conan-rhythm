@@ -96,6 +96,9 @@ The strongest current local reading is now:
 - the training target path also had real contract drift and is now fixed
 - runtime saturation still exists, so this is not a claim that every variant
   or every broader V1 surface is solved
+- `exact_global_family` remains a local/offline gate contract at this stage;
+  strict online continuation still only carries a scalar prefix state and does
+  not preserve full-history robust-prefix support
 
 The maintained local claim should therefore now be phrased as:
 
@@ -103,6 +106,8 @@ The maintained local claim should therefore now be phrased as:
   `weighted_median + exact_global_family + target_as_ref`
 - that contract now survives Gate0 and Gate1 zero-train falsification
 - Gate2 and Gate3 remain pending because this pass did not rerun training
+- the checked-in machine-readable summary for this result is now
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
 
 ## 2026-04-14 deep follow-up rerun
 

@@ -7,8 +7,9 @@ from .g_stats import normalize_falsification_eval_mode, normalize_global_rate_va
 from .math_utils import (
     apply_analytic_gap_clip,
     build_causal_source_prefix_rate_seq,
-    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
+    normalize_src_rate_init_mode,
+    resolve_default_source_rate_init,
 )
 from .silence_surface import build_silence_tau_surface_meta
 from .run_encoder import CausalUnitRunEncoder
@@ -99,13 +100,10 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         self.query_encoder = CausalUnitRunEncoder(vocab_size=vocab_size, dim=self.query_dim)
         self.spk_dim = int(max(8, spk_dim if spk_dim is not None else dim))
         self.spk_proj = nn.Linear(self.spk_dim, self.query_dim)
-        normalized_src_rate_init_mode = str(src_rate_init_mode or "first_speech").strip().lower()
-        if normalized_src_rate_init_mode in {"", "auto"}:
-            normalized_src_rate_init_mode = "first_speech"
-        if normalized_src_rate_init_mode not in {"learned", "zero", "first_speech"}:
-            raise ValueError(
-                "MinimalStreamingDurationHeadV1G.src_rate_init_mode must be one of: learned, zero, first_speech."
-            )
+        normalized_src_rate_init_mode = normalize_src_rate_init_mode(
+            src_rate_init_mode,
+            auto_fallback="first_speech",
+        )
         self.use_src_gap_in_coarse_head = bool(use_src_gap_in_coarse_head)
         coarse_in_dim = self.query_dim + (2 if self.use_src_gap_in_coarse_head else 1)
         self.coarse_head = nn.Sequential(
@@ -203,10 +201,13 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
 
         default_init_rate = self.src_rate_init
         if init_local_rate is None:
-            if self.src_rate_init_mode == "zero":
-                default_init_rate = log_anchor.new_zeros((mask.size(0), 1))
-            elif self.src_rate_init_mode == "first_speech":
-                default_init_rate = first_valid_speech_init(log_anchor.float(), speech_mask)
+            default_init_rate = resolve_default_source_rate_init(
+                observed_log=log_anchor.float(),
+                speech_mask=speech_mask,
+                src_rate_init_mode=self.src_rate_init_mode,
+                learned_init_rate=self.src_rate_init,
+                auto_fallback="first_speech",
+            )
         prefix_weight = None
         if (
             self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}

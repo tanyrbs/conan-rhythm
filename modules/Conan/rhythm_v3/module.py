@@ -27,8 +27,9 @@ from .g_stats import (
 )
 from .math_utils import (
     build_causal_source_prefix_rate_seq,
-    first_valid_speech_init,
     normalize_src_prefix_stat_mode,
+    normalize_src_rate_init_mode,
+    resolve_default_source_rate_init,
 )
 from .global_condition import PromptGlobalConditionEncoderV1G
 from .minimal_writer import MinimalStreamingDurationHeadV1G, MinimalStreamingDurationWriterV1G
@@ -678,13 +679,13 @@ class MixedEffectsDurationModule(nn.Module):
             )
         )
         source_rate_init_mode_default = "first_speech" if self.minimal_v1_profile else "learned"
-        self.src_rate_init_mode = str(
+        self.src_rate_init_mode = normalize_src_rate_init_mode(
             unused_kwargs.pop(
                 "src_rate_init_mode",
                 unused_kwargs.pop("rhythm_v3_src_rate_init_mode", source_rate_init_mode_default),
-            )
-            or source_rate_init_mode_default
-        ).strip().lower()
+            ),
+            auto_fallback=source_rate_init_mode_default,
+        )
         self.src_rate_init_value = float(
             unused_kwargs.pop(
                 "src_rate_init_value",
@@ -1473,18 +1474,13 @@ class MixedEffectsDurationModule(nn.Module):
             if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
             else None
         )
-        default_init_rate = getattr(
-            self.duration_head,
-            "src_rate_init",
-            observed_log.new_zeros((valid_mask.size(0), 1)),
+        default_init_rate = resolve_default_source_rate_init(
+            observed_log=observed_log,
+            speech_mask=speech_commit_mask.float() * valid_mask,
+            src_rate_init_mode=self.src_rate_init_mode,
+            learned_init_rate=getattr(self.duration_head, "src_rate_init", None),
+            auto_fallback="first_speech",
         )
-        if self.src_rate_init_mode == "zero":
-            default_init_rate = observed_log.new_zeros((valid_mask.size(0), 1))
-        elif self.src_rate_init_mode == "first_speech":
-            default_init_rate = first_valid_speech_init(
-                observed_log,
-                speech_commit_mask.float() * valid_mask,
-            )
         prefix_weight = None
         if (
             self.g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}

@@ -25,33 +25,38 @@ Latest local rerun date:
 
 Current verdict:
 
-- Gate 0: fail
-- Gate 1: fail
+- latest local strongest-contract Gate 0: pass
+- latest local strongest-contract Gate 1: pass
 - Gate 2: blocked
 - Gate 3: blocked
 - official training: blocked
 - prefix fine-tune: blocked
 
-The current maintained `raw_median + boundary-clean@0.5` path is therefore
-**not allowed to enter Gate-2 / Gate-3 training on the local quick-ARCTIC
-surface**. The blocking reasons are now:
+The current repo now carries two distinct gate truths and they must not be
+collapsed into one:
 
-- rebuilt local artifacts show prompt-domain support is repaired at
-  `min_boundary_confidence_for_g=0.5`
-- Gate-0 total-signal slope stays flat for `raw_median`,
-  `weighted_median`, `trimmed_mean`, `softclean_wmed`, and
-  `softclean_wtmean`
-- Gate-1 runtime push stays flat for `raw_median`, `weighted_median`, and
-  `trimmed_mean`
-- softclean variants recover push for only `1/4` probe sources, which is still
-  not enough for a maintained claim
+- official training gate:
+  `egs/overrides/rhythm_v3_gate_status.json`
+  This remains blocked.
+- latest local strongest-contract candidate:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
+  This records a local zero-train `Gate0/1` pass for
+  `weighted_median + exact_global_family + target_as_ref`.
 
-Current artifact bundle:
+Official training is still blocked because:
 
-- `tmp/gate_reaudit_20260414_rebuilt2/`
+- Gate 2 and Gate 3 were not rerun on the new candidate contract
+- `exact_global_family` is currently a local/offline gate contract, not the
+  maintained strict online runtime default
+- the checked-in maintained runtime default remains `raw_median + ema` until a
+  promoted candidate contract is frozen and revalidated
 
-Do not start new Gate-2 / Gate-3 training from the maintained config until a
-new gate-status JSON is generated from a passing Gate-0 / Gate-1 rerun.
+So the right reading is:
+
+- the old local `Gate0/1 fail` story is no longer current
+- the newest local strongest-contract candidate is alive
+- official training still stays blocked until that candidate is promoted or a
+  different official contract is frozen
 
 ## 1. What the maintained path is
 
@@ -123,11 +128,15 @@ small overrides:
 | `D` | no-detach ablation | same as `C`, but `rhythm_v3_detach_global_term_in_local_head=false`; treat this as an explicit comparison run rather than the maintained minimal-V1 contract |
 | `E` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
 
-Keep `rhythm_v3_g_variant=raw_median` as the checked-in baseline, but read it
-as a falsification baseline rather than a qualified local winner. Current local
-evidence shows `weighted_median` and `trimmed_mean` are not better, while
-`softclean_wmed` / `softclean_wtmean` remain diagnostic-only because they still
-fail Gate-1 across sources. The maintained strict-claim contract forbids
+Keep `rhythm_v3_g_variant=raw_median` as the checked-in maintained baseline, but
+do not confuse that with the latest local strongest-contract candidate.
+Current local zero-train evidence now points to
+`weighted_median + exact_global_family + target_as_ref` as the strongest local
+candidate contract, while `raw_median` remains the checked-in maintained
+runtime default and `trimmed_mean` remains a nearby local comparator rather
+than the promoted winner. `softclean_wmed` / `softclean_wtmean` still remain
+diagnostic-only because they are not the promoted candidate contract. The
+maintained strict-claim contract forbids
 `rhythm_v3_g_variant=unit_norm`, so keep
 `rhythm_v3_minimal_v1_profile=true` but set
 `rhythm_v3_strict_minimal_claim_profile=false` before running any `unit_norm`
@@ -703,6 +712,14 @@ gate bundle does not pass. The strict gate now also fails on low
 `alignment_mean_coarse_confidence_speech`, and low
 `alignment_local_margin_p10`, so the startup contract and the review script use
 the same quality floor.
+
+The checked-in base config intentionally points at the official blocked gate:
+
+- `egs/overrides/rhythm_v3_gate_status.json`
+
+Use the local candidate JSON only as a machine-readable summary of the latest
+zero-train strongest-contract evidence. It is not the official training
+unblock artifact.
 
 This keeps the current workflow aligned with the falsification-first order:
 
