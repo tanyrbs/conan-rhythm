@@ -1832,6 +1832,10 @@ class MixedEffectsDurationModule(nn.Module):
                 silence_pred=role_plan.get("unit_silence_pred"),
                 source_rate_seq=role_plan.get("source_rate_seq"),
                 source_prefix_summary=role_plan.get("source_prefix_summary"),
+                analytic_gap_raw=role_plan.get("unit_analytic_gap_raw"),
+                analytic_gap_clipped=role_plan.get("unit_analytic_gap_clipped"),
+                analytic_clip_hit=role_plan.get("unit_analytic_clip_hit"),
+                analytic_clip_hit_rate=role_plan.get("analytic_clip_hit_rate"),
             )
             execution.next_state = self._update_prompt_summary_state(
                 final_rate_ema=role_plan["local_rate_final"],
@@ -1849,6 +1853,10 @@ class MixedEffectsDurationModule(nn.Module):
             )
             execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
             execution.g_src_prefix_mean = self._compute_source_prefix_mean(
+                source_rate_seq=execution.g_src_prefix,
+                speech_commit_mask=speech_commit_mask,
+            )
+            execution.g_src_prefix_final = self._compute_source_prefix_final(
                 source_rate_seq=execution.g_src_prefix,
                 speech_commit_mask=speech_commit_mask,
             )
@@ -1942,6 +1950,10 @@ class MixedEffectsDurationModule(nn.Module):
         execution.g_src_prefix = source_prefix_seq
         execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
         execution.g_src_prefix_mean = self._compute_source_prefix_mean(
+            source_rate_seq=source_prefix_seq,
+            speech_commit_mask=speech_commit_mask,
+        )
+        execution.g_src_prefix_final = self._compute_source_prefix_final(
             source_rate_seq=source_prefix_seq,
             speech_commit_mask=speech_commit_mask,
         )
