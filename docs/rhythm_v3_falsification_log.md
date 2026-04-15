@@ -195,13 +195,14 @@ Reviewed status:
 - `analytic_tempo_monotonicity_rate=0.3529`
 - `analytic_tempo_transfer_slope=-0.0149`
 - `analytic_tempo_tie_rate=0.6471`
-- `coarse_only_runtime_metrics.cumulative_drift=8.9612`
+- `final_prefix_drift_abs_mean=8.9612`
 
 Interpretation:
 
 - simply exposing `src_gap` to the coarse head did not unlock the stalled
   online surface
-- the main failure signature still looks like execution flattening / drift
+- the main failure signature still looks like execution flattening / terminal
+  prefix drift
   rather than prompt-`g` absence
 
 ### Item-level reading
@@ -229,8 +230,10 @@ So the stronger current reading is:
 - `src_gap` is not the dominant fix by itself
 - the next debugging priority is projector/clipping/budget/headroom and exec
   bucketization
-- Gate3 local training is unblocked and advanced to a checkpointed run, but no
-  Gate3 pass should be claimed from this log
+- Gate3 local training is unblocked, the checked-in candidate surface now lives
+  in `egs/overrides/rhythm_v3_gate3_learned.yaml`, and the reviewed snapshot is
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json`
+- Gate3 still remains blocked; no Gate3 pass should be claimed from this log
 
 ## 2026-04-15 projector/headroom follow-up
 

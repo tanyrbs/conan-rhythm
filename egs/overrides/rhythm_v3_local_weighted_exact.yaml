@@ -1,5 +1,8 @@
 base_config: egs/conan_emformer_rhythm_v3.yaml
 
+# Probe-only upper-bound contract.
+# This file is for local/offline evidence and should not be used as a runnable
+# strict-training entrypoint while the official base still requires Gate2.
 rhythm_v3_g_variant: weighted_median
 rhythm_v3_src_prefix_stat_mode: exact_global_family
 rhythm_v3_drop_edge_runs_for_g: 1

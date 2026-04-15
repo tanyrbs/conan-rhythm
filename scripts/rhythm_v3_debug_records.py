@@ -31,7 +31,6 @@ from utils.plot.rhythm_v3_viz.review import (
     _is_real_reference_condition,
     _normalize_ref_bin,
     _normalize_ref_condition,
-    _resolve_ref_bin_column,
 )
 
 
@@ -78,6 +77,9 @@ _GATE3_RESIDUAL_CORR_MIN = 0.10
 _GATE3_COARSE_CORR_DROP_TOL = 0.05
 _GATE3_RESIDUAL_BIAS_SHARE_MAX = 0.25
 _GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX = 0.02
+_REAL_REF_BINS = {"slow", "mid", "fast"}
+
+
 def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
     if column not in frame.columns or "eval_mode" not in frame.columns:
         return float("nan")
@@ -92,6 +94,14 @@ def _max_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
     mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
     values = pd.to_numeric(frame.loc[mode_mask, column], errors="coerce").to_numpy(dtype=np.float32)
     return float(np.nanmax(values)) if values.size > 0 and np.isfinite(values).any() else float("nan")
+
+
+def _resolve_ref_bin_column(frame):
+    if "ref_bin" in getattr(frame, "columns", []):
+        return frame["ref_bin"].map(_normalize_ref_bin)
+    if "ref_condition" in getattr(frame, "columns", []):
+        return frame["ref_condition"].map(lambda value: _normalize_ref_bin("", fallback_condition=value))
+    return None
 
 
 def _corr_for_eval_mode(frame, *, x_col: str, y_col: str, eval_mode: str) -> float:

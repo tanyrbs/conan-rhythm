@@ -49,7 +49,13 @@ collapsed into one:
   `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
   with config
   `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
-  plus the local Gate3 work directory
+  plus follow-up local candidate snapshots
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json`
+  and
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_prefixopt.json`
+  plus the local Gate3 status snapshot
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json`
+  and the local Gate3 work directory
   `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
   These are local candidate diagnostics only; they are **not** official
   unblock artifacts.
@@ -475,6 +481,14 @@ surface. This stage keeps the coarse path intact, re-enables the learned path
 speech-side value without stealing coarse control or leaking into silence before
 you move on to prefix fine-tuning.
 
+The checked-in local quick aliases now follow the same candidate chain:
+
+- `egs/local_arctic_rhythm_v3_quick_gate2.yaml` inherits the Gate2 exec
+  candidate surface and is runnable without strict gate enforcement
+- `egs/local_arctic_rhythm_v3_quick_gate3.yaml` inherits the Gate3 learned
+  candidate surface and is likewise a local candidate entrypoint, not an
+  official gate unlock
+
 ---
 
 ## 4. Recommended way to create a local experiment yaml
@@ -774,10 +788,12 @@ The checked-in base config intentionally points at the official blocked gate:
 - `egs/overrides/rhythm_v3_gate_status.json`
 
 Use the local candidate JSON only as a machine-readable summary of the latest
-zero-train strongest-contract evidence. It is not the official training
-unblock artifact. The base config now also requires `gate2_pass=true` before
-official learned training can start, so refreshing Gate 0 / Gate 1 alone is
-not enough to unblock training.
+zero-train strongest-contract evidence or local candidate review snapshots. It
+is not the official training unblock artifact. Those candidate JSON files do
+not guard startup unless `rhythm_v3_gate_quality_strict=true`; with strict
+gating disabled they are audit metadata only. The base config now also
+requires `gate2_pass=true` before official learned training can start, so
+refreshing Gate 0 / Gate 1 alone is not enough to unblock training.
 
 This keeps the current workflow aligned with the falsification-first order:
 

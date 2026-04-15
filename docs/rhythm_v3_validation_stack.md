@@ -22,6 +22,9 @@ Latest exported local artifacts:
 - `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
 - `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
 - `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
+- `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json`
+- `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_prefixopt.json`
+- `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json`
 - supporting local-candidate artifacts:
   - `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
   - `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
@@ -193,7 +196,11 @@ fix only:
   `rhythm_v3_disable_learned_gate=false`
 - but minimal-V1 runtime must still avoid reinterpreting that as
   `use_learned_residual_gate=true`
-- this fixed a local training unblock; it did not add a new model capability
+- this fixed a local training unblock and is now reflected in the checked-in
+  local candidate pair:
+  `egs/overrides/rhythm_v3_gate3_learned.yaml` and
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json`
+- it still did not add a new model capability or a Gate3 pass
 
 ## 3. Unified analysis tables
 

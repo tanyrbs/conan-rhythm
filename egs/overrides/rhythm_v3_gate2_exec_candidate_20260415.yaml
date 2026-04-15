@@ -3,6 +3,8 @@ base_config: egs/overrides/rhythm_v3_online_weighted_streaming.yaml
 # 2026-04-15 local execution-layer candidate.
 # This is intentionally not the official maintained line. It keeps the
 # weighted_median + ema + first_speech contract and only widens execution headroom.
+# The paired gate-status JSON is audit metadata unless strict gate enforcement
+# is explicitly re-enabled.
 rhythm_v3_eval_mode: coarse_only
 rhythm_v3_gate_quality_strict: false
 rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json

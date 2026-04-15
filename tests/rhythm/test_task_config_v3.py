@@ -5,12 +5,31 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 
 from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
 from tasks.Conan.rhythm.duration_v3.task_config import _build_gate_contract_fingerprint
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_yaml_chain(path: Path) -> dict:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    base = data.get("base_config")
+    merged: dict = {}
+    if base:
+        bases = base if isinstance(base, list) else [base]
+        for entry in bases:
+            base_path = Path(entry)
+            if not base_path.is_absolute():
+                if str(entry).startswith("."):
+                    base_path = (path.parent / entry).resolve()
+                else:
+                    base_path = (ROOT / entry).resolve()
+            merged.update(_load_yaml_chain(base_path))
+    merged.update(data)
+    return merged
 
 
 def _minimal_v3_hparams():
@@ -510,9 +529,20 @@ def test_validate_rhythm_training_hparams_rejects_strict_gate_without_strict_inv
 
 def test_validate_rhythm_training_hparams_rejects_strict_gate_when_gate_status_fails(tmp_path):
     gate_status = tmp_path / "gate_status.json"
-    gate_status.write_text('{"gate0_pass": true, "gate1_pass": false, "gate2_pass": true}', encoding="utf-8")
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": False,
+                "gate2_pass": True,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
     hparams["rhythm_v3_gate_quality_strict"] = True
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     with pytest.raises(ValueError, match="gate0_pass=true and gate1_pass=true"):
@@ -532,9 +562,20 @@ def test_validate_rhythm_training_hparams_rejects_strict_gate_when_gate_status_m
 
 def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_train_requires_it(tmp_path):
     gate_status = tmp_path / "gate_status.json"
-    gate_status.write_text('{"gate0_pass": true, "gate1_pass": true, "gate2_pass": false}', encoding="utf-8")
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": False,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
     hparams["rhythm_v3_gate_quality_strict"] = True
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     hparams["rhythm_v3_require_gate2_for_official_train"] = True
@@ -626,17 +667,82 @@ def test_validate_rhythm_training_hparams_rejects_gate_status_missing_fingerprin
 
 def test_validate_rhythm_training_hparams_rejects_missing_gate3_when_prefix_finetune_requires_it(tmp_path):
     gate_status = tmp_path / "gate_status.json"
-    gate_status.write_text(
-        '{"gate0_pass": true, "gate1_pass": true, "gate2_pass": true, "gate3_pass": false}',
-        encoding="utf-8",
-    )
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": True,
+                "gate3_pass": False,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
     hparams["rhythm_v3_gate_quality_strict"] = True
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     hparams["rhythm_v3_require_gate3_for_prefix_finetune"] = True
     with pytest.raises(ValueError, match="requires gate3_pass=true"):
         validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_reports_schema_before_failed_gate_bits(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    fingerprint.pop("rhythm_v3_budget_mode", None)
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": False,
+                "gate1_pass": False,
+                "gate2_pass": False,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="contract_fingerprint schema mismatch"):
+        validate_rhythm_training_hparams(hparams)
+
+
+@pytest.mark.parametrize(
+    ("config_rel", "status_rel"),
+    (
+        ("egs/conan_emformer_rhythm_v3.yaml", "egs/overrides/rhythm_v3_gate_status.json"),
+        ("egs/overrides/rhythm_v3_local_weighted_exact.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json"),
+        ("egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json"),
+        ("egs/overrides/rhythm_v3_gate2_exec_candidate_dual_ema_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json"),
+        ("egs/overrides/rhythm_v3_gate2_prefix_optimal_candidate_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_prefixopt.json"),
+        ("egs/overrides/rhythm_v3_gate3_learned.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json"),
+    ),
+)
+def test_checked_in_gate_status_fingerprints_match_current_configs(config_rel, status_rel):
+    hparams = _load_yaml_chain(ROOT / config_rel)
+    expected = _build_gate_contract_fingerprint(hparams)
+    payload = json.loads((ROOT / status_rel).read_text(encoding="utf-8"))
+    assert payload["contract_fingerprint"] == expected
+
+
+@pytest.mark.parametrize(
+    "config_rel",
+    (
+        "egs/overrides/rhythm_v3_gate2_coarse_only.yaml",
+        "egs/local_arctic_rhythm_v3_quick_gate2.yaml",
+        "egs/overrides/rhythm_v3_gate3_learned.yaml",
+        "egs/local_arctic_rhythm_v3_quick_gate3.yaml",
+    ),
+)
+def test_checked_in_local_candidate_training_entrypoints_validate(config_rel):
+    validate_rhythm_training_hparams(_load_yaml_chain(ROOT / config_rel))
 
 
 @pytest.mark.parametrize(

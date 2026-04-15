@@ -3,6 +3,8 @@ base_config: egs/overrides/rhythm_v3_online_weighted_streaming.yaml
 # Gate 3: local-residual falsification on the maintained online writer.
 # Re-enable the learned path only after Gate 2 has shown coarse-only is
 # already stable enough to stand on its own.
+# The paired gate-status JSON is a reviewed local snapshot, not a startup
+# guard, while strict gate enforcement remains disabled here.
 rhythm_v3_eval_mode: learned
 rhythm_v3_gate_quality_strict: false
 rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json

@@ -39,6 +39,13 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
   `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
 - checked-in status snapshot:
   `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
+- follow-up checked-in candidate snapshots:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json`
+  and
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_prefixopt.json`
+- the checked-in exec candidate yaml now carries the same
+  `use_src_gap=true` and `strict_minimal_claim_profile=false` surface used for
+  this rerun
 
 3. Gate3 local training was unblocked by fixing a config/runtime mismatch.
 
@@ -47,6 +54,9 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
   `strict_minimal_claim_profile=false`
 - minimal-V1 runtime still does **not** reinterpret that as
   `use_learned_residual_gate=true`
+- the checked-in local candidate pair is now
+  `egs/overrides/rhythm_v3_gate3_learned.yaml` and
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json`
 - this is a local candidate wiring fix, not a Gate3 pass
 
 4. A projector/headroom falsification pass was run after the `src_gap`
@@ -180,8 +190,9 @@ It is closer to:
   still exists on part of the surface
 - some sources show real preproj ordering that gets flattened or bucketized at
   exec, so projector/discrete execution remains a primary bottleneck
-- aggregate online metrics still show too many ties and too much cumulative
-  drift
+- aggregate online metrics still show too many ties and too much terminal
+  prefix drift; the legacy `cumulative_drift` key in older reviews was really
+  reporting the final prefix offset, not a path-integrated drift trace
 
 Concrete examples from the current local candidate review:
 
