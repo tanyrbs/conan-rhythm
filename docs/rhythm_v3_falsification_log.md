@@ -155,7 +155,7 @@ The maintained zero-train diagnostics remain:
 - Gate2-online local coarse-only candidate:
   `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
 - reviewed Gate2 status:
-  `tmp/gate2_candidate_20260415_s75_srcgap/review/gate_status.json`
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
 - Gate3 local candidate:
   `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
 
@@ -301,3 +301,62 @@ This was a review/gating correction, not a model-quality improvement.
 - but valid/test still do not hold that response consistently
 - the maintained online contract still does not justify opening Gate3 training
   as if Gate1/Gate2 had been cleared
+
+## 2026-04-15 execution-candidate plumbing repair
+
+### Bug that was found
+
+The earlier local `greedy_repair` probe had a real runtime plumbing bug:
+
+- `ConanDurationAdapter` validated
+  `rhythm_v3_projection_mode` /
+  `rhythm_v3_integer_projection_mode`
+  and `rhythm_v3_projection_repair_*`
+- but it did not forward those hparams into
+  `MixedEffectsDurationModule`
+- so the supposed local `greedy_repair` candidate was still executing plain
+  `greedy`
+
+This means the earlier "repair is inert" reading was a false negative caused by
+adapter wiring, not evidence that the execution candidate had already been
+fairly falsified.
+
+### After the fix
+
+The checked-in online execution candidate is now:
+
+- config:
+  `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
+- status:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
+
+Observed activity after rerunning the same quick checkpoint:
+
+- valid:
+  `projector_repair_candidate_steps_mean=6.0`,
+  `projector_repair_accepted_steps_mean=1.6`
+- test:
+  `projector_repair_candidate_steps_mean=6.0`,
+  `projector_repair_accepted_steps_mean=2.4`
+
+Observed coarse runtime deltas on the maintained online contract:
+
+- valid:
+  `projector_bucket_count 10.60 -> 10.87`,
+  `projector_rounding_regret_mean 0.3775 -> 0.3675`,
+  `projector_clamp_mass_mean 0.2633 -> 0.2321`,
+  `final_prefix_drift_abs_mean 5.7658 -> 5.6645`
+- test:
+  `projector_rounding_regret_mean 0.6454 -> 0.6285`,
+  `projector_clamp_mass_mean 0.5350 -> 0.5050`,
+  `final_prefix_drift_abs_mean 7.3316 -> 7.2332`
+
+### Reading after the repair
+
+- execution repair is now demonstrably active
+- execution-side headroom was therefore a real blocker, not just a theory note
+- but the gain is still incremental:
+  tie rate is unchanged on valid/test,
+  drift is still far above the Gate2 runtime limit,
+  and the same valid/test item failures remain
+- so Gate2/Gate3 are still blocked on the maintained online contract

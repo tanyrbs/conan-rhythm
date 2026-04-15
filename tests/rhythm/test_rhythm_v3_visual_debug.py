@@ -38,7 +38,11 @@ from scripts.rhythm_v3_debug_records import (
     collect_gate_issues,
     main as debug_records_main,
 )
-from utils.plot.rhythm_v3_viz.review import compute_g, compute_source_global_rate_for_analysis
+from utils.plot.rhythm_v3_viz.review import (
+    compute_g,
+    compute_source_global_rate_for_analysis,
+    compute_speech_tempo_for_analysis,
+)
 
 
 def _make_debug_records_cli_row(
@@ -265,7 +269,9 @@ def test_build_debug_records_and_summary_from_runtime_objects():
         source_rate_seq=torch.tensor([[0.08, 0.18, 0.18]], dtype=torch.float32),
         g_src_prefix_final=torch.tensor([[0.18]], dtype=torch.float32),
         prefix_unit_offset=torch.tensor([[0.0, 0.1, 0.1]], dtype=torch.float32),
+        projector_prefreeze_duration_exec=torch.tensor([[2.7, 4.5, 1.0]], dtype=torch.float32),
         projector_preclamp_duration_exec=torch.tensor([[2.7, 4.8, 1.0]], dtype=torch.float32),
+        projector_repair_candidate_steps=torch.tensor([[2.0]], dtype=torch.float32),
         projector_rounding_residual=torch.tensor([[0.03]], dtype=torch.float32),
         analytic_gap_raw=torch.tensor([[0.28, 0.10, 0.00]], dtype=torch.float32),
         analytic_gap_clipped=torch.tensor([[0.25, 0.10, 0.00]], dtype=torch.float32),
@@ -307,6 +313,7 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     )
     assert len(records) == 1
     assert records[0].projector_rounding_residual is not None
+    assert records[0].projector_prefreeze_duration_exec is not None
     assert records[0].metadata["g_variant"] == "raw_median"
     assert records[0].metadata["g_support_count"] == 2.0
     summary = record_summary(records[0])
@@ -336,6 +343,7 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["analytic_gap_abs_mean"])
     assert np.isfinite(summary["analytic_gap_raw_abs_mean"])
     assert np.isfinite(summary["analytic_clip_hit_rate"])
+    assert np.isfinite(summary["projector_repair_candidate_steps_mean"])
     assert np.isfinite(summary["coarse_bias_abs_mean"])
     assert np.isfinite(summary["coarse_scalar_raw"])
     assert np.isfinite(summary["local_residual_abs_mean"])
@@ -346,6 +354,13 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["cumulative_drift"])
     assert np.isfinite(summary["g_src_prefix_final"])
     assert np.isfinite(summary["delta_g_ref_minus_src_prefix_final"])
+    expected_preproj = compute_speech_tempo_for_analysis(
+        source_duration_obs=np.asarray([2.7, 4.5, 1.0], dtype=np.float32),
+        source_speech_mask=np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+        source_valid_mask=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+        source_unit_ids=np.asarray([5, 6, 8], dtype=np.int64),
+    )
+    assert summary["tempo_out_preproj"] == pytest.approx(float(expected_preproj))
 
 
 def test_record_summary_and_ref_crop_table_use_prompt_specific_g_contract():

@@ -1,9 +1,11 @@
 {
   "updated_at": "2026-04-15",
-  "scope": "local_upper_bound_exact_candidate",
-  "status": "candidate_gate0_gate1_pass_gate2_gate3_blocked",
-  "basis": "docs/rhythm_v3_local_status_2026-04-14.md",
-  "candidate_config": "egs/overrides/rhythm_v3_local_weighted_exact.yaml",
+  "scope": "local_gate3_learned_candidate",
+  "status": "learned_residual_probe_blocked",
+  "basis": "docs/rhythm_v3_local_status_2026-04-15.md",
+  "review_artifact_hint": "tmp/gate3_eval_20260415_s125/{gate_valid_review,gate_test_review}/gate_status.json",
+  "candidate_config": "egs/overrides/rhythm_v3_gate3_learned.yaml",
+  "checkpoint": "checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/model_ckpt_steps_125.ckpt",
   "official_training_ready": false,
   "contract_fingerprint": {
     "rhythm_v3_alignment_local_margin_p10_min": 0.02,
@@ -44,24 +46,44 @@
     "rhythm_v3_require_same_text_paired_target": true,
     "rhythm_v3_src_g_variant": "weighted_median",
     "rhythm_v3_src_prefix_min_support": 3,
-    "rhythm_v3_src_prefix_stat_mode": "exact_global_family",
+    "rhythm_v3_src_prefix_stat_mode": "ema",
     "rhythm_v3_src_rate_init_mode": "first_speech",
     "rhythm_v3_strict_eval_invalid_g": true,
-    "rhythm_v3_strict_minimal_claim_profile": true,
+    "rhythm_v3_strict_minimal_claim_profile": false,
     "rhythm_v3_use_continuous_alignment": true,
-    "rhythm_v3_use_src_gap_in_coarse_head": false
+    "rhythm_v3_use_src_gap_in_coarse_head": true
   },
-  "gate0_pass": true,
-  "gate1_pass": true,
+  "gate0_pass": false,
+  "gate1_pass": false,
   "gate2_pass": false,
   "gate3_pass": false,
+  "valid_analytic_metrics": {
+    "tempo_monotonicity_rate_exec": 0.6666666865348816,
+    "tempo_transfer_slope_exec": 0.49068155884742737,
+    "tempo_tie_rate_exec": 0.3333333432674408
+  },
+  "test_analytic_metrics": {
+    "tempo_monotonicity_rate_exec": 0.5,
+    "tempo_transfer_slope_exec": 0.0,
+    "tempo_tie_rate_exec": 0.5
+  },
+  "valid_learned_metrics": {
+    "residual_target_corr": -0.28940632939338684,
+    "residual_bias_share": 0.6096691489219666,
+    "local_silence_delta_share": 0.2487480342388153
+  },
+  "test_learned_metrics": {
+    "residual_target_corr": -0.23643045127391815,
+    "residual_bias_share": 0.6316243410110474,
+    "local_silence_delta_share": 0.9898253679275513
+  },
   "findings": [
-    "The weighted_median + exact_global_family upper-bound contract demonstrates that the mixed global cue is alive on the local offline surface.",
-    "This artifact only proves the upper bound and does not justify promotion to the maintained online contract.",
-    "Gate2 and Gate3 remain blocked because the online execution chain still fails under the maintained prefix state."
+    "The learned local-residual candidate still rides on a Gate1 and Gate2 blocked maintained-online control chain.",
+    "Learned mode does not clear the execution bottleneck and shows large residual bias share plus substantial silence leakage.",
+    "Gate3 therefore remains blocked; the checkpoint should be read as a local training unblock and diagnostic rerun, not a pass."
   ],
   "warnings": [
-    "exact_global_family is not strict-online safe with the current runtime state shape.",
-    "Do not reuse this artifact for official or maintained-online strict training."
+    "The learned checkpoint was evaluated under a relaxed local review bundle, not an official strict gate reuse path.",
+    "Do not treat this artifact as evidence that local residual is safely constrained."
   ]
 }

@@ -17,6 +17,10 @@ from modules.Conan.rhythm_v3.g_stats import (
 from tasks.Conan.rhythm.duration_v3.metrics import (
     budget_hit_rate,
     cumulative_drift,
+    cumulative_drift_mean_abs,
+    final_prefix_drift_abs_mean,
+    final_prefix_offset_abs_mean,
+    max_prefix_offset_abs,
     prefix_discrepancy,
     same_text_gap,
     silence_leakage,
@@ -1122,6 +1126,9 @@ def build_ref_crop_table(
                     _meta(record, "prompt_g_invalid_missing_boundary", default=np.nan)
                 ),
                 "prompt_speech_mask_explicit": 1.0 if prompt_speech_explicit is not None else 0.0,
+                "control_contract_id": _as_str(
+                    _meta(record, "control_contract_id", "rhythm_v3_control_contract_id", default="")
+                ),
                 "gate0_row_dropped": 0.0 if gate0_drop_reason == "ok" else 1.0,
                 "gate0_drop_reason": gate0_drop_reason,
             }
@@ -1416,64 +1423,115 @@ def build_prefix_silence_review_table(
     items: str | Path | RhythmV3DebugRecord | Mapping[str, Any] | Sequence[Any],
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
-    grouped: dict[tuple[str, str], list[tuple[int, RhythmV3DebugRecord]]] = {}
+    grouped: dict[tuple[str, str, str], list[tuple[int, RhythmV3DebugRecord]]] = {}
     for index, record in enumerate(records):
         sample_id = _as_str(_meta(record, "sample_id", default=record.item_name or f"sample_{index:06d}"))
         eval_mode = _as_str(_meta(record, "eval_mode", "rhythm_v3_eval_mode", default=""))
-        grouped.setdefault((sample_id, eval_mode), []).append((index, record))
+        control_contract_id = _as_str(
+            _meta(record, "control_contract_id", "rhythm_v3_control_contract_id", default="")
+        )
+        grouped.setdefault((sample_id, eval_mode, control_contract_id), []).append((index, record))
     rows: list[dict[str, Any]] = []
-    for (sample_id, eval_mode), group in grouped.items():
+    for (sample_id, eval_mode, control_contract_id), group in grouped.items():
         sorted_group = sorted(group, key=lambda item: _resolve_prefix_ratio(item[1]))
-        _, short_record = sorted_group[0]
+        if len(sorted_group) < 2:
+            continue
         _, long_record = sorted_group[-1]
-        short_ratio = _resolve_prefix_ratio(short_record, full_record=long_record)
         long_ratio = _resolve_prefix_ratio(long_record, full_record=long_record)
-        short_logstretch, long_logstretch = _align_pair(short_record.unit_logstretch, long_record.unit_logstretch, dtype=np.float32)
-        short_commit, long_commit = _align_pair(short_record.commit_mask, long_record.commit_mask, dtype=np.float32)
-        commit_mask = None if short_commit is None or long_commit is None else np.minimum(short_commit, long_commit)
-        discrepancy = float("nan")
-        leakage = float("nan")
-        if short_logstretch is not None and long_logstretch is not None and commit_mask is not None:
-            discrepancy = float(prefix_discrepancy(short_logstretch, long_logstretch, commit_mask).item())
-            short_derived = derive_record(short_record)
-            long_derived = derive_record(long_record)
-            short_speech, long_speech = _align_pair(short_derived.speech_mask, long_derived.speech_mask, dtype=np.float32)
-            short_silence, long_silence = _align_pair(short_derived.silence_mask, long_derived.silence_mask, dtype=np.float32)
-            if short_speech is not None and long_speech is not None and short_silence is not None and long_silence is not None:
-                delta = long_logstretch - short_logstretch
-                leakage = float(
-                    silence_leakage(
-                        delta,
-                        np.minimum(short_speech, long_speech),
-                        np.minimum(short_silence, long_silence),
-                    ).item()
-                )
-        budget_hit = float(
-            budget_hit_rate(
-                long_record.projector_budget_hit_pos,
-                long_record.projector_budget_hit_neg,
-            ).item()
-        )
-        hit_pos = _safe_array(long_record.projector_budget_hit_pos, dtype=np.float32)
-        hit_neg = _safe_array(long_record.projector_budget_hit_neg, dtype=np.float32)
-        hit_pos_rate = float(np.mean(hit_pos > 0.5)) if hit_pos is not None and hit_pos.size > 0 else float("nan")
-        hit_neg_rate = float(np.mean(hit_neg > 0.5)) if hit_neg is not None and hit_neg.size > 0 else float("nan")
-        drift = float(cumulative_drift(long_record.prefix_unit_offset).item())
-        rows.append(
-            {
-                "sample_id": sample_id,
-                "eval_mode": eval_mode,
-                "prefix_ratio": long_ratio,
-                "short_prefix_ratio": short_ratio,
-                "prefix_discrepancy": discrepancy,
-                "budget_hit": budget_hit,
-                "budget_hit_rate": budget_hit,
-                "budget_hit_pos_rate": hit_pos_rate,
-                "budget_hit_neg_rate": hit_neg_rate,
-                "cumulative_drift": drift,
-                "silence_leakage": leakage,
-            }
-        )
+
+        def _preproj_surface(record: RhythmV3DebugRecord) -> np.ndarray | None:
+            for attr in (
+                "projector_prefreeze_duration_exec",
+                "projector_prefreeze_exec",
+                "projector_preclamp_duration_exec",
+                "projector_preclamp_exec",
+                "unit_duration_raw",
+            ):
+                value = getattr(record, attr, None)
+                arr = _safe_array(value, dtype=np.float32)
+                if arr is not None:
+                    return arr
+            return None
+
+        for _, short_record in sorted_group[:-1]:
+            short_ratio = _resolve_prefix_ratio(short_record, full_record=long_record)
+            short_logstretch, long_logstretch = _align_pair(
+                short_record.unit_logstretch,
+                long_record.unit_logstretch,
+                dtype=np.float32,
+            )
+            short_commit, long_commit = _align_pair(short_record.commit_mask, long_record.commit_mask, dtype=np.float32)
+            commit_mask = None if short_commit is None or long_commit is None else np.minimum(short_commit, long_commit)
+            z_discrepancy = float("nan")
+            preproj_exec_discrepancy = float("nan")
+            disc_exec_discrepancy = float("nan")
+            leakage = float("nan")
+
+            if short_logstretch is not None and long_logstretch is not None and commit_mask is not None:
+                z_discrepancy = float(prefix_discrepancy(short_logstretch, long_logstretch, commit_mask).item())
+                short_derived = derive_record(short_record)
+                long_derived = derive_record(long_record)
+                short_speech, long_speech = _align_pair(short_derived.speech_mask, long_derived.speech_mask, dtype=np.float32)
+                short_silence, long_silence = _align_pair(short_derived.silence_mask, long_derived.silence_mask, dtype=np.float32)
+                if short_speech is not None and long_speech is not None and short_silence is not None and long_silence is not None:
+                    delta = long_logstretch - short_logstretch
+                    leakage = float(
+                        silence_leakage(
+                            delta,
+                            np.minimum(short_speech, long_speech),
+                            np.minimum(short_silence, long_silence),
+                        ).item()
+                    )
+            short_preproj, long_preproj = _align_pair(
+                _preproj_surface(short_record),
+                _preproj_surface(long_record),
+                dtype=np.float32,
+            )
+            if short_preproj is not None and long_preproj is not None and commit_mask is not None:
+                preproj_exec_discrepancy = float(prefix_discrepancy(short_preproj, long_preproj, commit_mask).item())
+            short_exec, long_exec = _align_pair(short_record.unit_duration_exec, long_record.unit_duration_exec, dtype=np.float32)
+            if short_exec is not None and long_exec is not None and commit_mask is not None:
+                disc_exec_discrepancy = float(prefix_discrepancy(short_exec, long_exec, commit_mask).item())
+            budget_hit = float(
+                budget_hit_rate(
+                    long_record.projector_budget_hit_pos,
+                    long_record.projector_budget_hit_neg,
+                ).item()
+            )
+            hit_pos = _safe_array(long_record.projector_budget_hit_pos, dtype=np.float32)
+            hit_neg = _safe_array(long_record.projector_budget_hit_neg, dtype=np.float32)
+            hit_pos_rate = float(np.mean(hit_pos > 0.5)) if hit_pos is not None and hit_pos.size > 0 else float("nan")
+            hit_neg_rate = float(np.mean(hit_neg > 0.5)) if hit_neg is not None and hit_neg.size > 0 else float("nan")
+            drift = float(cumulative_drift(long_record.prefix_unit_offset).item())
+            drift_mean_abs = float(cumulative_drift_mean_abs(long_record.prefix_unit_offset).item())
+            final_drift = float(final_prefix_drift_abs_mean(long_record.prefix_unit_offset).item())
+            final_offset_abs = float(final_prefix_offset_abs_mean(long_record.prefix_unit_offset).item())
+            max_offset_abs = float(max_prefix_offset_abs(long_record.prefix_unit_offset).item())
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "eval_mode": eval_mode,
+                    "prefix_ratio": short_ratio,
+                    "full_prefix_ratio": long_ratio,
+                    "short_prefix_ratio": short_ratio,
+                    "prefix_pair_kind": "prefix_vs_full",
+                    "z_prefix_discrepancy": z_discrepancy,
+                    "preproj_exec_prefix_discrepancy": preproj_exec_discrepancy,
+                    "disc_exec_prefix_discrepancy": disc_exec_discrepancy,
+                    "prefix_discrepancy": disc_exec_discrepancy,
+                    "budget_hit": budget_hit,
+                    "budget_hit_rate": budget_hit,
+                    "budget_hit_pos_rate": hit_pos_rate,
+                    "budget_hit_neg_rate": hit_neg_rate,
+                    "cumulative_drift": drift,
+                    "cumulative_drift_mean_abs": drift_mean_abs,
+                    "final_prefix_drift_abs_mean": final_drift,
+                    "final_prefix_offset_abs_mean": final_offset_abs,
+                    "max_prefix_offset_abs": max_offset_abs,
+                    "silence_leakage": leakage,
+                    "control_contract_id": control_contract_id,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -1487,7 +1545,7 @@ def build_monotonicity_table(
     min_boundary_confidence: float | None = None,
 ) -> pd.DataFrame:
     records = ensure_debug_records(items)
-    grouped: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str, str], dict[str, dict[str, Any]]] = {}
     for index, record in enumerate(records):
         meta = dict(record.metadata or {})
         prompt_g_cfg = _resolve_prompt_g_config(
@@ -1507,6 +1565,7 @@ def build_monotonicity_table(
         src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
         sample_id = _as_str(meta.get("sample_id", record.item_name or src_id))
         pair_id = _as_str(meta.get("pair_id", meta.get("rhythm_pair_group_id", sample_id)))
+        control_contract_id = _as_str(meta.get("control_contract_id", meta.get("rhythm_v3_control_contract_id", "")))
         ref_condition = _normalize_ref_condition(meta.get("ref_condition", ""))
         ref_bin = _normalize_ref_bin(meta.get("ref_bin", meta.get("tempo_bin", "")), fallback_condition=ref_condition)
         if ref_bin not in _REAL_REF_BINS:
@@ -1565,9 +1624,17 @@ def build_monotonicity_table(
         tempo_out_preproj = (
             compute_speech_tempo_for_analysis(
                 source_duration_obs=(
-                    record.projector_preclamp_duration_exec
-                    if getattr(record, "projector_preclamp_duration_exec", None) is not None
-                    else getattr(record, "projector_preclamp_exec", None)
+                    record.projector_prefreeze_duration_exec
+                    if getattr(record, "projector_prefreeze_duration_exec", None) is not None
+                    else (
+                        record.projector_prefreeze_exec
+                        if getattr(record, "projector_prefreeze_exec", None) is not None
+                        else (
+                            record.projector_preclamp_duration_exec
+                            if getattr(record, "projector_preclamp_duration_exec", None) is not None
+                            else getattr(record, "projector_preclamp_exec", None)
+                        )
+                    )
                 ),
                 source_speech_mask=derived.speech_mask,
                 source_valid_mask=record.unit_mask,
@@ -1581,6 +1648,9 @@ def build_monotonicity_table(
                 source_unit_ids=record.source_content_units,
             )
             if (
+                getattr(record, "projector_prefreeze_duration_exec", None) is not None
+                or getattr(record, "projector_prefreeze_exec", None) is not None
+                or
                 getattr(record, "projector_preclamp_duration_exec", None) is not None
                 or getattr(record, "projector_preclamp_exec", None) is not None
             )
@@ -1635,9 +1705,10 @@ def build_monotonicity_table(
             drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
             source_unit_ids=record.source_content_units,
         )
-        grouped.setdefault((src_id, eval_mode, triplet_condition, pair_id), {})[ref_bin] = {
+        grouped.setdefault((src_id, eval_mode, triplet_condition, pair_id, control_contract_id), {})[ref_bin] = {
             "sample_id": sample_id,
             "pair_id": pair_id,
+            "control_contract_id": control_contract_id,
             "tempo_out": tempo_out_exec,
             "tempo_out_raw": tempo_out_raw,
             "tempo_out_preproj": tempo_out_preproj,
@@ -1664,38 +1735,53 @@ def build_monotonicity_table(
             "prompt_speech_mask_explicit": 1.0 if record.prompt_speech_mask is not None else 0.0,
         }
     rows: list[dict[str, Any]] = []
-    for (src_id, eval_mode, triplet_condition, pair_id), bins in grouped.items():
-        mono = float("nan")
-        anti_mono = float("nan")
-        tie_rate = float("nan")
+    def _triplet_layer_metrics(
+        bins: dict[str, dict[str, Any]],
+        *,
+        tempo_key: str,
+    ) -> dict[str, float]:
+        empty = {"mono": float("nan"), "anti": float("nan"), "tie": float("nan")}
         if all(name in bins for name in ("slow", "mid", "fast")):
             triplet_valid = all(
                 np.isfinite(float(bins[name]["g_domain_valid"])) and float(bins[name]["g_domain_valid"]) > 0.5
                 for name in ("slow", "mid", "fast")
             )
             if triplet_valid:
-                mono = float(
+                slow_val = float(bins["slow"].get(tempo_key, float("nan")))
+                mid_val = float(bins["mid"].get(tempo_key, float("nan")))
+                fast_val = float(bins["fast"].get(tempo_key, float("nan")))
+                if not (np.isfinite(slow_val) and np.isfinite(mid_val) and np.isfinite(fast_val)):
+                    return empty
+                return {
+                    "mono": float(
                     tempo_monotonicity(
-                        [bins["slow"]["tempo_out"]],
-                        [bins["mid"]["tempo_out"]],
-                        [bins["fast"]["tempo_out"]],
-                    ).item()
-                )
-                anti_mono = float(
+                            [slow_val],
+                            [mid_val],
+                            [fast_val],
+                        ).item()
+                    ),
+                    "anti": float(
                     tempo_monotonicity(
-                        [bins["slow"]["tempo_out"]],
-                        [bins["mid"]["tempo_out"]],
-                        [bins["fast"]["tempo_out"]],
-                        increasing=False,
-                    ).item()
-                )
-                tie_rate = float(
+                            [slow_val],
+                            [mid_val],
+                            [fast_val],
+                            increasing=False,
+                        ).item()
+                    ),
+                    "tie": float(
                     tempo_tie_rate(
-                        [bins["slow"]["tempo_out"]],
-                        [bins["mid"]["tempo_out"]],
-                        [bins["fast"]["tempo_out"]],
-                    ).item()
-                )
+                            [slow_val],
+                            [mid_val],
+                            [fast_val],
+                        ).item()
+                    ),
+                }
+        return empty
+
+    for (src_id, eval_mode, triplet_condition, pair_id, control_contract_id), bins in grouped.items():
+        raw_metrics = _triplet_layer_metrics(bins, tempo_key="tempo_out_raw")
+        preproj_metrics = _triplet_layer_metrics(bins, tempo_key="tempo_out_preproj")
+        exec_metrics = _triplet_layer_metrics(bins, tempo_key="tempo_out_exec")
         for ref_bin, payload in sorted(bins.items()):
             delta_g = (
                 float(payload["g_ref"] - payload["g_src_utt"])
@@ -1717,6 +1803,7 @@ def build_monotonicity_table(
                     "src_id": src_id,
                     "sample_id": payload["sample_id"],
                     "pair_id": payload["pair_id"],
+                    "control_contract_id": payload["control_contract_id"],
                     "ref_bin": ref_bin,
                     "tempo_out": payload["tempo_out"],
                     "tempo_out_raw": payload["tempo_out_raw"],
@@ -1726,6 +1813,21 @@ def build_monotonicity_table(
                     "tempo_delta": (
                         float(payload["tempo_out"] - payload["tempo_src"])
                         if np.isfinite(payload["tempo_out"]) and np.isfinite(payload["tempo_src"])
+                        else float("nan")
+                    ),
+                    "tempo_delta_raw": (
+                        float(payload["tempo_out_raw"] - payload["tempo_src"])
+                        if np.isfinite(payload["tempo_out_raw"]) and np.isfinite(payload["tempo_src"])
+                        else float("nan")
+                    ),
+                    "tempo_delta_preproj": (
+                        float(payload["tempo_out_preproj"] - payload["tempo_src"])
+                        if np.isfinite(payload["tempo_out_preproj"]) and np.isfinite(payload["tempo_src"])
+                        else float("nan")
+                    ),
+                    "tempo_delta_exec": (
+                        float(payload["tempo_out_exec"] - payload["tempo_src"])
+                        if np.isfinite(payload["tempo_out_exec"]) and np.isfinite(payload["tempo_src"])
                         else float("nan")
                     ),
                     "tempo_ref": payload["tempo_ref"],
@@ -1750,9 +1852,18 @@ def build_monotonicity_table(
                     "ref_condition_group": triplet_condition,
                     "same_text_reference": payload["same_text_reference"],
                     "same_speaker_reference": payload["same_speaker_reference"],
-                    "mono_triplet_ok": mono,
-                    "anti_mono_triplet_ok": anti_mono,
-                    "tempo_tie_triplet": tie_rate,
+                    "mono_triplet_ok_raw": raw_metrics["mono"],
+                    "mono_triplet_ok_preproj": preproj_metrics["mono"],
+                    "mono_triplet_ok_exec": exec_metrics["mono"],
+                    "mono_triplet_ok": exec_metrics["mono"],
+                    "anti_mono_triplet_ok_raw": raw_metrics["anti"],
+                    "anti_mono_triplet_ok_preproj": preproj_metrics["anti"],
+                    "anti_mono_triplet_ok_exec": exec_metrics["anti"],
+                    "anti_mono_triplet_ok": exec_metrics["anti"],
+                    "tempo_tie_triplet_raw": raw_metrics["tie"],
+                    "tempo_tie_triplet_preproj": preproj_metrics["tie"],
+                    "tempo_tie_triplet_exec": exec_metrics["tie"],
+                    "tempo_tie_triplet": exec_metrics["tie"],
                     "item_name": payload["item_name"],
                     "prompt_speech_mask_explicit": payload["prompt_speech_mask_explicit"],
                 }
@@ -1765,17 +1876,60 @@ def summarize_falsification_ladder(
     monotonicity_df: pd.DataFrame,
     prefix_silence_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    eval_modes: set[str] = set()
+    eval_contract_pairs: set[tuple[str, str]] = set()
     for frame in (ref_crop_df, monotonicity_df, prefix_silence_df):
         if not frame.empty and "eval_mode" in frame:
-            eval_modes.update(_as_str(mode) for mode in frame["eval_mode"].dropna().tolist())
-    if not eval_modes:
+            if "control_contract_id" in frame:
+                observed = frame[["eval_mode", "control_contract_id"]].dropna(how="all")
+                for _, row in observed.iterrows():
+                    eval_contract_pairs.add(
+                        (
+                            _as_str(row.get("eval_mode", "")),
+                            _as_str(row.get("control_contract_id", "")),
+                        )
+                    )
+            else:
+                eval_contract_pairs.update((_as_str(mode), "") for mode in frame["eval_mode"].dropna().tolist())
+    if not eval_contract_pairs:
         return pd.DataFrame()
     rows: list[dict[str, Any]] = []
-    for eval_mode in sorted(eval_modes):
-        crop_mode = ref_crop_df[ref_crop_df["eval_mode"] == eval_mode].copy() if not ref_crop_df.empty and "eval_mode" in ref_crop_df else pd.DataFrame()
-        mono_mode = monotonicity_df[monotonicity_df["eval_mode"] == eval_mode].copy() if not monotonicity_df.empty and "eval_mode" in monotonicity_df else pd.DataFrame()
-        prefix_mode = prefix_silence_df[prefix_silence_df["eval_mode"] == eval_mode].copy() if not prefix_silence_df.empty and "eval_mode" in prefix_silence_df else pd.DataFrame()
+    for eval_mode, control_contract_id in sorted(eval_contract_pairs):
+        crop_mode = (
+            ref_crop_df[
+                (ref_crop_df["eval_mode"] == eval_mode)
+                & (
+                    True
+                    if "control_contract_id" not in ref_crop_df
+                    else ref_crop_df["control_contract_id"].astype(str) == str(control_contract_id)
+                )
+            ].copy()
+            if not ref_crop_df.empty and "eval_mode" in ref_crop_df
+            else pd.DataFrame()
+        )
+        mono_mode = (
+            monotonicity_df[
+                (monotonicity_df["eval_mode"] == eval_mode)
+                & (
+                    True
+                    if "control_contract_id" not in monotonicity_df
+                    else monotonicity_df["control_contract_id"].astype(str) == str(control_contract_id)
+                )
+            ].copy()
+            if not monotonicity_df.empty and "eval_mode" in monotonicity_df
+            else pd.DataFrame()
+        )
+        prefix_mode = (
+            prefix_silence_df[
+                (prefix_silence_df["eval_mode"] == eval_mode)
+                & (
+                    True
+                    if "control_contract_id" not in prefix_silence_df
+                    else prefix_silence_df["control_contract_id"].astype(str) == str(control_contract_id)
+                )
+            ].copy()
+            if not prefix_silence_df.empty and "eval_mode" in prefix_silence_df
+            else pd.DataFrame()
+        )
 
         signal_explain = tempo_explainability(crop_mode.get("delta_g", []), crop_mode.get("zbar_sp_star", [])) if not crop_mode.empty else {
             "spearman": float("nan"),
@@ -1815,11 +1969,20 @@ def summarize_falsification_ladder(
         mono_rate = float("nan")
         anti_mono_rate = float("nan")
         tie_rate = float("nan")
-        tempo_transfer = {
-            "spearman": float("nan"),
-            "robust_slope": float("nan"),
-            "r2_like": float("nan"),
+        layer_metrics: dict[str, dict[str, float | dict[str, float]]] = {
+            layer: {
+                "mono": float("nan"),
+                "anti": float("nan"),
+                "tie": float("nan"),
+                "transfer": {
+                    "spearman": float("nan"),
+                    "robust_slope": float("nan"),
+                    "r2_like": float("nan"),
+                },
+            }
+            for layer in ("raw", "preproj", "exec")
         }
+        tempo_transfer = layer_metrics["exec"]["transfer"]
         negative_control_gap = float("nan")
         real_reference_count = 0
         negative_control_count = 0
@@ -1827,17 +1990,6 @@ def summarize_falsification_ladder(
         if not mono_mode.empty:
             triplet_keys = ["triplet_id"] if "triplet_id" in mono_mode.columns else ["src_id", "eval_mode", "pair_id", "ref_condition"]
             unique_triplets = mono_mode.drop_duplicates(subset=[key for key in triplet_keys if key in mono_mode.columns])
-            mono_values = unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)
-            mono_values = mono_values[np.isfinite(mono_values)]
-            mono_rate = float(np.nanmean(mono_values)) if mono_values.size > 0 else float("nan")
-            if "anti_mono_triplet_ok" in unique_triplets:
-                anti_values = unique_triplets["anti_mono_triplet_ok"].to_numpy(dtype=np.float32)
-                anti_values = anti_values[np.isfinite(anti_values)]
-                anti_mono_rate = float(np.nanmean(anti_values)) if anti_values.size > 0 else float("nan")
-            if "tempo_tie_triplet" in unique_triplets:
-                tie_values = unique_triplets["tempo_tie_triplet"].to_numpy(dtype=np.float32)
-                tie_values = tie_values[np.isfinite(tie_values)]
-                tie_rate = float(np.nanmean(tie_values)) if tie_values.size > 0 else float("nan")
             if "tempo_ref_runtime" in mono_mode.columns:
                 tempo_x_col = "tempo_ref_runtime"
             elif "delta_g_ref_minus_src_prefix_final_neg" in mono_mode.columns:
@@ -1846,7 +1998,41 @@ def summarize_falsification_ladder(
                 tempo_x_col = "delta_g_ref_minus_src_prefix_neg"
             else:
                 tempo_x_col = "delta_g_ref_minus_src_utt_neg" if "delta_g_ref_minus_src_utt_neg" in mono_mode.columns else "delta_g"
-            tempo_y_col = "tempo_delta" if "tempo_delta" in mono_mode.columns else "tempo_out"
+            for layer, mono_col, anti_col, tie_col, delta_col in (
+                ("raw", "mono_triplet_ok_raw", "anti_mono_triplet_ok_raw", "tempo_tie_triplet_raw", "tempo_delta_raw"),
+                ("preproj", "mono_triplet_ok_preproj", "anti_mono_triplet_ok_preproj", "tempo_tie_triplet_preproj", "tempo_delta_preproj"),
+                ("exec", "mono_triplet_ok_exec", "anti_mono_triplet_ok_exec", "tempo_tie_triplet_exec", "tempo_delta_exec"),
+            ):
+                mono_source_col = mono_col if mono_col in unique_triplets.columns else "mono_triplet_ok"
+                anti_source_col = anti_col if anti_col in unique_triplets.columns else "anti_mono_triplet_ok"
+                tie_source_col = tie_col if tie_col in unique_triplets.columns else "tempo_tie_triplet"
+                delta_source_col = delta_col if delta_col in mono_mode.columns else "tempo_delta"
+                if mono_source_col in unique_triplets:
+                    mono_values = unique_triplets[mono_source_col].to_numpy(dtype=np.float32)
+                    mono_values = mono_values[np.isfinite(mono_values)]
+                    layer_metrics[layer]["mono"] = (
+                        float(np.nanmean(mono_values)) if mono_values.size > 0 else float("nan")
+                    )
+                if anti_source_col in unique_triplets:
+                    anti_values = unique_triplets[anti_source_col].to_numpy(dtype=np.float32)
+                    anti_values = anti_values[np.isfinite(anti_values)]
+                    layer_metrics[layer]["anti"] = (
+                        float(np.nanmean(anti_values)) if anti_values.size > 0 else float("nan")
+                    )
+                if tie_source_col in unique_triplets:
+                    tie_values = unique_triplets[tie_source_col].to_numpy(dtype=np.float32)
+                    tie_values = tie_values[np.isfinite(tie_values)]
+                    layer_metrics[layer]["tie"] = (
+                        float(np.nanmean(tie_values)) if tie_values.size > 0 else float("nan")
+                    )
+                layer_metrics[layer]["transfer"] = transfer_slope(
+                    mono_mode.get(tempo_x_col, []),
+                    mono_mode.get(delta_source_col, mono_mode.get("tempo_delta", [])),
+                )
+            mono_rate = float(layer_metrics["exec"]["mono"])
+            anti_mono_rate = float(layer_metrics["exec"]["anti"])
+            tie_rate = float(layer_metrics["exec"]["tie"])
+            tempo_y_col = "tempo_delta_exec" if "tempo_delta_exec" in mono_mode.columns else "tempo_delta"
             tempo_transfer = transfer_slope(mono_mode.get(tempo_x_col, []), mono_mode.get(tempo_y_col, []))
             negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
                 mono_mode,
@@ -1884,6 +2070,7 @@ def summarize_falsification_ladder(
         rows.append(
             {
                 "eval_mode": eval_mode,
+                "control_contract_id": control_contract_id,
                 "signal_explainability_spearman": float(signal_explain["spearman"]),
                 "signal_explainability_slope": float(signal_explain["robust_slope"]),
                 "signal_explainability_r2_like": float(signal_explain["r2_like"]),
@@ -1904,6 +2091,21 @@ def summarize_falsification_ladder(
                 "tempo_tie_rate": tie_rate,
                 "tempo_transfer_slope": float(tempo_transfer["robust_slope"]),
                 "tempo_transfer_spearman": float(tempo_transfer["spearman"]),
+                "monotonicity_rate_raw": float(layer_metrics["raw"]["mono"]),
+                "monotonicity_rate_preproj": float(layer_metrics["preproj"]["mono"]),
+                "monotonicity_rate_exec": float(layer_metrics["exec"]["mono"]),
+                "anti_monotonicity_rate_raw": float(layer_metrics["raw"]["anti"]),
+                "anti_monotonicity_rate_preproj": float(layer_metrics["preproj"]["anti"]),
+                "anti_monotonicity_rate_exec": float(layer_metrics["exec"]["anti"]),
+                "tempo_tie_rate_raw": float(layer_metrics["raw"]["tie"]),
+                "tempo_tie_rate_preproj": float(layer_metrics["preproj"]["tie"]),
+                "tempo_tie_rate_exec": float(layer_metrics["exec"]["tie"]),
+                "tempo_transfer_slope_raw": float(layer_metrics["raw"]["transfer"]["robust_slope"]),
+                "tempo_transfer_slope_preproj": float(layer_metrics["preproj"]["transfer"]["robust_slope"]),
+                "tempo_transfer_slope_exec": float(layer_metrics["exec"]["transfer"]["robust_slope"]),
+                "tempo_transfer_spearman_raw": float(layer_metrics["raw"]["transfer"]["spearman"]),
+                "tempo_transfer_spearman_preproj": float(layer_metrics["preproj"]["transfer"]["spearman"]),
+                "tempo_transfer_spearman_exec": float(layer_metrics["exec"]["transfer"]["spearman"]),
                 "invalid_g_rate": invalid_g_rate,
                 "negative_control_gap": negative_control_gap,
                 "same_text_gap": gap,
@@ -1933,6 +2135,48 @@ def summarize_falsification_ladder(
                     if not prefix_mode.empty
                     and "cumulative_drift" in prefix_mode.columns
                     and np.isfinite(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "cumulative_drift_mean_abs": (
+                    float(np.nanmean(prefix_mode["cumulative_drift_mean_abs"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "cumulative_drift_mean_abs" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["cumulative_drift_mean_abs"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "disc_exec_prefix_discrepancy": (
+                    float(np.nanmean(prefix_mode["disc_exec_prefix_discrepancy"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "disc_exec_prefix_discrepancy" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["disc_exec_prefix_discrepancy"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "preproj_exec_prefix_discrepancy": (
+                    float(np.nanmean(prefix_mode["preproj_exec_prefix_discrepancy"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "preproj_exec_prefix_discrepancy" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["preproj_exec_prefix_discrepancy"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "z_prefix_discrepancy": (
+                    float(np.nanmean(prefix_mode["z_prefix_discrepancy"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "z_prefix_discrepancy" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["z_prefix_discrepancy"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "final_prefix_offset_abs_mean": (
+                    float(np.nanmean(prefix_mode["final_prefix_offset_abs_mean"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "final_prefix_offset_abs_mean" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["final_prefix_offset_abs_mean"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "max_prefix_offset_abs": (
+                    float(np.nanmean(prefix_mode["max_prefix_offset_abs"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "max_prefix_offset_abs" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["max_prefix_offset_abs"].to_numpy(dtype=np.float32)).any()
                     else float("nan")
                 ),
                 "n_ref_crops": int(crop_mode.shape[0]),

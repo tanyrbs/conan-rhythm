@@ -46,7 +46,9 @@ collapsed into one:
   This records a local zero-train `Gate0/1` pass for
   `weighted_median + exact_global_family + target_as_ref`.
 - latest local online-training candidate:
-  `tmp/gate2_candidate_20260415_s75_srcgap/review/gate_status.json`
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
+  with config
+  `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
   plus the local Gate3 work directory
   `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
   These are local candidate diagnostics only; they are **not** official
@@ -56,8 +58,8 @@ Official training is still blocked because:
 
 - Gate 1-online was not re-recorded under the official gate JSON on the
   maintained online contract
-- the local Gate2-online `src_gap` candidate did not materially improve the
-  aggregate gate picture
+- the local Gate2-online execution candidate now truly activates greedy repair
+  after the adapter-forwarding fix, but the aggregate gain is still too small
 - later projector/headroom falsification only improved the train split under a
   looser local probe surface
 - local Gate3 candidate work has not been converted into an official reviewed

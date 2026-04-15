@@ -179,6 +179,33 @@ class ConanDurationAdapter(nn.Module):
             boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
             boundary_offset_decay=hparams.get("rhythm_v3_boundary_offset_decay", None),
             boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
+            integer_projection_mode=str(
+                hparams.get(
+                    "rhythm_v3_integer_projection_mode",
+                    hparams.get("rhythm_v3_projection_mode", "greedy"),
+                )
+                or "greedy"
+            ),
+            integer_projection_anchor_mode=str(
+                hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded"
+            ),
+            prefix_projection_candidate_radius=int(
+                hparams.get("rhythm_v3_prefix_projection_candidate_radius", 2) or 2
+            ),
+            prefix_projection_max_states=int(hparams.get("rhythm_v3_prefix_projection_max_states", 256) or 256),
+            prefix_projection_terminal_carry_weight=float(
+                hparams.get("rhythm_v3_prefix_projection_terminal_carry_weight", 0.25) or 0.0
+            ),
+            prefix_projection_terminal_offset_weight=float(
+                hparams.get("rhythm_v3_prefix_projection_terminal_offset_weight", 0.05) or 0.0
+            ),
+            projection_repair_max_steps=int(hparams.get("rhythm_v3_projection_repair_max_steps", 0) or 0),
+            projection_repair_speech_bonus=float(
+                hparams.get("rhythm_v3_projection_repair_speech_bonus", 1.0) or 0.0
+            ),
+            projection_repair_boundary_penalty=float(
+                hparams.get("rhythm_v3_projection_repair_boundary_penalty", 0.35) or 0.0
+            ),
             rate_mode=rate_mode,
             simple_global_stats=simple_global_stats,
             minimal_v1_profile=minimal_v1_profile,
@@ -354,16 +381,14 @@ class ConanDurationAdapter(nn.Module):
         state=None,
         return_state: bool = False,
     ):
-        if (
-            state is not None
-            and src_prefix_stat_mode_requires_full_history(
-                getattr(self.module, "src_prefix_stat_mode", "ema")
-            )
-        ):
+        resolved_prefix_mode = str(
+            getattr(self.module, "src_prefix_stat_mode", "ema") or "ema"
+        ).strip().lower()
+        if state is not None and resolved_prefix_mode != "ema":
             raise ValueError(
-                "rhythm_v3 src_prefix_stat_mode=exact_global_family is currently a local/offline gate contract only. "
-                "Chunk-continuation runtime requires a compressed prefix state, but exact_global_family still depends "
-                "on full-history robust-prefix support. Use ema/family_hybrid for strict online continuation."
+                "strict online continuation currently only guarantees src_prefix_stat_mode=ema. "
+                "dual_timescale requires a 2-state carry, family_hybrid requires a richer prefix summary state, "
+                "and exact_global_family remains local/offline only."
             )
         precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
         if precomputed_cache is not None:
@@ -828,6 +853,61 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_src_prefix_min_support"] = float(
             getattr(self.module, "src_prefix_min_support", 3)
         )
+        ret["rhythm_v3_prompt_domain_mode"] = str(
+            getattr(self.module, "prompt_domain_mode", "minimal_strict")
+        )
+        ret["rhythm_v3_prompt_require_clean_support"] = float(
+            bool(getattr(self.module, "prompt_require_clean_support", True))
+        )
+        ret["rhythm_v3_prompt_g_variant"] = str(
+            getattr(self.module, "prompt_g_variant", getattr(self.module, "g_variant", "raw_median"))
+        )
+        ret["rhythm_v3_src_g_variant"] = str(
+            getattr(self.module, "src_g_variant", getattr(self.module, "g_variant", "raw_median"))
+        )
+        ret["rhythm_v3_min_prompt_speech_ratio"] = float(
+            getattr(self.module, "min_prompt_speech_ratio", self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6))
+        )
+        ret["rhythm_v3_min_prompt_ref_len_sec"] = float(
+            self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0
+        )
+        ret["rhythm_v3_max_prompt_ref_len_sec"] = float(
+            self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0
+        )
+        ret["rhythm_v3_disallow_same_text_reference"] = float(
+            bool(self.hparams.get("rhythm_v3_disallow_same_text_reference", True))
+        )
+        ret["rhythm_v3_disallow_same_text_paired_target"] = float(
+            bool(self.hparams.get("rhythm_v3_disallow_same_text_paired_target", False))
+        )
+        ret["rhythm_v3_require_same_text_paired_target"] = float(
+            bool(self.hparams.get("rhythm_v3_require_same_text_paired_target", True))
+        )
+        ret["rhythm_v3_strict_eval_invalid_g"] = float(
+            bool(self.hparams.get("rhythm_v3_strict_eval_invalid_g", True))
+        )
+        ret["rhythm_v3_alignment_prefilter_bad_samples"] = float(
+            bool(self.hparams.get("rhythm_v3_alignment_prefilter_bad_samples", False))
+        )
+        ret["rhythm_v3_alignment_prefilter_max_attempts"] = float(
+            self.hparams.get("rhythm_v3_alignment_prefilter_max_attempts", 4) or 0
+        )
+        ret["rhythm_v3_alignment_unmatched_speech_ratio_max"] = float(
+            self.hparams.get("rhythm_v3_alignment_unmatched_speech_ratio_max", 1.0) or 0.0
+        )
+        ret["rhythm_v3_alignment_mean_local_confidence_speech_min"] = float(
+            self.hparams.get("rhythm_v3_alignment_mean_local_confidence_speech_min", 0.0) or 0.0
+        )
+        ret["rhythm_v3_alignment_mean_coarse_confidence_speech_min"] = float(
+            self.hparams.get("rhythm_v3_alignment_mean_coarse_confidence_speech_min", 0.0) or 0.0
+        )
+        ret["rhythm_v3_alignment_local_margin_p10_min"] = float(
+            self.hparams.get("rhythm_v3_alignment_local_margin_p10_min", 0.0) or 0.0
+        )
+        ret["rhythm_v3_use_src_gap_in_coarse_head"] = float(
+            bool(getattr(self.module, "use_src_gap_in_coarse_head", False))
+        )
+        ret["rhythm_v3_analytic_gap_clip"] = float(getattr(self.module, "analytic_gap_clip", 0.35))
         ret["rhythm_v3_minimal_v1_profile"] = float(bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False)))
         ret["rhythm_v3_strict_minimal_claim_profile"] = float(
             bool(self.hparams.get("rhythm_v3_strict_minimal_claim_profile", True))
@@ -837,6 +917,53 @@ class ConanDurationAdapter(nn.Module):
         )
         ret["rhythm_v3_alignment_mode"] = str(
             self.hparams.get("rhythm_v3_alignment_mode", "continuous_viterbi_v1") or "continuous_viterbi_v1"
+        )
+        ret["rhythm_v3_prefix_budget_pos"] = float(getattr(self.module.projector, "prefix_budget_pos", 24))
+        ret["rhythm_v3_prefix_budget_neg"] = float(getattr(self.module.projector, "prefix_budget_neg", 24))
+        ret["rhythm_v3_dynamic_budget_ratio"] = float(getattr(self.module.projector, "dynamic_budget_ratio", 0.0))
+        ret["rhythm_v3_min_prefix_budget"] = float(getattr(self.module.projector, "min_prefix_budget", 0))
+        ret["rhythm_v3_max_prefix_budget"] = float(getattr(self.module.projector, "max_prefix_budget", 0))
+        ret["rhythm_v3_budget_mode"] = str(getattr(self.module.projector, "budget_mode", "total"))
+        ret["rhythm_v3_boundary_carry_decay"] = float(
+            getattr(self.module.projector, "boundary_carry_decay", 0.25)
+        )
+        ret["rhythm_v3_boundary_offset_decay"] = float(
+            getattr(self.module.projector, "boundary_offset_decay", 0.25)
+        )
+        ret["rhythm_v3_boundary_reset_thresh"] = float(
+            getattr(self.module.projector, "boundary_reset_thresh", 0.5)
+        )
+        ret["rhythm_v3_integer_projection_mode"] = str(
+            getattr(self.module.projector, "integer_projection_mode", "greedy")
+        )
+        ret["rhythm_v3_integer_projection_anchor_mode"] = str(
+            getattr(self.module.projector, "integer_projection_anchor_mode", "rounded")
+        )
+        ret["rhythm_v3_projection_repair_max_steps"] = float(
+            getattr(self.module.projector, "projection_repair_max_steps", 0)
+        )
+        ret["rhythm_v3_projection_repair_speech_bonus"] = float(
+            getattr(self.module.projector, "projection_repair_speech_bonus", 1.0)
+        )
+        ret["rhythm_v3_projection_repair_boundary_penalty"] = float(
+            getattr(self.module.projector, "projection_repair_boundary_penalty", 0.35)
+        )
+        ret["rhythm_v3_control_contract_id"] = (
+            f"prompt={ret['rhythm_v3_prompt_domain_mode']}"
+            f"|prompt_g={ret['rhythm_v3_prompt_g_variant']}"
+            f"|src_g={ret['rhythm_v3_src_g_variant']}"
+            f"|prefix={src_prefix_stat_mode}"
+            f"|src_init={ret['rhythm_v3_src_rate_init_mode']}"
+            f"|proj={ret['rhythm_v3_integer_projection_mode']}"
+            f"|anchor={ret['rhythm_v3_integer_projection_anchor_mode']}"
+            f"|budget={ret['rhythm_v3_budget_mode']}"
+            f"|budget_box={int(ret['rhythm_v3_prefix_budget_pos'])}/{int(ret['rhythm_v3_prefix_budget_neg'])}"
+            f"|clip={ret['rhythm_v3_analytic_gap_clip']:.2f}"
+            f"|srcgap={int(ret['rhythm_v3_use_src_gap_in_coarse_head'])}"
+            f"|prompt_speech={ret['rhythm_v3_min_prompt_speech_ratio']:.2f}"
+            f"|same_text_ref={int(ret['rhythm_v3_disallow_same_text_reference'])}"
+            f"|align_unmatched={ret['rhythm_v3_alignment_unmatched_speech_ratio_max']:.2f}"
+            f"|boundary={ret['rhythm_v3_boundary_carry_decay']:.2f}/{ret['rhythm_v3_boundary_offset_decay']:.2f}"
         )
         ret["rhythm_v3_detach_global_term_in_local_head"] = float(
             bool(getattr(self.module, "detach_global_term_in_local_head", False))
@@ -1466,6 +1593,40 @@ class ConanDurationAdapter(nn.Module):
                         else None
                     )
                 ),
+                "projector_prefreeze_exec": (
+                    execution.projector_prefreeze_exec.detach()
+                    if isinstance(getattr(execution, "projector_prefreeze_exec", None), torch.Tensor)
+                    else None
+                ),
+                "projector_prefreeze_duration_exec": (
+                    execution.projector_prefreeze_duration_exec.detach()
+                    if isinstance(getattr(execution, "projector_prefreeze_duration_exec", None), torch.Tensor)
+                    else (
+                        execution.projector_prefreeze_exec.detach()
+                        if isinstance(getattr(execution, "projector_prefreeze_exec", None), torch.Tensor)
+                        else None
+                    )
+                ),
+                "projector_repair_candidate_delta": (
+                    execution.projector_repair_candidate_delta.detach()
+                    if isinstance(getattr(execution, "projector_repair_candidate_delta", None), torch.Tensor)
+                    else None
+                ),
+                "projector_repair_candidate_steps": (
+                    execution.projector_repair_candidate_steps.detach()
+                    if isinstance(getattr(execution, "projector_repair_candidate_steps", None), torch.Tensor)
+                    else None
+                ),
+                "projector_repair_delta": (
+                    execution.projector_repair_delta.detach()
+                    if isinstance(getattr(execution, "projector_repair_delta", None), torch.Tensor)
+                    else None
+                ),
+                "projector_repair_steps": (
+                    execution.projector_repair_steps.detach()
+                    if isinstance(getattr(execution, "projector_repair_steps", None), torch.Tensor)
+                    else None
+                ),
                 "projector_clamp_delta": (
                     execution.projector_clamp_delta.detach()
                     if isinstance(getattr(execution, "projector_clamp_delta", None), torch.Tensor)
@@ -1474,6 +1635,11 @@ class ConanDurationAdapter(nn.Module):
                 "projector_clamp_mass": (
                     execution.projector_clamp_mass.detach()
                     if isinstance(getattr(execution, "projector_clamp_mass", None), torch.Tensor)
+                    else None
+                ),
+                "projector_rounding_only_regret": (
+                    execution.projector_rounding_only_regret.detach()
+                    if isinstance(getattr(execution, "projector_rounding_only_regret", None), torch.Tensor)
                     else None
                 ),
                 "projector_rounding_regret": (
@@ -1493,6 +1659,11 @@ class ConanDurationAdapter(nn.Module):
                 "projector_preclamp_prefix_cumsum": (
                     execution.projector_preclamp_prefix_cumsum.detach()
                     if isinstance(getattr(execution, "projector_preclamp_prefix_cumsum", None), torch.Tensor)
+                    else None
+                ),
+                "projector_prefreeze_prefix_cumsum": (
+                    execution.projector_prefreeze_prefix_cumsum.detach()
+                    if isinstance(getattr(execution, "projector_prefreeze_prefix_cumsum", None), torch.Tensor)
                     else None
                 ),
                 "source_prefix_cumsum": (
@@ -1573,9 +1744,17 @@ class ConanDurationAdapter(nn.Module):
             ]
             ret["rhythm_debug_projector_preclamp_exec"] = debug_bundle["projector_preclamp_exec"]
             ret["rhythm_debug_projector_preclamp_duration_exec"] = debug_bundle["projector_preclamp_duration_exec"]
+            ret["rhythm_debug_projector_prefreeze_exec"] = debug_bundle["projector_prefreeze_exec"]
+            ret["rhythm_debug_projector_prefreeze_duration_exec"] = debug_bundle["projector_prefreeze_duration_exec"]
+            ret["rhythm_debug_projector_repair_candidate_delta"] = debug_bundle["projector_repair_candidate_delta"]
+            ret["rhythm_debug_projector_repair_candidate_steps"] = debug_bundle["projector_repair_candidate_steps"]
+            ret["rhythm_debug_projector_repair_delta"] = debug_bundle["projector_repair_delta"]
+            ret["rhythm_debug_projector_repair_steps"] = debug_bundle["projector_repair_steps"]
             ret["rhythm_debug_projector_clamp_delta"] = debug_bundle["projector_clamp_delta"]
+            ret["rhythm_debug_projector_rounding_only_regret"] = debug_bundle["projector_rounding_only_regret"]
             ret["rhythm_debug_projector_projection_regret"] = debug_bundle["projector_projection_regret"]
             ret["rhythm_debug_projector_preclamp_prefix_cumsum"] = debug_bundle["projector_preclamp_prefix_cumsum"]
+            ret["rhythm_debug_projector_prefreeze_prefix_cumsum"] = debug_bundle["projector_prefreeze_prefix_cumsum"]
             for key, value in g_debug_stats.items():
                 ret[f"rhythm_debug_{key}"] = value
             if isinstance(ret.get("rhythm_prompt_global_weight_present"), torch.Tensor):

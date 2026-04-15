@@ -130,6 +130,10 @@ class DurationV3TargetBuildConfig:
     beta1_min_points: int = 24
     beta1_min_var: float = 2.5e-3
 
+    @property
+    def lambda_mem(self) -> float:
+        return float(self.lambda_op)
+
 
 def _resolve_target_boundary_confidence(
     unit_batch,
@@ -145,10 +149,6 @@ def _resolve_target_boundary_confidence(
     if isinstance(unit_mask, torch.Tensor):
         boundary_confidence = boundary_confidence * unit_mask.float()
     return boundary_confidence
-
-    @property
-    def lambda_mem(self) -> float:
-        return float(self.lambda_op)
 
 
 @dataclass(frozen=True)

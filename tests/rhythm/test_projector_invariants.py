@@ -45,7 +45,7 @@ class _ChunkStateHeadStub(nn.Module):
 
 class DurationV3ProjectorHotPathTests(unittest.TestCase):
     def test_duration_v3_prefix_projection_keeps_carry_budget_and_boundary_semantics(self):
-        projected, residual, prefix_offset, boundary_hit, boundary_decay = (
+        projected, residual, prefix_offset, boundary_hit, boundary_decay, _, _, _, _ = (
             StreamingDurationV3Projector._project_duration_prefix(
                 unit_duration_exec=torch.tensor([[2.6, 0.2, 4.7, 3.6]], dtype=torch.float32),
                 source_duration_obs=torch.tensor([[2.0, 5.0, 4.0, 3.0]], dtype=torch.float32),
@@ -66,7 +66,7 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
         )
 
         assert torch.allclose(projected, torch.tensor([[3.0, 5.0, 4.0, 3.0]], dtype=torch.float32))
-        assert torch.allclose(residual, torch.tensor([[0.95]], dtype=torch.float32))
+        assert torch.allclose(residual, torch.tensor([[0.45]], dtype=torch.float32))
         assert torch.allclose(prefix_offset, torch.tensor([[0.5]], dtype=torch.float32))
         assert torch.allclose(boundary_hit, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
         assert torch.allclose(boundary_decay, torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32))
@@ -146,7 +146,7 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
             assert torch.allclose(batched_tensor, expected_tensor)
 
     def test_duration_v3_prefix_optimal_projection_preserves_cached_prefix(self):
-        projected, residual, prefix_offset, boundary_hit, boundary_decay = (
+        projected, residual, prefix_offset, boundary_hit, boundary_decay, _, _, _, _ = (
             StreamingDurationV3Projector._project_duration_prefix(
                 unit_duration_exec=torch.tensor([[9.0, 9.0, 2.49, 2.49]], dtype=torch.float32),
                 source_duration_obs=torch.tensor([[2.0, 3.0, 2.0, 2.0]], dtype=torch.float32),
@@ -287,12 +287,12 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
             boundary_reset_thresh=0.5,
         )
 
-        projected_keep, residual_keep, prefix_offset_keep, boundary_hit_keep, boundary_decay_keep = keep_offset
-        projected_reset, residual_reset, prefix_offset_reset, boundary_hit_reset, boundary_decay_reset = reset_offset
+        projected_keep, residual_keep, prefix_offset_keep, boundary_hit_keep, boundary_decay_keep, _, _, _, _ = keep_offset
+        projected_reset, residual_reset, prefix_offset_reset, boundary_hit_reset, boundary_decay_reset, _, _, _, _ = reset_offset
 
         assert torch.allclose(projected_keep, torch.tensor([[2.0, 2.0]], dtype=torch.float32))
         assert torch.allclose(projected_reset, torch.tensor([[2.0, 3.0]], dtype=torch.float32))
-        assert torch.allclose(residual_keep, torch.tensor([[0.8]], dtype=torch.float32))
+        assert torch.allclose(residual_keep, torch.tensor([[-0.2]], dtype=torch.float32))
         assert torch.allclose(residual_reset, torch.tensor([[-0.2]], dtype=torch.float32))
         assert torch.allclose(prefix_offset_keep, torch.tensor([[1.0]], dtype=torch.float32))
         assert torch.allclose(prefix_offset_reset, torch.tensor([[1.0]], dtype=torch.float32))

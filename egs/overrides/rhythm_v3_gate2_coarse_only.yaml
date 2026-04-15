@@ -1,11 +1,5 @@
-base_config: egs/overrides/rhythm_v3_online_weighted_streaming.yaml
+base_config: egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml
 
-# Gate 2: coarse-only falsification on the maintained online contract.
-rhythm_v3_eval_mode: coarse_only
-rhythm_v3_gate_quality_strict: true
-rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json
-rhythm_v3_require_gate2_for_official_train: false
-rhythm_v3_disable_local_residual: true
-rhythm_v3_disable_coarse_bias: false
-lambda_rhythm_pref: 0.0
-lambda_rhythm_cons: 0.0
+# Gate 2 checked-in local candidate:
+# keep the maintained writer contract fixed, but use the execution-headroom
+# candidate surface that is actually runnable in the current repo state.

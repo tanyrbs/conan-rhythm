@@ -1,0 +1,8 @@
+base_config: egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml
+
+# Follow-up candidate for sources that remain flat before discrete execution.
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json
+rhythm_v3_src_prefix_stat_mode: dual_timescale
+rhythm_v3_local_rate_decay_fast: 0.75
+rhythm_v3_local_rate_decay_slow: 0.985
+rhythm_v3_local_rate_slow_mix: 0.55

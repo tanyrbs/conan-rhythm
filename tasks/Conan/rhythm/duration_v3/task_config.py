@@ -71,9 +71,42 @@ _GATE_STATUS_FINGERPRINT_KEYS = (
     "rhythm_v3_g_trim_ratio",
     "rhythm_v3_drop_edge_runs_for_g",
     "rhythm_v3_min_boundary_confidence_for_g",
+    "rhythm_v3_min_prompt_speech_ratio",
+    "rhythm_v3_min_prompt_ref_len_sec",
+    "rhythm_v3_max_prompt_ref_len_sec",
+    "rhythm_v3_disallow_same_text_reference",
+    "rhythm_v3_disallow_same_text_paired_target",
+    "rhythm_v3_require_same_text_paired_target",
+    "rhythm_v3_strict_eval_invalid_g",
+    "rhythm_v3_alignment_prefilter_bad_samples",
+    "rhythm_v3_alignment_prefilter_max_attempts",
+    "rhythm_v3_alignment_unmatched_speech_ratio_max",
+    "rhythm_v3_alignment_mean_local_confidence_speech_min",
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+    "rhythm_v3_alignment_local_margin_p10_min",
+    "rhythm_v3_prompt_domain_mode",
+    "rhythm_v3_prompt_require_clean_support",
+    "rhythm_v3_prompt_g_variant",
+    "rhythm_v3_src_g_variant",
     "rhythm_v3_src_prefix_stat_mode",
     "rhythm_v3_src_prefix_min_support",
     "rhythm_v3_src_rate_init_mode",
+    "rhythm_v3_use_src_gap_in_coarse_head",
+    "rhythm_v3_analytic_gap_clip",
+    "rhythm_v3_prefix_budget_pos",
+    "rhythm_v3_prefix_budget_neg",
+    "rhythm_v3_dynamic_budget_ratio",
+    "rhythm_v3_min_prefix_budget",
+    "rhythm_v3_max_prefix_budget",
+    "rhythm_v3_budget_mode",
+    "rhythm_v3_boundary_carry_decay",
+    "rhythm_v3_boundary_offset_decay",
+    "rhythm_v3_boundary_reset_thresh",
+    "rhythm_v3_integer_projection_mode",
+    "rhythm_v3_integer_projection_anchor_mode",
+    "rhythm_v3_projection_repair_max_steps",
+    "rhythm_v3_projection_repair_speech_bonus",
+    "rhythm_v3_projection_repair_boundary_penalty",
     "rhythm_v3_use_continuous_alignment",
     "rhythm_v3_alignment_mode",
     "rhythm_v3_minimal_v1_profile",
@@ -160,17 +193,44 @@ def _get_hparam_alias(hparams, primary: str, alias: str, default=None):
 
 
 _GATE_STATUS_BOOL_KEYS = {
+    "rhythm_v3_alignment_prefilter_bad_samples",
+    "rhythm_v3_disallow_same_text_paired_target",
+    "rhythm_v3_disallow_same_text_reference",
+    "rhythm_v3_prompt_require_clean_support",
+    "rhythm_v3_require_same_text_paired_target",
+    "rhythm_v3_strict_eval_invalid_g",
+    "rhythm_v3_use_src_gap_in_coarse_head",
     "rhythm_v3_use_continuous_alignment",
     "rhythm_v3_minimal_v1_profile",
     "rhythm_v3_strict_minimal_claim_profile",
 }
 _GATE_STATUS_INT_KEYS = {
+    "rhythm_v3_alignment_prefilter_max_attempts",
     "rhythm_v3_drop_edge_runs_for_g",
     "rhythm_v3_src_prefix_min_support",
+    "rhythm_v3_prefix_budget_pos",
+    "rhythm_v3_prefix_budget_neg",
+    "rhythm_v3_min_prefix_budget",
+    "rhythm_v3_max_prefix_budget",
+    "rhythm_v3_projection_repair_max_steps",
 }
 _GATE_STATUS_FLOAT_KEYS = {
+    "rhythm_v3_alignment_local_margin_p10_min",
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+    "rhythm_v3_alignment_mean_local_confidence_speech_min",
+    "rhythm_v3_alignment_unmatched_speech_ratio_max",
     "rhythm_v3_g_trim_ratio",
     "rhythm_v3_min_boundary_confidence_for_g",
+    "rhythm_v3_max_prompt_ref_len_sec",
+    "rhythm_v3_min_prompt_ref_len_sec",
+    "rhythm_v3_min_prompt_speech_ratio",
+    "rhythm_v3_analytic_gap_clip",
+    "rhythm_v3_dynamic_budget_ratio",
+    "rhythm_v3_boundary_carry_decay",
+    "rhythm_v3_boundary_offset_decay",
+    "rhythm_v3_boundary_reset_thresh",
+    "rhythm_v3_projection_repair_speech_bonus",
+    "rhythm_v3_projection_repair_boundary_penalty",
 }
 
 
@@ -190,9 +250,86 @@ def _normalize_gate_fingerprint_value(key: str, value):
     return str(value)
 
 
+def _resolve_gate_contract_hparam(hparams, key: str):
+    if key == "rhythm_v3_g_variant":
+        return str(hparams.get(key, "raw_median") or "raw_median")
+    if key == "rhythm_v3_g_trim_ratio":
+        return float(hparams.get(key, 0.2) or 0.2)
+    if key == "rhythm_v3_drop_edge_runs_for_g":
+        return int(hparams.get(key, 0) or 0)
+    if key == "rhythm_v3_min_boundary_confidence_for_g":
+        return hparams.get(key, None)
+    if key == "rhythm_v3_prompt_domain_mode":
+        return _normalize_prompt_domain_mode(hparams.get(key, "minimal_strict"))
+    if key == "rhythm_v3_prompt_require_clean_support":
+        return _is_enabled_flag(hparams.get(key, True))
+    if key == "rhythm_v3_prompt_g_variant":
+        return str(hparams.get(key, hparams.get("rhythm_v3_g_variant", "raw_median")) or "raw_median")
+    if key == "rhythm_v3_src_g_variant":
+        return str(hparams.get(key, hparams.get("rhythm_v3_g_variant", "raw_median")) or "raw_median")
+    if key == "rhythm_v3_src_prefix_stat_mode":
+        return str(hparams.get(key, "ema") or "ema").strip().lower()
+    if key == "rhythm_v3_src_prefix_min_support":
+        return int(hparams.get(key, 3) or 3)
+    if key == "rhythm_v3_src_rate_init_mode":
+        return str(hparams.get(key, "first_speech") or "first_speech").strip().lower()
+    if key == "rhythm_v3_use_src_gap_in_coarse_head":
+        return _is_enabled_flag(hparams.get(key, False))
+    if key == "rhythm_v3_analytic_gap_clip":
+        return float(hparams.get(key, 0.35) or 0.0)
+    if key == "rhythm_v3_prefix_budget_pos":
+        return int(hparams.get(key, hparams.get("rhythm_v3_unit_budget_pos", 24)) or 24)
+    if key == "rhythm_v3_prefix_budget_neg":
+        return int(hparams.get(key, hparams.get("rhythm_v3_unit_budget_neg", 24)) or 24)
+    if key == "rhythm_v3_dynamic_budget_ratio":
+        return float(hparams.get(key, 0.0) or 0.0)
+    if key == "rhythm_v3_min_prefix_budget":
+        return int(hparams.get(key, 0) or 0)
+    if key == "rhythm_v3_max_prefix_budget":
+        return int(hparams.get(key, 0) or 0)
+    if key == "rhythm_v3_budget_mode":
+        return str(hparams.get(key, "total") or "total").strip().lower()
+    if key == "rhythm_v3_boundary_carry_decay":
+        return float(hparams.get(key, 0.25) or 0.25)
+    if key == "rhythm_v3_boundary_offset_decay":
+        value = hparams.get(key, None)
+        if value is None:
+            value = hparams.get("rhythm_v3_boundary_carry_decay", 0.25)
+        return float(value)
+    if key == "rhythm_v3_boundary_reset_thresh":
+        return float(hparams.get(key, 0.5) or 0.5)
+    if key == "rhythm_v3_integer_projection_mode":
+        return str(
+            _get_hparam_alias(
+                hparams,
+                "rhythm_v3_integer_projection_mode",
+                "rhythm_v3_projection_mode",
+                "greedy",
+            )
+            or "greedy"
+        ).strip().lower()
+    if key == "rhythm_v3_integer_projection_anchor_mode":
+        return str(hparams.get(key, "rounded") or "rounded").strip().lower()
+    if key == "rhythm_v3_projection_repair_max_steps":
+        return int(hparams.get(key, 0) or 0)
+    if key == "rhythm_v3_projection_repair_speech_bonus":
+        return float(hparams.get(key, 1.0) or 0.0)
+    if key == "rhythm_v3_projection_repair_boundary_penalty":
+        return float(hparams.get(key, 0.35) or 0.0)
+    if key == "rhythm_v3_use_continuous_alignment":
+        return _is_enabled_flag(hparams.get(key, False))
+    if key == "rhythm_v3_alignment_mode":
+        return normalize_duration_v3_alignment_mode(hparams.get(key, "continuous_viterbi_v1"))
+    if key == "rhythm_v3_minimal_v1_profile":
+        return _is_enabled_flag(hparams.get(key, False))
+    if key == "rhythm_v3_strict_minimal_claim_profile":
+        return _is_enabled_flag(hparams.get(key, True))
+    return hparams.get(key)
+
+
 def _build_gate_contract_fingerprint(hparams) -> dict[str, object]:
     return {
-        key: _normalize_gate_fingerprint_value(key, hparams.get(key))
+        key: _normalize_gate_fingerprint_value(key, _resolve_gate_contract_hparam(hparams, key))
         for key in _GATE_STATUS_FINGERPRINT_KEYS
     }
 
@@ -220,6 +357,39 @@ def _validate_rhythm_v3_gate_status_json(
             "rhythm_v3_required_gate_status_json is missing required keys: "
             + ", ".join(missing)
         )
+    payload_fp = payload.get("contract_fingerprint")
+    if not isinstance(payload_fp, dict):
+        raise ValueError(
+            "rhythm_v3_required_gate_status_json must contain contract_fingerprint for strict gate reuse."
+        )
+    current_fp = _build_gate_contract_fingerprint(hparams)
+    payload_keys = set(payload_fp.keys())
+    required_keys = set(_GATE_STATUS_FINGERPRINT_KEYS)
+    missing_fp_keys = sorted(required_keys - payload_keys)
+    extra_fp_keys = sorted(payload_keys - required_keys)
+    if missing_fp_keys or extra_fp_keys:
+        problems: list[str] = []
+        if missing_fp_keys:
+            problems.append("missing_keys=" + ",".join(missing_fp_keys))
+        if extra_fp_keys:
+            problems.append("extra_keys=" + ",".join(extra_fp_keys))
+        raise ValueError(
+            "rhythm_v3_required_gate_status_json contract_fingerprint schema mismatch. "
+            + "; ".join(problems)
+        )
+    mismatches = []
+    for key in _GATE_STATUS_FINGERPRINT_KEYS:
+        payload_value = _normalize_gate_fingerprint_value(key, payload_fp.get(key))
+        if payload_value != current_fp.get(key):
+            mismatches.append(
+                f"{key}: payload={payload_value!r} current={current_fp.get(key)!r}"
+            )
+    if mismatches:
+        raise ValueError(
+            "rhythm_v3_required_gate_status_json contract mismatch with current hparams. "
+            "Regenerate gate status for the current g/prefix/alignment contract. "
+            + "; ".join(mismatches)
+        )
     if not bool(payload["gate0_pass"]) or not bool(payload["gate1_pass"]):
         raise ValueError(
             "rhythm_v3_gate_quality_strict requires gate0_pass=true and gate1_pass=true in "
@@ -239,24 +409,6 @@ def _validate_rhythm_v3_gate_status_json(
             "rhythm_v3_require_gate3_for_prefix_finetune requires gate3_pass=true in "
             "rhythm_v3_required_gate_status_json."
         )
-    payload_fp = payload.get("contract_fingerprint")
-    if isinstance(payload_fp, dict):
-        current_fp = _build_gate_contract_fingerprint(hparams)
-        mismatches = []
-        for key in _GATE_STATUS_FINGERPRINT_KEYS:
-            if key not in payload_fp:
-                continue
-            payload_value = _normalize_gate_fingerprint_value(key, payload_fp.get(key))
-            if payload_value != current_fp.get(key):
-                mismatches.append(
-                    f"{key}: payload={payload_value!r} current={current_fp.get(key)!r}"
-                )
-        if mismatches:
-            raise ValueError(
-                "rhythm_v3_required_gate_status_json contract mismatch with current hparams. "
-                "Regenerate gate status for the current g/prefix/alignment contract. "
-                + "; ".join(mismatches)
-            )
 
 
 def validate_duration_v3_training_hparams(hparams) -> None:
@@ -586,11 +738,19 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     budget_mode = str(hparams.get("rhythm_v3_budget_mode", "total") or "total").strip().lower()
     if budget_mode not in {"total", "speech_only", "hybrid"}:
         raise ValueError("rhythm_v3_budget_mode must be one of: total, speech_only, hybrid.")
-    integer_projection_mode = str(hparams.get("rhythm_v3_integer_projection_mode", "greedy") or "greedy").strip().lower()
+    integer_projection_mode = str(
+        hparams.get(
+            "rhythm_v3_integer_projection_mode",
+            hparams.get("rhythm_v3_projection_mode", "greedy"),
+        )
+        or "greedy"
+    ).strip().lower()
     integer_projection_aliases = {
         "default": "greedy",
         "nearest": "greedy",
         "recurrent": "greedy",
+        "repair": "greedy_repair",
+        "greedyrepair": "greedy_repair",
         "dp": "prefix_optimal",
         "prefix": "prefix_optimal",
         "prefix_dp": "prefix_optimal",
@@ -598,8 +758,8 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         "closed_prefix_optimal": "prefix_optimal",
     }
     integer_projection_mode = integer_projection_aliases.get(integer_projection_mode, integer_projection_mode)
-    if integer_projection_mode not in {"greedy", "prefix_optimal"}:
-        raise ValueError("rhythm_v3_integer_projection_mode must be one of: greedy, prefix_optimal.")
+    if integer_projection_mode not in {"greedy", "greedy_repair", "prefix_optimal"}:
+        raise ValueError("rhythm_v3_integer_projection_mode must be one of: greedy, greedy_repair, prefix_optimal.")
     integer_projection_anchor_mode = (
         str(hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded").strip().lower()
     )

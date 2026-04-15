@@ -252,6 +252,10 @@ def same_text_gap(
 
 
 def cumulative_drift(prefix_offset: Any) -> torch.Tensor:
+    return cumulative_drift_mean_abs(prefix_offset)
+
+
+def final_prefix_drift_abs_mean(prefix_offset: Any) -> torch.Tensor:
     offset = _to_tensor(prefix_offset).float()
     if offset.numel() <= 0:
         return torch.tensor(float("nan"))
@@ -262,6 +266,43 @@ def cumulative_drift(prefix_offset: Any) -> torch.Tensor:
     if valid.numel() <= 0:
         return torch.tensor(float("nan"))
     return valid.abs().mean()
+
+
+def final_prefix_offset_abs_mean(prefix_offset: Any) -> torch.Tensor:
+    return final_prefix_drift_abs_mean(prefix_offset)
+
+
+def cumulative_drift_mean_abs(prefix_offset: Any) -> torch.Tensor:
+    offset = _to_tensor(prefix_offset).float()
+    if offset.numel() <= 0:
+        return torch.tensor(float("nan"))
+    if offset.ndim == 0:
+        return offset.abs()
+    flat = offset.reshape(offset.shape[0], -1)
+    finite_mask = torch.isfinite(flat)
+    finite_abs = torch.where(finite_mask, flat.abs(), torch.zeros_like(flat))
+    count = finite_mask.float().sum(dim=1).clamp_min(1.0)
+    mean_abs = finite_abs.sum(dim=1) / count
+    valid = mean_abs[torch.isfinite(mean_abs)]
+    if valid.numel() <= 0:
+        return torch.tensor(float("nan"))
+    return valid.mean()
+
+
+def max_prefix_offset_abs(prefix_offset: Any) -> torch.Tensor:
+    offset = _to_tensor(prefix_offset).float()
+    if offset.numel() <= 0:
+        return torch.tensor(float("nan"))
+    if offset.ndim == 0:
+        return offset.abs()
+    flat = offset.reshape(offset.shape[0], -1).abs()
+    finite_mask = torch.isfinite(flat)
+    valid = torch.where(finite_mask, flat, torch.zeros_like(flat))
+    count = finite_mask.any(dim=1)
+    if not bool(count.any().item()):
+        return torch.tensor(float("nan"))
+    batch_max = valid.max(dim=1).values[count]
+    return batch_max.mean()
 
 
 def speech_weighted_mae(
@@ -352,7 +393,11 @@ __all__ = [
     "build_rhythm_metric_dict",
     "build_rhythm_metric_sections",
     "cumulative_drift",
+    "cumulative_drift_mean_abs",
+    "final_prefix_offset_abs_mean",
+    "final_prefix_drift_abs_mean",
     "local_silence_delta_share",
+    "max_prefix_offset_abs",
     "prefix_discrepancy",
     "residual_bias_share",
     "residual_target_stats",

@@ -454,7 +454,13 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "projected_prefix_cumsum" in debug
     assert "source_prefix_cumsum" in debug
     assert "projector_preclamp_duration_exec" in debug
+    assert "projector_prefreeze_duration_exec" in debug
+    assert "projector_repair_candidate_delta" in debug
+    assert "projector_repair_candidate_steps" in debug
+    assert "projector_repair_delta" in debug
+    assert "projector_repair_steps" in debug
     assert "projector_clamp_delta" in debug
+    assert "projector_rounding_only_regret" in debug
     assert "projector_projection_regret" in debug
     assert "projector_preclamp_prefix_cumsum" in debug
     assert debug["projector_budget_mode"] == "total"
@@ -492,7 +498,13 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_projected_prefix_cumsum" in ret
     assert "rhythm_debug_source_prefix_cumsum" in ret
     assert "rhythm_debug_projector_preclamp_duration_exec" in ret
+    assert "rhythm_debug_projector_prefreeze_duration_exec" in ret
+    assert "rhythm_debug_projector_repair_candidate_delta" in ret
+    assert "rhythm_debug_projector_repair_candidate_steps" in ret
+    assert "rhythm_debug_projector_repair_delta" in ret
+    assert "rhythm_debug_projector_repair_steps" in ret
     assert "rhythm_debug_projector_clamp_delta" in ret
+    assert "rhythm_debug_projector_rounding_only_regret" in ret
     assert "rhythm_debug_projector_projection_regret" in ret
     assert "rhythm_debug_projector_preclamp_prefix_cumsum" in ret
     assert "rhythm_debug_commit_closed_prefix_ok" in ret
@@ -595,7 +607,11 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert torch.allclose(debug["open_tail_commit_violation"], torch.zeros_like(execution.commit_mask))
     assert torch.allclose(debug["open_tail_commit_violation_count"], torch.zeros((1, 1), dtype=torch.float32))
     assert torch.allclose(debug["projector_preclamp_duration_exec"], execution.projector_preclamp_duration_exec)
+    assert torch.allclose(debug["projector_prefreeze_duration_exec"], execution.projector_prefreeze_duration_exec)
+    assert torch.allclose(debug["projector_repair_candidate_steps"], execution.projector_repair_candidate_steps)
+    assert torch.allclose(debug["projector_repair_steps"], execution.projector_repair_steps)
     assert torch.allclose(debug["projector_clamp_delta"], execution.projector_clamp_delta)
+    assert torch.allclose(debug["projector_rounding_only_regret"], execution.projector_rounding_only_regret)
     assert torch.allclose(debug["projector_projection_regret"], execution.projector_projection_regret)
     assert torch.allclose(debug["projector_preclamp_prefix_cumsum"], execution.projector_preclamp_prefix_cumsum)
     assert torch.allclose(ret["rhythm_v3_commit_closed_prefix_ok"], debug["commit_closed_prefix_ok"])
@@ -1858,6 +1874,24 @@ def test_rhythm_v3_rejects_invalid_precomputed_cache_shape_early():
         )
 
 
+def test_rhythm_v3_rejects_non_ema_strict_online_continuation():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_src_prefix_stat_mode"] = "dual_timescale"
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ref = torch.randn(1, 24, 80)
+    first = _run_adapter(adapter, content=torch.tensor([[1, 1, 2, 2]]), ref=ref)
+    with pytest.raises(
+        ValueError,
+        match="strict online continuation currently only guarantees src_prefix_stat_mode=ema",
+    ):
+        _run_adapter(
+            adapter,
+            content=torch.tensor([[2, 2, 3, 3]]),
+            ref=ref,
+            state=first["rhythm_state_next"],
+        )
+
+
 def test_rhythm_v3_handles_zero_length_reference_without_lengths():
     adapter = ConanDurationAdapter(_build_hparams(), hidden_size=32, vocab_size=128)
     ret = _run_adapter(
@@ -2202,7 +2236,7 @@ def test_rhythm_v3_projector_committed_speech_units_keep_at_least_one_frame():
         hidden_size=32,
         vocab_size=128,
     )
-    projected, residual, prefix_offset, _, _ = adapter.module.projector._project_duration_prefix(
+    projected, residual, prefix_offset, _, _, _, _, _, _ = adapter.module.projector._project_duration_prefix(
         unit_duration_exec=torch.tensor([[0.20, 0.20]], dtype=torch.float32),
         source_duration_obs=torch.tensor([[2.0, 2.0]], dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0]], dtype=torch.float32),
@@ -2233,7 +2267,7 @@ def test_rhythm_v3_projector_applies_prefix_unit_budget_clamp():
         hidden_size=32,
         vocab_size=128,
     )
-    projected, residual, prefix_offset, _, _ = adapter.module.projector._project_duration_prefix(
+    projected, residual, prefix_offset, _, _, _, _, _, _ = adapter.module.projector._project_duration_prefix(
         unit_duration_exec=torch.tensor([[20.0, 20.0, 20.0]], dtype=torch.float32),
         source_duration_obs=torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
@@ -2249,6 +2283,28 @@ def test_rhythm_v3_projector_applies_prefix_unit_budget_clamp():
     assert torch.equal(projected, torch.tensor([[3.0, 2.0, 2.0]], dtype=torch.float32))
     assert float(prefix_offset[0, 0].item()) == 1.0
     assert float(residual[0, 0].item()) >= 0.0
+
+
+def test_rhythm_v3_adapter_forwards_projection_mode_and_repair_hparams():
+    adapter = ConanDurationAdapter(
+        {
+            **_build_hparams(),
+            "rhythm_v3_backbone": "global_only",
+            "rhythm_v3_warp_mode": "none",
+            "rhythm_v3_allow_hybrid": False,
+            "rhythm_v3_projection_mode": "greedy_repair",
+            "rhythm_v3_projection_repair_max_steps": 6,
+            "rhythm_v3_projection_repair_speech_bonus": 1.25,
+            "rhythm_v3_projection_repair_boundary_penalty": 0.2,
+        },
+        hidden_size=32,
+        vocab_size=128,
+    )
+    projector = adapter.module.projector
+    assert projector.integer_projection_mode == "greedy_repair"
+    assert projector.projection_repair_max_steps == 6
+    assert projector.projection_repair_speech_bonus == pytest.approx(1.25)
+    assert projector.projection_repair_boundary_penalty == pytest.approx(0.2)
 
 
 def test_rhythm_v3_projector_rejects_noncontiguous_visible_prefix_commit_mask():
@@ -2322,11 +2378,11 @@ def test_rhythm_v3_projector_resets_carry_across_phrase_boundary():
         budget_neg=24,
         boundary_reset_thresh=0.5,
     )
-    projected_no_reset, _, _, boundary_hit_no_reset, boundary_decay_no_reset = projector_no_reset._project_duration_prefix(
+    projected_no_reset, _, _, boundary_hit_no_reset, boundary_decay_no_reset, _, _, _, _ = projector_no_reset._project_duration_prefix(
         **kwargs,
         boundary_carry_decay=1.0,
     )
-    projected_reset, _, _, boundary_hit_reset, boundary_decay_reset = projector_reset._project_duration_prefix(
+    projected_reset, _, _, boundary_hit_reset, boundary_decay_reset, _, _, _, _ = projector_reset._project_duration_prefix(
         **kwargs,
         boundary_carry_decay=0.0,
     )

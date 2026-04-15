@@ -365,11 +365,16 @@ def _series_summary(
             break
 
     slope = float("nan")
+    tie_rate = float("nan")
+    fast_minus_slow = float("nan")
     if len(ordered) >= 2:
         x = np.asarray(x_vals, dtype=np.float32)
         y = np.asarray(y_vals, dtype=np.float32)
         if np.all(np.isfinite(x)) and np.all(np.isfinite(y)) and float(np.max(x) - np.min(x)) > 1.0e-6:
             slope = float(np.polyfit(x, y, deg=1)[0])
+            ties = np.abs(np.diff(y)) <= 1.0e-6
+            tie_rate = float(np.mean(ties)) if ties.size > 0 else 0.0
+            fast_minus_slow = float(y[-1] - y[0])
 
     real_range = float("nan")
     if y_vals:
@@ -390,6 +395,8 @@ def _series_summary(
         "monotone": bool(monotone),
         "transfer_slope": slope,
         "real_range": real_range,
+        "tie_rate": tie_rate,
+        "fast_minus_slow": fast_minus_slow,
         "control_ok": control_ok,
     }
 
@@ -412,6 +419,8 @@ def _monotonicity_summary(
             "monotone": False,
             "transfer_slope": float("nan"),
             "real_range": float("nan"),
+            "tie_rate": float("nan"),
+            "fast_minus_slow": float("nan"),
             "control_ok": False,
         }
 
@@ -460,12 +469,7 @@ def _monotonicity_summary(
     mean_bucket_count = float(
         np.nanmean(np.asarray([row.get("projector_bucket_count", float("nan")) for row in real_rows], dtype=np.float32))
     ) if real_rows else float("nan")
-    exec_fast_minus_slow = float("nan")
-    if len(exec_summary["y_sorted"]) >= 2:
-        left = exec_summary["y_sorted"][-1]
-        right = exec_summary["y_sorted"][0]
-        if np.isfinite(left) and np.isfinite(right):
-            exec_fast_minus_slow = float(left - right)
+    exec_fast_minus_slow = float(exec_summary["fast_minus_slow"])
     exec_pass = bool(
         exec_summary["control_ok"]
         and np.isfinite(exec_fast_minus_slow)
@@ -489,18 +493,25 @@ def _monotonicity_summary(
         "monotone_by_prompt_tempo_raw": raw_summary["control_ok"],
         "transfer_slope_raw": raw_summary["transfer_slope"],
         "real_tempo_range_raw": raw_summary["real_range"],
+        "tie_rate_raw": raw_summary["tie_rate"],
+        "fast_minus_slow_raw": raw_summary["fast_minus_slow"],
         "tempo_out_raw_sorted": raw_summary["y_sorted"],
         "monotone_by_prompt_tempo_preproj": preproj_summary["control_ok"],
         "transfer_slope_preproj": preproj_summary["transfer_slope"],
         "real_tempo_range_preproj": preproj_summary["real_range"],
+        "tie_rate_preproj": preproj_summary["tie_rate"],
+        "fast_minus_slow_preproj": preproj_summary["fast_minus_slow"],
         "tempo_out_preproj_sorted": preproj_summary["y_sorted"],
         "monotone_by_prompt_tempo_exec": exec_pass,
         "transfer_slope_exec": exec_summary["transfer_slope"],
         "real_tempo_range_exec": exec_summary["real_range"],
+        "tie_rate_exec": exec_summary["tie_rate"],
+        "fast_minus_slow_exec": exec_summary["fast_minus_slow"],
         "tempo_out_exec_sorted": exec_summary["y_sorted"],
         "monotone_by_prompt_tempo": exec_pass,
         "transfer_slope": exec_summary["transfer_slope"],
         "real_tempo_range": exec_summary["real_range"],
+        "tie_rate": exec_summary["tie_rate"],
         "fast_minus_slow": exec_fast_minus_slow,
         "tempo_ref_sorted": exec_summary["x_sorted"],
         "tempo_out_sorted": exec_summary["y_sorted"],
@@ -591,21 +602,15 @@ def main() -> None:
         )
         for source_name in sorted(grouped.keys())
     ]
-    slopes = [
-        float(row["transfer_slope"])
-        for row in summary_rows
-        if np.isfinite(float(row.get("transfer_slope", float("nan"))))
-    ]
-    effects = [
-        float(row["fast_minus_slow"])
-        for row in summary_rows
-        if np.isfinite(float(row.get("fast_minus_slow", float("nan"))))
-    ]
     aggregate = {
         "source_count": int(len(summary_rows)),
         "monotone_source_count": int(sum(1 for row in summary_rows if bool(row["monotone_by_prompt_tempo"]))),
-        "transfer_slope_ci": bootstrap_ci(slopes) if slopes else (float("nan"), float("nan"), float("nan")),
-        "fast_minus_slow_ci": bootstrap_ci(effects) if effects else (float("nan"), float("nan"), float("nan")),
+        "mean_transfer_slope_raw": float(np.nanmean(np.asarray([row.get("transfer_slope_raw", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
+        "mean_transfer_slope_preproj": float(np.nanmean(np.asarray([row.get("transfer_slope_preproj", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
+        "mean_transfer_slope_exec": float(np.nanmean(np.asarray([row.get("transfer_slope_exec", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
+        "mean_tie_rate_raw": float(np.nanmean(np.asarray([row.get("tie_rate_raw", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
+        "mean_tie_rate_preproj": float(np.nanmean(np.asarray([row.get("tie_rate_preproj", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
+        "mean_tie_rate_exec": float(np.nanmean(np.asarray([row.get("tie_rate_exec", float("nan")) for row in summary_rows], dtype=np.float32))) if summary_rows else float("nan"),
         "max_sources_per_speaker": int(args.max_sources_per_speaker),
         "min_ref_gap": float(args.min_ref_gap),
         "min_fast_slow_effect": float(args.min_fast_slow_effect),
@@ -613,6 +618,22 @@ def main() -> None:
         "max_boundary_hit_rate": float(args.max_boundary_hit_rate),
         "relaxed_probe": True,
     }
+    for key, out_key in (
+        ("transfer_slope_raw", "transfer_slope_ci_raw"),
+        ("transfer_slope_preproj", "transfer_slope_ci_preproj"),
+        ("transfer_slope_exec", "transfer_slope_ci_exec"),
+        ("fast_minus_slow_raw", "fast_minus_slow_ci_raw"),
+        ("fast_minus_slow_preproj", "fast_minus_slow_ci_preproj"),
+        ("fast_minus_slow_exec", "fast_minus_slow_ci_exec"),
+    ):
+        values = [
+            float(row[key])
+            for row in summary_rows
+            if np.isfinite(float(row.get(key, float("nan"))))
+        ]
+        aggregate[out_key] = bootstrap_ci(values) if values else (float("nan"), float("nan"), float("nan"))
+    aggregate["transfer_slope_ci"] = aggregate["transfer_slope_ci_exec"]
+    aggregate["fast_minus_slow_ci"] = aggregate["fast_minus_slow_ci_exec"]
 
     output_csv = Path(args.output_csv)
     output_json = Path(args.output_json)
@@ -648,19 +669,23 @@ def main() -> None:
         print(f"[gate1-probe] wrote_bundle={args.output_bundle}")
     for row in summary_rows:
         source_name = row["source_name"]
+        mono_raw = "PASS" if row["monotone_by_prompt_tempo_raw"] else "FAIL"
         mono_pre = "PASS" if row["monotone_by_prompt_tempo_preproj"] else "FAIL"
         mono_exec = "PASS" if row["monotone_by_prompt_tempo_exec"] else "FAIL"
+        s_raw = row["transfer_slope_raw"]
         s_pre = row["transfer_slope_preproj"]
         s_exec = row["transfer_slope_exec"]
+        s_raw_str = "nan" if not np.isfinite(s_raw) else f"{s_raw:.4f}"
         s_pre_str = "nan" if not np.isfinite(s_pre) else f"{s_pre:.4f}"
         s_exec_str = "nan" if not np.isfinite(s_exec) else f"{s_exec:.4f}"
         print(
             f"[gate1-probe] {source_name} "
-            f"preproj={mono_pre}/{s_pre_str} exec={mono_exec}/{s_exec_str} "
-            f"range_pre={row['real_tempo_range_preproj']:.4f} range_exec={row['real_tempo_range_exec']:.4f} "
+            f"raw={mono_raw}/{s_raw_str} preproj={mono_pre}/{s_pre_str} exec={mono_exec}/{s_exec_str} "
+            f"tie_raw={row['tie_rate_raw']:.4f} tie_pre={row['tie_rate_preproj']:.4f} tie_exec={row['tie_rate_exec']:.4f} "
+            f"range_raw={row['real_tempo_range_raw']:.4f} range_pre={row['real_tempo_range_preproj']:.4f} range_exec={row['real_tempo_range_exec']:.4f} "
             f"valid_real={row['valid_real_row_count']}/{row['total_real_row_count']} "
             f"tempo_ref={row['tempo_ref_runtime_sorted']} "
-            f"tempo_preproj={row['tempo_out_preproj_sorted']} tempo_exec={row['tempo_out_exec_sorted']}"
+            f"tempo_raw={row['tempo_out_raw_sorted']} tempo_preproj={row['tempo_out_preproj_sorted']} tempo_exec={row['tempo_out_exec_sorted']}"
         )
         if row["controls"]:
             print(f"[gate1-probe] {source_name} controls={row['controls']}")

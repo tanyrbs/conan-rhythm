@@ -15,16 +15,6 @@ from .silence_surface import build_silence_tau_surface_meta
 from .run_encoder import CausalUnitRunEncoder
 
 
-def _masked_median_2d(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    batch_size = int(values.size(0))
-    out = values.new_zeros((batch_size, 1))
-    for batch_idx in range(batch_size):
-        keep = mask[batch_idx] > 0.5
-        if bool(keep.any().item()):
-            out[batch_idx, 0] = values[batch_idx][keep].median()
-    return out
-
-
 class MinimalStreamingDurationHeadV1G(nn.Module):
     """Hard-bounded V1 head: scalar coarse + speech-only local residual."""
 
@@ -184,6 +174,7 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
         local_rate_ema: torch.Tensor,
         silence_mask: torch.Tensor | None = None,
         run_stability: torch.Tensor | None = None,
+        source_global_rate: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor | str]:
         if log_base is not None:
             raise ValueError("MinimalStreamingDurationHeadV1G requires log_base=None.")
@@ -304,8 +295,14 @@ class MinimalStreamingDurationHeadV1G(nn.Module):
             / speech_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
         )
         if self.use_src_gap_in_coarse_head:
-            g_src_utt = _masked_median_2d(local_rate_seq.float(), speech_mask)
-            delta_g_utt = (g_ref_col - g_src_utt).detach()
+            if isinstance(source_global_rate, torch.Tensor):
+                g_src_utt = self._resolve_scalar_column(source_global_rate, batch_size=batch_size)
+                delta_g_utt = (g_ref_col - g_src_utt).detach()
+            else:
+                raise ValueError(
+                    "MinimalStreamingDurationHeadV1G requires source_global_rate when "
+                    "use_src_gap_in_coarse_head=true."
+                )
             coarse_context = torch.cat([spk_ctx, g_ref_col, delta_g_utt], dim=-1)
         else:
             coarse_context = torch.cat([spk_ctx, g_ref_col], dim=-1)

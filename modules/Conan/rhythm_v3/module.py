@@ -613,7 +613,10 @@ class MixedEffectsDurationModule(nn.Module):
         integer_projection_mode = str(
             unused_kwargs.pop(
                 "integer_projection_mode",
-                unused_kwargs.pop("rhythm_v3_integer_projection_mode", "greedy"),
+                unused_kwargs.pop(
+                    "rhythm_v3_integer_projection_mode",
+                    unused_kwargs.pop("rhythm_v3_projection_mode", "greedy"),
+                ),
             )
         )
         integer_projection_anchor_mode = str(
@@ -644,6 +647,24 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop(
                 "prefix_projection_terminal_offset_weight",
                 unused_kwargs.pop("rhythm_v3_prefix_projection_terminal_offset_weight", 0.05),
+            )
+        )
+        projection_repair_max_steps = int(
+            unused_kwargs.pop(
+                "projection_repair_max_steps",
+                unused_kwargs.pop("rhythm_v3_projection_repair_max_steps", 0),
+            )
+        )
+        projection_repair_speech_bonus = float(
+            unused_kwargs.pop(
+                "projection_repair_speech_bonus",
+                unused_kwargs.pop("rhythm_v3_projection_repair_speech_bonus", 1.0),
+            )
+        )
+        projection_repair_boundary_penalty = float(
+            unused_kwargs.pop(
+                "projection_repair_boundary_penalty",
+                unused_kwargs.pop("rhythm_v3_projection_repair_boundary_penalty", 0.35),
             )
         )
         emit_prompt_diagnostics = bool(
@@ -979,6 +1000,9 @@ class MixedEffectsDurationModule(nn.Module):
             prefix_projection_max_states=prefix_projection_max_states,
             prefix_projection_terminal_carry_weight=prefix_projection_terminal_carry_weight,
             prefix_projection_terminal_offset_weight=prefix_projection_terminal_offset_weight,
+            projection_repair_max_steps=projection_repair_max_steps,
+            projection_repair_speech_bonus=projection_repair_speech_bonus,
+            projection_repair_boundary_penalty=projection_repair_boundary_penalty,
             export_projector_telemetry=self.export_projector_telemetry,
         )
         if self.use_reference_summary:
@@ -1837,6 +1861,7 @@ class MixedEffectsDurationModule(nn.Module):
                 raise RuntimeError(
                     f"{_prompt_summary_public_with_aliases(minimal_v1_profile=self.is_minimal_v1)} is missing StreamingDurationHead."
                 )
+            source_global_rate = self._compute_source_global_rate(source_batch=source_batch)
             local_rate_ema = (
                 state.local_rate_ema.float()
                 if isinstance(getattr(state, "local_rate_ema", None), torch.Tensor)
@@ -1854,7 +1879,7 @@ class MixedEffectsDurationModule(nn.Module):
             role_value = ref_memory.role_value if self.use_reference_summary else None
             role_var = ref_memory.role_var if self.use_reference_summary else None
             role_coverage = ref_memory.role_coverage if self.use_reference_summary else None
-            role_plan = self.duration_head(
+            duration_head_kwargs = dict(
                 content_units=source_batch.content_units,
                 log_anchor=torch.log(prediction_anchor.clamp_min(1.0e-4)),
                 log_base=log_base,
@@ -1877,6 +1902,9 @@ class MixedEffectsDurationModule(nn.Module):
                 silence_mask=getattr(source_batch, "source_silence_mask", None),
                 run_stability=getattr(source_batch, "source_run_stability", None),
             )
+            if isinstance(self.duration_head, MinimalStreamingDurationHeadV1G):
+                duration_head_kwargs["source_global_rate"] = source_global_rate
+            role_plan = self.duration_head(**duration_head_kwargs)
             if self.minimal_v1_profile and isinstance(getattr(source_batch, "source_silence_mask", None), torch.Tensor):
                 residual = role_plan.get("unit_residual_logstretch")
                 if isinstance(residual, torch.Tensor):
@@ -1901,6 +1929,7 @@ class MixedEffectsDurationModule(nn.Module):
             )
             unit_logstretch_raw = unit_logstretch.clone()
             unit_duration_raw = unit_duration_exec.clone()
+            prefreeze_duration_exec = unit_duration_exec.clone()
             unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
                 unit_duration_exec=unit_duration_exec,
                 unit_logstretch=unit_logstretch,
@@ -1950,6 +1979,7 @@ class MixedEffectsDurationModule(nn.Module):
                 silence_pred=role_plan.get("unit_silence_pred"),
                 source_rate_seq=role_plan.get("source_rate_seq"),
                 source_prefix_summary=role_plan.get("source_prefix_summary"),
+                prefreeze_duration_exec=prefreeze_duration_exec,
                 analytic_gap_raw=role_plan.get("unit_analytic_gap_raw"),
                 analytic_gap_clipped=role_plan.get("unit_analytic_gap_clipped"),
                 analytic_clip_hit=role_plan.get("unit_analytic_clip_hit"),
@@ -1969,7 +1999,7 @@ class MixedEffectsDurationModule(nn.Module):
                 if isinstance(role_plan.get("g_src_prefix"), torch.Tensor)
                 else execution.source_rate_seq
             )
-            execution.g_src_utt = self._compute_source_global_rate(source_batch=source_batch)
+            execution.g_src_utt = source_global_rate
             execution.g_src_prefix_mean = self._compute_source_prefix_mean(
                 source_rate_seq=execution.g_src_prefix,
                 speech_commit_mask=speech_commit_mask,
@@ -2026,6 +2056,7 @@ class MixedEffectsDurationModule(nn.Module):
         )
         unit_logstretch_raw = unit_logstretch.clone()
         unit_duration_raw = unit_duration_exec.clone()
+        prefreeze_duration_exec = unit_duration_exec.clone()
         unit_duration_exec, unit_logstretch = self._freeze_committed_prefix(
             unit_duration_exec=unit_duration_exec,
             unit_logstretch=unit_logstretch,
@@ -2052,6 +2083,7 @@ class MixedEffectsDurationModule(nn.Module):
             phrase_final_mask=getattr(source_batch, "phrase_final_mask", None),
             unit_logstretch_raw=unit_logstretch_raw,
             unit_duration_raw=unit_duration_raw,
+            prefreeze_duration_exec=prefreeze_duration_exec,
         )
         source_prefix_seq, source_prefix_final = self._compute_source_prefix_rate_seq(
             source_batch=source_batch,

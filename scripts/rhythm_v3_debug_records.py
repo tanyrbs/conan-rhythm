@@ -27,6 +27,12 @@ from utils.plot.rhythm_v3_viz import (
     save_validation_gate_bundle,
     summarize_falsification_ladder,
 )
+from utils.plot.rhythm_v3_viz.review import (
+    _is_real_reference_condition,
+    _normalize_ref_bin,
+    _normalize_ref_condition,
+    _resolve_ref_bin_column,
+)
 
 
 _GATE1_MONOTONICITY_RATE_MIN = 0.95
@@ -54,7 +60,13 @@ _GATE2_RUNTIME_LIMITS = {
     "prefix_discrepancy": 0.05,
     "budget_hit_rate": 0.05,
     "cumulative_drift": 0.25,
+    "cumulative_drift_mean_abs": 0.25,
 }
+_GATE2_TIE_RATE_MAX = 0.35
+_GATE2_BUCKET_COUNT_MIN = 2.0
+_GATE2_ROUNDING_REGRET_MEAN_MAX = 0.60
+_GATE2_CLAMP_MASS_MEAN_MAX = 0.75
+_GATE2_FINAL_DRIFT_MAX = 0.25
 _GATE2_MONOTONICITY_DROP_TOL = 0.01
 _GATE2_TRANSFER_SLOPE_DROP_TOL = 0.05
 _GATE2_SPEECH_GAIN_MIN = 0.0
@@ -66,41 +78,6 @@ _GATE3_RESIDUAL_CORR_MIN = 0.10
 _GATE3_COARSE_CORR_DROP_TOL = 0.05
 _GATE3_RESIDUAL_BIAS_SHARE_MAX = 0.25
 _GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX = 0.02
-_REAL_REF_BINS = {"slow", "mid", "fast"}
-_REAL_REF_CONDITIONS = {"", "nan", "real", "real_reference"}
-
-
-def _normalize_ref_condition(value) -> str:
-    return str(value or "").strip().lower()
-
-
-def _normalize_ref_bin(value, *, fallback_condition=None) -> str:
-    ref_bin = str(value or "").strip().lower()
-    if ref_bin in _REAL_REF_BINS:
-        return ref_bin
-    fallback = _normalize_ref_condition(fallback_condition)
-    if fallback in _REAL_REF_BINS:
-        return fallback
-    return ref_bin
-
-
-def _is_real_reference_condition(value, *, ref_bin=None) -> bool:
-    ref_condition = _normalize_ref_condition(value)
-    if ref_condition in _REQUIRED_NEGATIVE_CONTROLS:
-        return False
-    if ref_condition in _REAL_REF_CONDITIONS or ref_condition in _REAL_REF_BINS:
-        return True
-    return _normalize_ref_bin(ref_bin, fallback_condition=ref_condition) in _REAL_REF_BINS
-
-
-def _resolve_ref_bin_column(frame):
-    if "ref_bin" in getattr(frame, "columns", []):
-        return frame["ref_bin"].map(_normalize_ref_bin)
-    if "ref_condition" in getattr(frame, "columns", []):
-        return frame["ref_condition"].map(lambda value: _normalize_ref_bin("", fallback_condition=value))
-    return None
-
-
 def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
     if column not in frame.columns or "eval_mode" not in frame.columns:
         return float("nan")
@@ -662,6 +639,11 @@ def build_gate_status(frame) -> dict[str, object]:
             "coarse_only_control_regressions": [],
             "coarse_only_speech_metric": float("nan"),
             "coarse_only_coarse_target_corr": float("nan"),
+            "coarse_only_tie_rate": float("nan"),
+            "coarse_only_bucket_count": float("nan"),
+            "coarse_only_rounding_regret_mean": float("nan"),
+            "coarse_only_clamp_mass_mean": float("nan"),
+            "coarse_only_final_prefix_drift_abs_mean": float("nan"),
             "learned_runtime_metrics": {},
             "learned_runtime_regressions": [],
             "learned_control_regressions": [],
@@ -673,6 +655,16 @@ def build_gate_status(frame) -> dict[str, object]:
             "warnings": ["summary_rows=empty"],
         }
     issues = collect_gate_issues(frame)
+    observed_control_contract_ids = []
+    if "control_contract_id" in frame.columns:
+        observed_control_contract_ids = [
+            value
+            for value in frame["control_contract_id"].astype(str).str.strip().tolist()
+            if value and value.lower() != "nan"
+        ]
+        observed_control_contract_ids = list(dict.fromkeys(observed_control_contract_ids))
+    control_contract_id_count = int(len(observed_control_contract_ids))
+    control_contract_id = observed_control_contract_ids[0] if control_contract_id_count == 1 else ""
     missing_controls: list[str] = []
     missing_eval_modes: list[str] = []
     incomplete_triplets = 0
@@ -689,6 +681,15 @@ def build_gate_status(frame) -> dict[str, object]:
     analytic_tempo_monotonicity_rate = float("nan")
     analytic_tempo_transfer_slope = float("nan")
     analytic_tempo_tie_rate = float("nan")
+    analytic_tempo_monotonicity_rate_raw = float("nan")
+    analytic_tempo_monotonicity_rate_preproj = float("nan")
+    analytic_tempo_monotonicity_rate_exec = float("nan")
+    analytic_tempo_transfer_slope_raw = float("nan")
+    analytic_tempo_transfer_slope_preproj = float("nan")
+    analytic_tempo_transfer_slope_exec = float("nan")
+    analytic_tempo_tie_rate_raw = float("nan")
+    analytic_tempo_tie_rate_preproj = float("nan")
+    analytic_tempo_tie_rate_exec = float("nan")
     analytic_invalid_g_rate = float("nan")
     analytic_anti_monotonicity_rate = float("nan")
     analytic_projected_real_range = float("nan")
@@ -702,6 +703,11 @@ def build_gate_status(frame) -> dict[str, object]:
     coarse_only_runtime_metrics: dict[str, float] = {}
     coarse_only_runtime_limit_violations: list[str] = []
     coarse_only_control_regressions: list[str] = []
+    coarse_only_tie_rate = float("nan")
+    coarse_only_bucket_count = float("nan")
+    coarse_only_rounding_regret_mean = float("nan")
+    coarse_only_clamp_mass_mean = float("nan")
+    coarse_only_final_drift = float("nan")
     learned_runtime_metrics: dict[str, float] = {}
     learned_runtime_regressions: list[str] = []
     learned_control_regressions: list[str] = []
@@ -818,6 +824,51 @@ def build_gate_status(frame) -> dict[str, object]:
             column="tempo_tie_rate",
             eval_mode="analytic",
         )
+        analytic_tempo_monotonicity_rate_raw = _mean_for_eval_mode(
+            frame,
+            column="monotonicity_rate_raw",
+            eval_mode="analytic",
+        )
+        analytic_tempo_monotonicity_rate_preproj = _mean_for_eval_mode(
+            frame,
+            column="monotonicity_rate_preproj",
+            eval_mode="analytic",
+        )
+        analytic_tempo_monotonicity_rate_exec = _mean_for_eval_mode(
+            frame,
+            column="monotonicity_rate_exec",
+            eval_mode="analytic",
+        )
+        analytic_tempo_transfer_slope_raw = _mean_for_eval_mode(
+            frame,
+            column="tempo_transfer_slope_raw",
+            eval_mode="analytic",
+        )
+        analytic_tempo_transfer_slope_preproj = _mean_for_eval_mode(
+            frame,
+            column="tempo_transfer_slope_preproj",
+            eval_mode="analytic",
+        )
+        analytic_tempo_transfer_slope_exec = _mean_for_eval_mode(
+            frame,
+            column="tempo_transfer_slope_exec",
+            eval_mode="analytic",
+        )
+        analytic_tempo_tie_rate_raw = _mean_for_eval_mode(
+            frame,
+            column="tempo_tie_rate_raw",
+            eval_mode="analytic",
+        )
+        analytic_tempo_tie_rate_preproj = _mean_for_eval_mode(
+            frame,
+            column="tempo_tie_rate_preproj",
+            eval_mode="analytic",
+        )
+        analytic_tempo_tie_rate_exec = _mean_for_eval_mode(
+            frame,
+            column="tempo_tie_rate_exec",
+            eval_mode="analytic",
+        )
         analytic_anti_monotonicity_rate = _mean_for_eval_mode(
             frame,
             column="anti_monotonicity_rate",
@@ -851,6 +902,41 @@ def build_gate_status(frame) -> dict[str, object]:
         coarse_mean = coarse_only_runtime_metrics[column]
         if np.isfinite(coarse_mean) and coarse_mean > float(limit):
             coarse_only_runtime_limit_violations.append(column)
+    coarse_only_tie_rate = _mean_for_eval_mode(frame, column="tempo_tie_rate", eval_mode="coarse_only")
+    coarse_only_bucket_count = _mean_for_eval_mode(frame, column="projector_bucket_count", eval_mode="coarse_only")
+    coarse_only_rounding_regret_mean = _mean_for_eval_mode(
+        frame,
+        column="projector_rounding_regret_mean",
+        eval_mode="coarse_only",
+    )
+    coarse_only_clamp_mass_mean = _mean_for_eval_mode(
+        frame,
+        column="projector_clamp_mass_mean",
+        eval_mode="coarse_only",
+    )
+    coarse_only_final_drift = _mean_for_eval_mode(
+        frame,
+        column="final_prefix_drift_abs_mean",
+        eval_mode="coarse_only",
+    )
+    coarse_only_runtime_metrics["tempo_tie_rate"] = coarse_only_tie_rate
+    coarse_only_runtime_metrics["projector_bucket_count"] = coarse_only_bucket_count
+    coarse_only_runtime_metrics["projector_rounding_regret_mean"] = coarse_only_rounding_regret_mean
+    coarse_only_runtime_metrics["projector_clamp_mass_mean"] = coarse_only_clamp_mass_mean
+    coarse_only_runtime_metrics["final_prefix_drift_abs_mean"] = coarse_only_final_drift
+    if np.isfinite(coarse_only_tie_rate) and coarse_only_tie_rate > _GATE2_TIE_RATE_MAX:
+        coarse_only_runtime_limit_violations.append("tempo_tie_rate")
+    if np.isfinite(coarse_only_bucket_count) and coarse_only_bucket_count < _GATE2_BUCKET_COUNT_MIN:
+        coarse_only_runtime_limit_violations.append("projector_bucket_count")
+    if (
+        np.isfinite(coarse_only_rounding_regret_mean)
+        and coarse_only_rounding_regret_mean > _GATE2_ROUNDING_REGRET_MEAN_MAX
+    ):
+        coarse_only_runtime_limit_violations.append("projector_rounding_regret_mean")
+    if np.isfinite(coarse_only_clamp_mass_mean) and coarse_only_clamp_mass_mean > _GATE2_CLAMP_MASS_MEAN_MAX:
+        coarse_only_runtime_limit_violations.append("projector_clamp_mass_mean")
+    if np.isfinite(coarse_only_final_drift) and coarse_only_final_drift > _GATE2_FINAL_DRIFT_MAX:
+        coarse_only_runtime_limit_violations.append("final_prefix_drift_abs_mean")
     coarse_mono = _mean_for_eval_mode(frame, column=mono_column, eval_mode="coarse_only")
     coarse_transfer = _mean_for_eval_mode(frame, column="tempo_transfer_slope", eval_mode="coarse_only")
     coarse_only_speech_metric = _mean_for_eval_mode(frame, column=speech_metric_column, eval_mode="coarse_only")
@@ -898,6 +984,7 @@ def build_gate_status(frame) -> dict[str, object]:
         column="local_silence_delta_share",
         eval_mode="learned",
     )
+    mixed_control_contract = control_contract_id_count > 1
     gate0a_pass = (
         analytic_valid_items >= _GATE0_VALID_ITEMS_MIN
         and
@@ -1007,6 +1094,17 @@ def build_gate_status(frame) -> dict[str, object]:
         and coarse_corr_ok
     )
     gate3_pass = gate3_criteria_pass
+    if control_contract_id_count == 0:
+        issues.append("control_contract_id=missing")
+    elif mixed_control_contract:
+        issues.append("mixed_control_contract_id=" + "|".join(observed_control_contract_ids))
+        gate0a_pass = False
+        gate0b_pass = False
+        gate0c_pass = False
+        gate0_pass = False
+        gate1_pass = False
+        gate2_pass = False
+        gate3_pass = False
     return {
         "gate0a_pass": bool(gate0a_pass),
         "gate0b_pass": bool(gate0b_pass),
@@ -1015,6 +1113,9 @@ def build_gate_status(frame) -> dict[str, object]:
         "gate1_pass": bool(gate1_pass),
         "gate2_pass": bool(gate2_pass),
         "gate3_pass": bool(gate3_pass),
+        "control_contract_id": control_contract_id,
+        "observed_control_contract_ids": observed_control_contract_ids,
+        "control_contract_id_count": int(control_contract_id_count),
         "missing_controls": missing_controls,
         "missing_eval_modes": missing_eval_modes,
         "incomplete_triplets": int(incomplete_triplets),
@@ -1037,6 +1138,15 @@ def build_gate_status(frame) -> dict[str, object]:
         "analytic_tempo_monotonicity_rate": analytic_tempo_monotonicity_rate,
         "analytic_tempo_transfer_slope": analytic_tempo_transfer_slope,
         "analytic_tempo_tie_rate": analytic_tempo_tie_rate,
+        "analytic_tempo_monotonicity_rate_raw": analytic_tempo_monotonicity_rate_raw,
+        "analytic_tempo_monotonicity_rate_preproj": analytic_tempo_monotonicity_rate_preproj,
+        "analytic_tempo_monotonicity_rate_exec": analytic_tempo_monotonicity_rate_exec,
+        "analytic_tempo_transfer_slope_raw": analytic_tempo_transfer_slope_raw,
+        "analytic_tempo_transfer_slope_preproj": analytic_tempo_transfer_slope_preproj,
+        "analytic_tempo_transfer_slope_exec": analytic_tempo_transfer_slope_exec,
+        "analytic_tempo_tie_rate_raw": analytic_tempo_tie_rate_raw,
+        "analytic_tempo_tie_rate_preproj": analytic_tempo_tie_rate_preproj,
+        "analytic_tempo_tie_rate_exec": analytic_tempo_tie_rate_exec,
         "analytic_invalid_g_rate": analytic_invalid_g_rate,
         "analytic_anti_monotonicity_rate": analytic_anti_monotonicity_rate,
         "analytic_valid_items": int(analytic_valid_items),
@@ -1049,6 +1159,11 @@ def build_gate_status(frame) -> dict[str, object]:
         "coarse_only_control_regressions": coarse_only_control_regressions,
         "coarse_only_speech_metric": coarse_only_speech_metric,
         "coarse_only_coarse_target_corr": coarse_only_coarse_target_corr,
+        "coarse_only_tie_rate": coarse_only_tie_rate,
+        "coarse_only_bucket_count": coarse_only_bucket_count,
+        "coarse_only_rounding_regret_mean": coarse_only_rounding_regret_mean,
+        "coarse_only_clamp_mass_mean": coarse_only_clamp_mass_mean,
+        "coarse_only_final_prefix_drift_abs_mean": coarse_only_final_drift,
         "learned_runtime_metrics": learned_runtime_metrics,
         "learned_runtime_regressions": learned_runtime_regressions,
         "learned_control_regressions": learned_control_regressions,
@@ -1106,6 +1221,13 @@ def _coerce_contract_fingerprint_value(key: str, value):
     if value is None:
         return None
     if key in {
+        "rhythm_v3_alignment_prefilter_bad_samples",
+        "rhythm_v3_disallow_same_text_paired_target",
+        "rhythm_v3_disallow_same_text_reference",
+        "rhythm_v3_require_same_text_paired_target",
+        "rhythm_v3_strict_eval_invalid_g",
+        "rhythm_v3_prompt_require_clean_support",
+        "rhythm_v3_use_src_gap_in_coarse_head",
         "rhythm_v3_use_continuous_alignment",
         "rhythm_v3_minimal_v1_profile",
         "rhythm_v3_strict_minimal_claim_profile",
@@ -1113,9 +1235,35 @@ def _coerce_contract_fingerprint_value(key: str, value):
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
-    if key in {"rhythm_v3_drop_edge_runs_for_g", "rhythm_v3_src_prefix_min_support"}:
+    if key in {
+        "rhythm_v3_alignment_prefilter_max_attempts",
+        "rhythm_v3_drop_edge_runs_for_g",
+        "rhythm_v3_src_prefix_min_support",
+        "rhythm_v3_prefix_budget_pos",
+        "rhythm_v3_prefix_budget_neg",
+        "rhythm_v3_min_prefix_budget",
+        "rhythm_v3_max_prefix_budget",
+        "rhythm_v3_projection_repair_max_steps",
+    }:
         return int(value)
-    if key in {"rhythm_v3_g_trim_ratio", "rhythm_v3_min_boundary_confidence_for_g"}:
+    if key in {
+        "rhythm_v3_alignment_local_margin_p10_min",
+        "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+        "rhythm_v3_alignment_mean_local_confidence_speech_min",
+        "rhythm_v3_alignment_unmatched_speech_ratio_max",
+        "rhythm_v3_g_trim_ratio",
+        "rhythm_v3_min_boundary_confidence_for_g",
+        "rhythm_v3_max_prompt_ref_len_sec",
+        "rhythm_v3_min_prompt_ref_len_sec",
+        "rhythm_v3_min_prompt_speech_ratio",
+        "rhythm_v3_analytic_gap_clip",
+        "rhythm_v3_dynamic_budget_ratio",
+        "rhythm_v3_boundary_carry_decay",
+        "rhythm_v3_boundary_offset_decay",
+        "rhythm_v3_boundary_reset_thresh",
+        "rhythm_v3_projection_repair_speech_bonus",
+        "rhythm_v3_projection_repair_boundary_penalty",
+    }:
         return float(value)
     return str(value)
 
@@ -1128,12 +1276,89 @@ def _build_gate_contract_fingerprint(*, records, args) -> dict[str, object]:
     if alignment_kind:
         use_continuous_alignment = bool(alignment_kind.startswith("continuous"))
     fingerprint = {
-        "rhythm_v3_g_variant": args.g_variant,
-        "rhythm_v3_g_trim_ratio": args.g_trim_ratio,
-        "rhythm_v3_drop_edge_runs_for_g": args.drop_edge_runs,
+        "rhythm_v3_g_variant": _infer_single_meta(
+            records,
+            "g_variant",
+            default=args.g_variant,
+        ),
+        "rhythm_v3_g_trim_ratio": _infer_single_meta(
+            records,
+            "g_trim_ratio",
+            default=args.g_trim_ratio,
+        ),
+        "rhythm_v3_drop_edge_runs_for_g": _infer_single_meta(
+            records,
+            "g_drop_edge_runs",
+            default=args.drop_edge_runs,
+        ),
         "rhythm_v3_min_boundary_confidence_for_g": _infer_single_meta(
             records,
             "min_boundary_confidence_for_g",
+            default=None,
+        ),
+        "rhythm_v3_min_prompt_speech_ratio": _infer_single_meta(
+            records,
+            "rhythm_v3_min_prompt_speech_ratio",
+            default=None,
+        ),
+        "rhythm_v3_min_prompt_ref_len_sec": _infer_single_meta(
+            records,
+            "rhythm_v3_min_prompt_ref_len_sec",
+            default=None,
+        ),
+        "rhythm_v3_max_prompt_ref_len_sec": _infer_single_meta(
+            records,
+            "rhythm_v3_max_prompt_ref_len_sec",
+            default=None,
+        ),
+        "rhythm_v3_disallow_same_text_reference": _infer_single_meta(
+            records,
+            "rhythm_v3_disallow_same_text_reference",
+            default=None,
+        ),
+        "rhythm_v3_disallow_same_text_paired_target": _infer_single_meta(
+            records,
+            "rhythm_v3_disallow_same_text_paired_target",
+            default=None,
+        ),
+        "rhythm_v3_require_same_text_paired_target": _infer_single_meta(
+            records,
+            "rhythm_v3_require_same_text_paired_target",
+            default=None,
+        ),
+        "rhythm_v3_strict_eval_invalid_g": _infer_single_meta(
+            records,
+            "rhythm_v3_strict_eval_invalid_g",
+            default=None,
+        ),
+        "rhythm_v3_alignment_prefilter_bad_samples": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_prefilter_bad_samples",
+            default=None,
+        ),
+        "rhythm_v3_alignment_prefilter_max_attempts": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_prefilter_max_attempts",
+            default=None,
+        ),
+        "rhythm_v3_alignment_unmatched_speech_ratio_max": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_unmatched_speech_ratio_max",
+            default=None,
+        ),
+        "rhythm_v3_alignment_mean_local_confidence_speech_min": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_mean_local_confidence_speech_min",
+            default=None,
+        ),
+        "rhythm_v3_alignment_mean_coarse_confidence_speech_min": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+            default=None,
+        ),
+        "rhythm_v3_alignment_local_margin_p10_min": _infer_single_meta(
+            records,
+            "rhythm_v3_alignment_local_margin_p10_min",
             default=None,
         ),
         "rhythm_v3_src_prefix_stat_mode": _infer_single_meta(
@@ -1149,6 +1374,106 @@ def _build_gate_contract_fingerprint(*, records, args) -> dict[str, object]:
         "rhythm_v3_src_rate_init_mode": _infer_single_meta(
             records,
             "src_rate_init_mode",
+            default=None,
+        ),
+        "rhythm_v3_prompt_domain_mode": _infer_single_meta(
+            records,
+            "prompt_domain_mode",
+            default=None,
+        ),
+        "rhythm_v3_prompt_require_clean_support": _infer_single_meta(
+            records,
+            "prompt_require_clean_support",
+            default=None,
+        ),
+        "rhythm_v3_prompt_g_variant": _infer_single_meta(
+            records,
+            "prompt_g_variant",
+            default=None,
+        ),
+        "rhythm_v3_src_g_variant": _infer_single_meta(
+            records,
+            "src_g_variant",
+            default=None,
+        ),
+        "rhythm_v3_use_src_gap_in_coarse_head": _infer_single_meta(
+            records,
+            "use_src_gap_in_coarse_head",
+            default=None,
+        ),
+        "rhythm_v3_analytic_gap_clip": _infer_single_meta(
+            records,
+            "analytic_gap_clip",
+            default=None,
+        ),
+        "rhythm_v3_prefix_budget_pos": _infer_single_meta(
+            records,
+            "prefix_budget_pos",
+            default=None,
+        ),
+        "rhythm_v3_prefix_budget_neg": _infer_single_meta(
+            records,
+            "prefix_budget_neg",
+            default=None,
+        ),
+        "rhythm_v3_dynamic_budget_ratio": _infer_single_meta(
+            records,
+            "dynamic_budget_ratio",
+            default=None,
+        ),
+        "rhythm_v3_min_prefix_budget": _infer_single_meta(
+            records,
+            "min_prefix_budget",
+            default=None,
+        ),
+        "rhythm_v3_max_prefix_budget": _infer_single_meta(
+            records,
+            "max_prefix_budget",
+            default=None,
+        ),
+        "rhythm_v3_budget_mode": _infer_single_meta(
+            records,
+            "budget_mode",
+            default=None,
+        ),
+        "rhythm_v3_boundary_carry_decay": _infer_single_meta(
+            records,
+            "boundary_carry_decay",
+            default=None,
+        ),
+        "rhythm_v3_boundary_offset_decay": _infer_single_meta(
+            records,
+            "boundary_offset_decay",
+            default=None,
+        ),
+        "rhythm_v3_boundary_reset_thresh": _infer_single_meta(
+            records,
+            "boundary_reset_thresh",
+            default=None,
+        ),
+        "rhythm_v3_integer_projection_mode": _infer_single_meta(
+            records,
+            "integer_projection_mode",
+            default=None,
+        ),
+        "rhythm_v3_integer_projection_anchor_mode": _infer_single_meta(
+            records,
+            "integer_projection_anchor_mode",
+            default=None,
+        ),
+        "rhythm_v3_projection_repair_max_steps": _infer_single_meta(
+            records,
+            "projection_repair_max_steps",
+            default=None,
+        ),
+        "rhythm_v3_projection_repair_speech_bonus": _infer_single_meta(
+            records,
+            "projection_repair_speech_bonus",
+            default=None,
+        ),
+        "rhythm_v3_projection_repair_boundary_penalty": _infer_single_meta(
+            records,
+            "projection_repair_boundary_penalty",
             default=None,
         ),
         "rhythm_v3_use_continuous_alignment": _infer_single_meta(
@@ -1338,13 +1663,18 @@ def main() -> None:
                 "sample_id",
                 "eval_mode",
                 "pair_id",
+                "control_contract_id",
                 "g_crop",
                 "g_full",
                 "g_crop_abs_err",
                 "has_crop_comparison",
             ]
             available_crop_cols = [column for column in crop_cols if column in ref_crop_df.columns]
-            merge_keys_crop = [key for key in ("sample_id", "eval_mode", "pair_id") if key in available_crop_cols and key in summary_df.columns]
+            merge_keys_crop = [
+                key
+                for key in ("sample_id", "eval_mode", "pair_id", "control_contract_id")
+                if key in available_crop_cols and key in summary_df.columns
+            ]
             value_cols_crop = [column for column in available_crop_cols if column not in merge_keys_crop]
             if merge_keys_crop and value_cols_crop:
                 summary_df = summary_df.drop(columns=value_cols_crop, errors="ignore").merge(
@@ -1357,25 +1687,42 @@ def main() -> None:
             keep_cols = [
                 "sample_id",
                 "eval_mode",
+                "control_contract_id",
                 "prefix_discrepancy",
+                "z_prefix_discrepancy",
+                "preproj_exec_prefix_discrepancy",
+                "disc_exec_prefix_discrepancy",
                 "budget_hit_rate",
                 "budget_hit_pos_rate",
                 "budget_hit_neg_rate",
                 "cumulative_drift",
+                "cumulative_drift_mean_abs",
+                "final_prefix_drift_abs_mean",
+                "final_prefix_offset_abs_mean",
+                "max_prefix_offset_abs",
                 "silence_leakage",
             ]
-            summary_df = summary_df.drop(
-                columns=[
-                    column
-                    for column in keep_cols[2:]
-                    if column in summary_df.columns
-                ],
-                errors="ignore",
-            ).merge(
-                prefix_silence_df[keep_cols],
-                on=["sample_id", "eval_mode"],
-                how="left",
-            )
+            available_prefix_cols = [column for column in keep_cols if column in prefix_silence_df.columns]
+            prefix_merge_keys = [
+                key
+                for key in ("sample_id", "eval_mode", "control_contract_id")
+                if key in available_prefix_cols and key in summary_df.columns
+            ]
+            value_cols_prefix = [column for column in available_prefix_cols if column not in prefix_merge_keys]
+            if prefix_merge_keys and value_cols_prefix:
+                prefix_summary_df = (
+                    prefix_silence_df[prefix_merge_keys + value_cols_prefix]
+                    .groupby(prefix_merge_keys, as_index=False)
+                    .mean(numeric_only=True)
+                )
+                summary_df = summary_df.drop(
+                    columns=[column for column in value_cols_prefix if column in summary_df.columns],
+                    errors="ignore",
+                ).merge(
+                    prefix_summary_df,
+                    on=prefix_merge_keys,
+                    how="left",
+                )
         monotonicity_df = build_monotonicity_table(
             records,
             g_variant=args.g_variant,
@@ -1385,34 +1732,60 @@ def main() -> None:
         if not monotonicity_df.empty:
             merge_keys_triplet = [
                 key
-                for key in ("src_id", "eval_mode", "ref_bin")
+                for key in ("src_id", "eval_mode", "ref_bin", "control_contract_id")
                 if key in summary_df.columns and key in monotonicity_df.columns
             ]
-            if merge_keys_triplet == ["src_id", "eval_mode", "ref_bin"]:
+            if {"src_id", "eval_mode", "ref_bin"}.issubset(set(merge_keys_triplet)):
                 summary_df = summary_df.merge(
                     monotonicity_df[
                         [
                             "src_id",
                             "eval_mode",
                             "ref_bin",
+                            *(
+                                ["control_contract_id"]
+                                if "control_contract_id" in monotonicity_df.columns
+                                else []
+                            ),
                             "mono_triplet_ok",
+                            "mono_triplet_ok_raw",
+                            "mono_triplet_ok_preproj",
+                            "mono_triplet_ok_exec",
+                            "tempo_tie_triplet_raw",
+                            "tempo_tie_triplet_preproj",
+                            "tempo_tie_triplet_exec",
                             "tempo_delta",
+                            "tempo_delta_raw",
+                            "tempo_delta_preproj",
+                            "tempo_delta_exec",
                         ]
-                    ].drop_duplicates(subset=["src_id", "eval_mode", "ref_bin"]),
+                    ].drop_duplicates(subset=merge_keys_triplet),
                     on=merge_keys_triplet,
                     how="left",
                 )
             mono_summary = (
-                monotonicity_df.drop_duplicates(subset=["src_id", "eval_mode"])[["src_id", "eval_mode", "mono_triplet_ok"]]
+                monotonicity_df.drop_duplicates(
+                    subset=[key for key in ("src_id", "eval_mode", "control_contract_id") if key in monotonicity_df.columns]
+                )[[
+                    "src_id",
+                    "eval_mode",
+                    *(
+                        ["control_contract_id"]
+                        if "control_contract_id" in monotonicity_df.columns
+                        else []
+                    ),
+                    "mono_triplet_ok",
+                ]]
                 .rename(columns={"mono_triplet_ok": "tempo_monotonicity_rate"})
             )
-            merge_keys = [key for key in ("src_id", "eval_mode") if key in summary_df.columns]
-            if merge_keys == ["src_id", "eval_mode"]:
+            merge_keys = [key for key in ("src_id", "eval_mode", "control_contract_id") if key in summary_df.columns and key in mono_summary.columns]
+            if {"src_id", "eval_mode"}.issubset(set(merge_keys)):
                 summary_df = summary_df.merge(mono_summary, on=merge_keys, how="left")
         ladder_df = summarize_falsification_ladder(ref_crop_df, monotonicity_df, prefix_silence_df)
         if not ladder_df.empty and "eval_mode" in summary_df.columns and "eval_mode" in ladder_df.columns:
             ladder_cols = [
                 "eval_mode",
+                "control_contract_id",
                 "signal_explainability_spearman",
                 "signal_explainability_slope",
                 "signal_explainability_r2_like",
@@ -1429,9 +1802,18 @@ def main() -> None:
                 "explainability_slope",
                 "explainability_r2_like",
                 "monotonicity_rate",
+                "monotonicity_rate_raw",
+                "monotonicity_rate_preproj",
+                "monotonicity_rate_exec",
                 "anti_monotonicity_rate",
                 "tempo_tie_rate",
+                "tempo_tie_rate_raw",
+                "tempo_tie_rate_preproj",
+                "tempo_tie_rate_exec",
                 "tempo_transfer_slope",
+                "tempo_transfer_slope_raw",
+                "tempo_transfer_slope_preproj",
+                "tempo_transfer_slope_exec",
                 "tempo_transfer_spearman",
                 "invalid_g_rate",
                 "negative_control_gap",
@@ -1439,11 +1821,17 @@ def main() -> None:
             ]
             available_ladder_cols = [column for column in ladder_cols if column in ladder_df.columns]
             summary_df = summary_df.drop(
-                columns=[column for column in available_ladder_cols if column != "eval_mode" and column in summary_df.columns],
+                columns=[
+                    column
+                    for column in available_ladder_cols
+                    if column not in {"eval_mode", "control_contract_id"} and column in summary_df.columns
+                ],
                 errors="ignore",
             ).merge(
-                ladder_df[available_ladder_cols].drop_duplicates(subset=["eval_mode"]),
-                on=["eval_mode"],
+                ladder_df[available_ladder_cols].drop_duplicates(
+                    subset=[key for key in ("eval_mode", "control_contract_id") if key in available_ladder_cols]
+                ),
+                on=[key for key in ("eval_mode", "control_contract_id") if key in available_ladder_cols and key in summary_df.columns],
                 how="left",
             )
         issues = _warn_sparse_review_metadata(summary_df)

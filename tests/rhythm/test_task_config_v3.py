@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 
 from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
+from tasks.Conan.rhythm.duration_v3.task_config import _build_gate_contract_fingerprint
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -543,29 +544,83 @@ def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_tr
 
 def test_validate_rhythm_training_hparams_rejects_gate_status_contract_mismatch(tmp_path):
     gate_status = tmp_path / "gate_status.json"
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_g_variant"] = "raw_median"
+    hparams["rhythm_v3_src_prefix_stat_mode"] = "ema"
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    fingerprint["rhythm_v3_src_prefix_stat_mode"] = "exact_global_family"
     gate_status.write_text(
         json.dumps(
             {
                 "gate0_pass": True,
                 "gate1_pass": True,
                 "gate2_pass": True,
-                "contract_fingerprint": {
-                    "rhythm_v3_g_variant": "weighted_median",
-                    "rhythm_v3_src_prefix_stat_mode": "exact_global_family",
-                },
+                "contract_fingerprint": fingerprint,
             }
         ),
         encoding="utf-8",
     )
-    hparams = _minimal_prompt_summary_v1_hparams()
-    hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_gate_quality_strict"] = True
     hparams["rhythm_v3_debug_export"] = True
     hparams["rhythm_v3_strict_eval_invalid_g"] = True
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
-    hparams["rhythm_v3_g_variant"] = "raw_median"
-    hparams["rhythm_v3_src_prefix_stat_mode"] = "ema"
     with pytest.raises(ValueError, match="contract mismatch"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_gate_status_execution_contract_mismatch(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_g_variant"] = "weighted_median"
+    hparams["rhythm_v3_src_prefix_stat_mode"] = "ema"
+    hparams["rhythm_v3_budget_mode"] = "hybrid"
+    hparams["rhythm_v3_analytic_gap_clip"] = 0.50
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    fingerprint["rhythm_v3_budget_mode"] = "total"
+    fingerprint["rhythm_v3_analytic_gap_clip"] = 0.35
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": True,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="contract mismatch"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_gate_status_missing_fingerprint_keys(tmp_path):
+    gate_status = tmp_path / "gate_status.json"
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    fingerprint = _build_gate_contract_fingerprint(hparams)
+    fingerprint.pop("rhythm_v3_budget_mode", None)
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": True,
+                "contract_fingerprint": fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_debug_export"] = True
+    hparams["rhythm_v3_strict_eval_invalid_g"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="contract_fingerprint schema mismatch"):
         validate_rhythm_training_hparams(hparams)
 
 

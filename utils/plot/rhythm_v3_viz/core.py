@@ -481,13 +481,21 @@ class RhythmV3DebugRecord:
     projector_preclamp_exec: Optional[np.ndarray] = None
     projector_preclamp_duration_exec: Optional[np.ndarray] = None
     projector_preclamp_prefix_cumsum: Optional[np.ndarray] = None
+    projector_prefreeze_exec: Optional[np.ndarray] = None
+    projector_prefreeze_duration_exec: Optional[np.ndarray] = None
+    projector_prefreeze_prefix_cumsum: Optional[np.ndarray] = None
     projector_clamp_delta: Optional[np.ndarray] = None
     projector_clamp_mass: Optional[np.ndarray] = None
+    projector_rounding_only_regret: Optional[np.ndarray] = None
     prefix_unit_offset: Optional[np.ndarray] = None
     projector_prefix_drift: Optional[np.ndarray] = None
     projector_rounding_residual: Optional[np.ndarray] = None
     projector_rounding_regret: Optional[np.ndarray] = None
     projector_projection_regret: Optional[np.ndarray] = None
+    projector_repair_candidate_delta: Optional[np.ndarray] = None
+    projector_repair_candidate_steps: Optional[np.ndarray] = None
+    projector_repair_delta: Optional[np.ndarray] = None
+    projector_repair_steps: Optional[np.ndarray] = None
     projector_budget_hit_pos: Optional[np.ndarray] = None
     projector_budget_hit_neg: Optional[np.ndarray] = None
     projector_budget_hit_mask: Optional[np.ndarray] = None
@@ -731,9 +739,41 @@ def build_debug_record(
             if value is not None:
                 _maybe_set_meta(meta, key.replace("rhythm_v3_", ""), _as_object_scalar(value))
         for key in (
+            "rhythm_v3_min_prompt_speech_ratio",
+            "rhythm_v3_min_prompt_ref_len_sec",
+            "rhythm_v3_max_prompt_ref_len_sec",
+            "rhythm_v3_disallow_same_text_reference",
+            "rhythm_v3_disallow_same_text_paired_target",
+            "rhythm_v3_require_same_text_paired_target",
+            "rhythm_v3_strict_eval_invalid_g",
+            "rhythm_v3_alignment_prefilter_bad_samples",
+            "rhythm_v3_alignment_prefilter_max_attempts",
+            "rhythm_v3_alignment_unmatched_speech_ratio_max",
+            "rhythm_v3_alignment_mean_local_confidence_speech_min",
+            "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
+            "rhythm_v3_alignment_local_margin_p10_min",
+            "rhythm_v3_prompt_domain_mode",
+            "rhythm_v3_prompt_require_clean_support",
             "rhythm_v3_min_boundary_confidence_for_g",
             "rhythm_v3_src_prefix_stat_mode",
             "rhythm_v3_src_prefix_min_support",
+            "rhythm_v3_use_src_gap_in_coarse_head",
+            "rhythm_v3_analytic_gap_clip",
+            "rhythm_v3_prefix_budget_pos",
+            "rhythm_v3_prefix_budget_neg",
+            "rhythm_v3_dynamic_budget_ratio",
+            "rhythm_v3_min_prefix_budget",
+            "rhythm_v3_max_prefix_budget",
+            "rhythm_v3_budget_mode",
+            "rhythm_v3_boundary_carry_decay",
+            "rhythm_v3_boundary_offset_decay",
+            "rhythm_v3_boundary_reset_thresh",
+            "rhythm_v3_integer_projection_mode",
+            "rhythm_v3_integer_projection_anchor_mode",
+            "rhythm_v3_projection_repair_max_steps",
+            "rhythm_v3_projection_repair_speech_bonus",
+            "rhythm_v3_projection_repair_boundary_penalty",
+            "rhythm_v3_control_contract_id",
             "rhythm_v3_minimal_v1_profile",
             "rhythm_v3_strict_minimal_claim_profile",
             "rhythm_v3_use_continuous_alignment",
@@ -930,11 +970,23 @@ def build_debug_record(
         projector_preclamp_prefix_cumsum=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_preclamp_prefix_cumsum", batch_index)
         ),
+        projector_prefreeze_exec=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_prefreeze_exec", batch_index)
+        ),
+        projector_prefreeze_duration_exec=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_prefreeze_duration_exec", batch_index)
+        ),
+        projector_prefreeze_prefix_cumsum=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_prefreeze_prefix_cumsum", batch_index)
+        ),
         projector_clamp_delta=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_clamp_delta", batch_index)
         ),
         projector_clamp_mass=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_clamp_mass", batch_index)
+        ),
+        projector_rounding_only_regret=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_rounding_only_regret", batch_index)
         ),
         prefix_unit_offset=_as_optional_vector(_extract_attr_or_key(execution, "prefix_unit_offset", batch_index)),
         projector_prefix_drift=_as_optional_vector(
@@ -952,6 +1004,18 @@ def build_debug_record(
         ),
         projector_projection_regret=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_projection_regret", batch_index)
+        ),
+        projector_repair_candidate_delta=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_repair_candidate_delta", batch_index)
+        ),
+        projector_repair_candidate_steps=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_repair_candidate_steps", batch_index)
+        ),
+        projector_repair_delta=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_repair_delta", batch_index)
+        ),
+        projector_repair_steps=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_repair_steps", batch_index)
         ),
         projector_budget_hit_pos=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index)),
         projector_budget_hit_neg=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index)),
@@ -1211,7 +1275,11 @@ def record_summary(
     )
     from tasks.Conan.rhythm.duration_v3.metrics import (
         cumulative_drift,
+        cumulative_drift_mean_abs,
+        final_prefix_drift_abs_mean,
+        final_prefix_offset_abs_mean,
         local_silence_delta_share,
+        max_prefix_offset_abs,
         residual_bias_share,
         residual_target_stats,
         silence_leakage,
@@ -1359,12 +1427,20 @@ def record_summary(
         source_unit_ids=record.source_content_units,
     ) if record.unit_duration_raw is not None else float("nan")
     continuous_duration = _as_optional_vector(
-        record.projector_preclamp_duration_exec
-        if record.projector_preclamp_duration_exec is not None
+        record.projector_prefreeze_duration_exec
+        if record.projector_prefreeze_duration_exec is not None
         else (
-            record.projector_preclamp_exec
-            if record.projector_preclamp_exec is not None
-            else record.unit_duration_raw
+            record.projector_prefreeze_exec
+            if record.projector_prefreeze_exec is not None
+            else (
+                record.projector_preclamp_duration_exec
+                if record.projector_preclamp_duration_exec is not None
+                else (
+                    record.projector_preclamp_exec
+                    if record.projector_preclamp_exec is not None
+                    else record.unit_duration_raw
+                )
+            )
         ),
         dtype=np.float32,
     )
@@ -1511,6 +1587,37 @@ def record_summary(
             projector_bucket_count = float(
                 np.unique(np.round(projected_duration_arr[:width][speech_valid[:width]]).astype(np.int32)).size
             )
+    projector_rounding_regret_mean = (
+        float(np.mean(np.asarray(record.projector_rounding_regret, dtype=np.float32).reshape(-1)[speech_valid]))
+        if record.projector_rounding_regret is not None and bool(np.any(speech_valid))
+        else np.nan
+    )
+    projector_rounding_only_regret_mean = (
+        float(np.mean(np.asarray(record.projector_rounding_only_regret, dtype=np.float32).reshape(-1)[speech_valid]))
+        if record.projector_rounding_only_regret is not None and bool(np.any(speech_valid))
+        else np.nan
+    )
+    projector_clamp_mass_mean = (
+        float(np.mean(np.asarray(record.projector_clamp_mass, dtype=np.float32).reshape(-1)[speech_valid]))
+        if record.projector_clamp_mass is not None and bool(np.any(speech_valid))
+        else np.nan
+    )
+    projector_projection_regret_mean = (
+        float(np.mean(np.asarray(record.projector_projection_regret, dtype=np.float32).reshape(-1)[speech_valid]))
+        if record.projector_projection_regret is not None and bool(np.any(speech_valid))
+        else np.nan
+    )
+    projector_repair_candidate_steps_mean = (
+        float(np.mean(np.asarray(record.projector_repair_candidate_steps, dtype=np.float32).reshape(-1)))
+        if record.projector_repair_candidate_steps is not None
+        and np.asarray(record.projector_repair_candidate_steps).size > 0
+        else np.nan
+    )
+    projector_repair_accepted_steps_mean = (
+        float(np.mean(np.asarray(record.projector_repair_steps, dtype=np.float32).reshape(-1)))
+        if record.projector_repair_steps is not None and np.asarray(record.projector_repair_steps).size > 0
+        else np.nan
+    )
     coarse_bias_abs_mean = np.nan
     if record.coarse_correction is not None and bool(np.any(speech_valid)):
         coarse_arr = np.asarray(record.coarse_correction, dtype=np.float32).reshape(-1)
@@ -1582,6 +1689,10 @@ def record_summary(
         else np.nan
     )
     cumulative_prefix_drift = float(cumulative_drift(record.prefix_unit_offset).item())
+    cumulative_prefix_drift_mean_abs = float(cumulative_drift_mean_abs(record.prefix_unit_offset).item())
+    final_prefix_drift = float(final_prefix_drift_abs_mean(record.prefix_unit_offset).item())
+    final_prefix_offset_abs = float(final_prefix_offset_abs_mean(record.prefix_unit_offset).item())
+    max_prefix_offset = float(max_prefix_offset_abs(record.prefix_unit_offset).item())
     budget_hit_pos_rate = (
         float(np.mean(record.projector_budget_hit_pos.reshape(-1) > 0.5))
         if record.projector_budget_hit_pos is not None and record.projector_budget_hit_pos.size > 0
@@ -1827,7 +1938,20 @@ def record_summary(
             else np.nan
         ),
         "projector_bucket_count": projector_bucket_count,
+        "projector_rounding_regret_mean": projector_rounding_regret_mean,
+        "projector_rounding_only_regret_mean": projector_rounding_only_regret_mean,
+        "projector_clamp_mass_mean": projector_clamp_mass_mean,
+        "projector_projection_regret_mean": projector_projection_regret_mean,
+        "projector_repair_candidate_steps_mean": projector_repair_candidate_steps_mean,
+        "projector_repair_accepted_steps_mean": projector_repair_accepted_steps_mean,
         "cumulative_drift": cumulative_prefix_drift,
+        "cumulative_drift_mean_abs": cumulative_prefix_drift_mean_abs,
+        "final_prefix_drift_abs_mean": final_prefix_drift,
+        "final_prefix_offset_abs_mean": final_prefix_offset_abs,
+        "max_prefix_offset_abs": max_prefix_offset,
+        "control_contract_id": str(
+            meta.get("control_contract_id", meta.get("rhythm_v3_control_contract_id", "")) or ""
+        ),
         "item_name": record.item_name or "",
         "split": record.split or "",
         "reference_seconds": float(prompt_total * float(unit_step_ms) / 1000.0),

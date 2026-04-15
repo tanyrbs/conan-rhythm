@@ -456,8 +456,15 @@ class DurationExecution:
     projector_preclamp_duration_exec: Optional[torch.Tensor] = None
     projector_clamp_delta: Optional[torch.Tensor] = None
     projector_clamp_mass: Optional[torch.Tensor] = None
+    projector_rounding_only_regret: Optional[torch.Tensor] = None
     projector_rounding_regret: Optional[torch.Tensor] = None
     projector_projection_regret: Optional[torch.Tensor] = None
+    projector_prefreeze_exec: Optional[torch.Tensor] = None
+    projector_prefreeze_duration_exec: Optional[torch.Tensor] = None
+    projector_repair_candidate_delta: Optional[torch.Tensor] = None
+    projector_repair_candidate_steps: Optional[torch.Tensor] = None
+    projector_repair_delta: Optional[torch.Tensor] = None
+    projector_repair_steps: Optional[torch.Tensor] = None
     analytic_gap_raw: Optional[torch.Tensor] = None
     analytic_gap_clipped: Optional[torch.Tensor] = None
     analytic_clip_hit: Optional[torch.Tensor] = None
@@ -467,6 +474,7 @@ class DurationExecution:
     open_tail_commit_violation_count: Optional[torch.Tensor] = None
     projected_prefix_cumsum: Optional[torch.Tensor] = None
     projector_preclamp_prefix_cumsum: Optional[torch.Tensor] = None
+    projector_prefreeze_prefix_cumsum: Optional[torch.Tensor] = None
     source_prefix_cumsum: Optional[torch.Tensor] = None
     coarse_scalar_raw: Optional[torch.Tensor] = None
     global_term_before_local: Optional[torch.Tensor] = None

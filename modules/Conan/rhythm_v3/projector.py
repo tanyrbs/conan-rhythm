@@ -42,16 +42,16 @@ def _project_row_recurrence_script(
             continue
 
         total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
-        frames = torch.floor(total + 0.5)
-        frames = torch.clamp_min(frames, 1.0)
+        rounded_frames = torch.floor(total + 0.5)
+        rounded_frames = torch.clamp_min(rounded_frames, 1.0)
         lower = torch.ceil(budget_anchor - (float(row_budget_neg) + prefix_offset[0]))
         lower = torch.clamp_min(lower, 1.0)
         upper = torch.floor(budget_anchor + (float(row_budget_pos) - prefix_offset[0]))
         upper = torch.maximum(upper, lower)
-        frames = torch.minimum(torch.maximum(frames, lower), upper)
+        frames = torch.minimum(torch.maximum(rounded_frames, lower), upper)
         projected[offset] = frames
         prefix_offset[0] = prefix_offset[0] + (frames - budget_anchor)
-        carry[0] = total - frames
+        carry[0] = total - rounded_frames
 
         boundary_event = bool(row_boundary[offset] >= boundary_reset_thresh) or bool(row_phrase_final[offset] > 0.5)
         if boundary_event:
@@ -96,17 +96,148 @@ def _project_row_recurrence_no_boundary_script(
             continue
 
         total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
-        frames = torch.floor(total + 0.5)
-        frames = torch.clamp_min(frames, 1.0)
+        rounded_frames = torch.floor(total + 0.5)
+        rounded_frames = torch.clamp_min(rounded_frames, 1.0)
         lower = torch.ceil(budget_anchor - (float(row_budget_neg) + prefix_offset[0]))
         lower = torch.clamp_min(lower, 1.0)
         upper = torch.floor(budget_anchor + (float(row_budget_pos) - prefix_offset[0]))
         upper = torch.maximum(upper, lower)
-        frames = torch.minimum(torch.maximum(frames, lower), upper)
+        frames = torch.minimum(torch.maximum(rounded_frames, lower), upper)
         projected[offset] = frames
         prefix_offset[0] = prefix_offset[0] + (frames - budget_anchor)
-        carry[0] = total - frames
+        carry[0] = total - rounded_frames
     return projected, carry, prefix_offset
+
+
+def _build_row_repair_delta(
+    *,
+    row_exec: torch.Tensor,
+    row_projected: torch.Tensor,
+    row_speech: torch.Tensor,
+    row_coarse: torch.Tensor,
+    row_boundary: torch.Tensor | None,
+    row_phrase_final: torch.Tensor | None,
+    boundary_reset_thresh: float,
+    max_steps: int,
+    speech_bonus: float,
+    boundary_penalty: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    delta = torch.zeros_like(row_projected)
+    order_out = torch.full((int(max_steps),), -1, dtype=torch.long, device=row_projected.device)
+    if int(max_steps) <= 0 or int(row_projected.numel()) <= 0:
+        return delta, order_out
+
+    residual = row_exec.float() - row_projected.float()
+    score = residual.abs()
+    active = ((row_speech.float() > 0.5) | (row_coarse.float() > 0.5)).float()
+    score = score + (float(speech_bonus) * (row_speech.float() > 0.5).float())
+    score = score * active
+
+    boundary_mask = torch.zeros_like(score, dtype=torch.bool)
+    if isinstance(row_boundary, torch.Tensor):
+        boundary_mask = boundary_mask | (row_boundary.float() >= float(boundary_reset_thresh))
+    if isinstance(row_phrase_final, torch.Tensor):
+        boundary_mask = boundary_mask | (row_phrase_final.float() > 0.5)
+    if bool(boundary_mask.any().item()):
+        score = score - (float(boundary_penalty) * boundary_mask.float())
+
+    order = torch.argsort(score, descending=True)
+    residual_threshold = 0.25
+    used = 0
+    for idx_tensor in order:
+        if used >= int(max_steps):
+            break
+        idx = int(idx_tensor.item())
+        if float(active[idx].item()) <= 0.5:
+            continue
+        residual_value = float(residual[idx].item())
+        projected_value = float(row_projected[idx].item())
+        if residual_value > residual_threshold:
+            delta[idx] = 1.0
+            order_out[used] = idx
+            used += 1
+        elif residual_value < -residual_threshold and projected_value > 1.0:
+            delta[idx] = -1.0
+            order_out[used] = idx
+            used += 1
+    return delta, order_out
+
+
+def _repair_objective_score(
+    *,
+    row_projected: torch.Tensor,
+    row_exec: torch.Tensor,
+    carry_tensor: torch.Tensor,
+    prefix_offset_tensor: torch.Tensor,
+    terminal_carry_weight: float,
+    terminal_offset_weight: float,
+) -> torch.Tensor:
+    projection_regret = torch.mean((row_projected.float() - row_exec.float()).abs())
+    carry_term = carry_tensor.reshape(-1)[0].abs() * float(terminal_carry_weight)
+    offset_term = prefix_offset_tensor.reshape(-1)[0].abs() * float(terminal_offset_weight)
+    return projection_regret + carry_term + offset_term
+
+
+@torch.jit.script
+def _project_row_recurrence_repair_script(
+    row_exec: torch.Tensor,
+    row_source_rounded: torch.Tensor,
+    row_source_budget: torch.Tensor,
+    row_speech: torch.Tensor,
+    row_coarse: torch.Tensor,
+    row_boundary: torch.Tensor,
+    row_phrase_final: torch.Tensor,
+    row_repair_delta: torch.Tensor,
+    carry_init: torch.Tensor,
+    prefix_offset_init: torch.Tensor,
+    row_budget_pos: int,
+    row_budget_neg: int,
+    boundary_carry_decay: float,
+    boundary_offset_decay: float,
+    boundary_reset_thresh: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_units = int(row_exec.numel())
+    projected = torch.zeros_like(row_exec)
+    boundary_hit = torch.zeros_like(row_exec)
+    boundary_decay = torch.zeros_like(row_exec)
+    carry = carry_init.reshape(1)
+    prefix_offset = prefix_offset_init.reshape(1)
+    for offset in range(num_units):
+        is_speech = bool(row_speech[offset] > 0.5)
+        is_coarse_only = bool(row_coarse[offset] > 0.5)
+        anchor = torch.clamp_min(row_source_rounded[offset], 1.0)
+        budget_anchor = torch.clamp_min(row_source_budget[offset], 1.0)
+        if (not is_speech) and (not is_coarse_only):
+            projected[offset] = anchor
+            continue
+
+        total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
+        base_frames = torch.floor(total + 0.5) + row_repair_delta[offset]
+        base_frames = torch.clamp_min(base_frames, 1.0)
+        lower = torch.ceil(budget_anchor - (float(row_budget_neg) + prefix_offset[0]))
+        lower = torch.clamp_min(lower, 1.0)
+        upper = torch.floor(budget_anchor + (float(row_budget_pos) - prefix_offset[0]))
+        upper = torch.maximum(upper, lower)
+        frames = torch.minimum(torch.maximum(base_frames, lower), upper)
+        projected[offset] = frames
+        prefix_offset[0] = prefix_offset[0] + (frames - budget_anchor)
+        carry[0] = total - base_frames
+
+        boundary_event = bool(row_boundary[offset] >= boundary_reset_thresh) or bool(row_phrase_final[offset] > 0.5)
+        if boundary_event:
+            boundary_hit[offset] = 1.0
+            if (
+                boundary_carry_decay < (1.0 - 1.0e-6)
+                or boundary_offset_decay < (1.0 - 1.0e-6)
+            ):
+                carry[0] = carry[0] * boundary_carry_decay
+                prefix_offset[0] = torch.clamp(
+                    prefix_offset[0] * boundary_offset_decay,
+                    min=-float(row_budget_neg),
+                    max=float(row_budget_pos),
+                )
+                boundary_decay[offset] = 1.0
+    return projected, boundary_hit, boundary_decay, carry, prefix_offset
 
 
 def _normalize_integer_projection_mode(value: str | None) -> str:
@@ -116,6 +247,8 @@ def _normalize_integer_projection_mode(value: str | None) -> str:
         "default": "greedy",
         "nearest": "greedy",
         "recurrent": "greedy",
+        "repair": "greedy_repair",
+        "greedyrepair": "greedy_repair",
         "dp": "prefix_optimal",
         "prefix": "prefix_optimal",
         "prefix_dp": "prefix_optimal",
@@ -123,10 +256,10 @@ def _normalize_integer_projection_mode(value: str | None) -> str:
         "closed_prefix_optimal": "prefix_optimal",
     }
     mode = aliases.get(mode, mode)
-    if mode not in {"greedy", "prefix_optimal"}:
+    if mode not in {"greedy", "greedy_repair", "prefix_optimal"}:
         raise ValueError(
             f"Unsupported rhythm_v3_integer_projection_mode={value!r}. "
-            "Expected one of: greedy, prefix_optimal."
+            "Expected one of: greedy, greedy_repair, prefix_optimal."
         )
     return mode
 
@@ -270,7 +403,8 @@ def _project_row_prefix_optimal_python(
                     continue
                 if next_offset < -float(row_budget_neg) - 1.0e-6:
                     continue
-                next_carry = total - frames
+                rounded_frames = float(max(1, int(math.floor(total + 0.5))))
+                next_carry = total - rounded_frames
                 step_cost = abs(frames - total)
                 hit_value = 1.0 if boundary_event else 0.0
                 decay_value = 0.0
@@ -377,6 +511,9 @@ class StreamingDurationProjector(nn.Module):
         prefix_projection_max_states: int = 256,
         prefix_projection_terminal_carry_weight: float = 0.25,
         prefix_projection_terminal_offset_weight: float = 0.05,
+        projection_repair_max_steps: int = 0,
+        projection_repair_speech_bonus: float = 1.0,
+        projection_repair_boundary_penalty: float = 0.35,
         export_projector_telemetry: bool = True,
     ) -> None:
         super().__init__()
@@ -399,6 +536,9 @@ class StreamingDurationProjector(nn.Module):
         self.prefix_projection_max_states = int(max(1, prefix_projection_max_states))
         self.prefix_projection_terminal_carry_weight = float(max(0.0, prefix_projection_terminal_carry_weight))
         self.prefix_projection_terminal_offset_weight = float(max(0.0, prefix_projection_terminal_offset_weight))
+        self.projection_repair_max_steps = int(max(0, projection_repair_max_steps))
+        self.projection_repair_speech_bonus = float(max(0.0, projection_repair_speech_bonus))
+        self.projection_repair_boundary_penalty = float(max(0.0, projection_repair_boundary_penalty))
         self.export_projector_telemetry = bool(export_projector_telemetry)
 
     def init_state(self, *, batch_size: int, device: torch.device) -> DurationRuntimeState:
@@ -615,14 +755,31 @@ class StreamingDurationProjector(nn.Module):
         prefix_projection_max_states: int = 256,
         prefix_projection_terminal_carry_weight: float = 0.25,
         prefix_projection_terminal_offset_weight: float = 0.05,
+        projection_repair_max_steps: int = 0,
+        projection_repair_speech_bonus: float = 1.0,
+        projection_repair_boundary_penalty: float = 0.35,
         committed_len: torch.Tensor | None = None,
         budget_pos_tensor: torch.Tensor | None = None,
         budget_neg_tensor: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         batch_size, num_units = unit_duration_exec.shape
         projected = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_hit = unit_duration_exec.new_zeros(unit_duration_exec.shape)
         boundary_decay_applied = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        repair_candidate_delta_full = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        repair_candidate_steps = unit_duration_exec.new_zeros((batch_size, 1))
+        repair_delta_full = unit_duration_exec.new_zeros(unit_duration_exec.shape)
+        repair_steps = unit_duration_exec.new_zeros((batch_size, 1))
         resolved_boundary_offset_decay = (
             float(boundary_carry_decay)
             if boundary_offset_decay is None
@@ -712,6 +869,8 @@ class StreamingDurationProjector(nn.Module):
             start_unit = int(prev_prefix[batch_idx].item())
             carry = float(residual_next[batch_idx].item())
             prefix_offset = float(prefix_offset_next[batch_idx].item())
+            carry_init_value = carry
+            prefix_offset_init_value = prefix_offset
             row_exec, row_source_rounded, row_source_budget, row_speech, row_coarse, row_boundary, row_phrase_final = (
                 StreamingDurationProjector._extract_projection_row_torch(
                     batch_idx=batch_idx,
@@ -802,6 +961,113 @@ class StreamingDurationProjector(nn.Module):
                     boundary_offset_decay=resolved_boundary_offset_decay,
                     boundary_reset_thresh=boundary_reset_thresh,
                 )
+            repair_delta = None
+            candidate_repair_delta = None
+            candidate_repair_steps = 0
+            applied_repair_steps = 0
+            if projection_mode == "greedy_repair" and int(projection_repair_max_steps) > 0:
+                candidate_repair_delta, candidate_order = _build_row_repair_delta(
+                    row_exec=row_exec,
+                    row_projected=row_projected,
+                    row_speech=row_speech.float(),
+                    row_coarse=row_coarse_float,
+                    row_boundary=row_boundary if isinstance(row_boundary, torch.Tensor) else None,
+                    row_phrase_final=(
+                        row_phrase_final.float()
+                        if isinstance(row_phrase_final, torch.Tensor)
+                        else None
+                    ),
+                    boundary_reset_thresh=boundary_reset_thresh,
+                    max_steps=projection_repair_max_steps,
+                    speech_bonus=projection_repair_speech_bonus,
+                    boundary_penalty=projection_repair_boundary_penalty,
+                )
+                candidate_repair_steps = int((candidate_repair_delta.abs() > 0.5).sum().item())
+                if candidate_repair_steps > 0:
+                    repair_candidate_delta_full[batch_idx, start_unit:row_committed_len] = candidate_repair_delta.to(
+                        device=repair_candidate_delta_full.device,
+                        dtype=repair_candidate_delta_full.dtype,
+                    )
+                    base_score = _repair_objective_score(
+                        row_projected=row_projected,
+                        row_exec=row_exec,
+                        carry_tensor=carry_tensor,
+                        prefix_offset_tensor=prefix_offset_tensor,
+                        terminal_carry_weight=prefix_projection_terminal_carry_weight,
+                        terminal_offset_weight=prefix_projection_terminal_offset_weight,
+                    )
+                    best_score = base_score
+                    best_delta = torch.zeros_like(candidate_repair_delta)
+                    best_projected = row_projected
+                    best_boundary_hit = row_boundary_hit
+                    best_boundary_decay = row_boundary_decay
+                    best_carry_tensor = carry_tensor
+                    best_prefix_offset_tensor = prefix_offset_tensor
+                    running_delta = torch.zeros_like(candidate_repair_delta)
+                    for step_idx_tensor in candidate_order:
+                        step_idx = int(step_idx_tensor.item())
+                        if step_idx < 0:
+                            break
+                        running_delta[step_idx] = candidate_repair_delta[step_idx]
+                        (
+                            repaired_projected,
+                            repaired_boundary_hit,
+                            repaired_boundary_decay,
+                            repaired_carry_tensor,
+                            repaired_prefix_offset_tensor,
+                        ) = _project_row_recurrence_repair_script(
+                            row_exec=row_exec,
+                            row_source_rounded=row_source_rounded,
+                            row_source_budget=row_source_budget,
+                            row_speech=row_speech.float(),
+                            row_coarse=row_coarse_float,
+                            row_boundary=(
+                                row_boundary
+                                if isinstance(row_boundary, torch.Tensor)
+                                else torch.zeros_like(row_exec)
+                            ),
+                            row_phrase_final=(
+                                row_phrase_final.float()
+                                if isinstance(row_phrase_final, torch.Tensor)
+                                else torch.zeros_like(row_exec)
+                            ),
+                            row_repair_delta=running_delta.float(),
+                            carry_init=row_exec.new_tensor([carry_init_value]),
+                            prefix_offset_init=row_exec.new_tensor([prefix_offset_init_value]),
+                            row_budget_pos=row_budget_pos,
+                            row_budget_neg=row_budget_neg,
+                            boundary_carry_decay=boundary_carry_decay,
+                            boundary_offset_decay=resolved_boundary_offset_decay,
+                            boundary_reset_thresh=boundary_reset_thresh,
+                        )
+                        candidate_score = _repair_objective_score(
+                            row_projected=repaired_projected,
+                            row_exec=row_exec,
+                            carry_tensor=repaired_carry_tensor,
+                            prefix_offset_tensor=repaired_prefix_offset_tensor,
+                            terminal_carry_weight=prefix_projection_terminal_carry_weight,
+                            terminal_offset_weight=prefix_projection_terminal_offset_weight,
+                        )
+                        if bool((candidate_score + 1.0e-6 < best_score).item()):
+                            best_score = candidate_score
+                            best_delta = running_delta.clone()
+                            best_projected = repaired_projected
+                            best_boundary_hit = repaired_boundary_hit
+                            best_boundary_decay = repaired_boundary_decay
+                            best_carry_tensor = repaired_carry_tensor
+                            best_prefix_offset_tensor = repaired_prefix_offset_tensor
+                    applied_repair_steps = int((best_delta.abs() > 0.5).sum().item())
+                    if applied_repair_steps > 0:
+                        repair_delta = best_delta
+                        row_projected = best_projected
+                        row_boundary_hit = best_boundary_hit
+                        row_boundary_decay = best_boundary_decay
+                        carry_tensor = best_carry_tensor
+                        prefix_offset_tensor = best_prefix_offset_tensor
+                        repair_delta_full[batch_idx, start_unit:row_committed_len] = best_delta.to(
+                            device=repair_delta_full.device,
+                            dtype=repair_delta_full.dtype,
+                        )
             projected[batch_idx, start_unit:row_committed_len] = row_projected.to(
                 device=projected.device,
                 dtype=projected.dtype,
@@ -822,12 +1088,18 @@ class StreamingDurationProjector(nn.Module):
                 device=prefix_offset_next.device,
                 dtype=prefix_offset_next.dtype,
             )
+            repair_candidate_steps[batch_idx, 0] = float(candidate_repair_steps)
+            repair_steps[batch_idx, 0] = float(applied_repair_steps)
         return (
             projected,
             residual_next.reshape(batch_size, 1),
             prefix_offset_next.reshape(batch_size, 1),
             boundary_hit,
             boundary_decay_applied,
+            repair_candidate_delta_full,
+            repair_candidate_steps,
+            repair_delta_full,
+            repair_steps,
         )
 
     @staticmethod
@@ -999,6 +1271,7 @@ class StreamingDurationProjector(nn.Module):
         silence_pred: torch.Tensor | None = None,
         source_rate_seq: torch.Tensor | None = None,
         source_prefix_summary: torch.Tensor | None = None,
+        prefreeze_duration_exec: torch.Tensor | None = None,
         analytic_gap_raw: torch.Tensor | None = None,
         analytic_gap_clipped: torch.Tensor | None = None,
         analytic_clip_hit: torch.Tensor | None = None,
@@ -1041,7 +1314,17 @@ class StreamingDurationProjector(nn.Module):
             max_prefix_budget=self.max_prefix_budget,
             budget_mode=self.budget_mode,
         ).unsqueeze(1)
-        projected_duration_exec, residual_next, prefix_unit_offset_next, boundary_hit, boundary_decay_applied = self._project_duration_prefix(
+        (
+            projected_duration_exec,
+            residual_next,
+            prefix_unit_offset_next,
+            boundary_hit,
+            boundary_decay_applied,
+            repair_candidate_delta_full,
+            repair_candidate_steps,
+            repair_delta_full,
+            repair_steps,
+        ) = self._project_duration_prefix(
             unit_duration_exec=unit_duration_exec,
             source_duration_obs=source_duration_obs,
             commit_mask=commit_mask,
@@ -1074,6 +1357,9 @@ class StreamingDurationProjector(nn.Module):
             prefix_projection_max_states=self.prefix_projection_max_states,
             prefix_projection_terminal_carry_weight=self.prefix_projection_terminal_carry_weight,
             prefix_projection_terminal_offset_weight=self.prefix_projection_terminal_offset_weight,
+            projection_repair_max_steps=self.projection_repair_max_steps,
+            projection_repair_speech_bonus=self.projection_repair_speech_bonus,
+            projection_repair_boundary_penalty=self.projection_repair_boundary_penalty,
             committed_len=committed_len,
             budget_pos_tensor=budget_pos_used.reshape(batch_size),
             budget_neg_tensor=budget_neg_used.reshape(batch_size),
@@ -1084,8 +1370,18 @@ class StreamingDurationProjector(nn.Module):
             else None
         )
         preclamp_duration_exec = unit_duration_exec.float() * commit_mask.float()
+        prefreeze_surface = (
+            prefreeze_duration_exec.float()
+            if isinstance(prefreeze_duration_exec, torch.Tensor)
+            else unit_duration_exec.float()
+        ) * commit_mask.float()
         preclamp_prefix_cumsum = (
             torch.cumsum(preclamp_duration_exec, dim=1)
+            if self.export_projector_telemetry
+            else None
+        )
+        prefreeze_prefix_cumsum = (
+            torch.cumsum(prefreeze_surface, dim=1)
             if self.export_projector_telemetry
             else None
         )
@@ -1098,12 +1394,20 @@ class StreamingDurationProjector(nn.Module):
         projector_preclamp_exec = (
             preclamp_duration_exec.detach() if self.export_projector_telemetry else None
         )
+        projector_prefreeze_exec = (
+            prefreeze_surface.detach() if self.export_projector_telemetry else None
+        )
         clamp_delta = (
             (projected_duration_exec.float() - preclamp_duration_exec) * commit_mask.float()
         )
         projector_clamp_delta = clamp_delta.detach() if self.export_projector_telemetry else None
         projector_clamp_mass = (
             (projected_duration_exec.float() - preclamp_rounded_exec).abs().detach()
+            if self.export_projector_telemetry
+            else None
+        )
+        projector_rounding_only_regret = (
+            (preclamp_rounded_exec - preclamp_duration_exec).abs().detach()
             if self.export_projector_telemetry
             else None
         )
@@ -1192,8 +1496,23 @@ class StreamingDurationProjector(nn.Module):
             projector_prefix_drift=prefix_unit_offset_next.detach(),
             projector_preclamp_exec=projector_preclamp_exec,
             projector_preclamp_duration_exec=projector_preclamp_exec,
+            projector_prefreeze_exec=projector_prefreeze_exec,
+            projector_prefreeze_duration_exec=projector_prefreeze_exec,
+            projector_repair_candidate_delta=(
+                repair_candidate_delta_full.detach() if self.export_projector_telemetry else None
+            ),
+            projector_repair_candidate_steps=(
+                repair_candidate_steps.detach() if self.export_projector_telemetry else None
+            ),
+            projector_repair_delta=(
+                repair_delta_full.detach() if self.export_projector_telemetry else None
+            ),
+            projector_repair_steps=(
+                repair_steps.detach() if self.export_projector_telemetry else None
+            ),
             projector_clamp_delta=projector_clamp_delta,
             projector_clamp_mass=projector_clamp_mass,
+            projector_rounding_only_regret=projector_rounding_only_regret,
             projector_rounding_regret=projector_rounding_regret,
             projector_projection_regret=projector_rounding_regret,
             commit_closed_prefix_ok=commit_closed_prefix_ok.detach(),
@@ -1204,6 +1523,9 @@ class StreamingDurationProjector(nn.Module):
             ),
             projector_preclamp_prefix_cumsum=(
                 None if preclamp_prefix_cumsum is None else preclamp_prefix_cumsum.detach()
+            ),
+            projector_prefreeze_prefix_cumsum=(
+                None if prefreeze_prefix_cumsum is None else prefreeze_prefix_cumsum.detach()
             ),
             source_prefix_cumsum=(
                 None if source_prefix_cumsum is None else source_prefix_cumsum.detach()

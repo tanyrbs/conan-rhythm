@@ -20,8 +20,9 @@ Latest exported local artifacts:
 
 - `egs/overrides/rhythm_v3_gate_status.json`
 - `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
+- `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
+- `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
 - supporting local-candidate artifacts:
-  - `tmp/gate2_candidate_20260415_s75_srcgap/`
   - `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
   - `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
 
@@ -32,10 +33,13 @@ Current verdict on the local quick-ARCTIC surface:
   source-support / init-parity repair
 - Gate 1-upper also passes on that same strongest fixed contract:
   `weighted_median + exact_global_family`
-- Gate 2-online local `src_gap` candidate was rerun on the maintained online
+- Gate 2-online local execution candidate was rerun on the maintained online
   contract
-- aggregate Gate2 results were essentially unchanged relative to the earlier
-  candidate
+- a real adapter-forwarding bug was fixed first:
+  earlier `greedy_repair` probes were actually still running `greedy`
+- once the wiring was corrected, `greedy_repair` became active and improved
+  coarse runtime metrics modestly, but the aggregate gate verdict still did not
+  change
 - later projector/headroom falsification found:
   boundary no-decay is not the fix,
   optional `prefix_optimal` / continuous-anchor projector knobs are now
@@ -51,9 +55,12 @@ Current verdict on the local quick-ARCTIC surface:
 So this validation stack should currently be read as a repaired
 **gate + local-candidate diagnostic surface**, not as evidence that the
 repository is ready for new official training.
-The checked-in local candidate JSON remains a machine-readable summary of the
-latest strongest-contract local result, while the newer Gate2/Gate3 reruns are
-still local online candidates rather than official training-unblock artifacts.
+The checked-in local candidate JSONs now separate:
+
+- the latest strongest-contract local Gate0/1 result, and
+- the latest maintained-online execution candidate
+
+Neither one should be read as an official training-unblock artifact.
 
 ## 1. What we validate first
 

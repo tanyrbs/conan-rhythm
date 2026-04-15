@@ -11,7 +11,8 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
 - strongest upper-bound local validation still retained separately as
   `weighted_median + exact_global_family`
 - official training status: blocked
-- local online candidate status: advanced, but still failing review gates
+- local online candidate status: execution candidate is now reproducible and active,
+  but still failing review gates
 
 ## What changed on 2026-04-15
 
@@ -34,8 +35,10 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
 
 - checkpoint family:
   `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
-- reviewed status:
-  `tmp/gate2_candidate_20260415_s75_srcgap/review/gate_status.json`
+- checked-in candidate config:
+  `egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml`
+- checked-in status snapshot:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
 
 3. Gate3 local training was unblocked by fixing a config/runtime mismatch.
 
@@ -68,6 +71,25 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
   `rhythm_v3_max_prefix_budget=96`,
   `rhythm_v3_dynamic_budget_ratio=0.35`
 
+5. The local `greedy_repair` candidate was found to have a real runtime
+   plumbing bug and then rerun.
+
+- bug:
+  `ConanDurationAdapter` was not forwarding
+  `rhythm_v3_projection_mode` /
+  `rhythm_v3_integer_projection_mode` and
+  `rhythm_v3_projection_repair_*`
+  into `MixedEffectsDurationModule`, so earlier "repair" probes were still
+  running plain `greedy`
+- after the fix:
+  valid `projector_repair_candidate_steps_mean=6.0`,
+  valid `projector_repair_accepted_steps_mean=1.6`,
+  test `projector_repair_candidate_steps_mean=6.0`,
+  test `projector_repair_accepted_steps_mean=2.4`
+- factual result:
+  the execution candidate is now truly active and modestly improves coarse
+  runtime metrics, but it still does not clear Gate1/Gate2
+
 ## Current gate reading
 
 ### Gate0 / Gate1 upper-bound
@@ -80,16 +102,24 @@ Still alive on the strongest local validation surface:
 
 ### Gate2-online local candidate
 
-Current reviewed result:
+Current reviewed result after the adapter-forwarding fix:
 
 - `gate1_pass=false`
 - `gate2_pass=false`
 - `gate3_pass=false`
-- `analytic_tempo_monotonicity_rate=0.3529`
-- `analytic_tempo_transfer_slope=-0.0149`
-- `analytic_tempo_tie_rate=0.6471`
-- `coarse_only_runtime_metrics.cumulative_drift=8.9612`
-- `coarse_only_control_regressions=["monotonicity_rate","speech_weighted_mae"]`
+- checked-in status:
+  `egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json`
+- valid coarse runtime deltas vs the earlier inert probe:
+  `projector_bucket_count: 10.60 -> 10.87`
+  `projector_rounding_regret_mean: 0.3775 -> 0.3675`
+  `projector_clamp_mass_mean: 0.2633 -> 0.2321`
+  `final_prefix_drift_abs_mean: 5.7658 -> 5.6645`
+  `tempo_tie_rate: 0.3333 -> 0.3333`
+- test coarse runtime deltas:
+  `projector_rounding_regret_mean: 0.6454 -> 0.6285`
+  `projector_clamp_mass_mean: 0.5350 -> 0.5050`
+  `final_prefix_drift_abs_mean: 7.3316 -> 7.2332`
+  `tempo_tie_rate: 0.5000 -> 0.5000`
 
 Projector/headroom follow-up:
 
@@ -98,6 +128,9 @@ Projector/headroom follow-up:
 - `prefix_optimal` projection and continuous-anchor debt tracking are now
   available for controlled local trials, but on the current quick data they do
   not materially change the Gate1 analytic result by themselves
+- `greedy_repair` is no longer inert once the adapter forwarding bug is fixed;
+  it now applies on most rows, but the gain is still incremental rather than
+  gate-clearing
 - wider budget plus `analytic_gap_clip=0.80` improves train transfer
   (`monotone_source_count=7/12`, mean exec slope about `1.02`) but still fails
   the gate because ties and non-monotone triplets remain
@@ -111,8 +144,11 @@ Projector/headroom follow-up:
 Interpretation:
 
 - `src_gap` alone did not materially improve the maintained online surface
-- the dominant bottleneck still looks execution-side rather than prompt-side
-  `g` existence
+- the execution layer really was part of the problem, because once repair was
+  truly activated the coarse runtime metrics moved in the expected direction
+- but the gain is too small:
+  tie rate is still high, drift is still far above the runtime limit, and the
+  same flat sources remain
 
 ### Gate3 local candidate
 
@@ -174,7 +210,8 @@ Keep these truths separate:
   Gate0/Gate1 alive on
   `weighted_median + exact_global_family`
 - local online candidates:
-  Gate2 rerun and Gate3-progress evidence exist, but they are diagnostic only
+  Gate2 rerun, the checked-in execution candidate JSON, and Gate3-progress
+  evidence all exist, but they are diagnostic only
 
 Therefore:
 
