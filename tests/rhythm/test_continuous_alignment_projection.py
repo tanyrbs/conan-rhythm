@@ -603,6 +603,49 @@ class ContinuousAlignmentProjectionTests(unittest.TestCase):
             places=6,
         )
 
+    def test_alignment_soft_repair_handles_missing_source_frame_support(self) -> None:
+        projected = project_target_runs_onto_source(
+            source_units=np.asarray([11, 12, 13], dtype=np.int64),
+            source_durations=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            source_silence_mask=np.zeros((3,), dtype=np.float32),
+            target_units=np.asarray([11, 12, 13], dtype=np.int64),
+            target_durations=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            target_valid_mask=np.ones((3,), dtype=np.float32),
+            target_speech_mask=np.ones((3,), dtype=np.float32),
+            use_continuous_alignment=True,
+            source_frame_states=np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            source_frame_to_run=np.asarray([0, 2], dtype=np.int64),
+            target_frame_states=np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            ),
+            target_frame_speech_prob=np.ones((3,), dtype=np.float32),
+            target_frame_valid=np.ones((3,), dtype=np.float32),
+            alignment_soft_repair=True,
+        )
+
+        self.assertEqual(projected["alignment_kind"], "continuous_viterbi_v1")
+        np.testing.assert_allclose(
+            projected["source_frame_count"],
+            np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            projected["source_frame_weight_sum"],
+            np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+        )
+        self.assertEqual(tuple(projected["source_run_proto"].shape), (3, 3))
+        self.assertTrue(np.all(np.isfinite(projected["source_run_proto"])))
+
 
 if __name__ == "__main__":
     unittest.main()

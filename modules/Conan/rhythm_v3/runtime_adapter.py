@@ -72,10 +72,16 @@ class ConanDurationAdapter(nn.Module):
         use_log_base_rate = bool(hparams.get("rhythm_v3_use_log_base_rate", False))
         if rate_mode == "simple_global" or simple_global_stats:
             use_log_base_rate = False
-        if "rhythm_v3_disable_learned_gate" in hparams:
-            use_learned_residual_gate = not bool(hparams.get("rhythm_v3_disable_learned_gate", False))
+        disable_learned_gate = hparams.get("rhythm_v3_disable_learned_gate", _MISSING)
+        requested_use_learned_residual_gate = hparams.get("rhythm_v3_use_learned_residual_gate", _MISSING)
+        if requested_use_learned_residual_gate is not _MISSING:
+            use_learned_residual_gate = bool(requested_use_learned_residual_gate)
+        elif minimal_v1_profile:
+            use_learned_residual_gate = False
+        elif disable_learned_gate is not _MISSING:
+            use_learned_residual_gate = not bool(disable_learned_gate)
         else:
-            use_learned_residual_gate = bool(hparams.get("rhythm_v3_use_learned_residual_gate", False))
+            use_learned_residual_gate = True
         requested_use_reference_summary = (
             hparams.get("rhythm_v3_use_reference_summary", False)
             if "rhythm_v3_use_reference_summary" in hparams
@@ -176,7 +182,11 @@ class ConanDurationAdapter(nn.Module):
             rate_mode=rate_mode,
             simple_global_stats=simple_global_stats,
             minimal_v1_profile=minimal_v1_profile,
+            strict_minimal_claim_profile=bool(hparams.get("rhythm_v3_strict_minimal_claim_profile", True)),
             use_log_base_rate=use_log_base_rate,
+            disable_learned_gate=(
+                None if disable_learned_gate is _MISSING else bool(disable_learned_gate)
+            ),
             use_learned_residual_gate=use_learned_residual_gate,
             use_reference_summary=use_reference_summary,
             emit_prompt_diagnostics=bool(hparams.get("rhythm_v3_emit_prompt_diagnostics", True)),
@@ -185,8 +195,61 @@ class ConanDurationAdapter(nn.Module):
             g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2)),
             drop_edge_runs_for_g=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
             min_boundary_confidence_for_g=hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
+            prompt_domain_mode=str(hparams.get("rhythm_v3_prompt_domain_mode", "minimal_strict") or "minimal_strict"),
+            prompt_require_clean_support=bool(hparams.get("rhythm_v3_prompt_require_clean_support", True)),
+            prompt_g_variant=str(
+                hparams.get(
+                    "rhythm_v3_prompt_g_variant",
+                    hparams.get("rhythm_v3_g_variant", "raw_median"),
+                )
+                or "raw_median"
+            ),
+            prompt_g_trim_ratio=float(
+                hparams.get(
+                    "rhythm_v3_prompt_g_trim_ratio",
+                    hparams.get("rhythm_v3_g_trim_ratio", 0.2),
+                )
+                or 0.2
+            ),
+            prompt_g_drop_edge_runs=int(
+                hparams.get(
+                    "rhythm_v3_prompt_g_drop_edge_runs",
+                    hparams.get("rhythm_v3_drop_edge_runs_for_g", 0),
+                )
+                or 0
+            ),
+            prompt_min_boundary_confidence_for_g=hparams.get(
+                "rhythm_v3_prompt_min_boundary_confidence_for_g",
+                hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
+            ),
+            src_g_variant=str(
+                hparams.get(
+                    "rhythm_v3_src_g_variant",
+                    hparams.get("rhythm_v3_g_variant", "raw_median"),
+                )
+                or "raw_median"
+            ),
+            src_g_trim_ratio=float(
+                hparams.get(
+                    "rhythm_v3_src_g_trim_ratio",
+                    hparams.get("rhythm_v3_g_trim_ratio", 0.2),
+                )
+                or 0.2
+            ),
+            src_g_drop_edge_runs=int(
+                hparams.get(
+                    "rhythm_v3_src_g_drop_edge_runs",
+                    hparams.get("rhythm_v3_drop_edge_runs_for_g", 0),
+                )
+                or 0
+            ),
+            src_min_boundary_confidence_for_g=hparams.get(
+                "rhythm_v3_src_min_boundary_confidence_for_g",
+                hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
+            ),
             disable_local_residual=bool(hparams.get("rhythm_v3_disable_local_residual", False)),
             disable_coarse_bias=bool(hparams.get("rhythm_v3_disable_coarse_bias", False)),
+            use_src_gap_in_coarse_head=bool(hparams.get("rhythm_v3_use_src_gap_in_coarse_head", False)),
             detach_global_term_in_local_head=bool(
                 hparams.get(
                     "rhythm_v3_detach_global_term_in_local_head",
@@ -594,6 +657,9 @@ class ConanDurationAdapter(nn.Module):
             "prompt_phrase_group_pos",
             "prompt_phrase_final_mask",
             "g_trim_ratio",
+            "prompt_g_trim_ratio",
+            "prompt_g_drop_edge_runs",
+            "prompt_min_boundary_confidence_for_g",
         ):
             if isinstance(ref_conditioning.get(key), torch.Tensor):
                 enriched[key] = ref_conditioning[key].to(device=device).float()
@@ -716,6 +782,32 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_g_variant"] = self.module.g_variant
         ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
         ret["rhythm_v3_min_boundary_confidence_for_g"] = (
+            None
+            if getattr(self.module, "min_boundary_confidence_for_g", None) is None
+            else float(self.module.min_boundary_confidence_for_g)
+        )
+        ret["rhythm_v3_prompt_g_variant"] = str(
+            getattr(self.module, "prompt_g_variant", self.module.g_variant)
+        )
+        ret["rhythm_v3_prompt_g_trim_ratio"] = float(
+            getattr(self.module, "prompt_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+        )
+        ret["rhythm_v3_prompt_g_drop_edge_runs"] = int(
+            getattr(self.module, "prompt_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
+        )
+        ret["rhythm_v3_prompt_min_boundary_confidence_for_g"] = (
+            None
+            if getattr(self.module, "prompt_min_boundary_confidence_for_g", None) is None
+            else float(self.module.prompt_min_boundary_confidence_for_g)
+        )
+        ret["rhythm_v3_src_g_variant"] = str(
+            getattr(self.module, "src_g_variant", self.module.g_variant)
+        )
+        ret["rhythm_v3_src_g_trim_ratio"] = float(
+            getattr(self.module, "src_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+        )
+        ret["rhythm_v3_src_g_drop_edge_runs"] = int(getattr(self.module, "g_drop_edge_runs", 0))
+        ret["rhythm_v3_src_min_boundary_confidence_for_g"] = (
             None
             if getattr(self.module, "min_boundary_confidence_for_g", None) is None
             else float(self.module.min_boundary_confidence_for_g)
@@ -1062,6 +1154,28 @@ class ConanDurationAdapter(nn.Module):
             debug_bundle = {
                 "g_variant": self.module.g_variant,
                 "g_trim_ratio": float(getattr(self.module, "g_trim_ratio", 0.2)),
+                "prompt_g_variant": str(getattr(self.module, "prompt_g_variant", self.module.g_variant)),
+                "prompt_g_trim_ratio": float(
+                    getattr(self.module, "prompt_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+                ),
+                "prompt_g_drop_edge_runs": float(
+                    getattr(self.module, "prompt_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
+                ),
+                "prompt_min_boundary_confidence_for_g": (
+                    None
+                    if getattr(self.module, "prompt_min_boundary_confidence_for_g", None) is None
+                    else float(self.module.prompt_min_boundary_confidence_for_g)
+                ),
+                "src_g_variant": str(getattr(self.module, "src_g_variant", self.module.g_variant)),
+                "src_g_trim_ratio": float(
+                    getattr(self.module, "src_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+                ),
+                "src_g_drop_edge_runs": float(getattr(self.module, "g_drop_edge_runs", 0)),
+                "src_min_boundary_confidence_for_g": (
+                    None
+                    if getattr(self.module, "min_boundary_confidence_for_g", None) is None
+                    else float(self.module.min_boundary_confidence_for_g)
+                ),
                 "src_prefix_stat_mode": str(getattr(self.module, "src_prefix_stat_mode", "ema")),
                 "src_prefix_min_support": float(getattr(self.module, "src_prefix_min_support", 3)),
                 "prompt_g_support_ratio_vs_speech": support_ratio_vs_speech.detach(),

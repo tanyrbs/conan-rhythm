@@ -918,6 +918,9 @@ class DurationV3DatasetMixin:
         prompt_ref_len_sec: float | None,
         context: str,
     ) -> None:
+        prompt_domain_mode = str(
+            self.hparams.get("rhythm_v3_prompt_domain_mode", "minimal_strict") or "minimal_strict"
+        ).strip().lower()
         min_ratio = float(self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.0)
         min_ref_sec = float(self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
         max_ref_sec = float(self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
@@ -929,6 +932,8 @@ class DurationV3DatasetMixin:
             raise RhythmDatasetPrefilterDrop(
                 f"minimal_v1 prompt conditioning rejects {context}: speech_ratio={speech_ratio_scalar:.4f} < min={min_ratio:.4f}"
             )
+        if prompt_domain_mode != "minimal_strict":
+            return
         if prompt_ref_len_sec is None or not np.isfinite(float(prompt_ref_len_sec)):
             raise RhythmDatasetPrefilterDrop(
                 f"minimal_v1 prompt conditioning rejects {context}: invalid ref_len_sec"
@@ -1003,17 +1008,40 @@ class DurationV3DatasetMixin:
         ) * prompt_valid_mask
         conditioning["prompt_closed_mask"] = prompt_closed_mask.astype(np.float32, copy=False)
         conditioning["prompt_boundary_confidence"] = prompt_boundary_confidence.astype(np.float32, copy=False)
-        min_boundary_confidence = self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
-        if min_boundary_confidence is not None:
-            min_boundary_confidence = float(min_boundary_confidence)
+        prompt_min_boundary_confidence = self.hparams.get(
+            "rhythm_v3_prompt_min_boundary_confidence_for_g",
+            self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
+        )
+        if prompt_min_boundary_confidence is not None:
+            prompt_min_boundary_confidence = float(prompt_min_boundary_confidence)
+        prompt_g_drop_edge_runs = int(
+            self.hparams.get(
+                "rhythm_v3_prompt_g_drop_edge_runs",
+                self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0),
+            )
+            or 0
+        )
+        prompt_g_trim_ratio = float(
+            self.hparams.get(
+                "rhythm_v3_prompt_g_trim_ratio",
+                self.hparams.get("rhythm_v3_g_trim_ratio", 0.2),
+            )
+            or 0.2
+        )
+        prompt_g_variant = normalize_global_rate_variant(
+            self.hparams.get(
+                "rhythm_v3_prompt_g_variant",
+                self.hparams.get("rhythm_v3_g_variant", "raw_median"),
+            )
+        )
         conditioning["prompt_global_weight"] = self._build_prompt_global_weight(
             prompt_speech_mask=prompt_speech_mask,
             run_stability=source_cache.get("source_run_stability"),
             open_run_mask=source_cache.get("open_run_mask"),
             prompt_closed_mask=prompt_closed_mask,
             prompt_boundary_confidence=prompt_boundary_confidence,
-            min_boundary_confidence=min_boundary_confidence,
-            drop_edge_runs=int(self.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+            min_boundary_confidence=prompt_min_boundary_confidence,
+            drop_edge_runs=prompt_g_drop_edge_runs,
             allow_shape_repair=allow_shape_repair,
         )
         conditioning["prompt_global_weight_present"] = np.asarray([1.0], dtype=np.float32)
@@ -1038,11 +1066,14 @@ class DurationV3DatasetMixin:
             )
         if prompt_ref_len_sec is not None:
             conditioning["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
-        conditioning["g_trim_ratio"] = np.asarray(
-            [float(self.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2)],
-            dtype=np.float32,
-        )
-        g_variant = normalize_global_rate_variant(self.hparams.get("rhythm_v3_g_variant", "raw_median"))
+        conditioning["g_trim_ratio"] = np.asarray([prompt_g_trim_ratio], dtype=np.float32)
+        conditioning["prompt_g_trim_ratio"] = np.asarray([prompt_g_trim_ratio], dtype=np.float32)
+        conditioning["prompt_g_drop_edge_runs"] = np.asarray([prompt_g_drop_edge_runs], dtype=np.float32)
+        if prompt_min_boundary_confidence is not None:
+            conditioning["prompt_min_boundary_confidence_for_g"] = np.asarray(
+                [prompt_min_boundary_confidence],
+                dtype=np.float32,
+            )
         prompt_unit_log_prior = source_cache.get("prompt_unit_log_prior")
         if prompt_unit_log_prior is None:
             prompt_unit_log_prior = source_cache.get("unit_log_prior")
@@ -1060,7 +1091,7 @@ class DurationV3DatasetMixin:
                 [int(unit_prior_meta.get("unit_prior_vocab_size", 0) or 0)],
                 dtype=np.int64,
             )
-        elif g_variant == "unit_norm":
+        elif prompt_g_variant == "unit_norm":
             raise RuntimeError(
                 "rhythm_v3 g_variant=unit_norm requires prompt_unit_log_prior/unit_log_prior "
                 "matching prompt runs in prompt/reference conditioning."

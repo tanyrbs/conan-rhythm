@@ -273,7 +273,7 @@ def _enforce_minimal_v1_runtime_contract(
         errors.append("detach_global_term_in_local_head must be true")
     if not bool(freeze_src_rate_init):
         errors.append("freeze_src_rate_init must be true")
-    if bool(use_src_gap_in_coarse_head):
+    if bool(use_src_gap_in_coarse_head) and bool(strict_minimal_claim_profile):
         errors.append("use_src_gap_in_coarse_head must be false")
     if errors:
         raise ValueError(
@@ -613,24 +613,89 @@ class MixedEffectsDurationModule(nn.Module):
         emit_prompt_diagnostics = bool(
             unused_kwargs.pop("emit_prompt_diagnostics", unused_kwargs.pop("rhythm_v3_emit_prompt_diagnostics", True))
         )
-        self.g_variant = normalize_global_rate_variant(
-            unused_kwargs.pop("g_variant", unused_kwargs.pop("rhythm_v3_g_variant", "raw_median"))
+        self.prompt_domain_mode = str(
+            unused_kwargs.pop(
+                "prompt_domain_mode",
+                unused_kwargs.pop("rhythm_v3_prompt_domain_mode", "minimal_strict"),
+            )
+            or "minimal_strict"
+        ).strip().lower()
+        self.prompt_require_clean_support = bool(
+            unused_kwargs.pop(
+                "prompt_require_clean_support",
+                unused_kwargs.pop("rhythm_v3_prompt_require_clean_support", True),
+            )
         )
-        self.g_trim_ratio = float(
+        self.prompt_g_variant = normalize_global_rate_variant(
+            unused_kwargs.pop(
+                "prompt_g_variant",
+                unused_kwargs.pop(
+                    "rhythm_v3_prompt_g_variant",
+                    unused_kwargs.get("rhythm_v3_g_variant", "raw_median"),
+                ),
+            )
+        )
+        self.prompt_g_trim_ratio = float(
             max(
                 0.0,
                 min(
                     0.49,
-                    float(unused_kwargs.pop("g_trim_ratio", unused_kwargs.pop("rhythm_v3_g_trim_ratio", 0.2))),
+                    float(
+                        unused_kwargs.pop(
+                            "prompt_g_trim_ratio",
+                            unused_kwargs.pop(
+                                "rhythm_v3_prompt_g_trim_ratio",
+                                unused_kwargs.get("rhythm_v3_g_trim_ratio", 0.2),
+                            ),
+                        )
+                    ),
                 ),
             )
         )
-        self.g_drop_edge_runs = max(
+        self.prompt_g_drop_edge_runs = max(
+            0,
+            int(
+                unused_kwargs.pop(
+                    "prompt_g_drop_edge_runs",
+                    unused_kwargs.pop(
+                        "rhythm_v3_prompt_g_drop_edge_runs",
+                        unused_kwargs.get("rhythm_v3_drop_edge_runs_for_g", 0),
+                    ),
+                )
+                or 0
+            ),
+        )
+        prompt_min_boundary_confidence_for_g = unused_kwargs.pop(
+            "prompt_min_boundary_confidence_for_g",
+            unused_kwargs.pop(
+                "rhythm_v3_prompt_min_boundary_confidence_for_g",
+                unused_kwargs.get("rhythm_v3_min_boundary_confidence_for_g", None),
+            ),
+        )
+        self.prompt_min_boundary_confidence_for_g = (
+            None if prompt_min_boundary_confidence_for_g is None else float(prompt_min_boundary_confidence_for_g)
+        )
+        self.src_g_variant = normalize_global_rate_variant(
+            unused_kwargs.pop("g_variant", unused_kwargs.pop("rhythm_v3_src_g_variant", unused_kwargs.pop("rhythm_v3_g_variant", "raw_median")))
+        )
+        self.src_g_trim_ratio = float(
+            max(
+                0.0,
+                min(
+                    0.49,
+                    float(unused_kwargs.pop("g_trim_ratio", unused_kwargs.pop("rhythm_v3_src_g_trim_ratio", unused_kwargs.pop("rhythm_v3_g_trim_ratio", 0.2)))),
+                ),
+            )
+        )
+        self.src_g_drop_edge_runs = max(
             0,
             int(
                 unused_kwargs.pop(
                     "drop_edge_runs_for_g",
-                    unused_kwargs.pop("rhythm_v3_drop_edge_runs_for_g", 0),
+                    unused_kwargs.pop(
+                        "rhythm_v3_src_g_drop_edge_runs",
+                        unused_kwargs.pop("rhythm_v3_drop_edge_runs_for_g", 0),
+                    ),
                 )
                 or 0
             ),
@@ -679,11 +744,18 @@ class MixedEffectsDurationModule(nn.Module):
         )
         min_boundary_confidence_for_g = unused_kwargs.pop(
             "min_boundary_confidence_for_g",
-            unused_kwargs.pop("rhythm_v3_min_boundary_confidence_for_g", None),
+            unused_kwargs.pop(
+                "rhythm_v3_src_min_boundary_confidence_for_g",
+                unused_kwargs.pop("rhythm_v3_min_boundary_confidence_for_g", None),
+            ),
         )
-        self.min_boundary_confidence_for_g = (
+        self.src_min_boundary_confidence_for_g = (
             None if min_boundary_confidence_for_g is None else float(min_boundary_confidence_for_g)
         )
+        self.g_variant = self.src_g_variant
+        self.g_trim_ratio = self.src_g_trim_ratio
+        self.g_drop_edge_runs = self.src_g_drop_edge_runs
+        self.min_boundary_confidence_for_g = self.src_min_boundary_confidence_for_g
         self.min_support_log_iqr_for_g = float(
             unused_kwargs.pop(
                 "min_support_log_iqr_for_g",
@@ -850,9 +922,9 @@ class MixedEffectsDurationModule(nn.Module):
                 holdout_ratio=operator_holdout_ratio,
                 simple_global_stats=self.simple_global_stats,
                 use_log_base_rate=self.use_log_base_rate,
-                g_variant=self.g_variant,
-                g_trim_ratio=self.g_trim_ratio,
-                drop_edge_runs_for_g=self.g_drop_edge_runs,
+                g_variant=self.prompt_g_variant,
+                g_trim_ratio=self.prompt_g_trim_ratio,
+                drop_edge_runs_for_g=self.prompt_g_drop_edge_runs,
             )
             self.reference_memory_builder.rate_mode = self.rate_mode
         self.projector = StreamingDurationProjector(
@@ -877,14 +949,16 @@ class MixedEffectsDurationModule(nn.Module):
             if self.is_minimal_v1:
                 self.prompt_memory_encoder = PromptGlobalConditionEncoderV1G(
                     operator_rank=basis_rank,
+                    prompt_domain_mode=self.prompt_domain_mode,
+                    prompt_require_clean_support=self.prompt_require_clean_support,
                     min_speech_ratio=self.min_prompt_speech_ratio,
                     min_ref_len_sec=self.min_prompt_ref_len_sec,
                     max_ref_len_sec=self.max_prompt_ref_len_sec,
                     use_log_base_rate=self.use_log_base_rate,
-                    g_variant=self.g_variant,
-                    g_trim_ratio=self.g_trim_ratio,
-                    drop_edge_runs_for_g=self.g_drop_edge_runs,
-                    min_boundary_confidence=self.min_boundary_confidence_for_g,
+                    g_variant=self.prompt_g_variant,
+                    g_trim_ratio=self.prompt_g_trim_ratio,
+                    drop_edge_runs_for_g=self.prompt_g_drop_edge_runs,
+                    min_boundary_confidence=self.prompt_min_boundary_confidence_for_g,
                     strict_eval_invalid_g=self.strict_eval_invalid_g,
                 )
                 self.duration_head = MinimalStreamingDurationWriterV1G(
@@ -951,17 +1025,19 @@ class MixedEffectsDurationModule(nn.Module):
             self.prompt_memory_encoder.rate_mode = self.rate_mode
             self.prompt_memory_encoder.simple_global_stats = self.simple_global_stats
             self.prompt_memory_encoder.use_log_base_rate = self.use_log_base_rate
-            self.prompt_memory_encoder.g_variant = self.g_variant
-            self.prompt_memory_encoder.g_trim_ratio = self.g_trim_ratio
-            self.prompt_memory_encoder.g_drop_edge_runs = self.g_drop_edge_runs
+            self.prompt_memory_encoder.g_variant = self.prompt_g_variant
+            self.prompt_memory_encoder.g_trim_ratio = self.prompt_g_trim_ratio
+            self.prompt_memory_encoder.g_drop_edge_runs = self.prompt_g_drop_edge_runs
             if hasattr(self.prompt_memory_encoder, "min_speech_ratio"):
                 self.prompt_memory_encoder.min_speech_ratio = self.min_prompt_speech_ratio
             if hasattr(self.prompt_memory_encoder, "min_ref_len_sec"):
                 self.prompt_memory_encoder.min_ref_len_sec = self.min_prompt_ref_len_sec
             if hasattr(self.prompt_memory_encoder, "max_ref_len_sec"):
                 self.prompt_memory_encoder.max_ref_len_sec = self.max_prompt_ref_len_sec
+            if hasattr(self.prompt_memory_encoder, "prompt_domain_mode"):
+                self.prompt_memory_encoder.prompt_domain_mode = self.prompt_domain_mode
             if hasattr(self.prompt_memory_encoder, "min_boundary_confidence"):
-                self.prompt_memory_encoder.min_boundary_confidence = self.min_boundary_confidence_for_g
+                self.prompt_memory_encoder.min_boundary_confidence = self.prompt_min_boundary_confidence_for_g
 
             if not self.is_minimal_v1:
                 duration_head_kwargs = dict(

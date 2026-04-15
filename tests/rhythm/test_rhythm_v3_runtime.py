@@ -180,11 +180,17 @@ def test_rhythm_v3_operator_runtime_exports_source_prefix_diagnostics():
     assert execution.g_src_prefix is not None
     assert execution.source_rate_seq is not None
     assert execution.g_src_prefix_mean is not None
+    assert execution.g_src_prefix_final is not None
     assert execution.next_state.local_rate_ema is not None
     assert torch.allclose(execution.source_rate_seq, execution.g_src_prefix)
     assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
     assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
+    assert torch.allclose(ret["rhythm_g_src_prefix_final"], execution.g_src_prefix_final)
     assert execution.g_src_prefix.shape == ret["speech_duration_exec"].shape
+    assert ret["rhythm_v3_prompt_g_variant"] == adapter.module.prompt_g_variant
+    assert ret["rhythm_v3_src_g_variant"] == adapter.module.src_g_variant
+    assert ret["rhythm_v3_prompt_g_trim_ratio"] == pytest.approx(adapter.module.prompt_g_trim_ratio)
+    assert ret["rhythm_v3_src_g_trim_ratio"] == pytest.approx(adapter.module.src_g_trim_ratio)
 
 
 def test_rhythm_v3_prompt_summary_runtime_uses_static_prompt_memory_and_source_anchor():
@@ -261,6 +267,39 @@ def test_minimal_duration_head_defaults_coarse_head_without_src_gap():
     )
     assert head.use_src_gap_in_coarse_head is False
     assert head.coarse_head[0].in_features == head.query_dim + 1
+
+
+def test_minimal_runtime_allows_src_gap_in_coarse_head_when_strict_claim_is_disabled():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_use_src_gap_in_coarse_head"] = True
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    assert adapter.module.use_src_gap_in_coarse_head is True
+    assert adapter.module.duration_head.use_src_gap_in_coarse_head is True
+    assert adapter.module.duration_head.coarse_head[0].in_features == adapter.module.duration_head.query_dim + 2
+
+
+def test_minimal_runtime_keeps_learned_residual_gate_disabled_when_disable_gate_flag_is_false():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = False
+    hparams["rhythm_v3_eval_mode"] = "learned"
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    assert adapter.module.eval_mode == "learned"
+    assert adapter.module.use_learned_residual_gate is False
+    assert adapter.module.duration_head.use_learned_residual_gate is False
 
 
 def test_rhythm_v3_nonminimal_prompt_summary_threads_shared_duration_head_runtime_knobs():
@@ -391,11 +430,13 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert execution.g_src_prefix is not None
     assert execution.g_src_utt is not None
     assert execution.g_src_prefix_mean is not None
+    assert execution.g_src_prefix_final is not None
     assert execution.eval_mode == "learned"
     assert torch.allclose(debug["g_ref"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix"], execution.g_src_prefix)
     assert torch.allclose(debug["g_src_utt"], execution.g_src_utt)
     assert torch.allclose(debug["g_src_prefix_mean"], execution.g_src_prefix_mean)
+    assert torch.allclose(debug["g_src_prefix_final"], execution.g_src_prefix_final)
     assert debug["g_variant"] == "raw_median"
     assert torch.allclose(debug["g_ref_scalar"], execution.g_ref)
     assert torch.allclose(debug["g_src_prefix_seq"], execution.g_src_prefix)
@@ -440,6 +481,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "speech_pred" in debug
     assert "silence_pred" in debug
     assert "projector_since_last_boundary" in debug
+    assert "analytic_gap_raw" in debug
+    assert "analytic_gap_clipped" in debug
+    assert "analytic_clip_hit" in debug
+    assert "analytic_clip_hit_rate" in debug
     assert "rhythm_debug_projector_boundary_hit" in ret
     assert "rhythm_debug_projector_boundary_decay" in ret
     assert "rhythm_debug_projector_budget_hit_mask" in ret
@@ -472,6 +517,11 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_speech_pred" in ret
     assert "rhythm_debug_silence_pred" in ret
     assert "rhythm_debug_prompt_ref_len_sec" in ret
+    assert "rhythm_debug_g_src_prefix_final" in ret
+    assert "rhythm_debug_analytic_gap_raw" in ret
+    assert "rhythm_debug_analytic_gap_clipped" in ret
+    assert "rhythm_debug_analytic_clip_hit" in ret
+    assert "rhythm_debug_analytic_clip_hit_rate" in ret
     assert torch.allclose(ret["rhythm_debug_prompt_ref_len_sec"], torch.tensor([[5.0]], dtype=torch.float32))
     assert "rhythm_prompt_ref_len_sec" in ret
     assert torch.allclose(ret["rhythm_prompt_ref_len_sec"], torch.tensor([[5.0]], dtype=torch.float32))
@@ -479,6 +529,7 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert "rhythm_debug_budget_hit_mask" in ret
     assert torch.allclose(ret["rhythm_g_src_utt"], execution.g_src_utt)
     assert torch.allclose(ret["rhythm_g_src_prefix_mean"], execution.g_src_prefix_mean)
+    assert torch.allclose(ret["rhythm_g_src_prefix_final"], execution.g_src_prefix_final)
     assert torch.allclose(execution.prompt_valid_len, torch.tensor([[3.0]], dtype=torch.float32))
     assert torch.allclose(execution.prompt_speech_ratio, torch.tensor([[6.0 / 7.0]], dtype=torch.float32))
     assert torch.allclose(ret["rhythm_prompt_valid_len"], execution.prompt_valid_len)
@@ -512,6 +563,10 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
     assert execution.local_residual_pred is not None
     assert torch.allclose(execution.coarse_path_logstretch, execution.coarse_logstretch)
     assert torch.allclose(debug["analytic_logstretch"], execution.global_shift_analytic)
+    assert torch.allclose(debug["analytic_gap_raw"], execution.analytic_gap_raw)
+    assert torch.allclose(debug["analytic_gap_clipped"], execution.analytic_gap_clipped)
+    assert torch.allclose(debug["analytic_clip_hit"], execution.analytic_clip_hit)
+    assert torch.allclose(debug["analytic_clip_hit_rate"], execution.analytic_clip_hit_rate)
     assert torch.allclose(debug["coarse_correction_used"], execution.coarse_correction)
     assert torch.allclose(debug["coarse_correction_pred"], execution.coarse_correction_pred)
     assert torch.allclose(debug["coarse_delta"], execution.coarse_correction)
@@ -549,6 +604,26 @@ def test_rhythm_v3_minimal_prompt_summary_exports_falsification_debug_contract()
         ret["rhythm_v3_open_tail_commit_violation_count"],
         debug["open_tail_commit_violation_count"],
     )
+
+
+def test_rhythm_v3_minimal_prompt_summary_allows_meaningful_reference_len_relaxation():
+    hparams = _build_prompt_summary_hparams()
+    hparams["rhythm_v3_minimal_v1_profile"] = True
+    hparams["rhythm_v3_rate_mode"] = "simple_global"
+    hparams["rhythm_v3_simple_global_stats"] = True
+    hparams["rhythm_v3_use_log_base_rate"] = False
+    hparams["rhythm_v3_use_reference_summary"] = False
+    hparams["rhythm_v3_use_learned_residual_gate"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_prompt_domain_mode"] = "meaningful_reference"
+    adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
+    ret = _run_adapter(
+        adapter,
+        content=torch.tensor([[1, 2, 3]], dtype=torch.long),
+        ref=None,
+        ref_conditioning=_build_prompt_conditioning(prompt_units=3, prompt_ref_len_sec=12.0),
+    )
+    assert ret["rhythm_execution"] is not None
 
 
 def test_rhythm_v3_non_debug_runtime_skips_g_debug_support_stats(monkeypatch):

@@ -296,6 +296,16 @@ def _masked_mean_scalar(
     value: Optional[torch.Tensor],
     mask: Optional[torch.Tensor],
 ) -> Optional[torch.Tensor]:
+    mean_per_batch = _masked_mean_per_batch(value, mask)
+    if not isinstance(mean_per_batch, torch.Tensor):
+        return None
+    return mean_per_batch.mean()
+
+
+def _masked_mean_per_batch(
+    value: Optional[torch.Tensor],
+    mask: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
     if not isinstance(value, torch.Tensor) or not isinstance(mask, torch.Tensor):
         return None
     value = value.float()
@@ -305,7 +315,7 @@ def _masked_mean_scalar(
     reduce_dims = tuple(range(1, value.dim()))
     numer = (value * eff_mask).sum(dim=reduce_dims)
     denom = eff_mask.sum(dim=reduce_dims).clamp_min(1.0)
-    return (numer / denom).mean()
+    return (numer / denom).reshape(value.size(0), 1)
 
 
 def _masked_abs_mean_scalar(
@@ -315,6 +325,39 @@ def _masked_abs_mean_scalar(
     if not isinstance(value, torch.Tensor):
         return None
     return _masked_mean_scalar(value.abs(), mask)
+
+
+def _masked_position_corr_abs(
+    value: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    mask_f = mask.float()
+    pos = torch.linspace(-1.0, 1.0, value.size(1), device=value.device, dtype=value.dtype)[None, :]
+    pos = pos.expand_as(value)
+
+    denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+    x = value.float() * mask_f
+    y = pos.float() * mask_f
+
+    x_mean = x.sum(dim=1, keepdim=True) / denom
+    y_mean = y.sum(dim=1, keepdim=True) / denom
+    xc = (x - x_mean) * mask_f
+    yc = (y - y_mean) * mask_f
+
+    num = (xc * yc).sum(dim=1)
+    den = torch.sqrt(
+        xc.square().sum(dim=1).clamp_min(1.0e-6) * yc.square().sum(dim=1).clamp_min(1.0e-6)
+    )
+    corr = num / den.clamp_min(1.0e-6)
+    return corr.abs().mean()
+
+
+def _masked_cumsum_abs_mean(
+    value: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    seq = (value.float() * mask.float()).cumsum(dim=1)
+    return _masked_abs_mean_scalar(seq, mask)
 
 
 def _resolve_duration_v3_prefix_target_surface(targets: DurationV3LossTargets) -> torch.Tensor:
@@ -432,9 +475,10 @@ def _build_duration_v3_diagnostic_metrics(
         )
     else:
         diagnostics["rhythm_v3_local_residual_tgt_abs_mean"] = zero
-    if isinstance(local_mean, torch.Tensor) and isinstance(local_tgt_center, torch.Tensor):
+    local_mean_per_batch = _masked_mean_per_batch(local_residual, speech_commit_mask)
+    if isinstance(local_mean_per_batch, torch.Tensor) and isinstance(local_tgt_center, torch.Tensor):
         diagnostics["rhythm_v3_local_residual_center_gap"] = (
-            (local_mean.reshape_as(local_tgt_center) - local_tgt_center.float()).abs().mean().detach()
+            (local_mean_per_batch.reshape_as(local_tgt_center) - local_tgt_center.float()).abs().mean().detach()
         )
     else:
         diagnostics["rhythm_v3_local_residual_center_gap"] = zero
@@ -455,9 +499,19 @@ def _build_duration_v3_diagnostic_metrics(
             else zero
         )
         diagnostics["rhythm_v3_silence_leakage_ratio"] = diagnostics["rhythm_v3_silence_local_leak_rate"]
+        diagnostics["rhythm_v3_local_position_corr_abs"] = _masked_position_corr_abs(
+            local_residual.float(),
+            speech_commit_mask.float(),
+        ).detach()
+        diagnostics["rhythm_v3_local_cumsum_abs_mean"] = _masked_cumsum_abs_mean(
+            local_residual.float(),
+            speech_commit_mask.float(),
+        ).detach()
     else:
         diagnostics["rhythm_v3_silence_local_leak_rate"] = zero
         diagnostics["rhythm_v3_silence_leakage_ratio"] = zero
+        diagnostics["rhythm_v3_local_position_corr_abs"] = zero
+        diagnostics["rhythm_v3_local_cumsum_abs_mean"] = zero
     silence_pred_surface = getattr(execution, "unit_logstretch", None)
     if isinstance(silence_pred_surface, torch.Tensor):
         silence_abs_mean = _masked_abs_mean_scalar(silence_pred_surface.float(), silence_commit_mask)

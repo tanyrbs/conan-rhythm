@@ -26,8 +26,6 @@ from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
 from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
-from utils.plot.rhythm_v3_viz.review import (
-)
 from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases, compute_conditioning_runtime_control
 
 
@@ -314,7 +312,7 @@ def _run_condition(
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
-            "prompt_tempo_ref": float("nan"),
+            "prompt_tempo_ref_runtime": float("nan"),
             "prompt_g_ref": float("nan"),
             "prompt_g_status": "conditioning_error",
             "prompt_total_units": 0,

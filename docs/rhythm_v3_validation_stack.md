@@ -10,36 +10,44 @@ core theory easy to **audit and falsify** with the smallest stable surface.
 
 Latest maintained local rerun:
 
-- `2026-04-14`
+- `2026-04-15`
 
 Canonical status snapshot:
 
-- `docs/rhythm_v3_local_status_2026-04-14.md`
+- `docs/rhythm_v3_local_status_2026-04-15.md`
 
 Latest exported local artifacts:
 
 - `egs/overrides/rhythm_v3_gate_status.json`
 - `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
-- supporting comparison artifacts:
-  - `tmp/gate_reaudit_20260414_rebuilt2/`
-  - `tmp/gate_reaudit_20260414_runtime_clean/`
-  - `tmp/gate_reaudit_20260414_runtime_fixed/`
+- supporting local-candidate artifacts:
+  - `tmp/gate2_candidate_20260415_s75_srcgap/`
+  - `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
+  - `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
 
 Current verdict on the local quick-ARCTIC surface:
 
 - prompt-domain support is repaired on the rebuilt cache surface
 - Gate 0 now passes on the strongest fixed local contract after the final
   source-support / init-parity repair
-- Gate 1 also passes on that same strongest fixed contract:
+- Gate 1-upper also passes on that same strongest fixed contract:
   `weighted_median + exact_global_family`
-- Gate 2 and Gate 3 were not rerun in this pass
+- Gate 2-online local `src_gap` candidate was rerun on the maintained online
+  contract
+- aggregate Gate2 results were essentially unchanged relative to the earlier
+  candidate
+- recurring failure mode remains execution-side:
+  `preproj` often shows signal while `exec` still flattens or ties
+- Gate 3 local candidate training is now unblocked by a runtime/config wiring
+  fix and advanced locally to a checkpointed run, but this is not an official
+  Gate3 pass
 
 So this validation stack should currently be read as a repaired
-**zero-train gate surface**, not as evidence that the repository is ready for
-new official training.
-The checked-in local candidate JSON is therefore a machine-readable summary of
-the latest strongest-contract local result, not an official training-unblock
-artifact.
+**gate + local-candidate diagnostic surface**, not as evidence that the
+repository is ready for new official training.
+The checked-in local candidate JSON remains a machine-readable summary of the
+latest strongest-contract local result, while the newer Gate2/Gate3 reruns are
+still local online candidates rather than official training-unblock artifacts.
 
 ## 1. What we validate first
 
@@ -159,6 +167,21 @@ workspace:
 - no second runtime surface is needed because `analytic / coarse_only / learned`
   already switch inside the maintained `rhythm_v3` path
 
+Recent local review utilities also now interpret real-reference triplets using
+the current `slow / mid / fast` semantics rather than the older `real`-only
+bucket assumption. Current Gate1/Gate2 readings should be interpreted on that
+updated semantics.
+
+The recent Gate3 change in this workspace should be read as a runtime wiring
+fix only:
+
+- local minimal-V1 candidate work under
+  `strict_minimal_claim_profile=false` may relax
+  `rhythm_v3_disable_learned_gate=false`
+- but minimal-V1 runtime must still avoid reinterpreting that as
+  `use_learned_residual_gate=true`
+- this fixed a local training unblock; it did not add a new model capability
+
 ## 3. Unified analysis tables
 
 The review util is built around three shared tables instead of five unrelated
@@ -256,8 +279,9 @@ Gate-0 is also now tied to the maintained runtime support surface:
   - speech-total duration log-ratio
   - runtime-clipped analytic/residual views aligned with writer clip
   - affine runtime residual diagnostics
-- current falsification runs fix `rhythm_v3_src_prefix_stat_mode=exact_global_family`
-  for Gate0 / Gate1 to remove the old EMA-only prefix mismatch
+- Gate1-upper uses `rhythm_v3_src_prefix_stat_mode=exact_global_family` to
+  measure the stronger offline/local upper bound
+- Gate1-online uses the maintained `weighted_median + ema` contract
 - current local falsification also defaults Gate0 to
   `reference_mode=target_as_ref`, so the clean local total slice is now
   available by default
@@ -271,19 +295,20 @@ Gate-0 is also now tied to the maintained runtime support surface:
   prefix state, so full-history exact robust-prefix semantics are not yet a
   maintained runtime guarantee
 
-Gate-1 is now tied to the same runtime `g` contract:
+Gate-1 is now tied to the runtime `g` contract, but it exposes both the upper
+and online readings explicitly:
 
 - probe-case selection uses runtime-equivalent `prompt_g_ref`
-- monotonicity ordering uses `prompt_g_ref`, not display-only
-  `prompt_tempo_ref`
-- higher `prompt_g_ref` is now explicitly interpreted as slower speech, so
-  `tempo_out` is expected to decrease
+- monotonicity ordering uses `prompt_tempo_ref_runtime`, not display-only
+  prompt tempo proxies
+- higher `prompt_g_ref` means slower speech, so the positive Gate1-online
+  control axis is `prompt_tempo_ref_runtime = exp(-g_ref)`
 - prompt/source tempo readouts now reuse weighted prompt/source contracts when
   `g_variant` is weighted or softclean
 - Gate-1 reports layered readouts:
-  - `tempo_out_preclip`
-  - `tempo_out_continuous`
-  - `tempo_out_projected`
+  - `tempo_out_raw`
+  - `tempo_out_preproj`
+  - `tempo_out_exec`
 - Gate-1 also reports continuous count/logstretch readouts in parallel with the
   discrete tempo readout so projector/readout collapse can be separated from
   earlier writer failure
@@ -340,6 +365,8 @@ The local code now keeps these two meanings separate:
 - `g_src_utt`: full-utterance source statistic used in static explainability
   analysis such as `delta_g = g_ref - g_src_utt`
 - `g_src_prefix`: causal runtime prefix state exported by the online planner
+- `g_src_prefix_final`: final committed prefix state, which is the main
+  runtime-aligned scalar for Gate0/Gate1 prefix comparisons
 
 They should not be mixed when making falsification plots.
 
@@ -501,7 +528,7 @@ py -3 scripts\rhythm_v3_debug_records.py ^
   --input path\to\debug_bundle.pt ^
   --output artifacts\rhythm_v3_summary.csv ^
   --review-dir artifacts\rhythm_v3_review ^
-  --g-variant raw_median ^
+  --g-variant weighted_median ^
   --drop-edge-runs 1
 ```
 

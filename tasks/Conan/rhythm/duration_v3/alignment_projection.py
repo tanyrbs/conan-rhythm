@@ -80,6 +80,21 @@ def _nearest_progress_index(progress: np.ndarray, value: float) -> int:
     return int(idx)
 
 
+def _nearest_sorted_index(sorted_values: np.ndarray, target: int) -> int:
+    if sorted_values.size <= 0:
+        raise ValueError("sorted_values must be non-empty.")
+    pos = int(np.searchsorted(sorted_values, np.int64(target), side="left"))
+    if pos <= 0:
+        return int(sorted_values[0])
+    if pos >= sorted_values.size:
+        return int(sorted_values[-1])
+    left = int(sorted_values[pos - 1])
+    right = int(sorted_values[pos])
+    if abs(target - left) <= abs(right - target):
+        return left
+    return right
+
+
 def _resolve_optional_run_signal(
     value,
     *,
@@ -244,6 +259,7 @@ class ContinuousRunAligner:
         source_valid_run_index: np.ndarray | None = None,
         source_run_stability: np.ndarray | None = None,
         source_boundary_cue: np.ndarray | None = None,
+        repair_missing_support: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         frame_states = as_float32_2d(source_frame_states, name="source_frame_states")
         frame_to_run = as_int64_1d(source_frame_to_run)
@@ -331,14 +347,28 @@ class ContinuousRunAligner:
         np.add.at(weight_sum, frame_to_run, frame_weight)
         missing = np.nonzero(weight_sum <= 0.0)[0]
         if missing.size > 0:
-            raise RuntimeError(
-                "continuous aligner requires source frame support for every valid run; "
-                f"missing run ids={missing.tolist()}"
-            )
-        proto /= weight_sum[:, None]
-        proto_var = np.maximum((proto_sq / weight_sum[:, None]) - np.square(proto), 0.0).astype(np.float32, copy=False)
+            if not repair_missing_support:
+                raise RuntimeError(
+                    "continuous aligner requires source frame support for every valid run; "
+                    f"missing run ids={missing.tolist()}"
+                )
+        valid = np.nonzero(weight_sum > 0.0)[0]
+        if valid.size <= 0:
+            raise RuntimeError("continuous aligner could not derive any source run prototype with frame support.")
+        proto_norm = np.zeros_like(proto)
+        proto_var = np.zeros_like(proto)
+        proto_norm[valid] = proto[valid] / weight_sum[valid, None]
+        proto_var[valid] = np.maximum(
+            (proto_sq[valid] / weight_sum[valid, None]) - np.square(proto_norm[valid]),
+            0.0,
+        ).astype(np.float32, copy=False)
+        if missing.size > 0:
+            for missing_idx in missing.tolist():
+                nearest_idx = _nearest_sorted_index(valid, int(missing_idx))
+                proto_norm[int(missing_idx)] = proto_norm[int(nearest_idx)]
+                proto_var[int(missing_idx)] = proto_var[int(nearest_idx)]
         return (
-            proto.astype(np.float32),
+            proto_norm.astype(np.float32),
             frame_count.astype(np.float32),
             weight_sum.astype(np.float32),
             proto_var.astype(np.float32),
@@ -840,6 +870,7 @@ class ContinuousRunAligner:
         target_frame_weight: np.ndarray | None = None,
         target_frame_valid: np.ndarray | None = None,
         target_frame_unit_hint: np.ndarray | None = None,
+        repair_missing_source_frame_support: bool = False,
     ) -> dict[str, np.ndarray | np.float32 | str]:
         source_run_units = as_int64_1d(source_run_units)
         source_run_types = as_float32_1d(source_run_types)
@@ -917,6 +948,7 @@ class ContinuousRunAligner:
             source_valid_run_index=source_valid_run_index,
             source_run_stability=source_run_stability,
             source_boundary_cue=source_boundary_cue,
+            repair_missing_support=repair_missing_source_frame_support,
         )
         local_cost = self.build_local_cost(
             source_run_proto=source_run_proto,
@@ -1114,6 +1146,7 @@ def align_target_frames_to_source_runs(
     continuous_alignment_mode: str | None = None,
     continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
+    repair_missing_source_frame_support: bool = False,
 ) -> dict[str, np.ndarray | np.float32 | str] | None:
     resolved_mode = _normalize_continuous_alignment_mode(
         continuous_alignment_mode,
@@ -1161,6 +1194,7 @@ def align_target_frames_to_source_runs(
         target_frame_weight=target_frame_weight,
         target_frame_valid=target_frame_valid,
         target_frame_unit_hint=target_frame_unit_hint,
+        repair_missing_source_frame_support=repair_missing_source_frame_support,
     )
 
 
@@ -1186,6 +1220,7 @@ def align_target_to_source(
     continuous_alignment_mode: str | None = None,
     continuous_aligner_kwargs: dict | None = None,
     precomputed_alignment=None,
+    repair_missing_source_frame_support: bool = False,
 ) -> dict[str, np.ndarray | np.float32 | str]:
     if use_continuous_alignment:
         continuous = align_target_frames_to_source_runs(
@@ -1208,6 +1243,7 @@ def align_target_to_source(
             continuous_alignment_mode=continuous_alignment_mode,
             continuous_aligner_kwargs=continuous_aligner_kwargs,
             precomputed_alignment=precomputed_alignment,
+            repair_missing_source_frame_support=repair_missing_source_frame_support,
         )
         if continuous is not None:
             return continuous
@@ -1323,6 +1359,7 @@ def project_target_runs_onto_source(
         continuous_alignment_mode=continuous_alignment_mode,
         continuous_aligner_kwargs=continuous_aligner_kwargs,
         precomputed_alignment=precomputed_alignment,
+        repair_missing_source_frame_support=bool(alignment_soft_repair or allow_source_self_target_fallback),
     )
 
     assigned_source = np.asarray(alignment["assigned_source"], dtype=np.int64)

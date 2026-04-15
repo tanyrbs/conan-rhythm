@@ -116,6 +116,22 @@ def normalize_duration_v3_alignment_mode(value) -> str:
     return aliases.get(normalized, normalized)
 
 
+def _normalize_prompt_domain_mode(value) -> str:
+    mode = str(value or "minimal_strict").strip().lower()
+    aliases = {
+        "strict": "minimal_strict",
+        "meaningful": "meaningful_reference",
+        "semantic": "meaningful_reference",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"minimal_strict", "meaningful_reference"}:
+        raise ValueError(
+            f"Unsupported rhythm_v3_prompt_domain_mode={value!r}. "
+            "Expected one of: minimal_strict, meaningful_reference."
+        )
+    return mode
+
+
 def resolve_duration_v3_rate_mode(hparams) -> str:
     explicit = normalize_duration_v3_rate_mode(hparams.get("rhythm_v3_rate_mode", ""))
     if explicit:
@@ -324,6 +340,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     strict_minimal_claim_profile = _is_enabled_flag(
         hparams.get("rhythm_v3_strict_minimal_claim_profile", True)
     )
+    prompt_domain_mode = _normalize_prompt_domain_mode(
+        hparams.get("rhythm_v3_prompt_domain_mode", "minimal_strict")
+    )
     if minimal_v1_profile:
         if "rhythm_v3_detach_global_term_in_local_head" not in hparams:
             hparams["rhythm_v3_detach_global_term_in_local_head"] = True
@@ -408,8 +427,12 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             if _is_enabled_flag(hparams.get(key, False)):
                 raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_use_learned_residual_gate=false.")
         for key in ("rhythm_v3_disable_learned_gate", "disable_learned_gate"):
-            if key in hparams and not _is_enabled_flag(hparams.get(key, True)):
-                raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_disable_learned_gate=true.")
+            if (
+                strict_minimal_claim_profile
+                and key in hparams
+                and not _is_enabled_flag(hparams.get(key, True))
+            ):
+                raise ValueError("strict minimal claim profile requires rhythm_v3_disable_learned_gate=true.")
         if not _is_enabled_flag(hparams.get("rhythm_v3_detach_global_term_in_local_head", True)):
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires rhythm_v3_detach_global_term_in_local_head=true."
@@ -444,16 +467,23 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 )
         if int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0) < 1:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_drop_edge_runs_for_g >= 1.")
-        if _is_enabled_flag(hparams.get("rhythm_v3_alignment_soft_repair", False)):
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_soft_repair=false.")
+        if strict_minimal_claim_profile and _is_enabled_flag(hparams.get("rhythm_v3_alignment_soft_repair", False)):
+            raise ValueError(
+                "strict minimal claim profile requires rhythm_v3_alignment_soft_repair=false."
+            )
         if _is_enabled_flag(hparams.get("rhythm_v3_allow_silence_aux", False)):
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_allow_silence_aux=false.")
-        min_prompt_ref_len_sec = float(hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
-        max_prompt_ref_len_sec = float(hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
-        if abs(min_prompt_ref_len_sec - 3.0) > 1.0e-6:
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_min_prompt_ref_len_sec=3.0.")
-        if abs(max_prompt_ref_len_sec - 8.0) > 1.0e-6:
-            raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_v3_max_prompt_ref_len_sec=8.0.")
+        if prompt_domain_mode == "minimal_strict":
+            min_prompt_ref_len_sec = float(hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
+            max_prompt_ref_len_sec = float(hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
+            if abs(min_prompt_ref_len_sec - 3.0) > 1.0e-6:
+                raise ValueError(
+                    "strict minimal claim profile requires rhythm_v3_min_prompt_ref_len_sec=3.0."
+                )
+            if abs(max_prompt_ref_len_sec - 8.0) > 1.0e-6:
+                raise ValueError(
+                    "strict minimal claim profile requires rhythm_v3_max_prompt_ref_len_sec=8.0."
+                )
         if float(hparams.get("rhythm_prompt_dropout", 0.0) or 0.0) > 0.0:
             raise ValueError("rhythm_v3_minimal_v1_profile requires rhythm_prompt_dropout=0.0.")
         if float(hparams.get("rhythm_prompt_truncation", 0.0) or 0.0) > 0.0:
@@ -463,9 +493,9 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 raise ValueError(
                     "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
                 )
-        if _is_enabled_flag(hparams.get("rhythm_v3_use_src_gap_in_coarse_head", False)):
+        if strict_minimal_claim_profile and _is_enabled_flag(hparams.get("rhythm_v3_use_src_gap_in_coarse_head", False)):
             raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_use_src_gap_in_coarse_head=false."
+                "strict minimal claim profile requires rhythm_v3_use_src_gap_in_coarse_head=false."
             )
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)

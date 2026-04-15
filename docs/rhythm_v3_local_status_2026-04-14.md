@@ -1,7 +1,19 @@
 # rhythm_v3 local status snapshot (2026-04-14)
 
+Superseded by:
+
+- `docs/rhythm_v3_local_status_2026-04-15.md`
+
 This is the latest local zero-train falsification snapshot after the final
 Gate0 contract-repair pass.
+
+Historical note:
+
+- this snapshot records the strongest local `Gate1-upper` exact-family result
+  available on `2026-04-14`
+- the maintained online mainline has since moved to
+  `weighted_median + ema + first_speech`
+- do not read this historical snapshot as the current online-unblock contract
 
 ## 1. Scope
 

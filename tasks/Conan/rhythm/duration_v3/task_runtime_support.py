@@ -35,6 +35,25 @@ class DurationV3TaskRuntimeSupportMixin:
         if rate_mode == "simple_global" or simple_global_stats:
             use_log_base_rate = False
         src_rate_init_mode_default = "first_speech" if minimal_v1_profile else "learned"
+        src_g_variant = str(
+            hparams.get("rhythm_v3_src_g_variant", hparams.get("rhythm_v3_g_variant", "raw_median"))
+            or "raw_median"
+        ).strip().lower()
+        src_g_trim_ratio = float(
+            hparams.get("rhythm_v3_src_g_trim_ratio", hparams.get("rhythm_v3_g_trim_ratio", 0.2))
+            or 0.2
+        )
+        src_g_drop_edge_runs = int(
+            hparams.get(
+                "rhythm_v3_src_g_drop_edge_runs",
+                hparams.get("rhythm_v3_drop_edge_runs_for_g", 0),
+            )
+            or 0
+        )
+        src_min_boundary_confidence_for_g = hparams.get(
+            "rhythm_v3_src_min_boundary_confidence_for_g",
+            hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
+        )
         return DurationV3TargetBuildConfig(
             lambda_dur=max(0.0, float(hparams.get("lambda_rhythm_dur", 1.0) or 1.0)),
             lambda_op=max(0.0, float(lambda_op or 0.0)),
@@ -73,19 +92,17 @@ class DurationV3TaskRuntimeSupportMixin:
             simple_global_stats=simple_global_stats,
             rate_mode=rate_mode,
             minimal_v1_profile=minimal_v1_profile,
-            g_variant=str(hparams.get("rhythm_v3_g_variant", "raw_median") or "raw_median").strip().lower(),
-            g_trim_ratio=float(hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
+            g_variant=src_g_variant,
+            g_trim_ratio=src_g_trim_ratio,
             src_prefix_stat_mode=str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema"),
             src_prefix_min_support=int(hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3),
             src_rate_init_mode=normalize_src_rate_init_mode(
-                hparams.get("rhythm_v3_src_rate_init_mode", "auto"),
+                hparams.get("rhythm_v3_src_rate_init_mode", "first_speech"),
                 auto_fallback=src_rate_init_mode_default,
             ),
-            g_drop_edge_runs=int(hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
+            g_drop_edge_runs=src_g_drop_edge_runs,
             min_boundary_confidence_for_g=(
-                None
-                if hparams.get("rhythm_v3_min_boundary_confidence_for_g", None) is None
-                else float(hparams.get("rhythm_v3_min_boundary_confidence_for_g"))
+                None if src_min_boundary_confidence_for_g is None else float(src_min_boundary_confidence_for_g)
             ),
             min_support_log_iqr_for_g=float(hparams.get("rhythm_v3_min_support_log_iqr_for_g", 0.0) or 0.0),
             min_support_log_span_for_g=float(hparams.get("rhythm_v3_min_support_log_span_for_g", 0.0) or 0.0),

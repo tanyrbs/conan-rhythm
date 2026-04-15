@@ -15,22 +15,45 @@ is a **three-gate falsification loop** over the maintained `rhythm_v3` line:
 
 Latest checked local rerun:
 
-- `2026-04-14`
-- artifacts: `tmp/gate_reaudit_20260414_rebuilt2/`
+- `2026-04-15`
+- canonical snapshot: `docs/rhythm_v3_local_status_2026-04-15.md`
+- local candidate artifacts:
+  - `tmp/gate2_candidate_20260415_s75_srcgap/`
+  - `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
+  - `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
 
 Current reading on the quick-ARCTIC surface:
 
 - frontend/cache support-domain collapse has been repaired
-- latest local strongest fixed contract
-  `weighted_median + exact_global_family` now passes local Gate 0 / Gate 1
-- maintained official default `raw_median + ema` remains blocked for training
-- Gate 2 / Gate 3 training remain blocked and must be rerun on the same contract
-- official learned training is still blocked until Gate 2 is recorded under the
-  same contract fingerprint
+- the strongest local upper-bound contract
+  `weighted_median + exact_global_family` still survives local Gate 0 / Gate 1
+- the maintained online mainline is
+  `weighted_median + ema + first_speech`
+- a local Gate2-online coarse-only candidate was rerun on that maintained
+  online surface with
+  `rhythm_v3_use_src_gap_in_coarse_head=true` and
+  `rhythm_v3_strict_minimal_claim_profile=false`
+- that local Gate2 candidate did **not** materially improve aggregate Gate2
+  metrics; recurring evidence still points to `preproj` showing signal while
+  `exec` flattens/ties
+- local Gate3 candidate training was unblocked by fixing a
+  config/runtime-wiring mismatch and then advanced to a checkpointed local run
+  at `step_125`; this is **not** a Gate3 pass
+- local quick configs now read dataset I/O from `D:/conan_data/...` for faster
+  local experimentation; this is a local quick-config change, not a repo-wide
+  default change
+- official online training remains blocked until the maintained state-sufficient
+  contract is rerun through Gate1-online / Gate2 / Gate3 under the official
+  gate JSON
 
 So the present blocker is no longer "prompt domain dies before `g` exists".
-The blocker is now "the local strongest contract is alive, but the official
-training/unblock surface is still stricter and not yet revalidated past Gate 1".
+The current blocker is closer to:
+
+- the cue exists on the strongest upper-bound contract
+- the maintained online writer shows some push before projection
+- the execution/projector layer still appears to eat too much of that signal
+- official gate status remains blocked because the local reruns are still
+  candidate diagnostics rather than official unblock evidence
 
 ## Current maintained default
 
@@ -43,7 +66,13 @@ Use:
 - `rhythm_v3_minimal_v1_profile: true`
 - `rhythm_v3_rate_mode: simple_global`
 - `rhythm_v3_simple_global_stats: true`
-- `rhythm_v3_g_variant: raw_median`
+- `rhythm_v3_prompt_domain_mode: meaningful_reference`
+- `rhythm_v3_prompt_require_clean_support: false`
+- `rhythm_v3_g_variant: weighted_median`
+- `rhythm_v3_prompt_g_variant: weighted_median`
+- `rhythm_v3_src_g_variant: weighted_median`
+- `rhythm_v3_src_prefix_stat_mode: ema`
+- `rhythm_v3_src_rate_init_mode: first_speech`
 - `rhythm_v3_unit_prior_path: null`  (`unit_norm` only; build with `scripts/build_unit_log_prior.py`)
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
@@ -71,9 +100,9 @@ The canonical writer also keeps local residuals conservative at cold start: open
 The maintained explanation is:
 
 - **source-anchored duration writing**
-- **global-stat prompt conditioning by default**
+- **reference-side weighted global cue with broader prompt policy**
 - **utterance-level scalar coarse correction over the analytic source/ref rate gap, broadcast over the visible prefix**
-- **strict-causal prefix-rate correction**
+- **strict-causal, state-sufficient source prefix-rate correction**
 - **carry+budget integer projection core with exported boundary-side smoothing telemetry**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
 - **stable-lattice suppression of short flicker runs and micro-silence islands before retiming**
@@ -88,24 +117,34 @@ The maintained explanation is:
 The structural mainline contract is therefore:
 
 - `prompt_summary + strict + simple_global`
-- explicit `prompt_speech_mask` on the prompt side
-- default runtime surface `raw_median + learned`
+- prompt side may use a broader meaningful-reference policy than the strict
+  old 3-8s claim slice
+- source side keeps the stricter online contract because chunk continuation
+  must remain state-sufficient
+- default runtime surface `weighted_median + ema + first_speech`
 
 For falsification work, `analytic`, `coarse_only`, and `learned` are three
 evaluation modes on that same runtime surface, not three separate systems.
 
-For falsification work, stay on that same structural path and only override the
-controlled analysis knobs (`analytic` / `coarse_only`, alternative `g_variant`)
-instead of opening a second runtime branch.
+For falsification work, there are now two explicit validation surfaces:
+
+- `Gate1-online`: maintained runtime contract (`weighted_median + ema`)
+- `Gate1-upper`: stronger offline/local upper bound
+  (`weighted_median + exact_global_family`)
+
+The second one is for proving the cue exists. It is not the maintained online
+runtime default.
 
 The maintained gate presets are checked in as config overlays rather than left
 as comment-only edits:
 
+- `egs/overrides/rhythm_v3_online_weighted_streaming.yaml`
 - `egs/overrides/rhythm_v3_gate0_g_audit.yaml`
 - `egs/overrides/rhythm_v3_gate1_analytic.yaml`
+- `egs/overrides/rhythm_v3_gate1_upper_exact.yaml`
 - `egs/overrides/rhythm_v3_gate2_coarse_only.yaml`
 - `egs/overrides/rhythm_v3_local_weighted_exact.yaml` for the current frozen
-  local strongest fixed contract used by Gate 2 / Gate 3 candidate reruns
+  upper-bound validation contract
 
 ## What the default v3 path does
 
@@ -144,6 +183,10 @@ speaker embedding by default; `summary_state` / slot statistics stay available
 for diagnostics and ablations instead of defining the default writer.
 
 A `rhythm_v3_summary_pool_speech_only` flag keeps that summary pooling speech-only, masking out silence runs before computing the pooled mean/std so `global_rate` and `summary_state` stay focused on speaking rhythm rather than pause counts.
+The maintained prompt policy is now `meaningful_reference` rather than the old
+hard 3-8s mainline claim. The stricter 3-8s slice still exists as
+`minimal_strict`, but it is treated as a stricter validation policy, not the
+default online runtime assumption.
 
 ### Source side
 
@@ -160,6 +203,11 @@ local-rate EMA in runtime state. `sep_mask` is not treated as a speech mask in
 the canonical path; the maintained v3 frontend now materializes explicit
 silence runs and exports `source_silence_mask` directly.
 Silence runs still exist in the stream but commit through the coarse/global bias path only (no local residual), and `source_silence_mask` keeps speech-only statistics from being contaminated by those paused units.
+This asymmetry is intentional: reference-side validation may use stronger
+offline statistics, but the maintained source-side online baseline must remain
+state-sufficient across chunk continuation. That is why
+`exact_global_family` stays in the repo as an upper-bound validation contract
+instead of the maintained online default.
 
 ### Projector
 

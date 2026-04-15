@@ -14,6 +14,8 @@ from tasks.Conan.rhythm.common.metrics_impl import (
 def _to_tensor(value: Any, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.detach().to(dtype=dtype)
+    if hasattr(value, "to_numpy"):
+        value = value.to_numpy()
     return torch.as_tensor(value, dtype=dtype)
 
 

@@ -154,6 +154,16 @@ def _extract_attr_or_key(obj: Any, name: str, batch_index: int) -> Any:
     return _slice_batch_value(value, batch_index)
 
 
+def _last_masked_value(arr: np.ndarray | None, mask: np.ndarray | None) -> float:
+    if arr is None or mask is None:
+        return float("nan")
+    idx = np.flatnonzero(np.asarray(mask, dtype=np.float32).reshape(-1) > 0.5)
+    if idx.size <= 0:
+        return float("nan")
+    flat = np.asarray(arr, dtype=np.float32).reshape(-1)
+    return float(flat[int(idx[-1])])
+
+
 def _extract_prompt_domain_valid_scalar(ref_memory: Any, batch_index: int) -> float | None:
     value = _extract_attr_or_key(ref_memory, "prompt_g_domain_valid", batch_index)
     if value is None:
@@ -282,6 +292,120 @@ class RhythmV3DerivedRecord:
     prediction_local: Optional[np.ndarray]
 
 
+def _resolve_prompt_g_config(
+    meta: Mapping[str, Any],
+    *,
+    fallback_variant: str = "raw_median",
+    fallback_trim_ratio: float = 0.2,
+    fallback_drop_edge_runs: int = 0,
+    fallback_min_boundary_confidence: float | None = None,
+) -> dict[str, Any]:
+    min_boundary = meta.get(
+        "prompt_min_boundary_confidence_for_g",
+        meta.get(
+            "rhythm_v3_prompt_min_boundary_confidence_for_g",
+            fallback_min_boundary_confidence,
+        ),
+    )
+    return {
+        "variant": str(
+            meta.get(
+                "prompt_g_variant",
+                meta.get(
+                    "rhythm_v3_prompt_g_variant",
+                    meta.get("g_variant", fallback_variant),
+                ),
+            )
+            or fallback_variant
+        ),
+        "trim_ratio": _as_float(
+            meta.get(
+                "prompt_g_trim_ratio",
+                meta.get(
+                    "rhythm_v3_prompt_g_trim_ratio",
+                    meta.get("g_trim_ratio", fallback_trim_ratio),
+                ),
+            ),
+            default=float(fallback_trim_ratio),
+        ),
+        "drop_edge_runs": int(
+            round(
+                _as_float(
+                    meta.get(
+                        "prompt_g_drop_edge_runs",
+                        meta.get(
+                            "rhythm_v3_prompt_g_drop_edge_runs",
+                            meta.get("g_drop_edge_runs", fallback_drop_edge_runs),
+                        ),
+                    ),
+                    default=float(fallback_drop_edge_runs),
+                )
+            )
+        ),
+        "min_boundary_confidence": None if min_boundary is None else float(min_boundary),
+    }
+
+
+def _resolve_src_g_config(
+    meta: Mapping[str, Any],
+    *,
+    fallback_variant: str = "raw_median",
+    fallback_trim_ratio: float = 0.2,
+    fallback_drop_edge_runs: int = 0,
+    fallback_min_boundary_confidence: float | None = None,
+) -> dict[str, Any]:
+    min_boundary = meta.get(
+        "src_min_boundary_confidence_for_g",
+        meta.get(
+            "rhythm_v3_src_min_boundary_confidence_for_g",
+            meta.get(
+                "min_boundary_confidence_for_g",
+                meta.get("rhythm_v3_min_boundary_confidence_for_g", fallback_min_boundary_confidence),
+            ),
+        ),
+    )
+    return {
+        "variant": str(
+            meta.get(
+                "src_g_variant",
+                meta.get(
+                    "rhythm_v3_src_g_variant",
+                    meta.get("g_variant", fallback_variant),
+                ),
+            )
+            or fallback_variant
+        ),
+        "trim_ratio": _as_float(
+            meta.get(
+                "src_g_trim_ratio",
+                meta.get(
+                    "rhythm_v3_src_g_trim_ratio",
+                    meta.get("g_trim_ratio", fallback_trim_ratio),
+                ),
+            ),
+            default=float(fallback_trim_ratio),
+        ),
+        "drop_edge_runs": int(
+            round(
+                _as_float(
+                    meta.get(
+                        "src_g_drop_edge_runs",
+                        meta.get(
+                            "rhythm_v3_src_g_drop_edge_runs",
+                            meta.get(
+                                "drop_edge_runs_for_g",
+                                meta.get("rhythm_v3_drop_edge_runs_for_g", fallback_drop_edge_runs),
+                            ),
+                        ),
+                    ),
+                    default=float(fallback_drop_edge_runs),
+                )
+            )
+        ),
+        "min_boundary_confidence": None if min_boundary is None else float(min_boundary),
+    }
+
+
 @dataclass
 class RhythmV3DebugRecord:
     item_name: Optional[str] = None
@@ -339,6 +463,7 @@ class RhythmV3DebugRecord:
     unit_alignment_posterior_values_debug: Optional[np.ndarray] = None
     global_rate: Optional[float] = None
     source_rate_seq: Optional[np.ndarray] = None
+    g_src_prefix_final: Optional[np.ndarray] = None
     source_rate_init_value: Optional[np.ndarray] = None
     global_shift_analytic: Optional[np.ndarray] = None
     global_bias_scalar: Optional[float] = None
@@ -354,16 +479,24 @@ class RhythmV3DebugRecord:
     unit_duration_exec: Optional[np.ndarray] = None
     unit_duration_raw: Optional[np.ndarray] = None
     projector_preclamp_exec: Optional[np.ndarray] = None
+    projector_preclamp_duration_exec: Optional[np.ndarray] = None
+    projector_preclamp_prefix_cumsum: Optional[np.ndarray] = None
     projector_clamp_delta: Optional[np.ndarray] = None
     projector_clamp_mass: Optional[np.ndarray] = None
     prefix_unit_offset: Optional[np.ndarray] = None
     projector_prefix_drift: Optional[np.ndarray] = None
     projector_rounding_residual: Optional[np.ndarray] = None
+    projector_rounding_regret: Optional[np.ndarray] = None
+    projector_projection_regret: Optional[np.ndarray] = None
     projector_budget_hit_pos: Optional[np.ndarray] = None
     projector_budget_hit_neg: Optional[np.ndarray] = None
     projector_budget_hit_mask: Optional[np.ndarray] = None
     projector_boundary_hit: Optional[np.ndarray] = None
     projector_boundary_decay_applied: Optional[np.ndarray] = None
+    analytic_gap_raw: Optional[np.ndarray] = None
+    analytic_gap_clipped: Optional[np.ndarray] = None
+    analytic_clip_hit: Optional[np.ndarray] = None
+    analytic_clip_hit_rate: Optional[np.ndarray] = None
     coarse_scalar_raw: Optional[np.ndarray] = None
     global_term_before_local: Optional[np.ndarray] = None
     analytic_gap_clip_value: Optional[np.ndarray] = None
@@ -434,6 +567,10 @@ def build_debug_record(
             "g_drop_edge_runs",
             "g_strict_speech_only",
             "g_trim_ratio",
+            "prompt_g_variant",
+            "prompt_g_trim_ratio",
+            "prompt_g_drop_edge_runs",
+            "prompt_min_boundary_confidence_for_g",
             "prompt_global_weight_present",
             "prompt_unit_log_prior_present",
             "prompt_unit_prior_vocab_size",
@@ -542,6 +679,7 @@ def build_debug_record(
         g_variant = model_output.get("rhythm_v3_g_variant")
         if g_variant is not None:
             _maybe_set_meta(meta, "g_variant", _as_object_scalar(g_variant))
+            _maybe_set_meta(meta, "src_g_variant", _as_object_scalar(g_variant))
         eval_mode_value = model_output.get("rhythm_v3_eval_mode")
         if eval_mode_value is not None:
             _maybe_set_meta(meta, "rhythm_v3_eval_mode", _as_object_scalar(eval_mode_value))
@@ -578,6 +716,20 @@ def build_debug_record(
                 _maybe_set_meta(meta, meta_key, scalar)
         if model_output.get("rhythm_v3_g_trim_ratio") is not None:
             _maybe_set_meta(meta, "g_trim_ratio", _as_object_scalar(model_output.get("rhythm_v3_g_trim_ratio")))
+            _maybe_set_meta(meta, "src_g_trim_ratio", _as_object_scalar(model_output.get("rhythm_v3_g_trim_ratio")))
+        for key in (
+            "rhythm_v3_prompt_g_variant",
+            "rhythm_v3_prompt_g_trim_ratio",
+            "rhythm_v3_prompt_g_drop_edge_runs",
+            "rhythm_v3_prompt_min_boundary_confidence_for_g",
+            "rhythm_v3_src_g_variant",
+            "rhythm_v3_src_g_trim_ratio",
+            "rhythm_v3_src_g_drop_edge_runs",
+            "rhythm_v3_src_min_boundary_confidence_for_g",
+        ):
+            value = model_output.get(key)
+            if value is not None:
+                _maybe_set_meta(meta, key.replace("rhythm_v3_", ""), _as_object_scalar(value))
         for key in (
             "rhythm_v3_min_boundary_confidence_for_g",
             "rhythm_v3_src_prefix_stat_mode",
@@ -748,6 +900,7 @@ def build_debug_record(
             if _extract_attr_or_key(execution, "source_rate_seq", batch_index) is not None
             else _extract_attr_or_key(execution, "g_src_prefix", batch_index)
         ),
+        g_src_prefix_final=_as_optional_vector(_extract_attr_or_key(execution, "g_src_prefix_final", batch_index)),
         source_rate_init_value=_as_optional_vector(
             _extract_attr_or_key(model_output, "rhythm_v3_source_rate_init", batch_index)
         ),
@@ -771,6 +924,12 @@ def build_debug_record(
         projector_preclamp_exec=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_preclamp_exec", batch_index)
         ),
+        projector_preclamp_duration_exec=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_preclamp_duration_exec", batch_index)
+        ),
+        projector_preclamp_prefix_cumsum=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_preclamp_prefix_cumsum", batch_index)
+        ),
         projector_clamp_delta=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_clamp_delta", batch_index)
         ),
@@ -787,6 +946,12 @@ def build_debug_record(
             _extract_attr_or_key(execution, "projector_rounding_residual", batch_index)
             if _extract_attr_or_key(execution, "projector_rounding_residual", batch_index) is not None
             else _extract_attr_or_key(getattr(execution, "next_state", None), "rounding_residual", batch_index)
+        ),
+        projector_rounding_regret=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_rounding_regret", batch_index)
+        ),
+        projector_projection_regret=_as_optional_vector(
+            _extract_attr_or_key(execution, "projector_projection_regret", batch_index)
         ),
         projector_budget_hit_pos=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_pos", batch_index)),
         projector_budget_hit_neg=_as_optional_vector(_extract_attr_or_key(execution, "projector_budget_hit_neg", batch_index)),
@@ -809,6 +974,10 @@ def build_debug_record(
         projector_boundary_decay_applied=_as_optional_vector(
             _extract_attr_or_key(execution, "projector_boundary_decay_applied", batch_index)
         ),
+        analytic_gap_raw=_as_optional_vector(_extract_attr_or_key(execution, "analytic_gap_raw", batch_index)),
+        analytic_gap_clipped=_as_optional_vector(_extract_attr_or_key(execution, "analytic_gap_clipped", batch_index)),
+        analytic_clip_hit=_as_optional_vector(_extract_attr_or_key(execution, "analytic_clip_hit", batch_index)),
+        analytic_clip_hit_rate=_as_optional_vector(_extract_attr_or_key(execution, "analytic_clip_hit_rate", batch_index)),
         coarse_scalar_raw=_as_optional_vector(_extract_attr_or_key(execution, "coarse_scalar_raw", batch_index)),
         global_term_before_local=_as_optional_vector(
             _extract_attr_or_key(execution, "global_term_before_local", batch_index)
@@ -909,8 +1078,7 @@ def derive_record(
             if record.source_run_stability is None
             else np.asarray(record.source_run_stability, dtype=np.float32).reshape(1, -1)
         )
-        g_variant_meta = str(meta.get("g_variant", "raw_median"))
-        g_trim_ratio_meta = _as_float(meta.get("g_trim_ratio"), default=0.2)
+        src_g_cfg = _resolve_src_g_config(meta)
         src_prefix_min_support = int(
             round(
                 _as_float(
@@ -926,23 +1094,9 @@ def derive_record(
             meta.get("src_rate_init_mode", meta.get("rhythm_v3_src_rate_init_mode", "first_speech"))
             or "first_speech"
         ).strip().lower()
-        min_boundary_confidence = meta.get(
-            "min_boundary_confidence_for_g",
-            meta.get("rhythm_v3_min_boundary_confidence_for_g"),
-        )
-        min_boundary_confidence = (
-            None if min_boundary_confidence is None else float(min_boundary_confidence)
-        )
-        drop_edge_runs = int(
-            round(
-                _as_float(
-                    meta.get("drop_edge_runs_for_g", meta.get("rhythm_v3_drop_edge_runs_for_g")),
-                    default=0.0,
-                )
-            )
-        )
+        drop_edge_runs = int(src_g_cfg["drop_edge_runs"])
         prefix_weight_t = None
-        if stability_np is not None and g_variant_meta in {"weighted_median", "softclean_wmed", "softclean_wtmean"}:
+        if stability_np is not None and src_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}:
             prefix_weight_t = torch.from_numpy(stability_np) * speech
         learned_init_rate = None
         if record.source_rate_init_value is not None:
@@ -966,8 +1120,8 @@ def derive_record(
             default_init_rate=default_init_rate,
             stat_mode=src_prefix_stat_mode,
             decay=float(local_rate_decay),
-            variant=g_variant_meta,
-            trim_ratio=float(g_trim_ratio_meta),
+            variant=str(src_g_cfg["variant"]),
+            trim_ratio=float(src_g_cfg["trim_ratio"]),
             min_support=max(1, src_prefix_min_support),
             weight=prefix_weight_t,
             valid_mask=torch.from_numpy(unit_mask_np.reshape(1, -1)),
@@ -975,7 +1129,7 @@ def derive_record(
             boundary_confidence=(
                 None if boundary_np is None else torch.from_numpy(boundary_np)
             ),
-            min_boundary_confidence=min_boundary_confidence,
+            min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
             drop_edge_runs=max(0, drop_edge_runs),
             min_speech_ratio=0.0,
             unit_ids=(
@@ -1066,12 +1220,22 @@ def record_summary(
 
     derived = derive_record(record, local_rate_decay=local_rate_decay, silence_tau=silence_tau)
     meta = dict(record.metadata or {})
-    min_boundary_confidence = meta.get(
-        "min_boundary_confidence_for_g",
-        meta.get("rhythm_v3_min_boundary_confidence_for_g"),
+    prompt_g_cfg = _resolve_prompt_g_config(
+        meta,
+        fallback_variant=g_variant,
+        fallback_trim_ratio=g_trim_ratio,
+        fallback_drop_edge_runs=drop_edge_runs,
+        fallback_min_boundary_confidence=None,
     )
-    min_boundary_confidence = (
-        None if min_boundary_confidence is None else float(min_boundary_confidence)
+    src_g_cfg = _resolve_src_g_config(
+        meta,
+        fallback_variant=g_variant,
+        fallback_trim_ratio=g_trim_ratio,
+        fallback_drop_edge_runs=drop_edge_runs,
+        fallback_min_boundary_confidence=meta.get(
+            "min_boundary_confidence_for_g",
+            meta.get("rhythm_v3_min_boundary_confidence_for_g"),
+        ),
     )
     prompt_total = 0.0 if record.prompt_duration_obs is None else float(np.sum(record.prompt_duration_obs))
     prompt_speech = (
@@ -1088,7 +1252,7 @@ def record_summary(
     source_valid_mask = _ensure_1d_mask(record.unit_mask, record.source_duration_obs)
     analysis_source_weight = (
         np.asarray(record.source_run_stability, dtype=np.float32).reshape(-1)
-        if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+        if src_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
         and record.source_run_stability is not None
         else None
     )
@@ -1109,7 +1273,7 @@ def record_summary(
         if derived.analytic_shift is None
         else derived.analytic_shift[speech_valid]
     )
-    if derived.global_rate is None:
+    if record.global_rate is None:
         prompt_speech_for_g = record.prompt_speech_mask
         g_ref, g_compute_status = compute_source_global_rate_for_analysis(
             source_duration_obs=record.prompt_duration_obs,
@@ -1118,16 +1282,16 @@ def record_summary(
             source_weight=record.prompt_global_weight,
             source_closed_mask=record.prompt_closed_mask,
             source_boundary_confidence=record.prompt_boundary_confidence,
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
+            min_boundary_confidence=prompt_g_cfg["min_boundary_confidence"],
+            g_variant=str(prompt_g_cfg["variant"]),
+            g_trim_ratio=float(prompt_g_cfg["trim_ratio"]),
+            drop_edge_runs=int(prompt_g_cfg["drop_edge_runs"]),
             source_unit_ids=record.prompt_content_units,
             require_explicit_speech_mask=True,
             return_status=True,
         )
     else:
-        g_ref = float(derived.global_rate)
+        g_ref = float(record.global_rate)
         g_compute_status = "ok" if np.isfinite(g_ref) else "invalid:record.global_rate"
     g_src_utt, g_src_compute_status = compute_source_global_rate_for_analysis(
         source_duration_obs=record.source_duration_obs,
@@ -1136,21 +1300,21 @@ def record_summary(
         source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
-        min_boundary_confidence=min_boundary_confidence,
-        g_variant=g_variant,
-        g_trim_ratio=g_trim_ratio,
-        drop_edge_runs=drop_edge_runs,
+        min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+        g_variant=str(src_g_cfg["variant"]),
+        g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+        drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
         source_unit_ids=record.source_content_units,
         require_explicit_speech_mask=False,
         return_status=True,
     )
     g_src_prefix_mean = float("nan")
-    g_src_prefix_final = float("nan")
     if derived.source_rate_seq is not None and bool(np.any(speech_valid)):
         g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
-        speech_idx = np.flatnonzero(speech_valid)
-        if speech_idx.size > 0:
-            g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
+    g_src_prefix_final = _as_float(
+        record.g_src_prefix_final,
+        default=_last_masked_value(derived.source_rate_seq, derived.speech_mask),
+    )
     delta_g = float(g_ref - g_src_utt) if np.isfinite(g_ref) and np.isfinite(g_src_utt) else float("nan")
     delta_g_ref_minus_src_prefix = (
         float(g_ref - g_src_prefix_mean)
@@ -1174,14 +1338,34 @@ def record_summary(
         source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
-        min_boundary_confidence=min_boundary_confidence,
-        g_variant=g_variant,
-        g_trim_ratio=g_trim_ratio,
-        drop_edge_runs=drop_edge_runs,
+        min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+        g_variant=str(src_g_cfg["variant"]),
+        g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+        drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
         source_unit_ids=record.source_content_units,
     )
+    tempo_ref_runtime = float(np.exp(-float(g_ref))) if np.isfinite(g_ref) else float("nan")
+    tempo_out_raw = compute_speech_tempo_for_analysis(
+        source_duration_obs=record.unit_duration_raw,
+        source_speech_mask=derived.speech_mask,
+        source_valid_mask=source_valid_mask,
+        source_weight=analysis_source_weight,
+        source_closed_mask=record.sealed_mask,
+        source_boundary_confidence=record.source_boundary_cue,
+        min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+        g_variant=str(src_g_cfg["variant"]),
+        g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+        drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
+        source_unit_ids=record.source_content_units,
+    ) if record.unit_duration_raw is not None else float("nan")
     continuous_duration = _as_optional_vector(
-        record.projector_preclamp_exec if record.projector_preclamp_exec is not None else record.unit_duration_raw,
+        record.projector_preclamp_duration_exec
+        if record.projector_preclamp_duration_exec is not None
+        else (
+            record.projector_preclamp_exec
+            if record.projector_preclamp_exec is not None
+            else record.unit_duration_raw
+        ),
         dtype=np.float32,
     )
     tempo_out_continuous = compute_speech_tempo_for_analysis(
@@ -1191,25 +1375,27 @@ def record_summary(
         source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
-        min_boundary_confidence=min_boundary_confidence,
-        g_variant=g_variant,
-        g_trim_ratio=g_trim_ratio,
-        drop_edge_runs=drop_edge_runs,
+        min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+        g_variant=str(src_g_cfg["variant"]),
+        g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+        drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
         source_unit_ids=record.source_content_units,
     )
-    tempo_out = compute_speech_tempo_for_analysis(
+    tempo_out_preproj = tempo_out_continuous
+    tempo_out_exec = compute_speech_tempo_for_analysis(
         source_duration_obs=record.unit_duration_exec,
         source_speech_mask=derived.speech_mask,
         source_valid_mask=source_valid_mask,
         source_weight=analysis_source_weight,
         source_closed_mask=record.sealed_mask,
         source_boundary_confidence=record.source_boundary_cue,
-        min_boundary_confidence=min_boundary_confidence,
-        g_variant=g_variant,
-        g_trim_ratio=g_trim_ratio,
-        drop_edge_runs=drop_edge_runs,
+        min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+        g_variant=str(src_g_cfg["variant"]),
+        g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+        drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
         source_unit_ids=record.source_content_units,
     )
+    tempo_out = tempo_out_exec
     source_duration_arr = _as_optional_vector(record.source_duration_obs, dtype=np.float32)
 
     def _speech_exec_surface(duration_arr: np.ndarray | None) -> tuple[float, float]:
@@ -1247,6 +1433,7 @@ def record_summary(
     )
     analytic_gap_preclip_abs_mean = np.nan
     analytic_saturation_rate = np.nan
+    analytic_gap_raw_abs_mean = np.nan
     tempo_out_preclip = float("nan")
     if derived.source_rate_seq is not None and np.isfinite(g_ref) and bool(np.any(speech_valid)):
         analytic_gap_preclip = (float(g_ref) - derived.source_rate_seq).astype(np.float32)
@@ -1286,16 +1473,31 @@ def record_summary(
                     if record.source_boundary_cue is None
                     else np.asarray(record.source_boundary_cue, dtype=np.float32).reshape(-1)[:width]
                 ),
-                min_boundary_confidence=min_boundary_confidence,
-                g_variant=g_variant,
-                g_trim_ratio=g_trim_ratio,
-                drop_edge_runs=drop_edge_runs,
+                min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+                g_variant=str(src_g_cfg["variant"]),
+                g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+                drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
                 source_unit_ids=(
                     None
                     if record.source_content_units is None
                     else np.asarray(record.source_content_units).reshape(-1)[:width]
                 ),
             )
+    if record.analytic_gap_raw is not None and bool(np.any(speech_valid)):
+        analytic_gap_raw_arr = np.asarray(record.analytic_gap_raw, dtype=np.float32).reshape(-1)
+        width = min(int(analytic_gap_raw_arr.shape[0]), int(speech_valid.shape[0]))
+        if width > 0 and bool(np.any(speech_valid[:width])):
+            analytic_gap_raw_abs_mean = float(np.mean(np.abs(analytic_gap_raw_arr[:width][speech_valid[:width]])))
+    elif np.isfinite(analytic_gap_preclip_abs_mean):
+        analytic_gap_raw_abs_mean = float(analytic_gap_preclip_abs_mean)
+    analytic_clip_hit_rate = _as_float(
+        record.analytic_clip_hit_rate,
+        default=(
+            float(np.mean(np.asarray(record.analytic_clip_hit, dtype=np.float32).reshape(-1)[speech_valid] > 0.5))
+            if record.analytic_clip_hit is not None and bool(np.any(speech_valid))
+            else analytic_saturation_rate
+        ),
+    )
     analytic_gap_abs_mean = (
         float(np.mean(np.abs(derived.analytic_shift[speech_valid])))
         if derived.analytic_shift is not None and bool(np.any(speech_valid))
@@ -1548,11 +1750,15 @@ def record_summary(
         "c_star": c_star,
         "zbar_sp_star": zbar_sp_star,
         "tempo_src": tempo_src,
+        "tempo_ref_runtime": tempo_ref_runtime,
+        "tempo_out_raw": tempo_out_raw,
+        "tempo_out_preproj": tempo_out_preproj,
+        "tempo_out_exec": tempo_out_exec,
         "tempo_out_preclip": tempo_out_preclip,
         "tempo_out_continuous": tempo_out_continuous,
         "tempo_out_preprojector": tempo_out_continuous,
-        "tempo_out_projected": tempo_out,
-        "tempo_out": tempo_out,
+        "tempo_out_projected": tempo_out_exec,
+        "tempo_out": tempo_out_exec,
         "speech_exec_ratio_continuous": speech_exec_ratio_continuous,
         "speech_exec_ratio_projected": speech_exec_ratio_projected,
         "speech_exec_ratio": speech_exec_ratio_projected,
@@ -1580,10 +1786,12 @@ def record_summary(
         "lexical_mismatch": lexical_mismatch,
         "analytic_gap_clip_value": analytic_gap_clip_value,
         "analytic_gap_preclip_abs_mean": analytic_gap_preclip_abs_mean,
+        "analytic_gap_raw_abs_mean": analytic_gap_raw_abs_mean,
         "analytic_gap_runtime_abs_mean": analytic_gap_abs_mean,
         "analytic_gap_abs_mean": analytic_gap_abs_mean,
         "analytic_saturation_rate": analytic_saturation_rate,
-        "analytic_gap_clip_hit_rate": analytic_saturation_rate,
+        "analytic_gap_clip_hit_rate": analytic_clip_hit_rate,
+        "analytic_clip_hit_rate": analytic_clip_hit_rate,
         "coarse_bias_abs_mean": coarse_bias_abs_mean,
         "coarse_scalar_raw": coarse_scalar_raw,
         "coarse_target_abs_err": (

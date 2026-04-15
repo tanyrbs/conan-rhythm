@@ -13,7 +13,7 @@ For the architecture/spec reading, see `docs/rhythm_migration_plan.md`.
 For validation/debug export and the retained five-figure review surface, see
 `docs/rhythm_v3_validation_stack.md`.
 For the latest local Gate rerun and current stop/go verdict, see
-`docs/rhythm_v3_local_status_2026-04-14.md`.
+`docs/rhythm_v3_local_status_2026-04-15.md`.
 
 ---
 
@@ -21,14 +21,14 @@ For the latest local Gate rerun and current stop/go verdict, see
 
 Latest local rerun date:
 
-- `2026-04-14`
+- `2026-04-15`
 
 Current verdict:
 
 - latest local strongest-contract Gate 0: pass
 - latest local strongest-contract Gate 1: pass
-- Gate 2: blocked
-- Gate 3: blocked
+- Gate2-online local `src_gap` candidate: rerun and reviewed, no material aggregate improvement
+- Gate3 local candidate: wiring-fixed and locally advanced to a checkpointed run
 - official training: blocked
 - prefix fine-tune: blocked
 
@@ -37,26 +37,41 @@ collapsed into one:
 
 - official training gate:
   `egs/overrides/rhythm_v3_gate_status.json`
-  This remains blocked.
+  This remains blocked on the maintained online contract
+  `weighted_median + ema + first_speech`.
 - latest local strongest-contract candidate:
   `egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json`
   This records a local zero-train `Gate0/1` pass for
   `weighted_median + exact_global_family + target_as_ref`.
+- latest local online-training candidate:
+  `tmp/gate2_candidate_20260415_s75_srcgap/review/gate_status.json`
+  plus the local Gate3 work directory
+  `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
+  These are local candidate diagnostics only; they are **not** official
+  unblock artifacts.
 
 Official training is still blocked because:
 
-- Gate 2 and Gate 3 were not rerun on the new candidate contract
-- `exact_global_family` is currently a local/offline gate contract, not the
-  maintained strict online runtime default
-- the checked-in maintained runtime default remains `raw_median + ema` until a
-  promoted candidate contract is frozen and revalidated
+- Gate 1-online was not re-recorded under the official gate JSON on the
+  maintained online contract
+- the local Gate2-online `src_gap` candidate did not materially improve the
+  aggregate gate picture
+- local Gate3 candidate work has not been converted into an official reviewed
+  Gate3 pass
+- `exact_global_family` is currently an upper-bound validation contract, not
+  the maintained strict online runtime default
+- the dominant failure signature still looks execution-side:
+  `preproj` can show signal while `exec` often collapses to ties/flat buckets
 
 So the right reading is:
 
 - the old local `Gate0/1 fail` story is no longer current
-- the newest local strongest-contract candidate is alive
-- official training still stays blocked until that candidate is frozen and
-  Gate 2 is recorded under the same contract fingerprint
+- the newest upper-bound exact-family candidate is alive
+- local online candidates have advanced the diagnosis, but not cleared the
+  official training gate
+- official online training still stays blocked until the maintained online
+  contract is rerun through Gate 1-online, Gate 2, and Gate 3 under the same
+  fingerprint
 
 ## 1. What the maintained path is
 
@@ -80,12 +95,19 @@ Operationally, the maintained default means:
 - `rhythm_v3_use_reference_summary: false`
 - `rhythm_v3_use_learned_residual_gate: false`
 - `rhythm_v3_disable_learned_gate: true`
-- `rhythm_v3_drop_edge_runs_for_g: 1`
+- `rhythm_v3_prompt_domain_mode: meaningful_reference`
+- `rhythm_v3_prompt_require_clean_support: false`
+- `rhythm_v3_g_variant: weighted_median`
+- `rhythm_v3_prompt_g_variant: weighted_median`
+- `rhythm_v3_src_g_variant: weighted_median`
+- `rhythm_v3_prompt_g_drop_edge_runs: 0`
+- `rhythm_v3_src_g_drop_edge_runs: 1`
 - `rhythm_v3_min_boundary_confidence_for_g: 0.5`
+- `rhythm_v3_src_prefix_stat_mode: ema`
+- `rhythm_v3_src_rate_init_mode: first_speech`
 - `rhythm_v3_min_prompt_ref_len_sec: 3.0`
 - `rhythm_v3_max_prompt_ref_len_sec: 8.0`
 - `rhythm_v3_require_same_text_paired_target: true`
-- `rhythm_v3_g_variant: raw_median`
 - `rhythm_v3_use_continuous_alignment: true`
 - `rhythm_v3_alignment_mode: continuous_viterbi_v1`
 - `rhythm_v3_detach_global_term_in_local_head: true`
@@ -95,8 +117,11 @@ Operationally, the maintained default means:
 - `rhythm_v3_strict_eval_invalid_g: true`
 - `rhythm_v3_eval_mode: learned`
 - duration-weighted speech-ratio gating end-to-end for prompt-domain checks
-- speech-only prompt global-rate estimation on the same closed/boundary-clean support surface used by runtime review
-- fail-closed prompt conditioning in both training and maintained eval when the prompt falls outside the 3-8s speech-dominant clean-support domain
+- prompt-side weighted global-rate estimation with a broader
+  `meaningful_reference` policy by default
+- strict 3-8s prompt-domain claims remain available as
+  `rhythm_v3_prompt_domain_mode=minimal_strict`, but they are no longer the
+  maintained online mainline assumption
 - speech = coarse + local
 - silence = clipped coarse-only follower
 - carry rounding + prefix budget at execution time
@@ -107,9 +132,15 @@ short fake silence islands when boundary evidence is weak, instead of asking
 the duration writer to absorb that noise.
 
 So this branch is **not** training a free-form pause planner. It is training a **source-anchored causal retimer** over a stabilized run lattice.
-The maintained runtime default is therefore `raw_median + learned(detach)`; the
-falsification ladder should only override `eval_mode` (and, when needed,
-`g_variant`) on that same surface.
+The maintained runtime default is therefore
+`weighted_median + ema + first_speech`; the falsification ladder should only
+override `eval_mode` on that same online surface unless you are explicitly
+running the stronger `Gate1-upper` exact-family check.
+For local quick experimentation in this workspace, the checked-in
+`egs/local_arctic_rhythm_v3_quick.yaml` now reads dataset I/O from
+`D:/conan_data/...` instead of the earlier `C:/project/...` paths. That is a
+local quick-config operational change only; it does not redefine the repo-wide
+default data layout.
 Minimal-V1 training now also fail-fast checks the prompt-side domain sidecars
 (`prompt_speech_mask`, `prompt_closed_mask`, `prompt_boundary_confidence`,
 `prompt_ref_len_sec`) before entering the model forward path.
@@ -117,32 +148,32 @@ Minimal-V1 training now also fail-fast checks the prompt-side domain sidecars
 ### 1.1 Recommended falsification profiles
 
 The maintained yaml already exposes the switches needed for staged validation.
-In practice, keep one base config and move between these five profiles with
-small overrides:
+In practice, keep one maintained online config and move between these profiles
+with small overrides:
 
-The current frozen local strongest-contract overlay is:
-
-- `egs/overrides/rhythm_v3_local_weighted_exact.yaml`
-
-Use that overlay for Gate 2 / Gate 3 candidate reruns so later stages cannot
-silently drift back to `raw_median + ema`.
+- maintained online contract:
+  `egs/overrides/rhythm_v3_online_weighted_streaming.yaml`
+- stronger upper-bound validation contract:
+  `egs/overrides/rhythm_v3_local_weighted_exact.yaml`
 
 | Profile | Purpose | Key overrides |
 | --- | --- | --- |
-| `A` | static / analytic falsification | `rhythm_v3_eval_mode=analytic`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0`, `rhythm_v3_silence_coarse_weight=0.0` |
+| `A-online` | Gate1-online on the maintained runtime contract | `egs/overrides/rhythm_v3_gate1_analytic.yaml` |
+| `A-upper` | Gate1-upper on the stronger exact-family validation contract | `egs/overrides/rhythm_v3_gate1_upper_exact.yaml` |
 | `B` | coarse-only validation training | `rhythm_v3_eval_mode=coarse_only`, `rhythm_v3_disable_local_residual=true`, `rhythm_v3_disable_coarse_bias=false`, `lambda_rhythm_bias=0.20`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
 | `C` | Gate 3 local residual falsification | `rhythm_v3_eval_mode=learned`, `rhythm_v3_disable_local_residual=false`, `rhythm_v3_disable_coarse_bias=false`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.0`, `lambda_rhythm_cons=0.0` |
 | `D` | no-detach ablation | same as `C`, but `rhythm_v3_detach_global_term_in_local_head=false`; treat this as an explicit comparison run rather than the maintained minimal-V1 contract |
 | `E` | strict-causal prefix fine-tune | `rhythm_v3_eval_mode=learned`, `rhythm_v3_detach_global_term_in_local_head=true`, `lambda_rhythm_pref=0.05`, `lambda_rhythm_cons=0.05`, `rhythm_v3_silence_coarse_weight=0.0` |
 
-Keep `rhythm_v3_g_variant=raw_median` as the checked-in maintained baseline, but
-do not confuse that with the latest local strongest-contract candidate.
-Current local zero-train evidence now points to
+Keep `weighted_median` as the checked-in maintained online baseline, but do not
+confuse the maintained online contract with the stronger exact-family upper
+bound. Current local zero-train evidence now points to
 `weighted_median + exact_global_family + target_as_ref` as the strongest local
-candidate contract, while `raw_median` remains the checked-in maintained
-runtime default and `trimmed_mean` remains a nearby local comparator rather
-than the promoted winner. `softclean_wmed` / `softclean_wtmean` still remain
-diagnostic-only because they are not the promoted candidate contract. The
+upper-bound validation contract, while the maintained runtime default is now
+`weighted_median + ema + first_speech`. `trimmed_mean` remains a nearby local
+comparator rather than the promoted winner. `softclean_wmed` /
+`softclean_wtmean` still remain diagnostic-only because they are not the
+promoted contract. The
 maintained strict-claim contract forbids
 `rhythm_v3_g_variant=unit_norm`, so keep
 `rhythm_v3_minimal_v1_profile=true` but set
@@ -161,6 +192,18 @@ actual falsification work, do not start there. Override into profile `A`
 first, then `B`, then `C`. Only use `D` if you are explicitly testing whether
 local residual quality depends on letting the local head backprop through the
 global/coarse term.
+
+One more local-candidate note matters for Gate3: under
+`rhythm_v3_strict_minimal_claim_profile=false`, local candidate work may set
+`rhythm_v3_disable_learned_gate=false` to reopen the learned-path training
+surface, but minimal-V1 runtime should still **not** reinterpret that as
+`use_learned_residual_gate=true`. The recent Gate3 unblock in this workspace
+was a config/runtime wiring fix along that line, not a claim that Gate3 has
+passed.
+
+Current local evidence also says `src_gap` is not the dominant bottleneck by
+itself. The next debugging priority is projector/clipping/budget/headroom and
+exec flattening, not simply increasing model freedom.
 
 --- 
 
@@ -210,22 +253,19 @@ inference-time prompt/source preparation now share the same `rhythm_v3`
 stable-lattice builder rather than separate legacy/v3 runizers.
 
 For the maintained prompt-summary path, `prompt_speech_mask` is part of the
-public conditioning contract rather than an internal optional hint. In the
-current strict minimal runtime, that means `prompt_speech_mask` should be
-materialized explicitly instead of being reconstructed from silence-token
-fallback. When available, `prompt_closed_mask`,
-`prompt_boundary_confidence`, and `prompt_ref_len_sec` now also feed the
-maintained prompt-domain contract: minimal V1 expects speech-dominant
-3-8 second references, and the mainline `g` path uses closed/boundary-clean
-support rather than only speech-mask edge drop. In the maintained minimal
-path, missing clean-support sidecars now fail closed instead of silently
-widening support back to `valid_mask`. The generic summary-pooling path still
-keeps a lenient all-silence zero-summary fallback for diagnostics. The
-maintained mainline also keeps `rhythm_prompt_dropout=0.0` and
-`rhythm_prompt_truncation=0.0`; if you want prompt augmentation, treat it as
-an explicit ablation and resample prompts so the 3-8s / speech-dominant gate
-remains satisfied after augmentation.
-behavior is now confined to the non-strict compatibility branch.
+public conditioning contract rather than an internal optional hint. The
+maintained prompt policy is now `meaningful_reference`: prompt references still
+need usable speech support, but the old 3-8s strict slice is no longer the
+default online claim. That stricter slice survives as
+`rhythm_v3_prompt_domain_mode=minimal_strict` for claim-tight validation.
+`prompt_closed_mask`, `prompt_boundary_confidence`, and `prompt_ref_len_sec`
+are still exported and audited, but the maintained prompt path now tolerates a
+broader reference set than the old fail-closed clean-support contract. By
+contrast, the source side stays stricter because online chunk continuation must
+remain state-sufficient. The generic summary-pooling path still keeps a lenient
+all-silence zero-summary fallback for diagnostics. The maintained mainline also
+keeps `rhythm_prompt_dropout=0.0` and `rhythm_prompt_truncation=0.0`; if you
+want prompt augmentation, treat it as an explicit ablation.
 
 ### 2.3 Canonical modules vs compatibility shims
 
@@ -705,7 +745,7 @@ py -3 scripts\rhythm_v3_debug_records.py ^
   --input artifacts\rhythm_debug.pt ^
   --output artifacts\rhythm_v3_summary.csv ^
   --review-dir artifacts\rhythm_v3_review ^
-  --g-variant raw_median ^
+  --g-variant weighted_median ^
   --drop-edge-runs 1
 ```
 
@@ -779,9 +819,10 @@ Treat these as the practical implementation checkpoints for the maintained
 minimal-V1 line:
 
 1. contract checkpoint:
-   prompt/reference metadata proves speech-dominant 3-8 second reference
-   support, paired-target provenance stays continuous, and same-text /
-   different-text rules are explicit rather than implicit
+   prompt/reference metadata proves a meaningful speech-dominant reference,
+   paired-target provenance stays continuous, and same-text /
+   different-text rules are explicit rather than implicit; use
+   `minimal_strict` only when you explicitly need the older 3-8s claim slice
 2. writer checkpoint:
    `rhythm_v3_detach_global_term_in_local_head=true` remains the maintained
    default, `rhythm_v3_freeze_src_rate_init=true` remains the maintained

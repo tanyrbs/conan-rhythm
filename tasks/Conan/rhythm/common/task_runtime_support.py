@@ -221,12 +221,12 @@ class CommonTaskRuntimeSupport:
             )
         output["acoustic_target_resampled_to_output"] = 0.0
         output["acoustic_target_trimmed_to_output"] = 0.0
-        if acoustic_target_is_retimed:
-            had_length_mismatch = (
-                target_len_before_align is not None
-                and mel_len_before_align is not None
-                and target_len_before_align != mel_len_before_align
-            )
+        had_length_mismatch = (
+            target_len_before_align is not None
+            and mel_len_before_align is not None
+            and target_len_before_align != mel_len_before_align
+        )
+        if acoustic_target_is_retimed or had_length_mismatch:
             mel_out_aligned, acoustic_target, acoustic_weight = self.owner._align_acoustic_target_to_output(
                 output["mel_out"],
                 acoustic_target,

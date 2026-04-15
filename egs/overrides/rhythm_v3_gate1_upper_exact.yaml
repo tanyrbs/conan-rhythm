@@ -1,6 +1,7 @@
-base_config: egs/conan_emformer_rhythm_v3.yaml
+base_config: egs/overrides/rhythm_v3_local_weighted_exact.yaml
 
-# Gate 1-online: analytic monotonicity on the maintained streaming-safe contract.
+# Gate 1-upper: stronger offline/local validation contract used to prove
+# the mixed global cue exists before the maintained online state catches up.
 rhythm_v3_eval_mode: analytic
 rhythm_v3_gate_quality_strict: false
 rhythm_v3_disable_local_residual: true

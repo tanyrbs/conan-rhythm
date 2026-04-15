@@ -380,6 +380,41 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         self.assertEqual(output["acoustic_target_length_frames_after_align"], 4.0)
         self.assertEqual(output["acoustic_output_length_frames_after_align"], 4.0)
 
+    def test_attach_acoustic_target_bundle_aligns_non_retimed_mismatch(self) -> None:
+        class DummyOwner:
+            mel_losses = {"l1": 1.0}
+
+            @staticmethod
+            def _align_acoustic_target_to_output(mel_out, acoustic_target, acoustic_weight):
+                target_len = mel_out.size(1)
+                return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
+
+        support = RhythmTaskRuntimeSupport(DummyOwner())
+        output = {
+            "mel_out": torch.zeros((1, 4, 3), dtype=torch.float32),
+        }
+        with mock.patch.dict(
+            "tasks.Conan.rhythm.task_runtime_support.hparams",
+            {"rhythm_resample_retimed_target_to_output": False},
+            clear=True,
+        ):
+            acoustic_target, acoustic_weight = support.attach_acoustic_target_bundle(
+                output,
+                acoustic_target=torch.ones((1, 6, 3), dtype=torch.float32),
+                acoustic_target_is_retimed=False,
+                acoustic_weight=torch.ones((1, 6), dtype=torch.float32),
+                acoustic_target_source="source",
+                disable_source_pitch_supervision=False,
+                disable_acoustic_train_path=False,
+            )
+        self.assertEqual(tuple(acoustic_target.shape), (1, 4, 3))
+        self.assertEqual(tuple(acoustic_weight.shape), (1, 4))
+        self.assertEqual(output["acoustic_target_is_retimed"], 0.0)
+        self.assertEqual(output["acoustic_target_length_mismatch_abs_before_align"], 2.0)
+        self.assertEqual(output["acoustic_target_resampled_to_output"], 0.0)
+        self.assertEqual(output["acoustic_target_trimmed_to_output"], 1.0)
+        self.assertEqual(output["acoustic_target_length_frames_after_align"], 4.0)
+
     def test_attach_acoustic_target_bundle_aligns_retimed_pitch_targets_and_nonpadding(self) -> None:
         class DummyOwner:
             mel_losses = {"l1": 1.0}

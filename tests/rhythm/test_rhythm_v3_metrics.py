@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 import torch
 
@@ -424,6 +425,17 @@ def test_tempo_explainability_uses_tie_aware_spearman():
         torch.tensor([0.0, 0.0, 2.0, 2.0], dtype=torch.float32),
     )
     assert metrics["count"] == 4.0
+    assert abs(metrics["spearman"] - 1.0) < 1.0e-6
+    assert abs(metrics["robust_slope"] - 2.0) < 1.0e-6
+    assert abs(metrics["r2_like"] - 1.0) < 1.0e-6
+
+
+def test_tempo_explainability_accepts_pandas_series_inputs():
+    metrics = tempo_explainability(
+        pd.Series([0.0, 0.5, 1.0], dtype="float32"),
+        pd.Series([0.0, 1.0, 2.0], dtype="float32"),
+    )
+    assert metrics["count"] == 3.0
     assert abs(metrics["spearman"] - 1.0) < 1.0e-6
     assert abs(metrics["robust_slope"] - 2.0) < 1.0e-6
     assert abs(metrics["r2_like"] - 1.0) < 1.0e-6

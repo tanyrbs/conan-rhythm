@@ -244,6 +244,7 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     execution = DurationExecution(
         unit_logstretch=torch.tensor([[0.1, -0.05, 0.0]], dtype=torch.float32),
         unit_duration_exec=torch.tensor([[2.2, 3.8, 1.0]], dtype=torch.float32),
+        unit_duration_raw=torch.tensor([[2.7, 4.5, 1.0]], dtype=torch.float32),
         basis_activation=torch.zeros((1, 3, 1), dtype=torch.float32),
         commit_mask=torch.tensor([[1.0, 1.0, 0.0]], dtype=torch.float32),
         next_state=DurationRuntimeState(
@@ -262,8 +263,14 @@ def test_build_debug_records_and_summary_from_runtime_objects():
         global_term_before_local=torch.tensor([[0.17, 0.07, 0.0]], dtype=torch.float32),
         residual_gate_mean=torch.tensor([[0.4]], dtype=torch.float32),
         source_rate_seq=torch.tensor([[0.08, 0.18, 0.18]], dtype=torch.float32),
+        g_src_prefix_final=torch.tensor([[0.18]], dtype=torch.float32),
         prefix_unit_offset=torch.tensor([[0.0, 0.1, 0.1]], dtype=torch.float32),
+        projector_preclamp_duration_exec=torch.tensor([[2.7, 4.8, 1.0]], dtype=torch.float32),
         projector_rounding_residual=torch.tensor([[0.03]], dtype=torch.float32),
+        analytic_gap_raw=torch.tensor([[0.28, 0.10, 0.00]], dtype=torch.float32),
+        analytic_gap_clipped=torch.tensor([[0.25, 0.10, 0.00]], dtype=torch.float32),
+        analytic_clip_hit=torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+        analytic_clip_hit_rate=torch.tensor([[0.5]], dtype=torch.float32),
     )
     sample = {
         "item_name": np.asarray(["demo_case"], dtype=object),
@@ -321,8 +328,14 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["c_star"])
     assert np.isfinite(summary["tempo_src"])
     assert np.isfinite(summary["tempo_out"])
+    assert np.isfinite(summary["tempo_ref_runtime"])
+    assert np.isfinite(summary["tempo_out_raw"])
+    assert np.isfinite(summary["tempo_out_preproj"])
+    assert np.isfinite(summary["tempo_out_exec"])
     assert np.isfinite(summary["tempo_delta"])
     assert np.isfinite(summary["analytic_gap_abs_mean"])
+    assert np.isfinite(summary["analytic_gap_raw_abs_mean"])
+    assert np.isfinite(summary["analytic_clip_hit_rate"])
     assert np.isfinite(summary["coarse_bias_abs_mean"])
     assert np.isfinite(summary["coarse_scalar_raw"])
     assert np.isfinite(summary["local_residual_abs_mean"])
@@ -331,6 +344,90 @@ def test_build_debug_records_and_summary_from_runtime_objects():
     assert np.isfinite(summary["local_silence_delta_share"])
     assert np.isfinite(summary["speech_weighted_mae"])
     assert np.isfinite(summary["cumulative_drift"])
+    assert np.isfinite(summary["g_src_prefix_final"])
+    assert np.isfinite(summary["delta_g_ref_minus_src_prefix_final"])
+
+
+def test_record_summary_and_ref_crop_table_use_prompt_specific_g_contract():
+    prompt_duration = np.asarray([2.0, 4.0, 16.0], dtype=np.float32)
+    prompt_speech = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    prompt_valid = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    prompt_closed = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    prompt_boundary = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    prompt_weight = np.asarray([0.1, 0.1, 10.0], dtype=np.float32)
+    expected_prompt_g = compute_source_global_rate_for_analysis(
+        source_duration_obs=prompt_duration,
+        source_speech_mask=prompt_speech,
+        source_valid_mask=prompt_valid,
+        source_weight=prompt_weight,
+        source_closed_mask=prompt_closed,
+        source_boundary_confidence=prompt_boundary,
+        g_variant="weighted_median",
+        g_trim_ratio=0.0,
+        drop_edge_runs=0,
+        min_boundary_confidence=None,
+    )
+    expected_src_like_g = compute_source_global_rate_for_analysis(
+        source_duration_obs=prompt_duration,
+        source_speech_mask=prompt_speech,
+        source_valid_mask=prompt_valid,
+        source_closed_mask=prompt_closed,
+        source_boundary_confidence=prompt_boundary,
+        g_variant="raw_median",
+        g_trim_ratio=0.0,
+        drop_edge_runs=0,
+        min_boundary_confidence=None,
+    )
+    assert np.isfinite(expected_prompt_g)
+    assert np.isfinite(expected_src_like_g)
+    assert expected_prompt_g != pytest.approx(expected_src_like_g)
+
+    record = RhythmV3DebugRecord.from_mapping(
+        {
+            "item_name": "promptsplit_case",
+            "metadata": {
+                "sample_id": "promptsplit_case",
+                "pair_id": "pair_promptsplit",
+                "src_id": "promptsplit",
+                "eval_mode": "analytic",
+                "g_domain_valid": 1.0,
+                "prompt_g_variant": "weighted_median",
+                "prompt_g_trim_ratio": 0.0,
+                "prompt_g_drop_edge_runs": 0.0,
+                "src_g_variant": "raw_median",
+                "src_g_trim_ratio": 0.0,
+                "src_g_drop_edge_runs": 1.0,
+                "src_min_boundary_confidence_for_g": 0.5,
+            },
+            "source_content_units": np.asarray([5, 6, 8], dtype=np.int64),
+            "source_duration_obs": np.asarray([2.0, 3.0, 1.0], dtype=np.float32),
+            "source_silence_mask": np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+            "unit_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+            "prompt_content_units": np.asarray([9, 9, 8], dtype=np.int64),
+            "prompt_duration_obs": prompt_duration,
+            "prompt_valid_mask": prompt_valid,
+            "prompt_speech_mask": prompt_speech,
+            "prompt_closed_mask": prompt_closed,
+            "prompt_boundary_confidence": prompt_boundary,
+            "prompt_global_weight": prompt_weight,
+            "source_rate_seq": np.asarray([0.10, 0.20, 0.20], dtype=np.float32),
+            "g_src_prefix_final": np.asarray([0.20], dtype=np.float32),
+            "unit_duration_exec": np.asarray([2.0, 3.0, 1.0], dtype=np.float32),
+            "unit_duration_raw": np.asarray([2.0, 3.0, 1.0], dtype=np.float32),
+            "projector_preclamp_duration_exec": np.asarray([2.0, 3.0, 1.0], dtype=np.float32),
+            "commit_mask": np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+            "prefix_unit_offset": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        }
+    )
+    summary = record_summary(record)
+    assert summary["g_ref"] == pytest.approx(float(expected_prompt_g))
+    assert summary["g_ref"] != pytest.approx(float(expected_src_like_g))
+    assert np.isfinite(summary["tempo_ref_runtime"])
+
+    ref_crop_df = build_ref_crop_table([record])
+    assert int(ref_crop_df.shape[0]) == 1
+    assert float(ref_crop_df.iloc[0]["g_crop"]) == pytest.approx(float(expected_prompt_g))
 
 
 def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
@@ -367,6 +464,7 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
             "unit_alignment_mean_coarse_confidence_speech_tgt": np.asarray([0.85], dtype=np.float32),
             "global_rate": 0.25,
             "source_rate_seq": np.asarray([0.08, 0.18, 0.18], dtype=np.float32),
+            "g_src_prefix_final": np.asarray([0.18], dtype=np.float32),
             "global_shift_analytic": np.asarray([0.17, 0.07, 0.07], dtype=np.float32),
             "global_bias_scalar": 0.05,
             "coarse_correction": np.asarray([0.05, 0.05, 0.05], dtype=np.float32),
@@ -374,6 +472,11 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
             "unit_logstretch": np.asarray([0.15, 0.01, 0.0], dtype=np.float32),
             "unit_duration_exec": np.asarray([2.8, 4.6, 1.0], dtype=np.float32),
             "unit_duration_raw": np.asarray([2.7, 4.5, 1.0], dtype=np.float32),
+            "projector_preclamp_duration_exec": np.asarray([2.7, 4.8, 1.0], dtype=np.float32),
+            "analytic_gap_raw": np.asarray([0.28, 0.10, 0.00], dtype=np.float32),
+            "analytic_gap_clipped": np.asarray([0.25, 0.10, 0.00], dtype=np.float32),
+            "analytic_clip_hit": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+            "analytic_clip_hit_rate": np.asarray([0.5], dtype=np.float32),
             "commit_mask": np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
             "prefix_unit_offset": np.asarray([0.0, 0.08, 0.08], dtype=np.float32),
             "projector_budget_hit_pos": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
@@ -390,19 +493,35 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
         return RhythmV3DebugRecord.from_mapping(payload)
 
     slow = clone_record(
-        metadata={"ref_bin": "slow"},
+        metadata={"ref_bin": "slow", "ref_condition": "slow"},
         prompt_duration_obs=np.asarray([4.5, 3.0, 1.0], dtype=np.float32),
         global_rate=0.45,
         unit_duration_exec=np.asarray([3.4, 5.1, 1.0], dtype=np.float32),
         unit_duration_raw=np.asarray([3.3, 5.0, 1.0], dtype=np.float32),
     )
-    mid = clone_record(metadata={"ref_bin": "mid"})
+    mid = clone_record(metadata={"ref_bin": "mid", "ref_condition": "mid"})
     fast = clone_record(
-        metadata={"ref_bin": "fast"},
+        metadata={"ref_bin": "fast", "ref_condition": "fast"},
         prompt_duration_obs=np.asarray([2.0, 1.5, 1.0], dtype=np.float32),
         global_rate=0.05,
         unit_duration_exec=np.asarray([1.8, 3.1, 1.0], dtype=np.float32),
         unit_duration_raw=np.asarray([1.9, 3.0, 1.0], dtype=np.float32),
+    )
+    random_ref = clone_record(
+        metadata={
+            "ref_condition": "random_ref",
+            "ref_prompt_id": "ref_rand",
+            "same_text_reference": 0.0,
+            "same_speaker_reference": 0.0,
+        },
+    )
+    source_only = clone_record(
+        metadata={
+            "ref_condition": "source_only",
+            "ref_prompt_id": "srcA_0001",
+            "same_text_reference": 1.0,
+            "same_speaker_reference": 1.0,
+        },
     )
     prefix_short = clone_record(
         metadata={"sample_id": "stream_eval", "prefix_ratio": 0.5},
@@ -419,7 +538,7 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
         prefix_unit_offset=np.asarray([0.0, 0.08, 0.08], dtype=np.float32),
     )
 
-    records = [slow, mid, fast, prefix_short, prefix_long]
+    records = [slow, mid, fast, random_ref, source_only, prefix_short, prefix_long]
     ref_crop_df = build_ref_crop_table(records, drop_edge_runs=1)
     monotonicity_df = build_monotonicity_table(records, drop_edge_runs=1)
     prefix_silence_df = build_prefix_silence_review_table(records)
@@ -431,6 +550,8 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert "gate0_row_dropped" in ref_crop_df.columns
     assert "g_src_prefix_mean" in ref_crop_df.columns
     assert "delta_g_ref_minus_src_prefix" in ref_crop_df.columns
+    assert "g_src_prefix_final" in ref_crop_df.columns
+    assert "delta_g_ref_minus_src_prefix_final" in ref_crop_df.columns
     assert "abar_sp_star" in ref_crop_df.columns
     assert "same_text_reference" in ref_crop_df.columns
     assert "same_speaker_reference" in ref_crop_df.columns
@@ -441,12 +562,15 @@ def test_review_tables_and_gate_ladder_use_unified_falsification_fields():
     assert summary["gate0_drop_reason"] == "ok"
     assert set(monotonicity_df["ref_bin"].tolist()) >= {"slow", "mid", "fast"}
     assert "tempo_delta" in monotonicity_df.columns
+    assert "tempo_out_preproj" in monotonicity_df.columns
+    assert "tempo_out_exec" in monotonicity_df.columns
     assert np.isfinite(monotonicity_df["mono_triplet_ok"]).any()
     assert "budget_hit_rate" in prefix_silence_df.columns
     assert "cumulative_drift" in prefix_silence_df.columns
     assert ladder_df.shape[0] == 1
     assert ladder_df.iloc[0]["eval_mode"] == "analytic"
     assert np.isfinite(ladder_df.iloc[0]["monotonicity_rate"])
+    assert np.isfinite(ladder_df.iloc[0]["negative_control_gap"])
     assert "signal_explainability_slope" in ladder_df.columns
     assert "analytic_signal_slope" in ladder_df.columns
     assert "coarse_residual_slope" in ladder_df.columns
@@ -1267,6 +1391,7 @@ def test_build_gate_status_splits_gate2_from_gate3_local_residual_failures():
             eval_mode=eval_mode,
             ref_bin=ref_bin,
             ref_condition=ref_condition,
+            tempo_out={"slow": 0.8, "mid": 1.0, "fast": 1.2}.get(ref_bin, 1.0),
             explainability_slope=0.4,
             negative_control_gap=0.3,
             same_text_gap=0.0,

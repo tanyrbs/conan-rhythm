@@ -66,6 +66,39 @@ _GATE3_RESIDUAL_CORR_MIN = 0.10
 _GATE3_COARSE_CORR_DROP_TOL = 0.05
 _GATE3_RESIDUAL_BIAS_SHARE_MAX = 0.25
 _GATE3_LOCAL_SILENCE_DELTA_SHARE_MAX = 0.02
+_REAL_REF_BINS = {"slow", "mid", "fast"}
+_REAL_REF_CONDITIONS = {"", "nan", "real", "real_reference"}
+
+
+def _normalize_ref_condition(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_ref_bin(value, *, fallback_condition=None) -> str:
+    ref_bin = str(value or "").strip().lower()
+    if ref_bin in _REAL_REF_BINS:
+        return ref_bin
+    fallback = _normalize_ref_condition(fallback_condition)
+    if fallback in _REAL_REF_BINS:
+        return fallback
+    return ref_bin
+
+
+def _is_real_reference_condition(value, *, ref_bin=None) -> bool:
+    ref_condition = _normalize_ref_condition(value)
+    if ref_condition in _REQUIRED_NEGATIVE_CONTROLS:
+        return False
+    if ref_condition in _REAL_REF_CONDITIONS or ref_condition in _REAL_REF_BINS:
+        return True
+    return _normalize_ref_bin(ref_bin, fallback_condition=ref_condition) in _REAL_REF_BINS
+
+
+def _resolve_ref_bin_column(frame):
+    if "ref_bin" in getattr(frame, "columns", []):
+        return frame["ref_bin"].map(_normalize_ref_bin)
+    if "ref_condition" in getattr(frame, "columns", []):
+        return frame["ref_condition"].map(lambda value: _normalize_ref_bin("", fallback_condition=value))
+    return None
 
 
 def _mean_for_eval_mode(frame, *, column: str, eval_mode: str) -> float:
@@ -104,16 +137,26 @@ def _fast_slow_effect_for_eval_mode(frame, *, eval_mode: str) -> float:
         value = _mean_for_eval_mode(frame, column="fast_minus_slow", eval_mode=eval_mode)
         if np.isfinite(value):
             return value
-    if not {"eval_mode", "ref_bin", "ref_condition", "tempo_out"}.issubset(getattr(frame, "columns", [])):
+    if not {"eval_mode", "ref_condition", "tempo_out"}.issubset(getattr(frame, "columns", [])):
         return float("nan")
     mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
-    real_mask = frame["ref_condition"].astype(str).str.strip().str.lower() == "real"
+    ref_bins = _resolve_ref_bin_column(frame)
+    if ref_bins is None:
+        return float("nan")
+    ref_condition = frame["ref_condition"].map(_normalize_ref_condition)
+    real_mask = np.asarray(
+        [
+            _is_real_reference_condition(cond, ref_bin=bin_value)
+            for cond, bin_value in zip(ref_condition.tolist(), ref_bins.tolist())
+        ],
+        dtype=bool,
+    )
     slow_vals = pd.to_numeric(
-        frame.loc[mode_mask & real_mask & (frame["ref_bin"].astype(str).str.strip().str.lower() == "slow"), "tempo_out"],
+        frame.loc[mode_mask & real_mask & (ref_bins == "slow"), "tempo_out"],
         errors="coerce",
     ).to_numpy(dtype=np.float32)
     fast_vals = pd.to_numeric(
-        frame.loc[mode_mask & real_mask & (frame["ref_bin"].astype(str).str.strip().str.lower() == "fast"), "tempo_out"],
+        frame.loc[mode_mask & real_mask & (ref_bins == "fast"), "tempo_out"],
         errors="coerce",
     ).to_numpy(dtype=np.float32)
     if slow_vals.size <= 0 or fast_vals.size <= 0:
@@ -129,7 +172,15 @@ def _real_tempo_range_for_eval_mode(frame, *, eval_mode: str) -> float:
     if not {"eval_mode", "ref_condition", "tempo_out"}.issubset(getattr(frame, "columns", [])):
         return float("nan")
     mode_mask = frame["eval_mode"].astype(str).str.strip().str.lower() == str(eval_mode).strip().lower()
-    real_mask = frame["ref_condition"].astype(str).str.strip().str.lower() == "real"
+    ref_bins = _resolve_ref_bin_column(frame)
+    ref_condition = frame["ref_condition"].map(_normalize_ref_condition)
+    real_mask = np.asarray(
+        [
+            _is_real_reference_condition(cond, ref_bin=(None if ref_bins is None else ref_bins.iloc[idx]))
+            for idx, cond in enumerate(ref_condition.tolist())
+        ],
+        dtype=bool,
+    )
     values = pd.to_numeric(frame.loc[mode_mask & real_mask, "tempo_out"], errors="coerce").to_numpy(dtype=np.float32)
     values = values[np.isfinite(values)]
     if values.size <= 0:
@@ -527,9 +578,16 @@ def collect_gate_issues(frame) -> list[str]:
         triplet_frame = frame.copy()
         if "ref_condition" in triplet_frame.columns:
             ref_condition = triplet_frame["ref_condition"].astype(str).str.strip().str.lower()
-            real_mask = ref_condition.isin({"", "nan", "real", "real_reference"})
+            ref_bins = triplet_frame["ref_bin"].map(_normalize_ref_bin)
+            real_mask = pd.Series(
+                [
+                    _is_real_reference_condition(cond, ref_bin=bin_value)
+                    for cond, bin_value in zip(ref_condition.tolist(), ref_bins.tolist())
+                ],
+                index=triplet_frame.index,
+            )
             triplet_frame = triplet_frame[real_mask]
-        triplet_frame = triplet_frame[triplet_frame["ref_bin"].astype(str).str.strip().str.lower().isin({"slow", "mid", "fast"})]
+        triplet_frame = triplet_frame[triplet_frame["ref_bin"].map(_normalize_ref_bin).isin(_REAL_REF_BINS)]
         if not triplet_frame.empty:
             triplet_counts = (
                 triplet_frame.assign(ref_bin=triplet_frame["ref_bin"].astype(str).str.strip().str.lower())

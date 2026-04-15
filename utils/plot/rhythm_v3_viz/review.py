@@ -26,13 +26,22 @@ from tasks.Conan.rhythm.duration_v3.metrics import (
     transfer_slope,
 )
 
-from .core import RhythmV3DebugRecord, derive_record, load_debug_records, record_summary, weighted_median_np
+from .core import (
+    RhythmV3DebugRecord,
+    derive_record,
+    load_debug_records,
+    record_summary,
+    weighted_median_np,
+    _resolve_prompt_g_config,
+    _resolve_src_g_config,
+)
 
 
 DEFAULT_REVIEW_SILENCE_TAU = 0.35
 DEFAULT_REVIEW_BOUNDARY_THRESHOLD = 0.55
 DEFAULT_REVIEW_UNIT_STEP_MS = 20.0
 DEFAULT_GATE_MIN_SPEECH_RATIO = 0.6
+_REAL_REF_BINS = {"slow", "mid", "fast"}
 _REAL_REF_CONDITIONS = {"", "nan", "real", "real_reference"}
 _NEGATIVE_CONTROL_REF_CONDITIONS = {"source_only", "random_ref", "shuffled_ref"}
 
@@ -120,6 +129,30 @@ def _normalize_ref_condition(value: Any) -> str:
     return _as_str(value, default="").strip().lower()
 
 
+def _normalize_ref_bin(value: Any, *, fallback_condition: Any = None) -> str:
+    ref_bin = _as_str(value, default="").strip().lower()
+    if ref_bin in _REAL_REF_BINS:
+        return ref_bin
+    fallback = _normalize_ref_condition(fallback_condition)
+    if fallback in _REAL_REF_BINS:
+        return fallback
+    return ref_bin
+
+
+def _is_real_reference_condition(value: Any, *, ref_bin: Any = None) -> bool:
+    ref_condition = _normalize_ref_condition(value)
+    if ref_condition in _NEGATIVE_CONTROL_REF_CONDITIONS:
+        return False
+    if ref_condition in _REAL_REF_CONDITIONS or ref_condition in _REAL_REF_BINS:
+        return True
+    return _normalize_ref_bin(ref_bin, fallback_condition=ref_condition) in _REAL_REF_BINS
+
+
+def _canonical_ref_condition_group(value: Any, *, ref_bin: Any = None) -> str:
+    ref_condition = _normalize_ref_condition(value)
+    return "real" if _is_real_reference_condition(ref_condition, ref_bin=ref_bin) else ref_condition
+
+
 def _stable_slope_strength(
     x: Any,
     y: Any,
@@ -153,7 +186,19 @@ def _compute_negative_control_gap(
     if frame.empty or "ref_condition" not in frame or x_col not in frame or y_col not in frame:
         return float("nan"), 0, 0
     ref_condition = frame["ref_condition"].map(_normalize_ref_condition)
-    real = frame[ref_condition.isin(_REAL_REF_CONDITIONS)]
+    ref_bin = (
+        frame["ref_bin"].map(_normalize_ref_bin)
+        if "ref_bin" in frame.columns
+        else pd.Series([""] * int(frame.shape[0]), index=frame.index)
+    )
+    real_mask = np.asarray(
+        [
+            _is_real_reference_condition(cond, ref_bin=bin_value)
+            for cond, bin_value in zip(ref_condition.tolist(), ref_bin.tolist())
+        ],
+        dtype=bool,
+    )
+    real = frame.loc[real_mask]
     negative = frame[ref_condition.isin(_NEGATIVE_CONTROL_REF_CONDITIONS)]
     real_count = int(real.shape[0])
     negative_count = int(negative.shape[0])
@@ -180,6 +225,17 @@ def _safe_array(value: Any, *, dtype: np.dtype | type = np.float32) -> np.ndarra
         return np.asarray(value, dtype=dtype).reshape(-1)
     except Exception:
         return None
+
+
+def _masked_final_value(arr: Any, mask: Any) -> float:
+    arr_np = _safe_array(arr, dtype=np.float32)
+    mask_np = _safe_array(mask, dtype=np.float32)
+    if arr_np is None or mask_np is None:
+        return float("nan")
+    idx = np.flatnonzero(mask_np.reshape(-1) > 0.5)
+    if idx.size <= 0:
+        return float("nan")
+    return float(arr_np.reshape(-1)[int(idx[-1])])
 
 
 def _safe_bool_array(value: Any) -> np.ndarray | None:
@@ -818,6 +874,21 @@ def build_ref_crop_table(
     for index, record in enumerate(records):
         ids = _resolve_record_ids(record, index)
         derived = derive_record(record)
+        meta = dict(record.metadata or {})
+        prompt_g_cfg = _resolve_prompt_g_config(
+            meta,
+            fallback_variant=g_variant,
+            fallback_trim_ratio=g_trim_ratio,
+            fallback_drop_edge_runs=drop_edge_runs,
+            fallback_min_boundary_confidence=min_boundary_confidence,
+        )
+        src_g_cfg = _resolve_src_g_config(
+            meta,
+            fallback_variant=g_variant,
+            fallback_trim_ratio=g_trim_ratio,
+            fallback_drop_edge_runs=drop_edge_runs,
+            fallback_min_boundary_confidence=min_boundary_confidence,
+        )
         prompt_duration = _safe_array(record.prompt_duration_obs, dtype=np.float32)
         prompt_valid = _safe_array(record.prompt_valid_mask, dtype=np.float32)
         prompt_speech_explicit = _safe_array(record.prompt_speech_mask, dtype=np.float32)
@@ -848,15 +919,15 @@ def build_ref_crop_table(
                     source_valid_mask=prompt_valid,
                     source_weight=(
                         _safe_array(getattr(record, "prompt_global_weight", None), dtype=np.float32)
-                        if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                        if prompt_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
                         else None
                     ),
                     source_closed_mask=getattr(record, "prompt_closed_mask", None),
                     source_boundary_confidence=getattr(record, "prompt_boundary_confidence", None),
-                    min_boundary_confidence=min_boundary_confidence,
-                    g_variant=g_variant,
-                    g_trim_ratio=g_trim_ratio,
-                    drop_edge_runs=drop_edge_runs,
+                    min_boundary_confidence=prompt_g_cfg["min_boundary_confidence"],
+                    g_variant=str(prompt_g_cfg["variant"]),
+                    g_trim_ratio=float(prompt_g_cfg["trim_ratio"]),
+                    drop_edge_runs=int(prompt_g_cfg["drop_edge_runs"]),
                     source_unit_ids=prompt_units,
                     require_explicit_speech_mask=require_explicit_speech_mask,
                     return_status=True,
@@ -872,27 +943,27 @@ def build_ref_crop_table(
             source_valid_mask=np.ones_like(source_duration, dtype=np.float32) if source_duration is not None and source_valid is None else source_valid,
             source_weight=(
                 _safe_array(record.source_run_stability, dtype=np.float32)
-                if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                if src_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
                 else None
             ),
             source_closed_mask=getattr(record, "sealed_mask", None),
             source_boundary_confidence=getattr(record, "source_boundary_cue", None),
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
+            min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+            g_variant=str(src_g_cfg["variant"]),
+            g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+            drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
             source_unit_ids=source_units,
             return_status=True,
         )
         g_src_prefix_mean = float("nan")
-        g_src_prefix_final = float("nan")
         if derived.source_rate_seq is not None and derived.speech_mask is not None:
             speech_valid = derived.speech_mask > 0.5
             if bool(np.any(speech_valid)):
                 g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
-                speech_idx = np.flatnonzero(speech_valid)
-                if speech_idx.size > 0:
-                    g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
+        g_src_prefix_final = _as_float(
+            getattr(record, "g_src_prefix_final", None),
+            default=_masked_final_value(derived.source_rate_seq, derived.speech_mask),
+        )
         ref_len_sec = _as_float(
             _meta(record, "ref_len_sec", default=None),
             default=(
@@ -1419,23 +1490,33 @@ def build_monotonicity_table(
     grouped: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
     for index, record in enumerate(records):
         meta = dict(record.metadata or {})
+        prompt_g_cfg = _resolve_prompt_g_config(
+            meta,
+            fallback_variant=g_variant,
+            fallback_trim_ratio=g_trim_ratio,
+            fallback_drop_edge_runs=drop_edge_runs,
+            fallback_min_boundary_confidence=min_boundary_confidence,
+        )
+        src_g_cfg = _resolve_src_g_config(
+            meta,
+            fallback_variant=g_variant,
+            fallback_trim_ratio=g_trim_ratio,
+            fallback_drop_edge_runs=drop_edge_runs,
+            fallback_min_boundary_confidence=min_boundary_confidence,
+        )
         src_id = _as_str(meta.get("src_id", record.item_name or f"src_{index:06d}"))
         sample_id = _as_str(meta.get("sample_id", record.item_name or src_id))
         pair_id = _as_str(meta.get("pair_id", meta.get("rhythm_pair_group_id", sample_id)))
         ref_condition = _normalize_ref_condition(meta.get("ref_condition", ""))
-        ref_bin = _as_str(meta.get("ref_bin", meta.get("tempo_bin", ""))).strip().lower()
-        if ref_bin not in {"slow", "mid", "fast"}:
+        ref_bin = _normalize_ref_bin(meta.get("ref_bin", meta.get("tempo_bin", "")), fallback_condition=ref_condition)
+        if ref_bin not in _REAL_REF_BINS:
             continue
+        triplet_condition = _canonical_ref_condition_group(ref_condition, ref_bin=ref_bin)
         derived = derive_record(record)
         eval_mode = _as_str(meta.get("eval_mode", meta.get("rhythm_v3_eval_mode", "")))
         source_weight = (
             _safe_array(record.source_run_stability, dtype=np.float32)
-            if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
-            else None
-        )
-        prompt_weight = (
-            _safe_array(getattr(record, "prompt_global_weight", None), dtype=np.float32)
-            if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+            if src_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
             else None
         )
         tempo_src = compute_speech_tempo_for_analysis(
@@ -1445,75 +1526,125 @@ def build_monotonicity_table(
             source_weight=source_weight,
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
+            min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+            g_variant=str(src_g_cfg["variant"]),
+            g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+            drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
             source_unit_ids=record.source_content_units,
         )
-        tempo_out = compute_speech_tempo_for_analysis(
+        tempo_out_exec = compute_speech_tempo_for_analysis(
             source_duration_obs=record.unit_duration_exec,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
             source_weight=source_weight,
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
+            min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+            g_variant=str(src_g_cfg["variant"]),
+            g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+            drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
             source_unit_ids=record.source_content_units,
         )
-        tempo_ref = compute_speech_tempo_for_analysis(
-            source_duration_obs=record.prompt_duration_obs,
-            source_speech_mask=(
-                record.prompt_speech_mask
-                if record.prompt_speech_mask is not None
-                else (None if bool(require_explicit_speech_mask) else derived.prompt_speech_mask)
-            ),
-            source_valid_mask=record.prompt_valid_mask,
-            source_weight=prompt_weight,
-            source_closed_mask=record.prompt_closed_mask,
-            source_boundary_confidence=record.prompt_boundary_confidence,
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
-            source_unit_ids=record.prompt_content_units,
+        tempo_out_raw = (
+            compute_speech_tempo_for_analysis(
+                source_duration_obs=record.unit_duration_raw,
+                source_speech_mask=derived.speech_mask,
+                source_valid_mask=record.unit_mask,
+                source_weight=source_weight,
+                source_closed_mask=record.sealed_mask,
+                source_boundary_confidence=record.source_boundary_cue,
+                min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+                g_variant=str(src_g_cfg["variant"]),
+                g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+                drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
+                source_unit_ids=record.source_content_units,
+            )
+            if record.unit_duration_raw is not None
+            else float("nan")
         )
-        g_ref = float("nan") if _record_prompt_domain_invalid(record) else float(derived.global_rate) if derived.global_rate is not None else float("nan")
+        tempo_out_preproj = (
+            compute_speech_tempo_for_analysis(
+                source_duration_obs=(
+                    record.projector_preclamp_duration_exec
+                    if getattr(record, "projector_preclamp_duration_exec", None) is not None
+                    else getattr(record, "projector_preclamp_exec", None)
+                ),
+                source_speech_mask=derived.speech_mask,
+                source_valid_mask=record.unit_mask,
+                source_weight=source_weight,
+                source_closed_mask=record.sealed_mask,
+                source_boundary_confidence=record.source_boundary_cue,
+                min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+                g_variant=str(src_g_cfg["variant"]),
+                g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+                drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
+                source_unit_ids=record.source_content_units,
+            )
+            if (
+                getattr(record, "projector_preclamp_duration_exec", None) is not None
+                or getattr(record, "projector_preclamp_exec", None) is not None
+            )
+            else tempo_out_raw
+        )
+        if _record_prompt_domain_invalid(record):
+            g_ref = float("nan")
+        elif record.global_rate is not None:
+            g_ref = float(record.global_rate)
+        else:
+            g_ref = compute_source_global_rate_for_analysis(
+                source_duration_obs=record.prompt_duration_obs,
+                source_speech_mask=record.prompt_speech_mask,
+                source_valid_mask=record.prompt_valid_mask,
+                source_weight=(
+                    _safe_array(getattr(record, "prompt_global_weight", None), dtype=np.float32)
+                    if prompt_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                    else None
+                ),
+                source_closed_mask=getattr(record, "prompt_closed_mask", None),
+                source_boundary_confidence=getattr(record, "prompt_boundary_confidence", None),
+                min_boundary_confidence=prompt_g_cfg["min_boundary_confidence"],
+                g_variant=str(prompt_g_cfg["variant"]),
+                g_trim_ratio=float(prompt_g_cfg["trim_ratio"]),
+                drop_edge_runs=int(prompt_g_cfg["drop_edge_runs"]),
+                source_unit_ids=record.prompt_content_units,
+            )
+        tempo_ref_runtime = float(np.exp(-float(g_ref))) if np.isfinite(g_ref) else float("nan")
         g_src_prefix_mean = float("nan")
-        g_src_prefix_final = float("nan")
         if derived.source_rate_seq is not None and derived.speech_mask is not None:
             speech_valid = derived.speech_mask > 0.5
             if bool(np.any(speech_valid)):
                 g_src_prefix_mean = float(np.nanmean(derived.source_rate_seq[speech_valid]))
-                speech_idx = np.flatnonzero(speech_valid)
-                if speech_idx.size > 0:
-                    g_src_prefix_final = float(derived.source_rate_seq[int(speech_idx[-1])])
+        g_src_prefix_final = _as_float(
+            getattr(record, "g_src_prefix_final", None),
+            default=_masked_final_value(derived.source_rate_seq, derived.speech_mask),
+        )
         g_src_utt = compute_source_global_rate_for_analysis(
             source_duration_obs=record.source_duration_obs,
             source_speech_mask=derived.speech_mask,
             source_valid_mask=record.unit_mask,
             source_weight=(
                 _safe_array(record.source_run_stability, dtype=np.float32)
-                if g_variant in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
+                if src_g_cfg["variant"] in {"weighted_median", "softclean_wmed", "softclean_wtmean"}
                 else None
             ),
             source_closed_mask=record.sealed_mask,
             source_boundary_confidence=record.source_boundary_cue,
-            min_boundary_confidence=min_boundary_confidence,
-            g_variant=g_variant,
-            g_trim_ratio=g_trim_ratio,
-            drop_edge_runs=drop_edge_runs,
+            min_boundary_confidence=src_g_cfg["min_boundary_confidence"],
+            g_variant=str(src_g_cfg["variant"]),
+            g_trim_ratio=float(src_g_cfg["trim_ratio"]),
+            drop_edge_runs=int(src_g_cfg["drop_edge_runs"]),
             source_unit_ids=record.source_content_units,
         )
-        grouped.setdefault((src_id, eval_mode, ref_condition, pair_id), {})[ref_bin] = {
+        grouped.setdefault((src_id, eval_mode, triplet_condition, pair_id), {})[ref_bin] = {
             "sample_id": sample_id,
             "pair_id": pair_id,
-            "tempo_out": tempo_out,
+            "tempo_out": tempo_out_exec,
+            "tempo_out_raw": tempo_out_raw,
+            "tempo_out_preproj": tempo_out_preproj,
+            "tempo_out_exec": tempo_out_exec,
             "tempo_src": tempo_src,
-            "tempo_ref": tempo_ref,
+            "tempo_ref": tempo_ref_runtime,
+            "tempo_ref_runtime": tempo_ref_runtime,
             "g_ref": g_ref,
             "g_src_utt": g_src_utt,
             "g_src_prefix_mean": g_src_prefix_mean,
@@ -1522,7 +1653,7 @@ def build_monotonicity_table(
                 meta.get("g_domain_valid", 1.0 if np.isfinite(g_ref) else float("nan"))
             ),
             "item_name": record.item_name or src_id,
-            "ref_condition": ref_condition,
+            "ref_condition": ref_condition if ref_condition not in _REAL_REF_CONDITIONS else triplet_condition,
             "same_text_reference": _as_float(meta.get("same_text_reference", meta.get("same_text", float("nan")))),
             "same_speaker_reference": _as_float(
                 meta.get(
@@ -1533,7 +1664,7 @@ def build_monotonicity_table(
             "prompt_speech_mask_explicit": 1.0 if record.prompt_speech_mask is not None else 0.0,
         }
     rows: list[dict[str, Any]] = []
-    for (src_id, eval_mode, ref_condition, pair_id), bins in grouped.items():
+    for (src_id, eval_mode, triplet_condition, pair_id), bins in grouped.items():
         mono = float("nan")
         anti_mono = float("nan")
         tie_rate = float("nan")
@@ -1588,6 +1719,9 @@ def build_monotonicity_table(
                     "pair_id": payload["pair_id"],
                     "ref_bin": ref_bin,
                     "tempo_out": payload["tempo_out"],
+                    "tempo_out_raw": payload["tempo_out_raw"],
+                    "tempo_out_preproj": payload["tempo_out_preproj"],
+                    "tempo_out_exec": payload["tempo_out_exec"],
                     "tempo_src": payload["tempo_src"],
                     "tempo_delta": (
                         float(payload["tempo_out"] - payload["tempo_src"])
@@ -1595,6 +1729,7 @@ def build_monotonicity_table(
                         else float("nan")
                     ),
                     "tempo_ref": payload["tempo_ref"],
+                    "tempo_ref_runtime": payload["tempo_ref_runtime"],
                     "g_ref": payload["g_ref"],
                     "g_src_utt": payload["g_src_utt"],
                     "g_src_prefix_mean": payload["g_src_prefix_mean"],
@@ -1610,8 +1745,9 @@ def build_monotonicity_table(
                         -delta_g_prefix_final if np.isfinite(delta_g_prefix_final) else float("nan")
                     ),
                     "eval_mode": eval_mode,
-                    "triplet_id": f"{src_id}|{eval_mode}|{ref_condition}|{pair_id}",
-                    "ref_condition": ref_condition,
+                    "triplet_id": f"{src_id}|{eval_mode}|{triplet_condition}|{pair_id}",
+                    "ref_condition": payload["ref_condition"],
+                    "ref_condition_group": triplet_condition,
                     "same_text_reference": payload["same_text_reference"],
                     "same_speaker_reference": payload["same_speaker_reference"],
                     "mono_triplet_ok": mono,
@@ -1688,11 +1824,17 @@ def summarize_falsification_ladder(
         if not mono_mode.empty:
             triplet_keys = ["triplet_id"] if "triplet_id" in mono_mode.columns else ["src_id", "eval_mode", "pair_id", "ref_condition"]
             unique_triplets = mono_mode.drop_duplicates(subset=[key for key in triplet_keys if key in mono_mode.columns])
-            mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
+            mono_values = unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)
+            mono_values = mono_values[np.isfinite(mono_values)]
+            mono_rate = float(np.nanmean(mono_values)) if mono_values.size > 0 else float("nan")
             if "anti_mono_triplet_ok" in unique_triplets:
-                anti_mono_rate = float(np.nanmean(unique_triplets["anti_mono_triplet_ok"].to_numpy(dtype=np.float32)))
+                anti_values = unique_triplets["anti_mono_triplet_ok"].to_numpy(dtype=np.float32)
+                anti_values = anti_values[np.isfinite(anti_values)]
+                anti_mono_rate = float(np.nanmean(anti_values)) if anti_values.size > 0 else float("nan")
             if "tempo_tie_triplet" in unique_triplets:
-                tie_rate = float(np.nanmean(unique_triplets["tempo_tie_triplet"].to_numpy(dtype=np.float32)))
+                tie_values = unique_triplets["tempo_tie_triplet"].to_numpy(dtype=np.float32)
+                tie_values = tie_values[np.isfinite(tie_values)]
+                tie_rate = float(np.nanmean(tie_values)) if tie_values.size > 0 else float("nan")
             tempo_transfer = transfer_slope(mono_mode.get("delta_g", []), mono_mode.get("tempo_delta", []))
             negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
                 mono_mode,
@@ -1700,6 +1842,14 @@ def summarize_falsification_ladder(
                 y_col="tempo_delta",
                 metric_fn=transfer_slope,
             )
+            if (not np.isfinite(negative_control_gap) or real_reference_count <= 0 or negative_control_count <= 0) and not crop_mode.empty:
+                crop_target_col = "zbar_sp_star" if "zbar_sp_star" in crop_mode.columns else "c_star"
+                negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
+                    crop_mode,
+                    x_col="delta_g",
+                    y_col=crop_target_col,
+                    metric_fn=tempo_explainability,
+                )
             if "g_domain_valid" in mono_mode.columns:
                 domain_values = pd.to_numeric(mono_mode["g_domain_valid"], errors="coerce").to_numpy(dtype=np.float32)
                 domain_values = domain_values[np.isfinite(domain_values)]
@@ -1745,10 +1895,34 @@ def summarize_falsification_ladder(
                 "invalid_g_rate": invalid_g_rate,
                 "negative_control_gap": negative_control_gap,
                 "same_text_gap": gap,
-                "silence_leakage": float(np.nanmean(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
-                "prefix_discrepancy": float(np.nanmean(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
-                "budget_hit_rate": float(np.nanmean(prefix_mode["budget_hit_rate"].to_numpy(dtype=np.float32))) if not prefix_mode.empty and "budget_hit_rate" in prefix_mode else float("nan"),
-                "cumulative_drift": float(np.nanmean(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32))) if not prefix_mode.empty else float("nan"),
+                "silence_leakage": (
+                    float(np.nanmean(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "silence_leakage" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["silence_leakage"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "prefix_discrepancy": (
+                    float(np.nanmean(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "prefix_discrepancy" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["prefix_discrepancy"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "budget_hit_rate": (
+                    float(np.nanmean(prefix_mode["budget_hit_rate"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "budget_hit_rate" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["budget_hit_rate"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
+                "cumulative_drift": (
+                    float(np.nanmean(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32)))
+                    if not prefix_mode.empty
+                    and "cumulative_drift" in prefix_mode.columns
+                    and np.isfinite(prefix_mode["cumulative_drift"].to_numpy(dtype=np.float32)).any()
+                    else float("nan")
+                ),
                 "n_ref_crops": int(crop_mode.shape[0]),
                 "n_triplets": (
                     0
@@ -2003,7 +2177,9 @@ def plot_monotonicity_intervention(monotonicity_df: pd.DataFrame):
                 ax.plot(np.arange(1, 4), [row["slow"], row["mid"], row["fast"]], color="#4C78A8", alpha=0.18, linewidth=1.0)
         triplet_keys = ["triplet_id"] if "triplet_id" in work.columns else ["src_id", "eval_mode", "pair_id", "ref_condition"]
         unique_triplets = work.drop_duplicates(subset=[key for key in triplet_keys if key in work.columns])
-        mono_rate = float(np.nanmean(unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)))
+        mono_values = unique_triplets["mono_triplet_ok"].to_numpy(dtype=np.float32)
+        mono_values = mono_values[np.isfinite(mono_values)]
+        mono_rate = float(np.nanmean(mono_values)) if mono_values.size > 0 else float("nan")
         ax.set_title(f"{eval_mode}\nmono={mono_rate:.3f}" if np.isfinite(mono_rate) else eval_mode)
         ax.set_ylabel("tempo_out")
         ax.grid(axis="y", alpha=0.25)

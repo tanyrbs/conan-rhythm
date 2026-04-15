@@ -1,0 +1,18 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Maintained online contract:
+# prompt-side weighted cue can be broader/offline,
+# source-side prefix statistic must remain state-sufficient.
+rhythm_v3_prompt_domain_mode: meaningful_reference
+rhythm_v3_prompt_require_clean_support: false
+rhythm_v3_g_variant: weighted_median
+rhythm_v3_prompt_g_variant: weighted_median
+rhythm_v3_prompt_g_trim_ratio: 0.2
+rhythm_v3_prompt_g_drop_edge_runs: 0
+rhythm_v3_prompt_min_boundary_confidence_for_g: null
+rhythm_v3_src_g_variant: weighted_median
+rhythm_v3_src_g_trim_ratio: 0.2
+rhythm_v3_src_g_drop_edge_runs: 1
+rhythm_v3_src_min_boundary_confidence_for_g: 0.5
+rhythm_v3_src_prefix_stat_mode: ema
+rhythm_v3_src_rate_init_mode: first_speech

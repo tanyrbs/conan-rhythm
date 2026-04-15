@@ -14,6 +14,31 @@ def compute_conditioning_runtime_control(
     ds: ConanDataset,
     conditioning: dict[str, Any],
 ) -> dict[str, float | str]:
+    prompt_g_variant = str(
+        ds.hparams.get(
+            "rhythm_v3_prompt_g_variant",
+            ds.hparams.get("rhythm_v3_g_variant", "raw_median"),
+        )
+        or "raw_median"
+    )
+    prompt_g_trim_ratio = float(
+        ds.hparams.get(
+            "rhythm_v3_prompt_g_trim_ratio",
+            ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2),
+        )
+        or 0.2
+    )
+    prompt_g_drop_edge_runs = int(
+        ds.hparams.get(
+            "rhythm_v3_prompt_g_drop_edge_runs",
+            ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0),
+        )
+        or 0
+    )
+    prompt_min_boundary_confidence = ds.hparams.get(
+        "rhythm_v3_prompt_min_boundary_confidence_for_g",
+        ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
+    )
     g_ref, status = compute_source_global_rate_for_analysis(
         source_duration_obs=conditioning.get("prompt_duration_obs"),
         source_speech_mask=conditioning.get("prompt_speech_mask"),
@@ -22,10 +47,10 @@ def compute_conditioning_runtime_control(
         source_unit_ids=conditioning.get("prompt_content_units"),
         source_closed_mask=conditioning.get("prompt_closed_mask"),
         source_boundary_confidence=conditioning.get("prompt_boundary_confidence"),
-        g_variant=str(ds.hparams.get("rhythm_v3_g_variant", "raw_median")),
-        g_trim_ratio=float(ds.hparams.get("rhythm_v3_g_trim_ratio", 0.2) or 0.2),
-        drop_edge_runs=int(ds.hparams.get("rhythm_v3_drop_edge_runs_for_g", 0) or 0),
-        min_boundary_confidence=ds.hparams.get("rhythm_v3_min_boundary_confidence_for_g"),
+        g_variant=prompt_g_variant,
+        g_trim_ratio=prompt_g_trim_ratio,
+        drop_edge_runs=prompt_g_drop_edge_runs,
+        min_boundary_confidence=prompt_min_boundary_confidence,
         require_explicit_speech_mask=False,
         return_status=True,
     )

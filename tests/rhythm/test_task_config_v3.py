@@ -431,6 +431,38 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_src_ga
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_allows_src_gap_in_coarse_head_when_strict_claim_disabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    hparams["rhythm_v3_use_src_gap_in_coarse_head"] = True
+    validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_allows_disable_learned_gate_false_when_strict_claim_disabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    hparams["rhythm_v3_disable_learned_gate"] = False
+    validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_alignment_soft_repair_under_strict_claim():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_alignment_soft_repair"] = True
+    with pytest.raises(ValueError, match="rhythm_v3_alignment_soft_repair=false"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_allows_alignment_soft_repair_when_strict_claim_disabled():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_strict_minimal_claim_profile"] = False
+    hparams["rhythm_v3_alignment_soft_repair"] = True
+    validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_strict_gate_without_status_path():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
@@ -1470,7 +1502,11 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_use_log_base_rate: false" in source
     assert "rhythm_v3_disable_learned_gate: true" in source
     assert "rhythm_v3_eval_mode: learned" in source
-    assert "rhythm_v3_g_variant: raw_median" in source
+    assert "rhythm_v3_g_variant: weighted_median" in source
+    assert "rhythm_v3_prompt_domain_mode: meaningful_reference" in source
+    assert "rhythm_v3_prompt_g_variant: weighted_median" in source
+    assert "rhythm_v3_src_g_variant: weighted_median" in source
+    assert "rhythm_v3_prompt_require_clean_support: false" in source
     assert "rhythm_v3_drop_edge_runs_for_g: 1" in source
     assert "rhythm_v3_min_boundary_confidence_for_g: 0.5" in source
     assert "rhythm_v3_use_continuous_alignment: true" in source

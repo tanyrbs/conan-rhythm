@@ -118,7 +118,7 @@ class DurationV3TargetBuildConfig:
     g_trim_ratio: float = 0.2
     src_prefix_stat_mode: str = "ema"
     src_prefix_min_support: int = 3
-    src_rate_init_mode: str = "auto"
+    src_rate_init_mode: str = "first_speech"
     g_drop_edge_runs: int = 0
     min_boundary_confidence_for_g: float | None = None
     min_support_log_iqr_for_g: float = 0.0

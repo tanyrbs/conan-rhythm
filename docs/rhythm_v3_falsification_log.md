@@ -1,5 +1,12 @@
 # rhythm_v3 falsification log
 
+Historical note:
+
+- this log records the exact-family upper-bound falsification pass that proved
+  the weighted global cue was alive
+- it should now be read together with the newer maintained online mainline
+  `weighted_median + ema + first_speech`, not as the online default itself
+
 ## 2026-04-14 final Gate0 contract-repair rerun
 
 ### Scope
@@ -132,3 +139,95 @@ The maintained zero-train diagnostics remain:
 - `scripts/probe_rhythm_v3_gate1_silent_counterfactual.py`
 - `scripts/rhythm_v3_probe_cases.py`
 - `scripts/rhythm_v3_debug_records.py`
+
+## 2026-04-15 Gate2-online and Gate3 local-candidate follow-up
+
+### Scope
+
+- maintained `rhythm_v3` minimal-V1 path only
+- local quick-ARCTIC only
+- local online candidate reruns, not official gate promotion
+- local quick dataset I/O migrated to `D:/conan_data/...` for faster local
+  reads
+
+### What was rerun
+
+- Gate2-online local coarse-only candidate:
+  `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/`
+- reviewed Gate2 status:
+  `tmp/gate2_candidate_20260415_s75_srcgap/review/gate_status.json`
+- Gate3 local candidate:
+  `checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/`
+
+### New blocker that was found and fixed
+
+The first Gate3 local candidate did not fail because of model quality. It
+failed before training because config/runtime semantics were inconsistent:
+
+- `strict_minimal_claim_profile=false` was supposed to allow local candidate
+  relaxation
+- but task/runtime validation still forced
+  `rhythm_v3_disable_learned_gate=true`
+- and runtime wiring could incorrectly reinterpret
+  `rhythm_v3_disable_learned_gate=false` as
+  `use_learned_residual_gate=true` under minimal-V1
+
+That wiring bug is now fixed. The correct local-candidate reading is:
+
+- local Gate3 candidate work may use
+  `rhythm_v3_disable_learned_gate=false` under
+  `strict_minimal_claim_profile=false`
+- minimal-V1 still should not promote that into
+  `use_learned_residual_gate=true`
+
+This was a local training unblock only, not a Gate3 pass.
+
+### Local Gate2-online result
+
+The local `src_gap` coarse-only candidate did not materially improve the gate
+picture.
+
+Reviewed status:
+
+- `gate1_pass=false`
+- `gate2_pass=false`
+- `gate3_pass=false`
+- `analytic_tempo_monotonicity_rate=0.3529`
+- `analytic_tempo_transfer_slope=-0.0149`
+- `analytic_tempo_tie_rate=0.6471`
+- `coarse_only_runtime_metrics.cumulative_drift=8.9612`
+
+Interpretation:
+
+- simply exposing `src_gap` to the coarse head did not unlock the stalled
+  online surface
+- the main failure signature still looks like execution flattening / drift
+  rather than prompt-`g` absence
+
+### Item-level reading
+
+The bottleneck is mixed, but projector/discrete execution remains a primary
+collapse point:
+
+- some items are already flat before projection
+  - `bdl_train_arctic_a0017`: raw/preproj/exec all flat
+  - `slt_train_arctic_a0020`: raw/preproj/exec all flat
+- some items clearly lose signal at execution
+  - `asi_train_arctic_a0023`: preproj monotone, exec flat
+- some items still survive end-to-end with reduced range
+  - `asi_test_arctic_a0011`: ordered through exec, but compressed
+
+So the stronger current reading is:
+
+- writer-side failures still exist on some items
+- but there is also direct evidence that projector/discrete execution is
+  eating already-limited preproj signal on other items
+
+### Current conclusion
+
+- Gate2-online local candidate remains failing
+- `src_gap` is not the dominant fix by itself
+- the next debugging priority is projector/clipping/budget/headroom and exec
+  bucketization
+- Gate3 local training is unblocked and advanced to a checkpointed run, but no
+  Gate3 pass should be claimed from this log

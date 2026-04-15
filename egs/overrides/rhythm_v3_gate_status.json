@@ -5,7 +5,7 @@
   "basis": "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json",
   "local_candidate_status_json": "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json",
   "contract_fingerprint": {
-    "rhythm_v3_g_variant": "raw_median",
+    "rhythm_v3_g_variant": "weighted_median",
     "rhythm_v3_g_trim_ratio": 0.2,
     "rhythm_v3_drop_edge_runs_for_g": 1,
     "rhythm_v3_min_boundary_confidence_for_g": 0.5,
@@ -22,21 +22,22 @@
   "gate2_pass": false,
   "gate3_pass": false,
   "gate0_summary": {
-    "official_contract": "checked-in maintained baseline remains raw_median + ema + learned runtime default",
-    "latest_local_candidate": "weighted_median + exact_global_family + target_as_ref",
-    "official_unblock_reason": "latest local candidate has not been promoted to the official training gate"
+    "official_contract": "checked-in maintained online contract is weighted_median + ema + first_speech + meaningful_reference",
+    "latest_upper_validation": "weighted_median + exact_global_family + target_as_ref",
+    "official_unblock_reason": "Gate0/Gate1 upper-bound evidence exists, but the state-sufficient online contract has not yet been re-recorded under the official gate JSON"
   },
   "gate1_summary": {
-    "official_contract": "blocked at official training gate",
-    "latest_local_candidate": "local strongest-contract candidate passes Gate0/Gate1 only",
+    "official_contract": "Gate1-online remains blocked at the official training gate",
+    "latest_upper_validation": "local strongest exact-family contract passes Gate0/Gate1 only",
     "promotion_blockers": [
-      "Gate2 and Gate3 were not rerun",
-      "exact_global_family is currently a local/offline gate contract, not a strict online maintained runtime contract"
+      "Gate1-online must be rerun on weighted_median + ema + first_speech",
+      "Gate2 coarse-only and Gate3 learned were not rerun on the maintained online contract",
+      "exact_global_family is currently an upper-bound validation contract, not a strict online maintained runtime contract"
     ]
   },
   "warnings": [
-    "Official training remains blocked in this checked-in gate status.",
-    "See egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json for the latest local strongest-contract zero-train result.",
-    "Do not treat the local candidate status as official training unblock."
+    "Official online training remains blocked in this checked-in gate status.",
+    "See egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json for the latest upper-bound exact-family zero-train result.",
+    "Do not treat the exact-family upper-bound status as an online training unblock."
   ]
 }

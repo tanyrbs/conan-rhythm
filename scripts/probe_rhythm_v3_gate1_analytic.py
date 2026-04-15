@@ -24,7 +24,12 @@ from tasks.Conan.Conan import ConanTask
 from tasks.Conan.dataset import ConanDataset
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
 from utils.commons.hparams import set_hparams
-from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record_summary
+from utils.commons.tensor_utils import move_to_cuda
+from utils.plot.rhythm_v3_viz.core import (
+    build_debug_records_from_batch,
+    record_summary,
+    save_debug_records,
+)
 from utils.plot.rhythm_v3_viz.review import (
     bootstrap_ci,
 )
@@ -55,6 +60,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--binary_data_dir", default="", help="Optional binary_data_dir override.")
     parser.add_argument("--processed_data_dir", default="", help="Optional processed_data_dir override.")
     parser.add_argument("--hparams", default="", help="Extra hparam overrides appended after relaxed probe defaults.")
+    parser.add_argument("--load_ckpt", default="", help="Optional checkpoint path or directory to load before probing.")
+    parser.add_argument(
+        "--eval_mode",
+        default="",
+        help="Optional runtime eval_mode override. Typical values: analytic, coarse_only, learned.",
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Inference device: auto, cpu, cuda, or cuda:<index>.",
+    )
     parser.add_argument(
         "--cases_json",
         default="",
@@ -62,6 +78,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output_csv", default=DEFAULT_OUTPUT_CSV, help="Where to write row-level results.")
     parser.add_argument("--output_json", default=DEFAULT_OUTPUT_JSON, help="Where to write grouped summary.")
+    parser.add_argument("--output_bundle", default="", help="Optional .pt path for raw debug-record export.")
     parser.add_argument("--min_real_range", type=float, default=DEFAULT_MIN_REAL_RANGE, help="Minimum tempo span required to count as a meaningful analytic control response.")
     parser.add_argument("--max_sources_per_speaker", type=int, default=3, help="How many source items to probe per speaker.")
     parser.add_argument("--min_ref_gap", type=float, default=0.08, help="Minimum slow/fast prompt gap required when auto-building cases.")
@@ -77,9 +94,36 @@ def _compose_hparams_override(args: argparse.Namespace) -> str:
         parts.append(f"binary_data_dir='{args.binary_data_dir}'")
     if args.processed_data_dir:
         parts.append(f"processed_data_dir='{args.processed_data_dir}'")
+    if args.load_ckpt:
+        parts.append(f"load_ckpt='{args.load_ckpt}'")
+    if args.eval_mode:
+        parts.append(f"rhythm_v3_eval_mode='{args.eval_mode}'")
     if args.hparams:
         parts.append(args.hparams)
     return ",".join(part for part in parts if part)
+
+
+def _resolve_device(spec: str) -> tuple[str, int | None]:
+    normalized = str(spec or "auto").strip().lower()
+    if normalized in {"", "auto"}:
+        if torch.cuda.is_available():
+            return "cuda:0", 0
+        return "cpu", None
+    if normalized == "cpu":
+        return "cpu", None
+    if normalized == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but torch.cuda.is_available() is false.")
+        return "cuda:0", 0
+    if normalized.startswith("cuda:"):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but torch.cuda.is_available() is false.")
+        try:
+            gpu_id = int(normalized.split(":", 1)[1])
+        except Exception as exc:
+            raise ValueError(f"Unsupported device spec: {spec!r}") from exc
+        return f"cuda:{gpu_id}", gpu_id
+    raise ValueError(f"Unsupported device spec: {spec!r}")
 
 
 def _load_cases(args: argparse.Namespace, ds: ConanDataset) -> list[dict[str, Any]]:
@@ -170,12 +214,13 @@ def _run_condition(
     *,
     ds: ConanDataset,
     task: ConanTask,
+    cuda_gpu_id: int | None,
     source_name: str,
     source_fetch_index: int,
     ref_name: str,
     ref_local_index: int,
     ref_condition: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Any | None]:
     try:
         sample, conditioning, raw_ref_item, _ = _build_probe_sample(
             ds,
@@ -192,7 +237,7 @@ def _run_condition(
             "source_name": source_name,
             "ref_name": ref_name,
             "ref_condition": ref_condition,
-            "prompt_tempo_ref": float("nan"),
+            "prompt_tempo_ref_runtime": float("nan"),
             "prompt_g_ref": float("nan"),
             "prompt_g_status": "conditioning_error",
             "prompt_total_units": int(np.asarray(raw_ref_item.get("dur_anchor_src", [])).reshape(-1).shape[0]),
@@ -201,10 +246,12 @@ def _run_condition(
             "ref_pair_item_name": str(raw_ref_item.get("item_name", ref_name)),
             "src_prefix_stat_mode": str(ds.hparams.get("rhythm_v3_src_prefix_stat_mode", "ema")),
         }
-        return summary
+        return summary, None
     raw_source_item = sample.get("_raw_item")
     raw_paired_target_item = sample.get("_raw_paired_target_item")
     batch = ds.collater([sample])
+    if cuda_gpu_id is not None:
+        batch = move_to_cuda(batch, gpu_id=int(cuda_gpu_id))
     if (
         "rhythm_v3_cache_meta" not in batch
         and isinstance(raw_source_item, dict)
@@ -250,6 +297,7 @@ def _run_condition(
             "tempo_out": float("nan"),
             "probe_error": message,
         }
+        record = None
     else:
         record = build_debug_records_from_batch(
             sample=batch,
@@ -282,7 +330,7 @@ def _run_condition(
             ),
         }
     )
-    return summary
+    return summary, record
 
 
 def _row_domain_valid(row: dict[str, Any]) -> bool:
@@ -478,6 +526,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     args = _parse_args()
+    device_spec, cuda_gpu_id = _resolve_device(args.device)
     set_hparams(
         config=args.config,
         hparams_str=_compose_hparams_override(args),
@@ -488,14 +537,17 @@ def main() -> None:
     ds = ConanDataset(prefix=args.split, shuffle=False)
     cases = _load_cases(args, ds)
     task = ConanTask()
-    task.build_tts_model()
+    task.build_model()
     task.global_step = 0
-    task.model.eval()
+    task.eval()
+    if device_spec != "cpu":
+        task = task.to(torch.device(device_spec))
 
     name_to_local = _item_name_to_local_index(ds)
     source_to_fetch = _source_local_to_fetch_index(ds)
 
     rows: list[dict[str, Any]] = []
+    records: list[Any] = []
     for case in cases:
         source_name = str(case["source"])
         refs = dict(case["refs"])
@@ -512,17 +564,19 @@ def main() -> None:
             ref_name = str(ref_name)
             if ref_name not in name_to_local:
                 raise KeyError(f"Reference item not found in split '{args.split}': {ref_name}")
-            rows.append(
-                _run_condition(
-                    ds=ds,
-                    task=task,
-                    source_name=source_name,
-                    source_fetch_index=source_fetch_index,
-                    ref_name=ref_name,
-                    ref_local_index=int(name_to_local[ref_name]),
-                    ref_condition=str(ref_condition),
-                )
+            row, record = _run_condition(
+                ds=ds,
+                task=task,
+                cuda_gpu_id=cuda_gpu_id,
+                source_name=source_name,
+                source_fetch_index=source_fetch_index,
+                ref_name=ref_name,
+                ref_local_index=int(name_to_local[ref_name]),
+                ref_condition=str(ref_condition),
             )
+            rows.append(row)
+            if record is not None:
+                records.append(record)
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -563,13 +617,35 @@ def main() -> None:
     output_csv = Path(args.output_csv)
     output_json = Path(args.output_json)
     _write_csv(output_csv, rows)
+    if args.output_bundle:
+        save_debug_records(records, args.output_bundle)
     output_json.parent.mkdir(parents=True, exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as handle:
-        json.dump({"rows": rows, "summary": summary_rows, "aggregate": aggregate}, handle, indent=2, ensure_ascii=False)
+        json.dump(
+            {
+                "rows": rows,
+                "summary": summary_rows,
+                "aggregate": aggregate,
+                "record_count": len(records),
+                "output_bundle": str(args.output_bundle) if args.output_bundle else "",
+                "device": device_spec,
+                "load_ckpt": str(args.load_ckpt or ""),
+                "eval_mode": str(args.eval_mode or ds.hparams.get("rhythm_v3_eval_mode", "analytic")),
+            },
+            handle,
+            indent=2,
+            ensure_ascii=False,
+        )
 
-    print(f"[gate1-probe] split={args.split} cases={len(cases)} rows={len(rows)}")
+    print(
+        f"[gate1-probe] split={args.split} cases={len(cases)} rows={len(rows)} "
+        f"records={len(records)} device={device_spec} "
+        f"eval_mode={str(args.eval_mode or ds.hparams.get('rhythm_v3_eval_mode', 'analytic'))}"
+    )
     print(f"[gate1-probe] wrote_csv={output_csv}")
     print(f"[gate1-probe] wrote_json={output_json}")
+    if args.output_bundle:
+        print(f"[gate1-probe] wrote_bundle={args.output_bundle}")
     for row in summary_rows:
         source_name = row["source_name"]
         mono_pre = "PASS" if row["monotone_by_prompt_tempo_preproj"] else "FAIL"

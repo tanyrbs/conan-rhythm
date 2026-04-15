@@ -26,6 +26,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         self,
         *,
         operator_rank: int,
+        prompt_domain_mode: str = "minimal_strict",
+        prompt_require_clean_support: bool = True,
         min_speech_ratio: float = 0.6,
         min_ref_len_sec: float = 3.0,
         max_ref_len_sec: float = 8.0,
@@ -38,6 +40,8 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
     ) -> None:
         super().__init__()
         self.operator_rank = int(max(1, operator_rank))
+        self.prompt_domain_mode = str(prompt_domain_mode or "minimal_strict").strip().lower()
+        self.prompt_require_clean_support = bool(prompt_require_clean_support)
         self.min_speech_ratio = float(max(0.0, min(1.0, min_speech_ratio)))
         self.min_ref_len_sec = float(max(0.0, min_ref_len_sec))
         self.max_ref_len_sec = float(max(self.min_ref_len_sec, max_ref_len_sec))
@@ -117,12 +121,15 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             if not isinstance(ref_len, torch.Tensor)
             else torch.zeros_like(speech_ratio, dtype=torch.bool)
         )
-        invalid_ref_len_rows = (
-            ((~torch.isfinite(ref_len)) | (ref_len < self.min_ref_len_sec) | (ref_len > self.max_ref_len_sec))
-            if isinstance(ref_len, torch.Tensor)
-            else torch.zeros_like(speech_ratio, dtype=torch.bool)
-        )
-        invalid_ref_len_rows = invalid_ref_len_rows | missing_ref_len_rows
+        if self.prompt_domain_mode == "minimal_strict":
+            invalid_ref_len_rows = (
+                ((~torch.isfinite(ref_len)) | (ref_len < self.min_ref_len_sec) | (ref_len > self.max_ref_len_sec))
+                if isinstance(ref_len, torch.Tensor)
+                else torch.zeros_like(speech_ratio, dtype=torch.bool)
+            )
+            invalid_ref_len_rows = invalid_ref_len_rows | missing_ref_len_rows
+        else:
+            invalid_ref_len_rows = torch.zeros_like(speech_ratio, dtype=torch.bool)
         if self.training:
             if bool(no_speech_rows.any().item()):
                 raise ValueError("V1-G prompt conditioning requires at least one speech run.")
@@ -167,17 +174,22 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
             min_boundary_confidence=self.min_boundary_confidence,
         )
         support_mask = support_stats.support_mask
-        missing_closed_sidecar_rows = (
-            torch.ones_like(support_stats.support_count, dtype=torch.bool)
-            if not isinstance(prompt_closed_mask, torch.Tensor)
-            else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
-        )
-        missing_boundary_sidecar_rows = (
-            torch.ones_like(support_stats.support_count, dtype=torch.bool)
-            if self.min_boundary_confidence is not None and not isinstance(prompt_boundary_confidence, torch.Tensor)
-            else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
-        )
-        invalid_clean_rows = support_stats.clean_count <= 0.0
+        if self.prompt_require_clean_support:
+            missing_closed_sidecar_rows = (
+                torch.ones_like(support_stats.support_count, dtype=torch.bool)
+                if not isinstance(prompt_closed_mask, torch.Tensor)
+                else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+            )
+            missing_boundary_sidecar_rows = (
+                torch.ones_like(support_stats.support_count, dtype=torch.bool)
+                if self.min_boundary_confidence is not None and not isinstance(prompt_boundary_confidence, torch.Tensor)
+                else torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+            )
+            invalid_clean_rows = support_stats.clean_count <= 0.0
+        else:
+            missing_closed_sidecar_rows = torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+            missing_boundary_sidecar_rows = torch.zeros_like(support_stats.support_count, dtype=torch.bool)
+            invalid_clean_rows = torch.zeros_like(support_stats.support_count, dtype=torch.bool)
         invalid_clean_support_rows = invalid_clean_rows | missing_closed_sidecar_rows | missing_boundary_sidecar_rows
         invalid_support_rows = support_stats.support_count <= 0.0
         resolved_weight = (
@@ -208,8 +220,13 @@ class PromptGlobalConditionEncoderV1G(nn.Module):
         invalid_rows = invalid_support_rows | invalid_clean_support_rows | domain_invalid_rows
         if bool(invalid_rows.any().item()):
             if self.training or self.strict_eval_invalid_g:
-                raise ValueError(
+                support_error = (
                     "V1-G prompt conditioning requires non-empty closed/boundary-clean support for g."
+                    if self.prompt_require_clean_support
+                    else "V1-G prompt conditioning requires non-empty support for g."
+                )
+                raise ValueError(
+                    support_error
                 )
         global_rate = rate_logdur.new_zeros((rate_logdur.size(0), 1))
         valid_rows = ~invalid_rows.squeeze(1)

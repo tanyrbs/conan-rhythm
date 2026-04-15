@@ -46,22 +46,35 @@ rhythm_v3_baseline_target_mode: deglobalized
 rhythm_v3_rate_mode: simple_global
 rhythm_v3_use_log_base_rate: false
 rhythm_v3_disable_learned_gate: true
-# Maintained runtime default stays `learned`.
+# Maintained runtime default stays `learned`, but the maintained online
+# control contract is now state-sufficient:
+# weighted prompt/source global cue + causal EMA prefix state.
 # For falsification, use checked-in overlays instead of hand-editing this file:
 # - egs/overrides/rhythm_v3_gate0_g_audit.yaml
 # - egs/overrides/rhythm_v3_gate1_analytic.yaml
+# - egs/overrides/rhythm_v3_gate1_upper_exact.yaml
 # - egs/overrides/rhythm_v3_gate2_coarse_only.yaml
 rhythm_v3_eval_mode: learned
-rhythm_v3_g_variant: raw_median
+rhythm_v3_g_variant: weighted_median
 rhythm_v3_g_trim_ratio: 0.2
 rhythm_v3_drop_edge_runs_for_g: 1
+rhythm_v3_prompt_domain_mode: meaningful_reference  # strict 3-8s prompt claims now live behind minimal_strict
+rhythm_v3_prompt_require_clean_support: false
+rhythm_v3_prompt_g_variant: weighted_median
+rhythm_v3_prompt_g_trim_ratio: 0.2
+rhythm_v3_prompt_g_drop_edge_runs: 0
+rhythm_v3_prompt_min_boundary_confidence_for_g: null
+rhythm_v3_src_g_variant: weighted_median
+rhythm_v3_src_g_trim_ratio: 0.2
+rhythm_v3_src_g_drop_edge_runs: 1
 rhythm_v3_min_prompt_speech_ratio: 0.60
 rhythm_v3_min_prompt_ref_len_sec: 3.0
 rhythm_v3_max_prompt_ref_len_sec: 8.0
 rhythm_v3_min_boundary_confidence_for_g: 0.5
+rhythm_v3_src_min_boundary_confidence_for_g: 0.5
 rhythm_v3_gate_quality_strict: true  # strict gate enforcement now baked into config validation
-rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # checked-in official training gate; latest local candidate lives in rhythm_v3_gate_status_local_candidate_20260414.json and must not be treated as official unblock
-rhythm_v3_require_gate2_for_official_train: true  # official learned training stays blocked until Gate2 is recorded under the same contract
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # checked-in online-maintained gate; exact upper-bound validation lives in rhythm_v3_gate_status_local_candidate_20260414.json and must not be treated as online unblock
+rhythm_v3_require_gate2_for_official_train: true  # official learned training stays blocked until Gate1-online + Gate2 are recorded under the same state-sufficient contract
 rhythm_v3_strict_eval_invalid_g: true
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
@@ -137,7 +150,7 @@ rhythm_v3_use_src_gap_in_coarse_head: false
 rhythm_v3_detach_global_term_in_local_head: true
 rhythm_v3_freeze_src_rate_init: true  # frozen mode stores src_rate_init as module state, not an optimizer parameter
 rhythm_v3_src_rate_init_mode: first_speech
-rhythm_v3_src_prefix_stat_mode: ema  # maintained online default; exact_global_family is kept as a local/offline gate candidate until prefix history becomes state-safe across chunk continuation
+rhythm_v3_src_prefix_stat_mode: ema  # maintained online default; exact_global_family is kept as an upper-bound validation contract until prefix history becomes state-safe across chunk continuation
 rhythm_v3_src_prefix_min_support: 3
 rhythm_v3_min_support_log_iqr_for_g: 0.08
 rhythm_v3_min_support_log_span_for_g: 0.18
