@@ -18,7 +18,7 @@ from tasks.Conan.rhythm.duration_v3.metrics import (
     tempo_monotonicity,
     tempo_tie_rate,
 )
-from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
+from tasks.Conan.rhythm.common.metrics_impl import build_rhythm_metric_dict, build_rhythm_metric_sections
 from tasks.Conan.rhythm.common.targets_impl import (
     DurationV3TargetBuildConfig,
     _build_duration_v3_silence_tau,

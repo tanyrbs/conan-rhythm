@@ -32,6 +32,12 @@ from utils.plot.rhythm_v3_viz.review import (
     _normalize_ref_bin,
     _normalize_ref_condition,
 )
+from tasks.Conan.rhythm.duration_v3.gate_contract import (
+    _GATE_STATUS_FINGERPRINT_KEYS,
+    attach_gate_permissions,
+    build_runtime_contract_id_from_values,
+    normalize_gate_fingerprint_value,
+)
 
 
 _GATE1_MONOTONICITY_RATE_MIN = 0.95
@@ -608,7 +614,7 @@ def collect_review_issues(frame) -> list[str]:
 
 def build_gate_status(frame) -> dict[str, object]:
     if pd is None or frame is None or not hasattr(frame, "columns") or int(frame.shape[0]) <= 0:
-        return {
+        return attach_gate_permissions({
             "gate0a_pass": False,
             "gate0b_pass": False,
             "gate0c_pass": False,
@@ -616,6 +622,7 @@ def build_gate_status(frame) -> dict[str, object]:
             "gate1_pass": False,
             "gate2_pass": False,
             "gate3_pass": False,
+            "contract_id": "",
             "missing_controls": list(_REQUIRED_NEGATIVE_CONTROLS),
             "missing_eval_modes": ["analytic", "coarse_only", "learned"],
             "incomplete_triplets": 0,
@@ -663,7 +670,7 @@ def build_gate_status(frame) -> dict[str, object]:
             "learned_residual_bias_share": float("nan"),
             "learned_local_silence_delta_share": float("nan"),
             "warnings": ["summary_rows=empty"],
-        }
+        })
     issues = collect_gate_issues(frame)
     observed_control_contract_ids = []
     if "control_contract_id" in frame.columns:
@@ -1115,7 +1122,7 @@ def build_gate_status(frame) -> dict[str, object]:
         gate1_pass = False
         gate2_pass = False
         gate3_pass = False
-    return {
+    return attach_gate_permissions({
         "gate0a_pass": bool(gate0a_pass),
         "gate0b_pass": bool(gate0b_pass),
         "gate0c_pass": bool(gate0c_pass),
@@ -1123,6 +1130,7 @@ def build_gate_status(frame) -> dict[str, object]:
         "gate1_pass": bool(gate1_pass),
         "gate2_pass": bool(gate2_pass),
         "gate3_pass": bool(gate3_pass),
+        "contract_id": control_contract_id,
         "control_contract_id": control_contract_id,
         "observed_control_contract_ids": observed_control_contract_ids,
         "control_contract_id_count": int(control_contract_id_count),
@@ -1183,7 +1191,7 @@ def build_gate_status(frame) -> dict[str, object]:
         "learned_residual_bias_share": learned_residual_bias_share,
         "learned_local_silence_delta_share": learned_local_silence_delta_share,
         "warnings": issues,
-    }
+    })
 
 
 def _warn_sparse_review_metadata(frame) -> list[str]:
@@ -1228,54 +1236,7 @@ def _infer_single_meta(records, key, default=None):
 
 
 def _coerce_contract_fingerprint_value(key: str, value):
-    if value is None:
-        return None
-    if key in {
-        "rhythm_v3_alignment_prefilter_bad_samples",
-        "rhythm_v3_disallow_same_text_paired_target",
-        "rhythm_v3_disallow_same_text_reference",
-        "rhythm_v3_require_same_text_paired_target",
-        "rhythm_v3_strict_eval_invalid_g",
-        "rhythm_v3_prompt_require_clean_support",
-        "rhythm_v3_use_src_gap_in_coarse_head",
-        "rhythm_v3_use_continuous_alignment",
-        "rhythm_v3_minimal_v1_profile",
-        "rhythm_v3_strict_minimal_claim_profile",
-    }:
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-    if key in {
-        "rhythm_v3_alignment_prefilter_max_attempts",
-        "rhythm_v3_drop_edge_runs_for_g",
-        "rhythm_v3_src_prefix_min_support",
-        "rhythm_v3_prefix_budget_pos",
-        "rhythm_v3_prefix_budget_neg",
-        "rhythm_v3_min_prefix_budget",
-        "rhythm_v3_max_prefix_budget",
-        "rhythm_v3_projection_repair_max_steps",
-    }:
-        return int(value)
-    if key in {
-        "rhythm_v3_alignment_local_margin_p10_min",
-        "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
-        "rhythm_v3_alignment_mean_local_confidence_speech_min",
-        "rhythm_v3_alignment_unmatched_speech_ratio_max",
-        "rhythm_v3_g_trim_ratio",
-        "rhythm_v3_min_boundary_confidence_for_g",
-        "rhythm_v3_max_prompt_ref_len_sec",
-        "rhythm_v3_min_prompt_ref_len_sec",
-        "rhythm_v3_min_prompt_speech_ratio",
-        "rhythm_v3_analytic_gap_clip",
-        "rhythm_v3_dynamic_budget_ratio",
-        "rhythm_v3_boundary_carry_decay",
-        "rhythm_v3_boundary_offset_decay",
-        "rhythm_v3_boundary_reset_thresh",
-        "rhythm_v3_projection_repair_speech_bonus",
-        "rhythm_v3_projection_repair_boundary_penalty",
-    }:
-        return float(value)
-    return str(value)
+    return normalize_gate_fingerprint_value(key, value)
 
 
 def _build_gate_contract_fingerprint(*, records, args) -> dict[str, object]:
@@ -1285,228 +1246,68 @@ def _build_gate_contract_fingerprint(*, records, args) -> dict[str, object]:
     use_continuous_alignment = None
     if alignment_kind:
         use_continuous_alignment = bool(alignment_kind.startswith("continuous"))
-    fingerprint = {
-        "rhythm_v3_g_variant": _infer_single_meta(
-            records,
-            "g_variant",
-            default=args.g_variant,
-        ),
-        "rhythm_v3_g_trim_ratio": _infer_single_meta(
-            records,
-            "g_trim_ratio",
-            default=args.g_trim_ratio,
-        ),
-        "rhythm_v3_drop_edge_runs_for_g": _infer_single_meta(
-            records,
-            "g_drop_edge_runs",
-            default=args.drop_edge_runs,
-        ),
-        "rhythm_v3_min_boundary_confidence_for_g": _infer_single_meta(
-            records,
-            "min_boundary_confidence_for_g",
-            default=None,
-        ),
-        "rhythm_v3_min_prompt_speech_ratio": _infer_single_meta(
-            records,
-            "rhythm_v3_min_prompt_speech_ratio",
-            default=None,
-        ),
-        "rhythm_v3_min_prompt_ref_len_sec": _infer_single_meta(
-            records,
-            "rhythm_v3_min_prompt_ref_len_sec",
-            default=None,
-        ),
-        "rhythm_v3_max_prompt_ref_len_sec": _infer_single_meta(
-            records,
-            "rhythm_v3_max_prompt_ref_len_sec",
-            default=None,
-        ),
-        "rhythm_v3_disallow_same_text_reference": _infer_single_meta(
-            records,
-            "rhythm_v3_disallow_same_text_reference",
-            default=None,
-        ),
-        "rhythm_v3_disallow_same_text_paired_target": _infer_single_meta(
-            records,
-            "rhythm_v3_disallow_same_text_paired_target",
-            default=None,
-        ),
-        "rhythm_v3_require_same_text_paired_target": _infer_single_meta(
-            records,
-            "rhythm_v3_require_same_text_paired_target",
-            default=None,
-        ),
-        "rhythm_v3_strict_eval_invalid_g": _infer_single_meta(
-            records,
-            "rhythm_v3_strict_eval_invalid_g",
-            default=None,
-        ),
-        "rhythm_v3_alignment_prefilter_bad_samples": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_prefilter_bad_samples",
-            default=None,
-        ),
-        "rhythm_v3_alignment_prefilter_max_attempts": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_prefilter_max_attempts",
-            default=None,
-        ),
-        "rhythm_v3_alignment_unmatched_speech_ratio_max": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_unmatched_speech_ratio_max",
-            default=None,
-        ),
-        "rhythm_v3_alignment_mean_local_confidence_speech_min": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_mean_local_confidence_speech_min",
-            default=None,
-        ),
-        "rhythm_v3_alignment_mean_coarse_confidence_speech_min": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
-            default=None,
-        ),
-        "rhythm_v3_alignment_local_margin_p10_min": _infer_single_meta(
-            records,
-            "rhythm_v3_alignment_local_margin_p10_min",
-            default=None,
-        ),
-        "rhythm_v3_src_prefix_stat_mode": _infer_single_meta(
-            records,
-            "src_prefix_stat_mode",
-            default=None,
-        ),
-        "rhythm_v3_src_prefix_min_support": _infer_single_meta(
-            records,
-            "src_prefix_min_support",
-            default=None,
-        ),
-        "rhythm_v3_src_rate_init_mode": _infer_single_meta(
-            records,
-            "src_rate_init_mode",
-            default=None,
-        ),
-        "rhythm_v3_prompt_domain_mode": _infer_single_meta(
-            records,
-            "prompt_domain_mode",
-            default=None,
-        ),
-        "rhythm_v3_prompt_require_clean_support": _infer_single_meta(
-            records,
-            "prompt_require_clean_support",
-            default=None,
-        ),
-        "rhythm_v3_prompt_g_variant": _infer_single_meta(
-            records,
-            "prompt_g_variant",
-            default=None,
-        ),
-        "rhythm_v3_src_g_variant": _infer_single_meta(
-            records,
-            "src_g_variant",
-            default=None,
-        ),
-        "rhythm_v3_use_src_gap_in_coarse_head": _infer_single_meta(
-            records,
-            "use_src_gap_in_coarse_head",
-            default=None,
-        ),
-        "rhythm_v3_analytic_gap_clip": _infer_single_meta(
-            records,
-            "analytic_gap_clip",
-            default=None,
-        ),
-        "rhythm_v3_prefix_budget_pos": _infer_single_meta(
-            records,
-            "prefix_budget_pos",
-            default=None,
-        ),
-        "rhythm_v3_prefix_budget_neg": _infer_single_meta(
-            records,
-            "prefix_budget_neg",
-            default=None,
-        ),
-        "rhythm_v3_dynamic_budget_ratio": _infer_single_meta(
-            records,
-            "dynamic_budget_ratio",
-            default=None,
-        ),
-        "rhythm_v3_min_prefix_budget": _infer_single_meta(
-            records,
-            "min_prefix_budget",
-            default=None,
-        ),
-        "rhythm_v3_max_prefix_budget": _infer_single_meta(
-            records,
-            "max_prefix_budget",
-            default=None,
-        ),
-        "rhythm_v3_budget_mode": _infer_single_meta(
-            records,
-            "budget_mode",
-            default=None,
-        ),
-        "rhythm_v3_boundary_carry_decay": _infer_single_meta(
-            records,
-            "boundary_carry_decay",
-            default=None,
-        ),
-        "rhythm_v3_boundary_offset_decay": _infer_single_meta(
-            records,
-            "boundary_offset_decay",
-            default=None,
-        ),
-        "rhythm_v3_boundary_reset_thresh": _infer_single_meta(
-            records,
-            "boundary_reset_thresh",
-            default=None,
-        ),
-        "rhythm_v3_integer_projection_mode": _infer_single_meta(
-            records,
-            "integer_projection_mode",
-            default=None,
-        ),
-        "rhythm_v3_integer_projection_anchor_mode": _infer_single_meta(
-            records,
-            "integer_projection_anchor_mode",
-            default=None,
-        ),
-        "rhythm_v3_projection_repair_max_steps": _infer_single_meta(
-            records,
-            "projection_repair_max_steps",
-            default=None,
-        ),
-        "rhythm_v3_projection_repair_speech_bonus": _infer_single_meta(
-            records,
-            "projection_repair_speech_bonus",
-            default=None,
-        ),
-        "rhythm_v3_projection_repair_boundary_penalty": _infer_single_meta(
-            records,
-            "projection_repair_boundary_penalty",
-            default=None,
-        ),
-        "rhythm_v3_use_continuous_alignment": _infer_single_meta(
-            records,
-            "use_continuous_alignment",
-            default=use_continuous_alignment,
-        ),
-        "rhythm_v3_alignment_mode": _infer_single_meta(
-            records,
-            "alignment_mode",
-            default=None,
-        ),
-        "rhythm_v3_minimal_v1_profile": _infer_single_meta(
-            records,
-            "minimal_v1_profile",
-            default=None,
-        ),
-        "rhythm_v3_strict_minimal_claim_profile": _infer_single_meta(
-            records,
-            "strict_minimal_claim_profile",
-            default=None,
-        ),
+    defaults = {
+        "rhythm_v3_g_variant": args.g_variant,
+        "rhythm_v3_g_trim_ratio": args.g_trim_ratio,
+        "rhythm_v3_drop_edge_runs_for_g": args.drop_edge_runs,
+        "rhythm_v3_use_continuous_alignment": use_continuous_alignment,
     }
+    aliases = {
+        "rhythm_v3_drop_edge_runs_for_g": ("g_drop_edge_runs",),
+        "rhythm_v3_min_boundary_confidence_for_g": ("min_boundary_confidence_for_g",),
+        "rhythm_v3_prompt_domain_mode": ("prompt_domain_mode",),
+        "rhythm_v3_prompt_require_clean_support": ("prompt_require_clean_support",),
+        "rhythm_v3_prompt_g_variant": ("prompt_g_variant",),
+        "rhythm_v3_src_g_variant": ("src_g_variant",),
+        "rhythm_v3_src_prefix_stat_mode": ("src_prefix_stat_mode",),
+        "rhythm_v3_src_prefix_min_support": ("src_prefix_min_support",),
+        "rhythm_v3_src_rate_init_mode": ("src_rate_init_mode",),
+        "rhythm_v3_use_src_gap_in_coarse_head": ("use_src_gap_in_coarse_head",),
+        "rhythm_v3_analytic_gap_clip": ("analytic_gap_clip",),
+        "rhythm_v3_prefix_budget_pos": ("prefix_budget_pos",),
+        "rhythm_v3_prefix_budget_neg": ("prefix_budget_neg",),
+        "rhythm_v3_dynamic_budget_ratio": ("dynamic_budget_ratio",),
+        "rhythm_v3_min_prefix_budget": ("min_prefix_budget",),
+        "rhythm_v3_max_prefix_budget": ("max_prefix_budget",),
+        "rhythm_v3_budget_mode": ("budget_mode",),
+        "rhythm_v3_boundary_carry_decay": ("boundary_carry_decay",),
+        "rhythm_v3_boundary_offset_decay": ("boundary_offset_decay",),
+        "rhythm_v3_boundary_reset_thresh": ("boundary_reset_thresh",),
+        "rhythm_v3_projection_mode": ("projection_mode", "integer_projection_mode"),
+        "rhythm_v3_integer_projection_mode": ("integer_projection_mode", "projection_mode"),
+        "rhythm_v3_integer_projection_anchor_mode": ("integer_projection_anchor_mode",),
+        "rhythm_v3_prefix_optimal_step_weight": ("prefix_optimal_step_weight",),
+        "rhythm_v3_prefix_optimal_prefix_weight": ("prefix_optimal_prefix_weight",),
+        "rhythm_v3_prefix_optimal_terminal_weight": ("prefix_optimal_terminal_weight",),
+        "rhythm_v3_prefix_optimal_boundary_weight": ("prefix_optimal_boundary_weight",),
+        "rhythm_v3_prefix_optimal_coarse_weight": ("prefix_optimal_coarse_weight",),
+        "rhythm_v3_prefix_optimal_phrase_final_boost": ("prefix_optimal_phrase_final_boost",),
+        "rhythm_v3_prefix_optimal_max_window": ("prefix_optimal_max_window",),
+        "rhythm_v3_prefix_optimal_max_states": ("prefix_optimal_max_states",),
+        "rhythm_v3_projection_repair_max_steps": ("projection_repair_max_steps",),
+        "rhythm_v3_projection_repair_speech_bonus": ("projection_repair_speech_bonus",),
+        "rhythm_v3_projection_repair_boundary_penalty": ("projection_repair_boundary_penalty",),
+        "rhythm_v3_alignment_mode": ("alignment_mode",),
+        "rhythm_v3_minimal_v1_profile": ("minimal_v1_profile",),
+        "rhythm_v3_strict_minimal_claim_profile": ("strict_minimal_claim_profile",),
+        "rhythm_v3_strict_eval_invalid_g": ("strict_eval_invalid_g",),
+        "rhythm_v3_alignment_prefilter_bad_samples": ("alignment_prefilter_bad_samples",),
+        "rhythm_v3_alignment_prefilter_max_attempts": ("alignment_prefilter_max_attempts",),
+    }
+    fingerprint = {}
+    for key in _GATE_STATUS_FINGERPRINT_KEYS:
+        raw_value = None
+        for alias in aliases.get(key, (key,)):
+            raw_value = _infer_single_meta(records, alias, default=None)
+            if raw_value is not None:
+                break
+        if raw_value is None:
+            raw_value = defaults.get(key)
+        fingerprint[key] = raw_value
+    if fingerprint.get("rhythm_v3_projection_mode") is None:
+        fingerprint["rhythm_v3_projection_mode"] = fingerprint.get("rhythm_v3_integer_projection_mode", "greedy")
+    if fingerprint.get("rhythm_v3_integer_projection_mode") is None:
+        fingerprint["rhythm_v3_integer_projection_mode"] = fingerprint.get("rhythm_v3_projection_mode", "greedy")
     return {
         key: _coerce_contract_fingerprint_value(key, value)
         for key, value in fingerprint.items()
@@ -1847,9 +1648,14 @@ def main() -> None:
         issues = _warn_sparse_review_metadata(summary_df)
         summary_df.to_csv(output, index=False)
         gate_status = build_gate_status(summary_df)
-        gate_status["contract_fingerprint"] = _build_gate_contract_fingerprint(
+        contract_fingerprint = _build_gate_contract_fingerprint(
             records=records,
             args=args,
+        )
+        gate_status["contract_fingerprint"] = contract_fingerprint
+        gate_status["contract_id"] = build_runtime_contract_id_from_values(contract_fingerprint)
+        gate_status["control_contract_id"] = str(
+            gate_status.get("control_contract_id", gate_status["contract_id"]) or gate_status["contract_id"]
         )
         gate_status_path = None
         if args.gate_status_json:

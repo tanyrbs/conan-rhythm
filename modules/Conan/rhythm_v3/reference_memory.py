@@ -66,7 +66,9 @@ _V3_PROMPT_UNIT_OPTIONAL_FIELDS = (
     "prompt_speech_mask",
     "prompt_silence_mask",
     "prompt_closed_mask",
+    "prompt_closed_mask_present",
     "prompt_boundary_confidence",
+    "prompt_boundary_confidence_present",
     "prompt_global_weight",
     "prompt_global_weight_present",
     "prompt_unit_log_prior",
@@ -77,6 +79,7 @@ _V3_PROMPT_UNIT_OPTIONAL_FIELDS = (
     "prompt_phrase_group_pos",
     "prompt_phrase_final_mask",
     "prompt_ref_len_sec",
+    "prompt_ref_len_present",
     "prompt_speech_ratio_scalar",
     "g_trim_ratio",
 )

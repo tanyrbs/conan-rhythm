@@ -9,7 +9,7 @@ from modules.Conan.rhythm_v3.contracts import (
     StructuredRoleDurationMemory,
 )
 import modules.Conan.rhythm_v3.runtime_adapter as runtime_adapter_mod
-from modules.Conan.rhythm_v3.minimal_head import MinimalStreamingDurationHeadV1G
+from modules.Conan.rhythm_v3.minimal_writer import MinimalStreamingDurationHeadV1G
 from modules.Conan.rhythm_v3.projector import StreamingDurationProjector
 from modules.Conan.rhythm_v3.runtime_adapter import ConanDurationAdapter
 from modules.Conan.rhythm_v3.summary_memory import StreamingDurationHead
@@ -50,6 +50,9 @@ def _build_prompt_summary_hparams():
             "rhythm_role_dim": 32,
             "rhythm_num_role_slots": 8,
             "rhythm_v3_source_residual_gain": 0.0,
+            "rhythm_v3_min_prompt_support_runs": 1,
+            "rhythm_v3_min_prompt_support_fraction": 0.0,
+            "rhythm_v3_min_prompt_support_weight": 0.0,
         }
     )
     return hparams
@@ -95,8 +98,11 @@ def _build_prompt_conditioning(*, prompt_units: int = 6, prompt_ref_len_sec: flo
         "prompt_valid_mask": mask,
         "prompt_speech_mask": mask,
         "prompt_closed_mask": mask,
+        "prompt_closed_mask_present": torch.ones((1, 1), dtype=torch.float32),
         "prompt_boundary_confidence": torch.ones((1, prompt_units), dtype=torch.float32),
+        "prompt_boundary_confidence_present": torch.ones((1, 1), dtype=torch.float32),
         "prompt_ref_len_sec": torch.tensor([[prompt_ref_len_sec]], dtype=torch.float32),
+        "prompt_ref_len_present": torch.ones((1, 1), dtype=torch.float32),
         "prompt_speech_ratio_scalar": torch.ones((1, 1), dtype=torch.float32),
     }
 
@@ -719,8 +725,10 @@ def test_rhythm_v3_minimal_prompt_summary_rejects_out_of_domain_prompt_ref_len_s
     hparams["rhythm_v3_use_reference_summary"] = False
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_require_prompt_ref_len_gate"] = True
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
-    with pytest.raises(ValueError, match="3-8s reference duration"):
+    adapter.eval()
+    with pytest.raises(ValueError, match="sufficient prompt support"):
         _run_adapter(
             adapter,
             content=torch.tensor([[1, 2, 3]], dtype=torch.long),
@@ -776,6 +784,7 @@ def test_rhythm_v3_debug_g_domain_valid_respects_prompt_ref_len_gate():
     hparams["rhythm_v3_use_reference_summary"] = False
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_require_prompt_ref_len_gate"] = True
     hparams["rhythm_v3_debug_export"] = True
     hparams["rhythm_v3_strict_eval_invalid_g"] = False
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
@@ -810,9 +819,10 @@ def test_rhythm_v3_minimal_prompt_summary_eval_rejects_invalid_prompt_when_stric
     hparams["rhythm_v3_use_reference_summary"] = False
     hparams["rhythm_v3_use_learned_residual_gate"] = False
     hparams["rhythm_v3_disable_learned_gate"] = True
+    hparams["rhythm_v3_require_prompt_ref_len_gate"] = True
     adapter = ConanDurationAdapter(hparams, hidden_size=32, vocab_size=128)
     adapter.eval()
-    with pytest.raises(ValueError, match="closed/boundary-clean support"):
+    with pytest.raises(ValueError, match="sufficient prompt support"):
         _run_adapter(
             adapter,
             content=torch.tensor([[1, 2, 3]], dtype=torch.long),

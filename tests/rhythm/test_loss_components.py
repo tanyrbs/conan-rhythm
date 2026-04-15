@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.common.losses_impl import RhythmLossTargets, build_rhythm_loss_dict
 from tasks.Conan.rhythm.loss_routing import update_public_loss_aliases
 from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
 

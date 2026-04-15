@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from tasks.Conan.rhythm.v1_task_mixin import RhythmV1TaskMixin
 
 
 class _DummyOfflineTeacher(nn.Module):
@@ -64,12 +64,12 @@ class _DummyV3Model(nn.Module):
         self.rhythm_render_phase_gain = None
 
 
-class _DummyTask(RhythmConanTaskMixin):
+class _DummyTask(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.model = _DummyModel()
 
 
-class _DummyV3Task(RhythmConanTaskMixin):
+class _DummyV3Task(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.model = _DummyV3Model()
 
@@ -83,7 +83,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
             + list(task.model.rhythm_module.offline_teacher.confidence_heads.parameters())
         }
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_optimize_pause_state": False,
                 "rhythm_train_offline_confidence_heads": False,
@@ -103,7 +103,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
             *(id(param) for param in task.model.rhythm_render_phase_mlp.parameters()),
         }
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_optimize_pause_state": True,
                 "rhythm_train_offline_confidence_heads": False,
@@ -124,7 +124,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
             + list(task.model.rhythm_module.offline_teacher.confidence_heads.parameters())
         }
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_train_offline_confidence_heads": False,
             },
@@ -142,7 +142,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
         task = _DummyV3Task()
         baseline_ids = {id(param) for param in task.model.rhythm_unit_frontend.baseline.parameters()}
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_v3_baseline_train_mode": "joint",
                 "rhythm_v3_freeze_baseline": False,
@@ -158,7 +158,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
         task = _DummyV3Task()
         baseline_ids = {id(param) for param in task.model.rhythm_unit_frontend.baseline.parameters()}
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_v3_baseline_train_mode": "frozen",
                 "rhythm_v3_freeze_baseline": True,
@@ -174,7 +174,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
         task = _DummyV3Task()
         baseline_ids = {id(param) for param in task.model.rhythm_unit_frontend.baseline.parameters()}
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "rhythm_v3_backbone": "prompt_summary",
                 "rhythm_v3_baseline_train_mode": "joint",

@@ -15,8 +15,8 @@ from tasks.Conan.rhythm.distill_confidence import (
     normalize_component_distill_confidence,
     normalize_distill_confidence,
 )
-from tasks.Conan.rhythm.losses import RhythmLossTargets, build_rhythm_loss_dict
-from tasks.Conan.rhythm.targets import DistillConfidenceBundle, _normalize_distill_confidences
+from tasks.Conan.rhythm.common.losses_impl import RhythmLossTargets, build_rhythm_loss_dict
+from tasks.Conan.rhythm.common.targets_impl import DistillConfidenceBundle, _normalize_distill_confidences
 
 
 class RhythmLossConfidenceRoutingTests(unittest.TestCase):

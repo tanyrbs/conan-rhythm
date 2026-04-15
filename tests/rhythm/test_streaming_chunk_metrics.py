@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tasks.Conan.rhythm.metrics import build_streaming_chunk_metrics
+from tasks.Conan.rhythm.common.metrics_impl import build_streaming_chunk_metrics
 
 
 def test_streaming_chunk_metrics_returns_zeros_for_empty_history():

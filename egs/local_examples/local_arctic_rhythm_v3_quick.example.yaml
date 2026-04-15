@@ -1,0 +1,29 @@
+base_config: egs/overrides/rhythm_v3_online_weighted_streaming.yaml
+
+# Local example only. Copy this file to a separate untracked config (e.g.
+# `egs/local_arctic_rhythm_v3_quick.local.yaml`) and point these paths to your
+# local dataset directories.
+processed_data_dir: 'data/processed/vc'
+binary_data_dir: 'data/binary/vc_6layer'
+metafile_path: 'data/processed/vc/metadata.json'
+rhythm_pair_manifest_path: 'data/processed/vc/pairs.json'
+rhythm_pair_manifest_prefixes: 'train,valid,test'
+rhythm_pair_manifest_strict: true
+rhythm_cache_version: 6
+rhythm_cached_reference_policy: external
+rhythm_dataset_target_mode: runtime_only
+rhythm_v3_emit_silence_runs: true
+rhythm_v3_debounce_min_run_frames: 2
+
+# Quick falsification path: keep the maintained online rhythm_v3 contract, but
+# disable pitch extraction so we can binarize a small ARCTIC subset before
+# producing RMVPE sidecars for the full corpus.
+use_pitch_embed: false
+valid_prefixes: []
+test_prefixes: []
+
+binarization_args:
+  with_f0: false
+  with_f0cwt: false
+  with_spk_embed: false
+  with_rhythm_cache: true

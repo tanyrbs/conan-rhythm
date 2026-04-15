@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import csv
 import json
 import os
@@ -24,7 +25,8 @@ from tasks.Conan.dataset import ConanDataset
 from utils.commons.hparams import set_hparams
 
 
-DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick.yaml"
+# Maintained default should not depend on local quick configs with machine-specific paths.
+DEFAULT_CONFIG = os.environ.get("CONAN_RHYTHM_CONFIG", "egs/conan_emformer_rhythm_v3.yaml")
 DEFAULT_SPLITS = "train,valid,test"
 DEFAULT_THRESHOLDS = "0.5,0.45,0.4,0.35,0.3,0.0"
 DEFAULT_OUTPUT_CSV = "tmp/gate1_boundary_audit/full_split_boundary_audit_rows.csv"

@@ -19,8 +19,8 @@ from modules.Conan.rhythm_v3.source_cache import (
     build_duration_v3_cache_meta,
 )
 from tasks.Conan.rhythm.dataset_sample_builder import RhythmDatasetSampleAssembler
-from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
-from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict
+from tasks.Conan.rhythm.v1_dataset_mixin import RhythmV1DatasetMixin
+from tasks.Conan.rhythm.common.metrics_impl import build_rhythm_metric_dict
 
 
 class _AssemblerOwner:
@@ -163,7 +163,7 @@ class ReferenceBootstrapRuntimeTests(unittest.TestCase):
             "source_boundary_cue",
             DURATION_V3_CACHE_META_KEY,
         }
-        runtime_keys = set(RhythmConanDatasetMixin._RHYTHM_RUNTIME_MINIMAL_KEYS)
+        runtime_keys = set(RhythmV1DatasetMixin._RHYTHM_RUNTIME_MINIMAL_KEYS)
         self.assertTrue(required.issubset(runtime_keys))
 
     def test_sample_builder_preserves_duration_v3_cache_meta_for_runtime_contract(self) -> None:

@@ -18,6 +18,14 @@ DURATION_V3_CACHE_META_KEY = "rhythm_v3_cache_meta"
 UNIT_LOG_PRIOR_META_KEY = "rhythm_v3_unit_prior_meta"
 
 
+def _masked_standardize(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.float()
+    total = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+    mean = (x * mask).sum(dim=1, keepdim=True) / total
+    var = (((x - mean) ** 2) * mask).sum(dim=1, keepdim=True) / total
+    return ((x - mean) / var.clamp_min(1.0e-6).sqrt()) * mask
+
+
 def build_duration_v3_cache_meta(
     *,
     silent_token: int | None,
@@ -883,16 +891,22 @@ def _build_source_boundary_cue_v3(
     sealed_mask: torch.Tensor,
     boundary_confidence: torch.Tensor,
 ) -> torch.Tensor:
-    from modules.Conan.rhythm.source_boundary import build_source_boundary_cue as _legacy_build_source_boundary_cue
-
-    return _legacy_build_source_boundary_cue(
-        dur_anchor_src=dur_anchor_src,
-        unit_mask=unit_mask,
-        sep_hint=sep_hint,
-        open_run_mask=open_run_mask,
-        sealed_mask=sealed_mask,
-        boundary_confidence=boundary_confidence,
+    unit_mask = unit_mask.float()
+    log_anchor = torch.log1p(dur_anchor_src.float().clamp_min(0.0)) * unit_mask
+    prev_anchor = F.pad(log_anchor[:, :-1], (1, 0))
+    next_anchor = F.pad(log_anchor[:, 1:], (0, 1))
+    local_peak = torch.relu(log_anchor - 0.5 * (prev_anchor + next_anchor))
+    local_jump = 0.5 * (
+        torch.abs(log_anchor - prev_anchor) + torch.abs(next_anchor - log_anchor)
     )
+    peak_score = torch.sigmoid(_masked_standardize(local_peak, unit_mask))
+    jump_score = torch.sigmoid(_masked_standardize(local_jump, unit_mask))
+    cue = 0.25 * peak_score + 0.15 * jump_score
+    cue = cue + 0.40 * sep_hint.float()
+    cue = cue + 0.20 * boundary_confidence.float()
+    cue = cue * (1.0 - 0.25 * open_run_mask.float())
+    cue = cue * (0.80 + 0.20 * sealed_mask.float())
+    return cue.clamp(0.0, 1.0) * unit_mask
 
 
 def build_source_phrase_cache(

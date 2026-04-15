@@ -174,16 +174,16 @@ def _collect_processed_data_dir_findings(processed_dir: str, *, strict: bool) ->
 
 def _build_cache_shape_contract(hparams):
     from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
-    from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+    from tasks.Conan.rhythm.v1_dataset_mixin import RhythmV1DatasetMixin
 
     owner = type(
         "_PreflightRhythmCacheOwner",
         (),
         {
             "hparams": hparams,
-            "_RHYTHM_SOURCE_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_SOURCE_CACHE_KEYS,
-            "_RHYTHM_REF_DEBUG_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_REF_DEBUG_CACHE_KEYS,
-            "_RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS": RhythmConanDatasetMixin._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS,
+            "_RHYTHM_SOURCE_CACHE_KEYS": RhythmV1DatasetMixin._RHYTHM_SOURCE_CACHE_KEYS,
+            "_RHYTHM_REF_DEBUG_CACHE_KEYS": RhythmV1DatasetMixin._RHYTHM_REF_DEBUG_CACHE_KEYS,
+            "_RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS": RhythmV1DatasetMixin._RHYTHM_REF_PLANNER_DEBUG_CACHE_KEYS,
         },
     )()
     return RhythmDatasetCacheContract(owner)

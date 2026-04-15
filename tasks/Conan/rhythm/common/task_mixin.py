@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from importlib import import_module
 
 import torch
 import torch.nn.functional as F
@@ -27,18 +26,19 @@ from tasks.Conan.rhythm.common.task_config import (
 )
 from tasks.Conan.rhythm.loss_balance import AdaptiveRhythmLossBalancer
 from tasks.Conan.rhythm.loss_routing import compute_reporting_total_loss
-from tasks.Conan.rhythm.losses import build_rhythm_loss_dict
-from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_streaming_chunk_metrics
+from tasks.Conan.rhythm.common.losses_impl import build_rhythm_loss_dict
+from tasks.Conan.rhythm.common.metrics_impl import build_rhythm_metric_dict, build_streaming_chunk_metrics
+from tasks.Conan.rhythm.common.targets_impl import scale_rhythm_loss_terms
 from tasks.Conan.rhythm.plot_utils import f0_to_figure
-from tasks.Conan.rhythm.runtime_modes import resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model
+from tasks.Conan.rhythm.common.runtime_modes import (
+    resolve_acoustic_target_post_model as resolve_task_acoustic_target_post_model,
+)
 from tasks.Conan.rhythm.streaming_eval import run_chunkwise_streaming_inference
 from tasks.Conan.rhythm.teacher_aux import build_runtime_teacher_aux_loss_dict
 from tasks.Conan.rhythm.common.runtime_modes import resolve_task_runtime_state
 from tasks.Conan.rhythm.duration_v3.runtime_modes import build_duration_v3_ref_conditioning
-from tasks.Conan.rhythm.rhythm_v2.runtime_modes import build_legacy_v2_ref_conditioning, collect_legacy_planner_runtime_outputs
-from tasks.Conan.rhythm.rhythm_v2.targets import RhythmTargetBuildConfig, scale_rhythm_loss_terms
 from tasks.Conan.rhythm.task_config import validate_rhythm_training_hparams
-from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
+from tasks.Conan.rhythm.duration_v3.task_runtime_support import DurationV3TaskRuntimeSupport
 from utils.audio.pitch.utils import denorm_f0
 from utils.commons.hparams import hparams
 from utils.commons.tensor_utils import tensors_to_scalars
@@ -46,10 +46,10 @@ from utils.metrics.ssim import ssim
 
 
 class CommonRhythmTaskMixin:
-    def _task_runtime_support(self) -> RhythmTaskRuntimeSupport:
+    def _task_runtime_support(self) -> DurationV3TaskRuntimeSupport:
         helper = getattr(self, "_cached_rhythm_task_runtime_support", None)
         if helper is None:
-            helper = RhythmTaskRuntimeSupport(self)
+            helper = DurationV3TaskRuntimeSupport(self)
             self._cached_rhythm_task_runtime_support = helper
         return helper
 
@@ -223,10 +223,18 @@ class CommonRhythmTaskMixin:
                 if cache_meta is not None:
                     payload[DURATION_V3_CACHE_META_KEY] = cache_meta
                 return payload
+            allow_legacy_alias = bool(hparams.get("rhythm_v3_allow_legacy_source_cache_alias", False))
             legacy_duration = sample.get(f"{prefix}dur_anchor_src")
             legacy_content = sample.get(f"{prefix}content_units")
             if legacy_content is None or legacy_duration is None:
                 return None
+            if not allow_legacy_alias:
+                raise RuntimeError(
+                    "rhythm_v3 source cache is missing canonical duration_v3 fields, "
+                    "but legacy alias fallback would have been used. "
+                    "Fix the upstream source-cache producer, or set "
+                    "rhythm_v3_allow_legacy_source_cache_alias=true only for transitional debugging."
+                )
             legacy_sep = sample.get(f"{prefix}sep_hint")
             legacy_sealed = sample.get(f"{prefix}sealed_mask")
             unit_mask = (legacy_duration.float() > 0).float() if torch.is_tensor(legacy_duration) else None
@@ -698,9 +706,9 @@ class CommonRhythmTaskMixin:
     def _build_rhythm_loss_targets(self, output, sample):
         if "rhythm_execution" not in output or output["rhythm_execution"] is None:
             return None
-        if output.get("rhythm_version") == "v3":
-            return self._build_duration_v3_loss_targets(output, sample)
-        return self._build_rhythm_v2_loss_targets(output, sample)
+        if output.get("rhythm_version") != "v3":
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 training path.")
+        return self._build_duration_v3_loss_targets(output, sample)
 
     def _maybe_add_v2_teacher_aux_losses(self, *, output, sample, losses) -> None:
         runtime_teacher = output.get("rhythm_offline_execution")
@@ -727,25 +735,14 @@ class CommonRhythmTaskMixin:
             return
         rhythm_execution = output["rhythm_execution"]
         rhythm_losses = build_rhythm_loss_dict(rhythm_execution, targets)
-        if output.get("rhythm_version") == "v3":
-            losses.update(rhythm_losses)
-            return
-        scaled_rhythm_losses = scale_rhythm_loss_terms(
-            rhythm_losses,
-            hparams=hparams,
-            cumplan_lambda=self._get_rhythm_prefix_state_lambda(),
-        )
-        losses.update(self._maybe_balance_rhythm_loss_terms(scaled_rhythm_losses))
-        self._add_reference_descriptor_regularization(output, sample, losses)
-        self._maybe_add_v2_teacher_aux_losses(output=output, sample=sample, losses=losses)
+        if output.get("rhythm_version") != "v3":
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 training path.")
+        losses.update(rhythm_losses)
 
     def _build_runtime_ref_conditioning(self, sample, *, explicit=None):
-        builder = (
-            build_duration_v3_ref_conditioning
-            if getattr(self.model, "rhythm_enable_v3", False)
-            else build_legacy_v2_ref_conditioning
-        )
-        return builder(sample, explicit=explicit)
+        if not getattr(self.model, "rhythm_enable_v3", False):
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 runtime path.")
+        return build_duration_v3_ref_conditioning(sample, explicit=explicit)
 
     def _maybe_run_teacher_only_stage(
         self,
@@ -757,14 +754,7 @@ class CommonRhythmTaskMixin:
         teacher_as_main: bool,
         rhythm_ref_conditioning,
     ):
-        if stage != "teacher_offline" or teacher_as_main or not getattr(self.model, "rhythm_enable_v2", False):
-            return None
-        return self._run_offline_teacher_model(
-            sample,
-            infer=infer,
-            test=test,
-            rhythm_ref_conditioning=rhythm_ref_conditioning,
-        )
+        return None
 
     def _annotate_runtime_stage_outputs(
         self,
@@ -871,7 +861,7 @@ class CommonRhythmTaskMixin:
             )
         )
         if output.get("rhythm_version") != "v3":
-            output.update(collect_legacy_planner_runtime_outputs(output.get("rhythm_execution")))
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 runtime path.")
 
         losses = {}
         acoustic_target, acoustic_weight = runtime_helper.attach_acoustic_target_bundle(
@@ -1102,13 +1092,4 @@ class CommonRhythmTaskMixin:
         return result
 
 
-__all__ = ["CommonRhythmTaskMixin", "RhythmConanTaskMixin"]
-
-
-def __getattr__(name: str):
-    if name != "RhythmConanTaskMixin":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module("tasks.Conan.rhythm.task_mixin")
-    value = getattr(module, name)
-    globals()[name] = value
-    return value
+__all__ = ["CommonRhythmTaskMixin"]

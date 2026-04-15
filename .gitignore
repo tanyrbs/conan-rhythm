@@ -48,9 +48,14 @@ htmlcov/
 # Logs / experiment tracking
 logs/
 tmp/
+tmp_autodl_fetch/
 tensorboard/
 wandb/
 lightning_logs/
+
+# Keep machine-specific configs out of the repo.
+egs/*.local.yaml
+egs/local_arctic_rhythm_v3_quick.yaml
 
 # Project data & generated artifacts (keep placeholders)
 data/binary/

@@ -12,13 +12,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tasks.Conan.rhythm.task_runtime_support import RhythmTaskRuntimeSupport
-from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from tasks.Conan.rhythm.v1_task_mixin import RhythmV1TaskMixin
 
 
 class PitchSupervisionRuntimeTests(unittest.TestCase):
     def test_missing_source_pitch_raises_when_pitch_embed_is_enabled(self) -> None:
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "use_pitch_embed": True,
                 "rhythm_fail_fast_missing_pitch_supervision": True,
@@ -26,7 +26,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
             clear=True,
         ):
             with self.assertRaisesRegex(RuntimeError, "Pitch supervision is missing"):
-                RhythmConanTaskMixin._assert_pitch_supervision_ready(
+                RhythmV1TaskMixin._assert_pitch_supervision_ready(
                     {
                         "disable_acoustic_train_path": 0.0,
                         "rhythm_pitch_supervision_disabled": 0.0,
@@ -40,7 +40,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
 
     def test_retimed_training_requires_matched_retimed_pitch_targets(self) -> None:
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "use_pitch_embed": True,
                 "rhythm_fail_fast_missing_pitch_supervision": True,
@@ -48,7 +48,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
             clear=True,
         ):
             with self.assertRaisesRegex(RuntimeError, "retimed training is missing usable pitch supervision"):
-                RhythmConanTaskMixin._assert_pitch_supervision_ready(
+                RhythmV1TaskMixin._assert_pitch_supervision_ready(
                     {
                         "disable_acoustic_train_path": 0.0,
                         "rhythm_pitch_supervision_disabled": 0.0,
@@ -62,7 +62,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
 
     def test_retimed_length_mismatch_raises_before_pitch_loss_runs(self) -> None:
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "use_pitch_embed": True,
                 "rhythm_fail_fast_missing_pitch_supervision": True,
@@ -70,7 +70,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
             clear=True,
         ):
             with self.assertRaisesRegex(RuntimeError, "length-aligned"):
-                RhythmConanTaskMixin._assert_pitch_supervision_ready(
+                RhythmV1TaskMixin._assert_pitch_supervision_ready(
                     {
                         "disable_acoustic_train_path": 0.0,
                         "rhythm_pitch_supervision_disabled": 0.0,
@@ -87,14 +87,14 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
 
     def test_escape_hatch_allows_debug_runs_without_pitch_targets(self) -> None:
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "use_pitch_embed": True,
                 "rhythm_fail_fast_missing_pitch_supervision": False,
             },
             clear=True,
         ):
-            RhythmConanTaskMixin._assert_pitch_supervision_ready(
+            RhythmV1TaskMixin._assert_pitch_supervision_ready(
                 {
                     "disable_acoustic_train_path": 0.0,
                     "rhythm_pitch_supervision_disabled": 1.0,
@@ -108,14 +108,14 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
 
     def test_source_pitch_supervision_passes_when_non_retimed_target_is_active(self) -> None:
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "use_pitch_embed": True,
                 "rhythm_fail_fast_missing_pitch_supervision": True,
             },
             clear=True,
         ):
-            RhythmConanTaskMixin._assert_pitch_supervision_ready(
+            RhythmV1TaskMixin._assert_pitch_supervision_ready(
                 {
                     "disable_acoustic_train_path": 0.0,
                     "rhythm_pitch_supervision_disabled": 0.0,
@@ -136,7 +136,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
                 target_len = mel_out.size(1)
                 return mel_out, acoustic_target[:, :target_len], acoustic_weight[:, :target_len]
 
-        class _DummyTask(RhythmConanTaskMixin):
+        class _DummyTask(RhythmV1TaskMixin):
             pass
 
         support = RhythmTaskRuntimeSupport(_DummyOwner())
@@ -169,7 +169,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
             )
         losses = {}
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {"f0_gen": "diff", "lambda_uv": 1.0},
             clear=True,
         ):
@@ -178,7 +178,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(losses["uv"]))
 
     def test_add_pitch_loss_prefers_source_pitch_when_cached_target_is_active(self) -> None:
-        class _DummyTask(RhythmConanTaskMixin):
+        class _DummyTask(RhythmV1TaskMixin):
             pass
 
         task = _DummyTask()
@@ -198,7 +198,7 @@ class PitchSupervisionRuntimeTests(unittest.TestCase):
         }
         losses = {}
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {"f0_gen": "diff", "lambda_uv": 1.0},
             clear=True,
         ):

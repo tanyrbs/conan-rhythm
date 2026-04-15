@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+from tasks.Conan.rhythm.v1_dataset_mixin import RhythmV1DatasetMixin
 from tasks.tts.dataset_utils import BaseSpeechDataset, FastSpeechDataset, FastSpeechWordDataset
 from utils.commons.dataset_utils import BaseDataset, build_dataloader
 
@@ -79,7 +79,7 @@ class _DummyRhythmAssembler:
         }
 
 
-class _CountingRhythmDataset(RhythmConanDatasetMixin, FastSpeechDataset):
+class _CountingRhythmDataset(RhythmV1DatasetMixin, FastSpeechDataset):
     def __init__(self, items):
         self.get_item_calls = 0
         super().__init__(prefix="train", items=items, shuffle=False)
@@ -116,7 +116,7 @@ class _LocalIdFallbackBase:
         return self.items[int(local_idx)]
 
 
-class _LocalIdFallbackRhythmDataset(RhythmConanDatasetMixin, _LocalIdFallbackBase):
+class _LocalIdFallbackRhythmDataset(RhythmV1DatasetMixin, _LocalIdFallbackBase):
     def _materialize_rhythm_cache_compat(self, item, *, item_name: str):
         return item
 

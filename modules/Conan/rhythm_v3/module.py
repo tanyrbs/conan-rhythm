@@ -610,13 +610,16 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop("rhythm_v3_boundary_offset_decay", None),
         )
         boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
+        projection_mode = str(
+            unused_kwargs.pop(
+                "projection_mode",
+                unused_kwargs.pop("rhythm_v3_projection_mode", "greedy"),
+            )
+        )
         integer_projection_mode = str(
             unused_kwargs.pop(
                 "integer_projection_mode",
-                unused_kwargs.pop(
-                    "rhythm_v3_integer_projection_mode",
-                    unused_kwargs.pop("rhythm_v3_projection_mode", "greedy"),
-                ),
+                unused_kwargs.pop("rhythm_v3_integer_projection_mode", projection_mode),
             )
         )
         integer_projection_anchor_mode = str(
@@ -625,30 +628,14 @@ class MixedEffectsDurationModule(nn.Module):
                 unused_kwargs.pop("rhythm_v3_integer_projection_anchor_mode", "rounded"),
             )
         )
-        prefix_projection_candidate_radius = int(
-            unused_kwargs.pop(
-                "prefix_projection_candidate_radius",
-                unused_kwargs.pop("rhythm_v3_prefix_projection_candidate_radius", 2),
-            )
-        )
-        prefix_projection_max_states = int(
-            unused_kwargs.pop(
-                "prefix_projection_max_states",
-                unused_kwargs.pop("rhythm_v3_prefix_projection_max_states", 256),
-            )
-        )
-        prefix_projection_terminal_carry_weight = float(
-            unused_kwargs.pop(
-                "prefix_projection_terminal_carry_weight",
-                unused_kwargs.pop("rhythm_v3_prefix_projection_terminal_carry_weight", 0.25),
-            )
-        )
-        prefix_projection_terminal_offset_weight = float(
-            unused_kwargs.pop(
-                "prefix_projection_terminal_offset_weight",
-                unused_kwargs.pop("rhythm_v3_prefix_projection_terminal_offset_weight", 0.05),
-            )
-        )
+        prefix_optimal_step_weight = float(unused_kwargs.pop("prefix_optimal_step_weight", unused_kwargs.pop("rhythm_v3_prefix_optimal_step_weight", 0.10)))
+        prefix_optimal_prefix_weight = float(unused_kwargs.pop("prefix_optimal_prefix_weight", unused_kwargs.pop("rhythm_v3_prefix_optimal_prefix_weight", 1.00)))
+        prefix_optimal_terminal_weight = float(unused_kwargs.pop("prefix_optimal_terminal_weight", unused_kwargs.pop("rhythm_v3_prefix_optimal_terminal_weight", 1.00)))
+        prefix_optimal_boundary_weight = float(unused_kwargs.pop("prefix_optimal_boundary_weight", unused_kwargs.pop("rhythm_v3_prefix_optimal_boundary_weight", 0.75)))
+        prefix_optimal_coarse_weight = float(unused_kwargs.pop("prefix_optimal_coarse_weight", unused_kwargs.pop("rhythm_v3_prefix_optimal_coarse_weight", 0.50)))
+        prefix_optimal_phrase_final_boost = float(unused_kwargs.pop("prefix_optimal_phrase_final_boost", unused_kwargs.pop("rhythm_v3_prefix_optimal_phrase_final_boost", 1.50)))
+        prefix_optimal_max_window = int(unused_kwargs.pop("prefix_optimal_max_window", unused_kwargs.pop("rhythm_v3_prefix_optimal_max_window", 96)))
+        prefix_optimal_max_states = int(unused_kwargs.pop("prefix_optimal_max_states", unused_kwargs.pop("rhythm_v3_prefix_optimal_max_states", 97)))
         projection_repair_max_steps = int(
             unused_kwargs.pop(
                 "projection_repair_max_steps",
@@ -797,6 +784,31 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop(
                 "max_prompt_ref_len_sec",
                 unused_kwargs.pop("rhythm_v3_max_prompt_ref_len_sec", 8.0),
+            )
+        )
+        self.require_prompt_ref_len_gate = bool(
+            unused_kwargs.pop(
+                "require_prompt_ref_len_gate",
+                unused_kwargs.pop("rhythm_v3_require_prompt_ref_len_gate", False),
+            )
+        )
+        self.min_prompt_support_runs = int(
+            unused_kwargs.pop(
+                "min_prompt_support_runs",
+                unused_kwargs.pop("rhythm_v3_min_prompt_support_runs", 3),
+            )
+            or 0
+        )
+        self.min_prompt_support_fraction = float(
+            unused_kwargs.pop(
+                "min_prompt_support_fraction",
+                unused_kwargs.pop("rhythm_v3_min_prompt_support_fraction", 0.20),
+            )
+        )
+        self.min_prompt_support_weight = float(
+            unused_kwargs.pop(
+                "min_prompt_support_weight",
+                unused_kwargs.pop("rhythm_v3_min_prompt_support_weight", 2.0),
             )
         )
         min_boundary_confidence_for_g = unused_kwargs.pop(
@@ -994,12 +1006,17 @@ class MixedEffectsDurationModule(nn.Module):
             boundary_carry_decay=boundary_carry_decay,
             boundary_offset_decay=boundary_offset_decay,
             boundary_reset_thresh=boundary_reset_thresh,
+            projection_mode=projection_mode,
             integer_projection_mode=integer_projection_mode,
             integer_projection_anchor_mode=integer_projection_anchor_mode,
-            prefix_projection_candidate_radius=prefix_projection_candidate_radius,
-            prefix_projection_max_states=prefix_projection_max_states,
-            prefix_projection_terminal_carry_weight=prefix_projection_terminal_carry_weight,
-            prefix_projection_terminal_offset_weight=prefix_projection_terminal_offset_weight,
+            prefix_optimal_step_weight=prefix_optimal_step_weight,
+            prefix_optimal_prefix_weight=prefix_optimal_prefix_weight,
+            prefix_optimal_terminal_weight=prefix_optimal_terminal_weight,
+            prefix_optimal_boundary_weight=prefix_optimal_boundary_weight,
+            prefix_optimal_coarse_weight=prefix_optimal_coarse_weight,
+            prefix_optimal_phrase_final_boost=prefix_optimal_phrase_final_boost,
+            prefix_optimal_max_window=prefix_optimal_max_window,
+            prefix_optimal_max_states=prefix_optimal_max_states,
             projection_repair_max_steps=projection_repair_max_steps,
             projection_repair_speech_bonus=projection_repair_speech_bonus,
             projection_repair_boundary_penalty=projection_repair_boundary_penalty,
@@ -1020,6 +1037,10 @@ class MixedEffectsDurationModule(nn.Module):
                     min_speech_ratio=self.min_prompt_speech_ratio,
                     min_ref_len_sec=self.min_prompt_ref_len_sec,
                     max_ref_len_sec=self.max_prompt_ref_len_sec,
+                    require_ref_len_gate=self.require_prompt_ref_len_gate,
+                    min_support_runs=self.min_prompt_support_runs,
+                    min_support_fraction=self.min_prompt_support_fraction,
+                    min_support_weight=self.min_prompt_support_weight,
                     use_log_base_rate=self.use_log_base_rate,
                     g_variant=self.prompt_g_variant,
                     g_trim_ratio=self.prompt_g_trim_ratio,
@@ -1100,6 +1121,14 @@ class MixedEffectsDurationModule(nn.Module):
                 self.prompt_memory_encoder.min_ref_len_sec = self.min_prompt_ref_len_sec
             if hasattr(self.prompt_memory_encoder, "max_ref_len_sec"):
                 self.prompt_memory_encoder.max_ref_len_sec = self.max_prompt_ref_len_sec
+            if hasattr(self.prompt_memory_encoder, "require_ref_len_gate"):
+                self.prompt_memory_encoder.require_ref_len_gate = self.require_prompt_ref_len_gate
+            if hasattr(self.prompt_memory_encoder, "min_support_runs"):
+                self.prompt_memory_encoder.min_support_runs = self.min_prompt_support_runs
+            if hasattr(self.prompt_memory_encoder, "min_support_fraction"):
+                self.prompt_memory_encoder.min_support_fraction = self.min_prompt_support_fraction
+            if hasattr(self.prompt_memory_encoder, "min_support_weight"):
+                self.prompt_memory_encoder.min_support_weight = self.min_prompt_support_weight
             if hasattr(self.prompt_memory_encoder, "prompt_domain_mode"):
                 self.prompt_memory_encoder.prompt_domain_mode = self.prompt_domain_mode
             if hasattr(self.prompt_memory_encoder, "min_boundary_confidence"):
@@ -1282,6 +1311,10 @@ class MixedEffectsDurationModule(nn.Module):
                 prompt_unit_log_prior=ref_conditioning.get("prompt_unit_log_prior"),
             )
             if self.minimal_v1_profile:
+                prompt_memory_kwargs["prompt_closed_mask_present"] = ref_conditioning.get("prompt_closed_mask_present")
+                prompt_memory_kwargs["prompt_boundary_confidence_present"] = ref_conditioning.get(
+                    "prompt_boundary_confidence_present"
+                )
                 prompt_valid_mask = prompt_memory_kwargs["prompt_valid_mask"]
                 if not isinstance(prompt_valid_mask, torch.Tensor):
                     prompt_valid_mask = prompt_mask.float()
@@ -1303,6 +1336,7 @@ class MixedEffectsDurationModule(nn.Module):
                     )[:, :1]
                 if isinstance(prompt_ref_len_sec, torch.Tensor):
                     prompt_memory_kwargs["prompt_ref_len_sec"] = prompt_ref_len_sec
+                prompt_memory_kwargs["prompt_ref_len_present"] = ref_conditioning.get("prompt_ref_len_present")
                 prompt_memory_kwargs["prompt_speech_ratio_scalar"] = prompt_speech_ratio_scalar
             return self.prompt_memory_encoder(**prompt_memory_kwargs)
         need_progress = self._use_progress_response()

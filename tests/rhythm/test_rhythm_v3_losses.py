@@ -19,13 +19,13 @@ from tasks.Conan.rhythm.loss_routing import (
     route_conan_optimizer_losses,
     update_public_loss_aliases,
 )
-from tasks.Conan.rhythm.losses import (
+from tasks.Conan.rhythm.common.losses_impl import (
     DurationV3LossTargets,
     _build_duration_v3_stream_losses,
     _resolve_duration_v3_prefix_target_surface,
     build_rhythm_loss_dict,
 )
-from tasks.Conan.rhythm.targets import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
+from tasks.Conan.rhythm.common.targets_impl import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
 from tasks.Conan.rhythm.common import targets_impl
 from tasks.Conan.rhythm.common.targets_impl import _build_duration_v3_silence_tau
 

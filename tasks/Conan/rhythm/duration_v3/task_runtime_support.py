@@ -4,7 +4,7 @@ from ..common.task_runtime_support import CommonTaskRuntimeSupport
 from modules.Conan.rhythm_v3.math_utils import normalize_src_rate_init_mode
 from utils.commons.hparams import hparams
 
-from .targets import DurationV3TargetBuildConfig
+from ..common.targets_impl import DurationV3TargetBuildConfig
 from .task_config import is_duration_v3_prompt_summary_backbone, resolve_duration_v3_rate_mode
 
 

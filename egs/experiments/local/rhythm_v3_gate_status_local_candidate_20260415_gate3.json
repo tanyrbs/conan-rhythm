@@ -1,0 +1,89 @@
+{
+  "updated_at": "2026-04-15",
+  "scope": "local_gate3_learned_candidate",
+  "status": "learned_residual_probe_blocked",
+  "basis": "docs/rhythm_v3_local_status_2026-04-15.md",
+  "review_artifact_hint": "tmp/gate3_eval_20260415_s125/{gate_valid_review,gate_test_review}/gate_status.json",
+  "candidate_config": "egs/experiments/local/rhythm_v3_gate3_local_residual.yaml",
+  "checkpoint": "checkpoints/rhythm_v3_gate3_candidate_20260415_s126_srcgapfix1/model_ckpt_steps_125.ckpt",
+  "official_training_ready": false,
+  "contract_fingerprint": {
+    "rhythm_v3_alignment_local_margin_p10_min": 0.02,
+    "rhythm_v3_alignment_mean_coarse_confidence_speech_min": 0.6,
+    "rhythm_v3_alignment_mean_local_confidence_speech_min": 0.55,
+    "rhythm_v3_alignment_mode": "continuous_viterbi_v1",
+    "rhythm_v3_alignment_prefilter_bad_samples": true,
+    "rhythm_v3_alignment_prefilter_max_attempts": 2,
+    "rhythm_v3_alignment_unmatched_speech_ratio_max": 0.15,
+    "rhythm_v3_analytic_gap_clip": 0.35,
+    "rhythm_v3_boundary_carry_decay": 0.25,
+    "rhythm_v3_boundary_offset_decay": 0.6,
+    "rhythm_v3_boundary_reset_thresh": 0.55,
+    "rhythm_v3_budget_mode": "total",
+    "rhythm_v3_disallow_same_text_paired_target": false,
+    "rhythm_v3_disallow_same_text_reference": true,
+    "rhythm_v3_drop_edge_runs_for_g": 1,
+    "rhythm_v3_dynamic_budget_ratio": 0.15,
+    "rhythm_v3_g_trim_ratio": 0.2,
+    "rhythm_v3_g_variant": "weighted_median",
+    "rhythm_v3_integer_projection_anchor_mode": "rounded",
+    "rhythm_v3_integer_projection_mode": "greedy",
+    "rhythm_v3_max_prefix_budget": 48,
+    "rhythm_v3_max_prompt_ref_len_sec": 8.0,
+    "rhythm_v3_min_boundary_confidence_for_g": 0.5,
+    "rhythm_v3_min_prefix_budget": 12,
+    "rhythm_v3_min_prompt_ref_len_sec": 3.0,
+    "rhythm_v3_min_prompt_speech_ratio": 0.6,
+    "rhythm_v3_minimal_v1_profile": true,
+    "rhythm_v3_prefix_budget_neg": 24,
+    "rhythm_v3_prefix_budget_pos": 24,
+    "rhythm_v3_projection_repair_boundary_penalty": 0.35,
+    "rhythm_v3_projection_repair_max_steps": 0,
+    "rhythm_v3_projection_repair_speech_bonus": 1.0,
+    "rhythm_v3_prompt_domain_mode": "meaningful_reference",
+    "rhythm_v3_prompt_g_variant": "weighted_median",
+    "rhythm_v3_prompt_require_clean_support": false,
+    "rhythm_v3_require_same_text_paired_target": true,
+    "rhythm_v3_src_g_variant": "weighted_median",
+    "rhythm_v3_src_prefix_min_support": 3,
+    "rhythm_v3_src_prefix_stat_mode": "ema",
+    "rhythm_v3_src_rate_init_mode": "first_speech",
+    "rhythm_v3_strict_eval_invalid_g": true,
+    "rhythm_v3_strict_minimal_claim_profile": false,
+    "rhythm_v3_use_continuous_alignment": true,
+    "rhythm_v3_use_src_gap_in_coarse_head": true
+  },
+  "gate0_pass": false,
+  "gate1_pass": false,
+  "gate2_pass": false,
+  "gate3_pass": false,
+  "valid_analytic_metrics": {
+    "tempo_monotonicity_rate_exec": 0.6666666865348816,
+    "tempo_transfer_slope_exec": 0.49068155884742737,
+    "tempo_tie_rate_exec": 0.3333333432674408
+  },
+  "test_analytic_metrics": {
+    "tempo_monotonicity_rate_exec": 0.5,
+    "tempo_transfer_slope_exec": 0.0,
+    "tempo_tie_rate_exec": 0.5
+  },
+  "valid_learned_metrics": {
+    "residual_target_corr": -0.28940632939338684,
+    "residual_bias_share": 0.6096691489219666,
+    "local_silence_delta_share": 0.2487480342388153
+  },
+  "test_learned_metrics": {
+    "residual_target_corr": -0.23643045127391815,
+    "residual_bias_share": 0.6316243410110474,
+    "local_silence_delta_share": 0.9898253679275513
+  },
+  "findings": [
+    "The learned local-residual candidate still rides on a Gate1 and Gate2 blocked maintained-online control chain.",
+    "Learned mode does not clear the execution bottleneck and shows large residual bias share plus substantial silence leakage.",
+    "Gate3 therefore remains blocked; the checkpoint should be read as a local training unblock and diagnostic rerun, not a pass."
+  ],
+  "warnings": [
+    "The learned checkpoint was evaluated under a relaxed local review bundle, not an official strict gate reuse path.",
+    "Do not treat this artifact as evidence that local residual is safely constrained."
+  ]
+}

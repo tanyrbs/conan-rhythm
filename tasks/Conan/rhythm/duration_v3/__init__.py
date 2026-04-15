@@ -1,7 +1,7 @@
-from .losses import DurationV3LossTargets, build_duration_v3_loss_dict, build_rhythm_loss_dict
+from ..common.losses_impl import DurationV3LossTargets, _build_duration_v3_loss_dict as build_duration_v3_loss_dict, build_rhythm_loss_dict
 from .metrics import build_duration_v3_metric_sections, build_rhythm_metric_dict, build_rhythm_metric_sections
 from .runtime_modes import build_duration_v3_ref_conditioning
-from .targets import (
+from ..common.targets_impl import (
     DurationV3TargetBuildConfig,
     build_duration_v3_loss_targets,
     build_pseudo_source_duration_context,

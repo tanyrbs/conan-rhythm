@@ -1,6 +1,8 @@
 base_config: egs/conan_emformer_rhythm_v3.yaml
 
-# Gate 0: static g audit on the maintained runtime surface.
+# Gate 0: static g audit (upper-bound exact-family probe).
+# This is a diagnostic-only surface; it is not the maintained streaming-safe
+# source-side online contract.
 # Keep the mainline config, but hard-freeze the analysis knobs here instead of
 # relying on manual comment edits in the parent YAML.
 rhythm_v3_eval_mode: analytic

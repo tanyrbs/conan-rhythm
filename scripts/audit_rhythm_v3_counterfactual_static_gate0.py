@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import copy
 import csv
 import json
@@ -35,7 +36,8 @@ from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, derive
 from utils.plot.rhythm_v3_viz.review import compute_source_global_rate_for_analysis
 
 
-DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick.yaml"
+# Maintained default should not depend on local quick configs with machine-specific paths.
+DEFAULT_CONFIG = os.environ.get("CONAN_RHYTHM_CONFIG", "egs/conan_emformer_rhythm_v3.yaml")
 DEFAULT_SPLITS = "train,valid,test"
 DEFAULT_CANDIDATES = "57,71,72,63"
 DEFAULT_DROP_EDGES = "1,3"

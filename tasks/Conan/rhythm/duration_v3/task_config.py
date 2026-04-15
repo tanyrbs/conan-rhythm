@@ -5,6 +5,17 @@ import math
 from pathlib import Path
 
 from modules.Conan.rhythm.policy import is_duration_operator_mode
+from .gate_contract import (
+    _GATE_STATUS_FINGERPRINT_KEYS,
+    build_gate_contract_fingerprint as _shared_build_gate_contract_fingerprint,
+    build_runtime_contract_id_from_hparams,
+    prompt_ref_len_contract_active_from_hparams,
+    normalize_gate_fingerprint_value as _shared_normalize_gate_fingerprint_value,
+    normalize_projection_mode,
+    required_stage_gate_keys,
+    resolve_gate_contract_hparam as _shared_resolve_gate_contract_hparam,
+    resolve_train_stage,
+)
 
 from ..common.task_config import (
     _normalize_optional_path,
@@ -66,52 +77,6 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
 _LEGACY_PROMPT_SUMMARY_BACKBONES = {"role_memory", "unit_run"}
 _MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global", "v1g_minimal"}
 _UNIT_NORM_G_VARIANTS = {"unit_norm", "unit_normalized"}
-_GATE_STATUS_FINGERPRINT_KEYS = (
-    "rhythm_v3_g_variant",
-    "rhythm_v3_g_trim_ratio",
-    "rhythm_v3_drop_edge_runs_for_g",
-    "rhythm_v3_min_boundary_confidence_for_g",
-    "rhythm_v3_min_prompt_speech_ratio",
-    "rhythm_v3_min_prompt_ref_len_sec",
-    "rhythm_v3_max_prompt_ref_len_sec",
-    "rhythm_v3_disallow_same_text_reference",
-    "rhythm_v3_disallow_same_text_paired_target",
-    "rhythm_v3_require_same_text_paired_target",
-    "rhythm_v3_strict_eval_invalid_g",
-    "rhythm_v3_alignment_prefilter_bad_samples",
-    "rhythm_v3_alignment_prefilter_max_attempts",
-    "rhythm_v3_alignment_unmatched_speech_ratio_max",
-    "rhythm_v3_alignment_mean_local_confidence_speech_min",
-    "rhythm_v3_alignment_mean_coarse_confidence_speech_min",
-    "rhythm_v3_alignment_local_margin_p10_min",
-    "rhythm_v3_prompt_domain_mode",
-    "rhythm_v3_prompt_require_clean_support",
-    "rhythm_v3_prompt_g_variant",
-    "rhythm_v3_src_g_variant",
-    "rhythm_v3_src_prefix_stat_mode",
-    "rhythm_v3_src_prefix_min_support",
-    "rhythm_v3_src_rate_init_mode",
-    "rhythm_v3_use_src_gap_in_coarse_head",
-    "rhythm_v3_analytic_gap_clip",
-    "rhythm_v3_prefix_budget_pos",
-    "rhythm_v3_prefix_budget_neg",
-    "rhythm_v3_dynamic_budget_ratio",
-    "rhythm_v3_min_prefix_budget",
-    "rhythm_v3_max_prefix_budget",
-    "rhythm_v3_budget_mode",
-    "rhythm_v3_boundary_carry_decay",
-    "rhythm_v3_boundary_offset_decay",
-    "rhythm_v3_boundary_reset_thresh",
-    "rhythm_v3_integer_projection_mode",
-    "rhythm_v3_integer_projection_anchor_mode",
-    "rhythm_v3_projection_repair_max_steps",
-    "rhythm_v3_projection_repair_speech_bonus",
-    "rhythm_v3_projection_repair_boundary_penalty",
-    "rhythm_v3_use_continuous_alignment",
-    "rhythm_v3_alignment_mode",
-    "rhythm_v3_minimal_v1_profile",
-    "rhythm_v3_strict_minimal_claim_profile",
-)
 
 
 def _is_unit_norm_variant(value) -> bool:
@@ -196,6 +161,7 @@ _GATE_STATUS_BOOL_KEYS = {
     "rhythm_v3_alignment_prefilter_bad_samples",
     "rhythm_v3_disallow_same_text_paired_target",
     "rhythm_v3_disallow_same_text_reference",
+    "rhythm_v3_prompt_ref_len_contract_active",
     "rhythm_v3_prompt_require_clean_support",
     "rhythm_v3_require_same_text_paired_target",
     "rhythm_v3_strict_eval_invalid_g",
@@ -207,11 +173,15 @@ _GATE_STATUS_BOOL_KEYS = {
 _GATE_STATUS_INT_KEYS = {
     "rhythm_v3_alignment_prefilter_max_attempts",
     "rhythm_v3_drop_edge_runs_for_g",
+    "rhythm_v3_prompt_g_drop_edge_runs",
+    "rhythm_v3_src_g_drop_edge_runs",
     "rhythm_v3_src_prefix_min_support",
     "rhythm_v3_prefix_budget_pos",
     "rhythm_v3_prefix_budget_neg",
     "rhythm_v3_min_prefix_budget",
     "rhythm_v3_max_prefix_budget",
+    "rhythm_v3_prefix_optimal_max_window",
+    "rhythm_v3_prefix_optimal_max_states",
     "rhythm_v3_projection_repair_max_steps",
 }
 _GATE_STATUS_FLOAT_KEYS = {
@@ -221,6 +191,10 @@ _GATE_STATUS_FLOAT_KEYS = {
     "rhythm_v3_alignment_unmatched_speech_ratio_max",
     "rhythm_v3_g_trim_ratio",
     "rhythm_v3_min_boundary_confidence_for_g",
+    "rhythm_v3_prompt_g_trim_ratio",
+    "rhythm_v3_prompt_min_boundary_confidence_for_g",
+    "rhythm_v3_src_g_trim_ratio",
+    "rhythm_v3_src_min_boundary_confidence_for_g",
     "rhythm_v3_max_prompt_ref_len_sec",
     "rhythm_v3_min_prompt_ref_len_sec",
     "rhythm_v3_min_prompt_speech_ratio",
@@ -229,109 +203,27 @@ _GATE_STATUS_FLOAT_KEYS = {
     "rhythm_v3_boundary_carry_decay",
     "rhythm_v3_boundary_offset_decay",
     "rhythm_v3_boundary_reset_thresh",
+    "rhythm_v3_prefix_optimal_step_weight",
+    "rhythm_v3_prefix_optimal_prefix_weight",
+    "rhythm_v3_prefix_optimal_terminal_weight",
+    "rhythm_v3_prefix_optimal_boundary_weight",
+    "rhythm_v3_prefix_optimal_coarse_weight",
+    "rhythm_v3_prefix_optimal_phrase_final_boost",
     "rhythm_v3_projection_repair_speech_bonus",
     "rhythm_v3_projection_repair_boundary_penalty",
 }
 
 
 def _normalize_gate_fingerprint_value(key: str, value):
-    if value is None:
-        return None
-    if key in _GATE_STATUS_BOOL_KEYS:
-        return _is_enabled_flag(value)
-    if key in _GATE_STATUS_INT_KEYS:
-        return int(value)
-    if key in _GATE_STATUS_FLOAT_KEYS:
-        return float(value)
-    if isinstance(value, float):
-        return float(value)
-    if isinstance(value, (int, bool, str)) or value is None:
-        return value
-    return str(value)
+    return _shared_normalize_gate_fingerprint_value(key, value)
 
 
 def _resolve_gate_contract_hparam(hparams, key: str):
-    if key == "rhythm_v3_g_variant":
-        return str(hparams.get(key, "raw_median") or "raw_median")
-    if key == "rhythm_v3_g_trim_ratio":
-        return float(hparams.get(key, 0.2) or 0.2)
-    if key == "rhythm_v3_drop_edge_runs_for_g":
-        return int(hparams.get(key, 0) or 0)
-    if key == "rhythm_v3_min_boundary_confidence_for_g":
-        return hparams.get(key, None)
-    if key == "rhythm_v3_prompt_domain_mode":
-        return _normalize_prompt_domain_mode(hparams.get(key, "minimal_strict"))
-    if key == "rhythm_v3_prompt_require_clean_support":
-        return _is_enabled_flag(hparams.get(key, True))
-    if key == "rhythm_v3_prompt_g_variant":
-        return str(hparams.get(key, hparams.get("rhythm_v3_g_variant", "raw_median")) or "raw_median")
-    if key == "rhythm_v3_src_g_variant":
-        return str(hparams.get(key, hparams.get("rhythm_v3_g_variant", "raw_median")) or "raw_median")
-    if key == "rhythm_v3_src_prefix_stat_mode":
-        return str(hparams.get(key, "ema") or "ema").strip().lower()
-    if key == "rhythm_v3_src_prefix_min_support":
-        return int(hparams.get(key, 3) or 3)
-    if key == "rhythm_v3_src_rate_init_mode":
-        return str(hparams.get(key, "first_speech") or "first_speech").strip().lower()
-    if key == "rhythm_v3_use_src_gap_in_coarse_head":
-        return _is_enabled_flag(hparams.get(key, False))
-    if key == "rhythm_v3_analytic_gap_clip":
-        return float(hparams.get(key, 0.35) or 0.0)
-    if key == "rhythm_v3_prefix_budget_pos":
-        return int(hparams.get(key, hparams.get("rhythm_v3_unit_budget_pos", 24)) or 24)
-    if key == "rhythm_v3_prefix_budget_neg":
-        return int(hparams.get(key, hparams.get("rhythm_v3_unit_budget_neg", 24)) or 24)
-    if key == "rhythm_v3_dynamic_budget_ratio":
-        return float(hparams.get(key, 0.0) or 0.0)
-    if key == "rhythm_v3_min_prefix_budget":
-        return int(hparams.get(key, 0) or 0)
-    if key == "rhythm_v3_max_prefix_budget":
-        return int(hparams.get(key, 0) or 0)
-    if key == "rhythm_v3_budget_mode":
-        return str(hparams.get(key, "total") or "total").strip().lower()
-    if key == "rhythm_v3_boundary_carry_decay":
-        return float(hparams.get(key, 0.25) or 0.25)
-    if key == "rhythm_v3_boundary_offset_decay":
-        value = hparams.get(key, None)
-        if value is None:
-            value = hparams.get("rhythm_v3_boundary_carry_decay", 0.25)
-        return float(value)
-    if key == "rhythm_v3_boundary_reset_thresh":
-        return float(hparams.get(key, 0.5) or 0.5)
-    if key == "rhythm_v3_integer_projection_mode":
-        return str(
-            _get_hparam_alias(
-                hparams,
-                "rhythm_v3_integer_projection_mode",
-                "rhythm_v3_projection_mode",
-                "greedy",
-            )
-            or "greedy"
-        ).strip().lower()
-    if key == "rhythm_v3_integer_projection_anchor_mode":
-        return str(hparams.get(key, "rounded") or "rounded").strip().lower()
-    if key == "rhythm_v3_projection_repair_max_steps":
-        return int(hparams.get(key, 0) or 0)
-    if key == "rhythm_v3_projection_repair_speech_bonus":
-        return float(hparams.get(key, 1.0) or 0.0)
-    if key == "rhythm_v3_projection_repair_boundary_penalty":
-        return float(hparams.get(key, 0.35) or 0.0)
-    if key == "rhythm_v3_use_continuous_alignment":
-        return _is_enabled_flag(hparams.get(key, False))
-    if key == "rhythm_v3_alignment_mode":
-        return normalize_duration_v3_alignment_mode(hparams.get(key, "continuous_viterbi_v1"))
-    if key == "rhythm_v3_minimal_v1_profile":
-        return _is_enabled_flag(hparams.get(key, False))
-    if key == "rhythm_v3_strict_minimal_claim_profile":
-        return _is_enabled_flag(hparams.get(key, True))
-    return hparams.get(key)
+    return _shared_resolve_gate_contract_hparam(hparams, key)
 
 
 def _build_gate_contract_fingerprint(hparams) -> dict[str, object]:
-    return {
-        key: _normalize_gate_fingerprint_value(key, _resolve_gate_contract_hparam(hparams, key))
-        for key in _GATE_STATUS_FINGERPRINT_KEYS
-    }
+    return _shared_build_gate_contract_fingerprint(hparams)
 
 
 def _validate_rhythm_v3_gate_status_json(
@@ -340,6 +232,12 @@ def _validate_rhythm_v3_gate_status_json(
     gate_status_json,
 ) -> None:
     gate_path = Path(str(gate_status_json))
+    lowered_gate_path = gate_path.as_posix().lower()
+    if "local_candidate" in gate_path.name.lower() or "/experiments/local/" in lowered_gate_path:
+        raise ValueError(
+            "rhythm_v3 strict gate cannot reuse local-candidate gate status JSON. "
+            "Point rhythm_v3_required_gate_status_json to the maintained official gate bundle instead."
+        )
     try:
         payload = json.loads(gate_path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -390,7 +288,17 @@ def _validate_rhythm_v3_gate_status_json(
             "Regenerate gate status for the current g/prefix/alignment contract. "
             + "; ".join(mismatches)
         )
-    if not bool(payload["gate0_pass"]) or not bool(payload["gate1_pass"]):
+    expected_contract_id = build_runtime_contract_id_from_hparams(hparams)
+    actual_contract_id = str(
+        payload.get("contract_id", payload.get("control_contract_id", ""))
+        or ""
+    )
+    if actual_contract_id and actual_contract_id != expected_contract_id:
+        raise ValueError(
+            "rhythm_v3 gate_status_json contract mismatch: "
+            f"expected={expected_contract_id}, got={actual_contract_id}."
+        )
+    if not bool(payload.get("gate0_pass", False)) or not bool(payload.get("gate1_pass", False)):
         raise ValueError(
             "rhythm_v3_gate_quality_strict requires gate0_pass=true and gate1_pass=true in "
             "rhythm_v3_required_gate_status_json."
@@ -408,6 +316,17 @@ def _validate_rhythm_v3_gate_status_json(
         raise ValueError(
             "rhythm_v3_require_gate3_for_prefix_finetune requires gate3_pass=true in "
             "rhythm_v3_required_gate_status_json."
+        )
+    stage = resolve_train_stage(hparams)
+    required = required_stage_gate_keys(stage)
+    missing_passes = [key for key in required if not bool(payload.get(key, False))]
+    if missing_passes:
+        raise ValueError(
+            "rhythm_v3 strict gate requires "
+            + ", ".join(f"{key}=true" for key in required)
+            + f" for stage={stage}, but gate_status_json reports "
+            + ", ".join(f"{key}={payload.get(key)!r}" for key in missing_passes)
+            + "."
         )
 
 
@@ -581,6 +500,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         for key in ("rhythm_v3_disable_learned_gate", "disable_learned_gate"):
             if (
                 strict_minimal_claim_profile
+                and str(hparams.get("rhythm_v3_eval_mode", "learned") or "learned").strip().lower() != "learned"
                 and key in hparams
                 and not _is_enabled_flag(hparams.get(key, True))
             ):
@@ -645,10 +565,6 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 raise ValueError(
                     "rhythm_v3_minimal_v1_profile requires rhythm_v3_alignment_allow_source_skip=false."
                 )
-        if strict_minimal_claim_profile and _is_enabled_flag(hparams.get("rhythm_v3_use_src_gap_in_coarse_head", False)):
-            raise ValueError(
-                "strict minimal claim profile requires rhythm_v3_use_src_gap_in_coarse_head=false."
-            )
     if _is_enabled_flag(hparams.get("rhythm_v3_disable_learned_gate", False)) and _is_enabled_flag(
         hparams.get("rhythm_v3_use_learned_residual_gate", False)
     ):
@@ -738,28 +654,13 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     budget_mode = str(hparams.get("rhythm_v3_budget_mode", "total") or "total").strip().lower()
     if budget_mode not in {"total", "speech_only", "hybrid"}:
         raise ValueError("rhythm_v3_budget_mode must be one of: total, speech_only, hybrid.")
-    integer_projection_mode = str(
+    projection_mode = normalize_projection_mode(
         hparams.get(
-            "rhythm_v3_integer_projection_mode",
-            hparams.get("rhythm_v3_projection_mode", "greedy"),
+            "rhythm_v3_projection_mode",
+            hparams.get("rhythm_v3_integer_projection_mode", "greedy"),
         )
-        or "greedy"
-    ).strip().lower()
-    integer_projection_aliases = {
-        "default": "greedy",
-        "nearest": "greedy",
-        "recurrent": "greedy",
-        "repair": "greedy_repair",
-        "greedyrepair": "greedy_repair",
-        "dp": "prefix_optimal",
-        "prefix": "prefix_optimal",
-        "prefix_dp": "prefix_optimal",
-        "closed_prefix": "prefix_optimal",
-        "closed_prefix_optimal": "prefix_optimal",
-    }
-    integer_projection_mode = integer_projection_aliases.get(integer_projection_mode, integer_projection_mode)
-    if integer_projection_mode not in {"greedy", "greedy_repair", "prefix_optimal"}:
-        raise ValueError("rhythm_v3_integer_projection_mode must be one of: greedy, greedy_repair, prefix_optimal.")
+    )
+    integer_projection_mode = projection_mode
     integer_projection_anchor_mode = (
         str(hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded").strip().lower()
     )
@@ -778,16 +679,21 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     )
     if integer_projection_anchor_mode not in {"rounded", "continuous"}:
         raise ValueError("rhythm_v3_integer_projection_anchor_mode must be one of: rounded, continuous.")
-    if int(hparams.get("rhythm_v3_prefix_projection_candidate_radius", 2) or 0) < 0:
-        raise ValueError("rhythm_v3_prefix_projection_candidate_radius must be >= 0 for rhythm_v3.")
-    if int(hparams.get("rhythm_v3_prefix_projection_max_states", 256) or 0) <= 0:
-        raise ValueError("rhythm_v3_prefix_projection_max_states must be > 0 for rhythm_v3.")
     for key in (
-        "rhythm_v3_prefix_projection_terminal_carry_weight",
-        "rhythm_v3_prefix_projection_terminal_offset_weight",
+        "rhythm_v3_prefix_optimal_step_weight",
+        "rhythm_v3_prefix_optimal_prefix_weight",
+        "rhythm_v3_prefix_optimal_terminal_weight",
+        "rhythm_v3_prefix_optimal_boundary_weight",
+        "rhythm_v3_prefix_optimal_coarse_weight",
     ):
         if float(hparams.get(key, 0.0) or 0.0) < 0.0:
             raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
+    if float(hparams.get("rhythm_v3_prefix_optimal_phrase_final_boost", 1.5) or 0.0) < 1.0:
+        raise ValueError("rhythm_v3_prefix_optimal_phrase_final_boost must be >= 1.0 for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_prefix_optimal_max_window", 96) or 0) <= 0:
+        raise ValueError("rhythm_v3_prefix_optimal_max_window must be > 0 for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_prefix_optimal_max_states", 97) or 0) <= 0:
+        raise ValueError("rhythm_v3_prefix_optimal_max_states must be > 0 for rhythm_v3.")
     if float(hparams.get("rhythm_progress_support_tau", 8.0) or 0.0) < 0.0:
         raise ValueError("rhythm_progress_support_tau must be >= 0 for rhythm_v3.")
     if int(hparams.get("rhythm_progress_bins", 4) or 0) <= 0:
@@ -800,16 +706,39 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     min_prompt_speech_ratio = float(hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.0)
     if min_prompt_speech_ratio < 0.0 or min_prompt_speech_ratio > 1.0:
         raise ValueError("rhythm_v3_min_prompt_speech_ratio must be within [0, 1] for rhythm_v3.")
-    min_prompt_ref_len_sec = float(hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
-    max_prompt_ref_len_sec = float(hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
-    if min_prompt_ref_len_sec <= 0.0:
-        raise ValueError("rhythm_v3_min_prompt_ref_len_sec must be > 0 for rhythm_v3.")
-    if max_prompt_ref_len_sec <= 0.0:
-        raise ValueError("rhythm_v3_max_prompt_ref_len_sec must be > 0 for rhythm_v3.")
-    if max_prompt_ref_len_sec < min_prompt_ref_len_sec:
-        raise ValueError(
-            "rhythm_v3_max_prompt_ref_len_sec must be >= rhythm_v3_min_prompt_ref_len_sec for rhythm_v3."
+    prompt_ref_len_contract_active = prompt_ref_len_contract_active_from_hparams(hparams)
+    min_prompt_ref_len_sec_raw = hparams.get("rhythm_v3_min_prompt_ref_len_sec", None)
+    max_prompt_ref_len_sec_raw = hparams.get("rhythm_v3_max_prompt_ref_len_sec", None)
+    if prompt_ref_len_contract_active:
+        min_prompt_ref_len_sec = float(3.0 if min_prompt_ref_len_sec_raw is None else min_prompt_ref_len_sec_raw)
+        max_prompt_ref_len_sec = float(8.0 if max_prompt_ref_len_sec_raw is None else max_prompt_ref_len_sec_raw)
+        if min_prompt_ref_len_sec <= 0.0:
+            raise ValueError("rhythm_v3_min_prompt_ref_len_sec must be > 0 for rhythm_v3.")
+        if max_prompt_ref_len_sec <= 0.0:
+            raise ValueError("rhythm_v3_max_prompt_ref_len_sec must be > 0 for rhythm_v3.")
+        if max_prompt_ref_len_sec < min_prompt_ref_len_sec:
+            raise ValueError(
+                "rhythm_v3_max_prompt_ref_len_sec must be >= rhythm_v3_min_prompt_ref_len_sec for rhythm_v3."
+            )
+    else:
+        min_prompt_ref_len_sec = (
+            None
+            if min_prompt_ref_len_sec_raw in (None, "", 0, 0.0)
+            else float(min_prompt_ref_len_sec_raw)
         )
+        max_prompt_ref_len_sec = (
+            None
+            if max_prompt_ref_len_sec_raw in (None, "", 0, 0.0)
+            else float(max_prompt_ref_len_sec_raw)
+        )
+        if (
+            min_prompt_ref_len_sec is not None
+            and max_prompt_ref_len_sec is not None
+            and max_prompt_ref_len_sec < min_prompt_ref_len_sec
+        ):
+            raise ValueError(
+                "rhythm_v3_max_prompt_ref_len_sec must be >= rhythm_v3_min_prompt_ref_len_sec for rhythm_v3."
+            )
     src_rate_init_mode = str(hparams.get("rhythm_v3_src_rate_init_mode", "auto") or "auto").strip().lower()
     if src_rate_init_mode not in {"auto", "learned", "zero", "first_speech"}:
         raise ValueError(
@@ -835,6 +764,11 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             "rhythm_v3_src_prefix_stat_mode must be one of: "
             "ema, dual_timescale, family_hybrid, exact_global_family."
         )
+    if _is_enabled_flag(hparams.get("rhythm_v3_gate_quality_strict", False)) and src_prefix_stat_mode != "ema":
+        raise ValueError(
+            "official strict gate currently only permits rhythm_v3_src_prefix_stat_mode=ema; "
+            "non-ema prefix modes are candidate or upper-bound surfaces, not maintained online V1."
+        )
     coarse_delta_scale = float(hparams.get("rhythm_v3_coarse_delta_scale", 0.20) or 0.0)
     if coarse_delta_scale < 0.0:
         raise ValueError("rhythm_v3_coarse_delta_scale must be >= 0 for rhythm_v3.")
@@ -854,6 +788,20 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         min_boundary_confidence_for_g = float(min_boundary_confidence_for_g)
         if min_boundary_confidence_for_g < 0.0 or min_boundary_confidence_for_g > 1.0:
             raise ValueError("rhythm_v3_min_boundary_confidence_for_g must be within [0, 1] for rhythm_v3.")
+    boundary_confidence_soft_floor = hparams.get("rhythm_v3_boundary_confidence_soft_floor", None)
+    if boundary_confidence_soft_floor is not None:
+        boundary_confidence_soft_floor = float(boundary_confidence_soft_floor)
+        if boundary_confidence_soft_floor < 0.0 or boundary_confidence_soft_floor > 1.0:
+            raise ValueError("rhythm_v3_boundary_confidence_soft_floor must be within [0, 1] for rhythm_v3.")
+    min_prompt_support_runs = int(hparams.get("rhythm_v3_min_prompt_support_runs", 3) or 0)
+    if min_prompt_support_runs <= 0:
+        raise ValueError("rhythm_v3_min_prompt_support_runs must be > 0 for rhythm_v3.")
+    min_prompt_support_fraction = float(hparams.get("rhythm_v3_min_prompt_support_fraction", 0.20) or 0.0)
+    if min_prompt_support_fraction < 0.0 or min_prompt_support_fraction > 1.0:
+        raise ValueError("rhythm_v3_min_prompt_support_fraction must be within [0, 1] for rhythm_v3.")
+    min_prompt_support_weight = float(hparams.get("rhythm_v3_min_prompt_support_weight", 2.0) or 0.0)
+    if min_prompt_support_weight < 0.0:
+        raise ValueError("rhythm_v3_min_prompt_support_weight must be >= 0 for rhythm_v3.")
     for key in (
         "rhythm_v3_min_support_log_iqr_for_g",
         "rhythm_v3_min_support_log_span_for_g",

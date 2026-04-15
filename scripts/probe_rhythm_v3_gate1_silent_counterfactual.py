@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import copy
 import json
 import os
@@ -29,7 +30,8 @@ from utils.plot.rhythm_v3_viz.core import build_debug_records_from_batch, record
 from scripts.rhythm_v3_probe_cases import build_auto_gate1_cases, compute_conditioning_runtime_control
 
 
-DEFAULT_CONFIG = "egs/local_arctic_rhythm_v3_quick_gate1.yaml"
+# Maintained default should not depend on local quick configs with machine-specific paths.
+DEFAULT_CONFIG = os.environ.get("CONAN_RHYTHM_CONFIG", "egs/conan_emformer_rhythm_v3.yaml")
 DEFAULT_SPLIT = "train"
 DEFAULT_OUTPUT_CSV = "tmp/gate1_counterfactual_probe/results.csv"
 DEFAULT_OUTPUT_JSON = "tmp/gate1_counterfactual_probe/summary.json"

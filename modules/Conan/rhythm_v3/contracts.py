@@ -386,9 +386,16 @@ class DurationRuntimeState:
     prefix_unit_offset: torch.Tensor
     cached_duration_exec: Optional[torch.Tensor] = None
     local_rate_ema: Optional[torch.Tensor] = None
+    prefix_carry: Optional["PrefixCarryState"] = None
     since_last_boundary: Optional[torch.Tensor] = None
     frontend_state: Optional[StreamingUnitizerState] = None
     consumed_content_steps: Optional[torch.Tensor] = None
+
+    def __post_init__(self) -> None:
+        if self.prefix_carry is None and isinstance(self.local_rate_ema, torch.Tensor):
+            self.prefix_carry = PrefixCarryState(mode="ema", main=self.local_rate_ema)
+        elif self.local_rate_ema is None and self.prefix_carry is not None:
+            self.local_rate_ema = self.prefix_carry.main
 
     @property
     def commit_frontier(self) -> torch.Tensor:
@@ -401,6 +408,125 @@ class DurationRuntimeState:
     @property
     def backlog(self) -> torch.Tensor:
         return self.prefix_unit_offset.float().clamp_min(0.0)
+
+@dataclass
+class PrefixCarryState:
+    mode: str
+    main: Optional[torch.Tensor] = None
+    ema_fast: Optional[torch.Tensor] = None
+    ema_slow: Optional[torch.Tensor] = None
+    reliability: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class GlobalRateContract:
+    prompt_variant: str
+    prompt_trim_ratio: float
+    prompt_drop_edge_runs: int
+    prompt_min_boundary_confidence: Optional[float]
+    src_variant: str
+    src_trim_ratio: float
+    src_drop_edge_runs: int
+    src_min_boundary_confidence: Optional[float]
+    min_support_log_iqr: float
+    min_support_log_span: float
+    min_support_unique: int
+
+
+@dataclass(frozen=True)
+class PrefixContract:
+    stat_mode: str
+    init_mode: str
+    min_support: int
+    local_rate_decay: float
+    local_rate_decay_fast: float
+    local_rate_decay_slow: float
+    local_rate_slow_mix: float
+
+
+@dataclass(frozen=True)
+class ProjectionContract:
+    integer_projection_mode: str
+    integer_projection_anchor_mode: str
+    prefix_budget_pos: int
+    prefix_budget_neg: int
+    dynamic_budget_ratio: float
+    min_prefix_budget: int
+    max_prefix_budget: int
+    budget_mode: str
+    boundary_carry_decay: float
+    boundary_offset_decay: Optional[float]
+    boundary_reset_thresh: float
+    repair_max_steps: int
+    repair_speech_bonus: float
+    repair_boundary_penalty: float
+
+
+def _optional_float(value) -> Optional[float]:
+    return None if value is None else float(value)
+
+
+def resolve_global_rate_contract(hparams, *, strict: bool) -> GlobalRateContract:
+    if strict:
+        required = (
+            "rhythm_v3_prompt_g_variant",
+            "rhythm_v3_prompt_g_trim_ratio",
+            "rhythm_v3_src_g_variant",
+            "rhythm_v3_src_g_trim_ratio",
+        )
+        missing = [key for key in required if key not in hparams]
+        if missing:
+            raise ValueError("Missing explicit V1 global-rate keys: " + ", ".join(missing))
+    return GlobalRateContract(
+        prompt_variant=normalize_global_rate_variant(hparams["rhythm_v3_prompt_g_variant"]),
+        prompt_trim_ratio=float(hparams["rhythm_v3_prompt_g_trim_ratio"]),
+        prompt_drop_edge_runs=int(hparams.get("rhythm_v3_prompt_g_drop_edge_runs", 0) or 0),
+        prompt_min_boundary_confidence=_optional_float(
+            hparams.get("rhythm_v3_prompt_min_boundary_confidence_for_g", None)
+        ),
+        src_variant=normalize_global_rate_variant(hparams["rhythm_v3_src_g_variant"]),
+        src_trim_ratio=float(hparams["rhythm_v3_src_g_trim_ratio"]),
+        src_drop_edge_runs=int(hparams.get("rhythm_v3_src_g_drop_edge_runs", 0) or 0),
+        src_min_boundary_confidence=_optional_float(
+            hparams.get("rhythm_v3_src_min_boundary_confidence_for_g", None)
+        ),
+        min_support_log_iqr=float(hparams.get("rhythm_v3_min_support_log_iqr_for_g", 0.0) or 0.0),
+        min_support_log_span=float(hparams.get("rhythm_v3_min_support_log_span_for_g", 0.0) or 0.0),
+        min_support_unique=int(hparams.get("rhythm_v3_min_support_unique_for_g", 1) or 1),
+    )
+
+
+def resolve_prefix_contract(hparams) -> PrefixContract:
+    return PrefixContract(
+        stat_mode=str(hparams.get("rhythm_v3_src_prefix_stat_mode", "ema") or "ema").strip().lower(),
+        init_mode=str(hparams.get("rhythm_v3_src_rate_init_mode", "first_speech") or "first_speech").strip().lower(),
+        min_support=int(hparams.get("rhythm_v3_src_prefix_min_support", 3) or 3),
+        local_rate_decay=float(hparams.get("rhythm_v3_local_rate_decay", 0.95) or 0.95),
+        local_rate_decay_fast=float(hparams.get("rhythm_v3_local_rate_decay_fast", 0.80) or 0.80),
+        local_rate_decay_slow=float(hparams.get("rhythm_v3_local_rate_decay_slow", 0.97) or 0.97),
+        local_rate_slow_mix=float(hparams.get("rhythm_v3_local_rate_slow_mix", 0.65) or 0.65),
+    )
+
+
+def resolve_projection_contract(hparams) -> ProjectionContract:
+    return ProjectionContract(
+        integer_projection_mode=str(hparams.get("rhythm_v3_integer_projection_mode", "greedy") or "greedy").strip().lower(),
+        integer_projection_anchor_mode=str(
+            hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded"
+        ).strip().lower(),
+        prefix_budget_pos=int(hparams.get("rhythm_v3_prefix_budget_pos", hparams.get("rhythm_v3_unit_budget_pos", 24)) or 24),
+        prefix_budget_neg=int(hparams.get("rhythm_v3_prefix_budget_neg", hparams.get("rhythm_v3_unit_budget_neg", 24)) or 24),
+        dynamic_budget_ratio=float(hparams.get("rhythm_v3_dynamic_budget_ratio", 0.0) or 0.0),
+        min_prefix_budget=int(hparams.get("rhythm_v3_min_prefix_budget", 0) or 0),
+        max_prefix_budget=int(hparams.get("rhythm_v3_max_prefix_budget", 0) or 0),
+        budget_mode=str(hparams.get("rhythm_v3_budget_mode", "total") or "total").strip().lower(),
+        boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
+        boundary_offset_decay=_optional_float(hparams.get("rhythm_v3_boundary_offset_decay", None)),
+        boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
+        repair_max_steps=int(hparams.get("rhythm_v3_projection_repair_max_steps", 0) or 0),
+        repair_speech_bonus=float(hparams.get("rhythm_v3_projection_repair_speech_bonus", 1.0) or 0.0),
+        repair_boundary_penalty=float(hparams.get("rhythm_v3_projection_repair_boundary_penalty", 0.35) or 0.0),
+    )
 
 
 @dataclass
@@ -1268,6 +1394,17 @@ def move_duration_runtime_state(
         prefix_unit_offset=_move_tensor(state.prefix_unit_offset, device=device),
         cached_duration_exec=_move_tensor(state.cached_duration_exec, device=device),
         local_rate_ema=_move_tensor(state.local_rate_ema, device=device),
+        prefix_carry=(
+            None
+            if state.prefix_carry is None
+            else PrefixCarryState(
+                mode=str(state.prefix_carry.mode),
+                main=_move_tensor(state.prefix_carry.main, device=device),
+                ema_fast=_move_tensor(state.prefix_carry.ema_fast, device=device),
+                ema_slow=_move_tensor(state.prefix_carry.ema_slow, device=device),
+                reliability=_move_tensor(state.prefix_carry.reliability, device=device),
+            )
+        ),
         since_last_boundary=_move_tensor(state.since_last_boundary, device=device),
         frontend_state=frontend_state,
         consumed_content_steps=_move_tensor(state.consumed_content_steps, device=device),
@@ -1310,7 +1447,16 @@ def ensure_duration_runtime_state_batch(
         raise ValueError(
             f"DurationRuntimeState.prefix_unit_offset must be rank-2 [B, 1], got shape={tuple(state.prefix_unit_offset.shape)}."
         )
-    for name in ("local_rate_ema", "since_last_boundary", "consumed_content_steps"):
+    if state.prefix_carry is not None:
+        for name in ("main", "ema_fast", "ema_slow", "reliability"):
+            value = getattr(state.prefix_carry, name)
+            if value is None:
+                continue
+            if value.dim() != 2 or value.size(1) != 1:
+                raise ValueError(
+                    f"DurationRuntimeState.prefix_carry.{name} must be rank-2 [B, 1], got shape={tuple(value.shape)}."
+                )
+    for name in ("since_last_boundary", "consumed_content_steps"):
         value = getattr(state, name)
         if value is None:
             continue

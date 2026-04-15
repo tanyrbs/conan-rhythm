@@ -1,0 +1,16 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Official strict-gate overlay.
+# This is the only maintained entrypoint that should hard-enforce the checked-in
+# `rhythm_v3_gate_status.json` pass bits and contract fingerprint.
+rhythm_v3_gate_quality_strict: true
+rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json
+
+# When strict gate is enabled, official learned training stays blocked until the
+# maintained online contract clears Gate2 under the same fingerprint.
+rhythm_v3_require_gate2_for_official_train: true
+
+# Strict evaluation mode should fail hard on invalid prompt conditioning during
+# official claims; keep base recipe permissive for repair runs.
+rhythm_v3_strict_eval_invalid_g: true
+

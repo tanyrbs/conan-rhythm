@@ -30,6 +30,11 @@ from tasks.Conan.rhythm.duration_v3.task_config import (
     is_duration_v3_prompt_summary_backbone,
     resolve_duration_v3_rate_mode,
 )
+from tasks.Conan.rhythm.duration_v3.gate_contract import (
+    build_runtime_contract_fingerprint_from_values,
+    build_runtime_contract_fingerprint_json_from_values,
+    build_runtime_contract_id_from_values,
+)
 
 _PROMPT_UNIT_REQUIRED_KEYS = (
     "prompt_content_units",
@@ -179,6 +184,7 @@ class ConanDurationAdapter(nn.Module):
             boundary_carry_decay=float(hparams.get("rhythm_v3_boundary_carry_decay", 0.25) or 0.25),
             boundary_offset_decay=hparams.get("rhythm_v3_boundary_offset_decay", None),
             boundary_reset_thresh=float(hparams.get("rhythm_v3_boundary_reset_thresh", 0.5) or 0.5),
+            projection_mode=str(hparams.get("rhythm_v3_projection_mode", "greedy") or "greedy"),
             integer_projection_mode=str(
                 hparams.get(
                     "rhythm_v3_integer_projection_mode",
@@ -189,16 +195,14 @@ class ConanDurationAdapter(nn.Module):
             integer_projection_anchor_mode=str(
                 hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded"
             ),
-            prefix_projection_candidate_radius=int(
-                hparams.get("rhythm_v3_prefix_projection_candidate_radius", 2) or 2
-            ),
-            prefix_projection_max_states=int(hparams.get("rhythm_v3_prefix_projection_max_states", 256) or 256),
-            prefix_projection_terminal_carry_weight=float(
-                hparams.get("rhythm_v3_prefix_projection_terminal_carry_weight", 0.25) or 0.0
-            ),
-            prefix_projection_terminal_offset_weight=float(
-                hparams.get("rhythm_v3_prefix_projection_terminal_offset_weight", 0.05) or 0.0
-            ),
+            prefix_optimal_step_weight=float(hparams.get("rhythm_v3_prefix_optimal_step_weight", 0.10) or 0.10),
+            prefix_optimal_prefix_weight=float(hparams.get("rhythm_v3_prefix_optimal_prefix_weight", 1.00) or 1.00),
+            prefix_optimal_terminal_weight=float(hparams.get("rhythm_v3_prefix_optimal_terminal_weight", 1.00) or 1.00),
+            prefix_optimal_boundary_weight=float(hparams.get("rhythm_v3_prefix_optimal_boundary_weight", 0.75) or 0.75),
+            prefix_optimal_coarse_weight=float(hparams.get("rhythm_v3_prefix_optimal_coarse_weight", 0.50) or 0.50),
+            prefix_optimal_phrase_final_boost=float(hparams.get("rhythm_v3_prefix_optimal_phrase_final_boost", 1.50) or 1.50),
+            prefix_optimal_max_window=int(hparams.get("rhythm_v3_prefix_optimal_max_window", 96) or 96),
+            prefix_optimal_max_states=int(hparams.get("rhythm_v3_prefix_optimal_max_states", 97) or 97),
             projection_repair_max_steps=int(hparams.get("rhythm_v3_projection_repair_max_steps", 0) or 0),
             projection_repair_speech_bonus=float(
                 hparams.get("rhythm_v3_projection_repair_speech_bonus", 1.0) or 0.0
@@ -224,6 +228,10 @@ class ConanDurationAdapter(nn.Module):
             min_boundary_confidence_for_g=hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
             prompt_domain_mode=str(hparams.get("rhythm_v3_prompt_domain_mode", "minimal_strict") or "minimal_strict"),
             prompt_require_clean_support=bool(hparams.get("rhythm_v3_prompt_require_clean_support", True)),
+            require_prompt_ref_len_gate=bool(hparams.get("rhythm_v3_require_prompt_ref_len_gate", False)),
+            min_prompt_support_runs=int(hparams.get("rhythm_v3_min_prompt_support_runs", 3) or 0),
+            min_prompt_support_fraction=float(hparams.get("rhythm_v3_min_prompt_support_fraction", 0.20) or 0.0),
+            min_prompt_support_weight=float(hparams.get("rhythm_v3_min_prompt_support_weight", 2.0) or 0.0),
             prompt_g_variant=str(
                 hparams.get(
                     "rhythm_v3_prompt_g_variant",
@@ -719,6 +727,166 @@ class ConanDurationAdapter(nn.Module):
             )
         return enriched
 
+    def _collect_contract_meta(self) -> dict[str, object]:
+        prompt_domain_mode = str(getattr(self.module, "prompt_domain_mode", "minimal_strict"))
+        prompt_ref_len_contract_active = prompt_domain_mode.strip().lower() == "minimal_strict"
+        min_prompt_ref_len_sec = None
+        max_prompt_ref_len_sec = None
+        if prompt_ref_len_contract_active:
+            min_prompt_ref_len_sec = float(getattr(self.module, "min_prompt_ref_len_sec", 0.0) or 0.0)
+            max_prompt_ref_len_sec = float(getattr(self.module, "max_prompt_ref_len_sec", 0.0) or 0.0)
+        values: dict[str, object] = {
+            "rhythm_v3_g_variant": str(getattr(self.module, "g_variant", "raw_median")),
+            "rhythm_v3_g_trim_ratio": float(getattr(self.module, "g_trim_ratio", 0.2)),
+            "rhythm_v3_drop_edge_runs_for_g": int(getattr(self.module, "g_drop_edge_runs", 0)),
+            "rhythm_v3_min_boundary_confidence_for_g": (
+                None
+                if getattr(self.module, "min_boundary_confidence_for_g", None) is None
+                else float(self.module.min_boundary_confidence_for_g)
+            ),
+            "rhythm_v3_min_prompt_speech_ratio": float(
+                getattr(self.module, "min_prompt_speech_ratio", self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6))
+            ),
+            "rhythm_v3_min_prompt_ref_len_sec": min_prompt_ref_len_sec,
+            "rhythm_v3_max_prompt_ref_len_sec": max_prompt_ref_len_sec,
+            "rhythm_v3_disallow_same_text_reference": bool(
+                self.hparams.get("rhythm_v3_disallow_same_text_reference", True)
+            ),
+            "rhythm_v3_disallow_same_text_paired_target": bool(
+                self.hparams.get("rhythm_v3_disallow_same_text_paired_target", False)
+            ),
+            "rhythm_v3_require_same_text_paired_target": bool(
+                self.hparams.get("rhythm_v3_require_same_text_paired_target", True)
+            ),
+            "rhythm_v3_strict_eval_invalid_g": bool(
+                self.hparams.get("rhythm_v3_strict_eval_invalid_g", True)
+            ),
+            "rhythm_v3_alignment_prefilter_bad_samples": bool(
+                self.hparams.get("rhythm_v3_alignment_prefilter_bad_samples", False)
+            ),
+            "rhythm_v3_alignment_prefilter_max_attempts": int(
+                self.hparams.get("rhythm_v3_alignment_prefilter_max_attempts", 4) or 0
+            ),
+            "rhythm_v3_alignment_unmatched_speech_ratio_max": float(
+                self.hparams.get("rhythm_v3_alignment_unmatched_speech_ratio_max", 1.0) or 0.0
+            ),
+            "rhythm_v3_alignment_mean_local_confidence_speech_min": float(
+                self.hparams.get("rhythm_v3_alignment_mean_local_confidence_speech_min", 0.0) or 0.0
+            ),
+            "rhythm_v3_alignment_mean_coarse_confidence_speech_min": float(
+                self.hparams.get("rhythm_v3_alignment_mean_coarse_confidence_speech_min", 0.0) or 0.0
+            ),
+            "rhythm_v3_alignment_local_margin_p10_min": float(
+                self.hparams.get("rhythm_v3_alignment_local_margin_p10_min", 0.0) or 0.0
+            ),
+            "rhythm_v3_prompt_domain_mode": prompt_domain_mode,
+            "rhythm_v3_prompt_require_clean_support": bool(
+                getattr(self.module, "prompt_require_clean_support", True)
+            ),
+            "rhythm_v3_prompt_g_variant": str(
+                getattr(self.module, "prompt_g_variant", getattr(self.module, "g_variant", "raw_median"))
+            ),
+            "rhythm_v3_prompt_g_trim_ratio": float(
+                getattr(self.module, "prompt_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+            ),
+            "rhythm_v3_prompt_g_drop_edge_runs": int(
+                getattr(self.module, "prompt_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
+            ),
+            "rhythm_v3_prompt_min_boundary_confidence_for_g": (
+                None
+                if getattr(self.module, "prompt_min_boundary_confidence_for_g", None) is None
+                else float(self.module.prompt_min_boundary_confidence_for_g)
+            ),
+            "rhythm_v3_src_g_variant": str(
+                getattr(self.module, "src_g_variant", getattr(self.module, "g_variant", "raw_median"))
+            ),
+            "rhythm_v3_src_g_trim_ratio": float(
+                getattr(self.module, "src_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
+            ),
+            "rhythm_v3_src_g_drop_edge_runs": int(
+                getattr(self.module, "src_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
+            ),
+            "rhythm_v3_src_min_boundary_confidence_for_g": (
+                None
+                if getattr(self.module, "src_min_boundary_confidence_for_g", None) is None
+                else float(self.module.src_min_boundary_confidence_for_g)
+            ),
+            "rhythm_v3_prompt_ref_len_contract_active": prompt_ref_len_contract_active,
+            "rhythm_v3_src_prefix_stat_mode": str(getattr(self.module, "src_prefix_stat_mode", "ema")),
+            "rhythm_v3_src_prefix_min_support": int(getattr(self.module, "src_prefix_min_support", 3)),
+            "rhythm_v3_src_rate_init_mode": str(getattr(self.module, "src_rate_init_mode", "first_speech")),
+            "rhythm_v3_use_src_gap_in_coarse_head": bool(getattr(self.module, "use_src_gap_in_coarse_head", False)),
+            "rhythm_v3_analytic_gap_clip": float(getattr(self.module, "analytic_gap_clip", 0.35)),
+            "rhythm_v3_prefix_budget_pos": int(getattr(self.module.projector, "prefix_budget_pos", 24)),
+            "rhythm_v3_prefix_budget_neg": int(getattr(self.module.projector, "prefix_budget_neg", 24)),
+            "rhythm_v3_dynamic_budget_ratio": float(getattr(self.module.projector, "dynamic_budget_ratio", 0.0)),
+            "rhythm_v3_min_prefix_budget": int(getattr(self.module.projector, "min_prefix_budget", 0)),
+            "rhythm_v3_max_prefix_budget": int(getattr(self.module.projector, "max_prefix_budget", 0)),
+            "rhythm_v3_budget_mode": str(getattr(self.module.projector, "budget_mode", "total")),
+            "rhythm_v3_boundary_carry_decay": float(getattr(self.module.projector, "boundary_carry_decay", 0.25)),
+            "rhythm_v3_boundary_offset_decay": float(getattr(self.module.projector, "boundary_offset_decay", 0.25)),
+            "rhythm_v3_boundary_reset_thresh": float(getattr(self.module.projector, "boundary_reset_thresh", 0.5)),
+            "rhythm_v3_projection_mode": str(getattr(self.module.projector, "projection_mode", "greedy")),
+            "rhythm_v3_integer_projection_mode": str(
+                getattr(
+                    self.module.projector,
+                    "integer_projection_mode",
+                    getattr(self.module.projector, "projection_mode", "greedy"),
+                )
+            ),
+            "rhythm_v3_integer_projection_anchor_mode": str(
+                getattr(self.module.projector, "integer_projection_anchor_mode", "rounded")
+            ),
+            "rhythm_v3_prefix_optimal_step_weight": float(
+                getattr(self.module.projector, "prefix_optimal_step_weight", 0.10)
+            ),
+            "rhythm_v3_prefix_optimal_prefix_weight": float(
+                getattr(self.module.projector, "prefix_optimal_prefix_weight", 1.00)
+            ),
+            "rhythm_v3_prefix_optimal_terminal_weight": float(
+                getattr(self.module.projector, "prefix_optimal_terminal_weight", 1.00)
+            ),
+            "rhythm_v3_prefix_optimal_boundary_weight": float(
+                getattr(self.module.projector, "prefix_optimal_boundary_weight", 0.75)
+            ),
+            "rhythm_v3_prefix_optimal_coarse_weight": float(
+                getattr(self.module.projector, "prefix_optimal_coarse_weight", 0.50)
+            ),
+            "rhythm_v3_prefix_optimal_phrase_final_boost": float(
+                getattr(self.module.projector, "prefix_optimal_phrase_final_boost", 1.50)
+            ),
+            "rhythm_v3_prefix_optimal_max_window": int(
+                getattr(self.module.projector, "prefix_optimal_max_window", 96)
+            ),
+            "rhythm_v3_prefix_optimal_max_states": int(
+                getattr(self.module.projector, "prefix_optimal_max_states", 97)
+            ),
+            "rhythm_v3_projection_repair_max_steps": int(
+                getattr(self.module.projector, "projection_repair_max_steps", 0)
+            ),
+            "rhythm_v3_projection_repair_speech_bonus": float(
+                getattr(self.module.projector, "projection_repair_speech_bonus", 1.0)
+            ),
+            "rhythm_v3_projection_repair_boundary_penalty": float(
+                getattr(self.module.projector, "projection_repair_boundary_penalty", 0.35)
+            ),
+            "rhythm_v3_use_continuous_alignment": bool(
+                self.hparams.get("rhythm_v3_use_continuous_alignment", False)
+            ),
+            "rhythm_v3_alignment_mode": str(
+                self.hparams.get("rhythm_v3_alignment_mode", "continuous_viterbi_v1")
+                or "continuous_viterbi_v1"
+            ),
+            "rhythm_v3_minimal_v1_profile": bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False)),
+            "rhythm_v3_strict_minimal_claim_profile": bool(
+                self.hparams.get("rhythm_v3_strict_minimal_claim_profile", True)
+            ),
+        }
+        values["rhythm_v3_control_contract_fingerprint"] = build_runtime_contract_fingerprint_json_from_values(values)
+        values["rhythm_v3_control_contract_id"] = build_runtime_contract_id_from_values(values)
+        values["rhythm_v3_control_contract_values"] = build_runtime_contract_fingerprint_from_values(values)
+        return values
+
     def _validate_training_reference_semantics(
         self,
         *,
@@ -804,40 +972,9 @@ class ConanDurationAdapter(nn.Module):
         ret["rhythm_v3_baseline_train_mode"] = self.baseline_train_mode
         ret["rhythm_v3_source_residual_gain"] = float(self.module.source_residual_gain)
         ret["rhythm_v3_eval_mode"] = self.module.eval_mode
-        ret["rhythm_v3_g_variant"] = self.module.g_variant
-        ret["rhythm_v3_g_trim_ratio"] = float(getattr(self.module, "g_trim_ratio", 0.2))
-        ret["rhythm_v3_min_boundary_confidence_for_g"] = (
-            None
-            if getattr(self.module, "min_boundary_confidence_for_g", None) is None
-            else float(self.module.min_boundary_confidence_for_g)
-        )
-        ret["rhythm_v3_prompt_g_variant"] = str(
-            getattr(self.module, "prompt_g_variant", self.module.g_variant)
-        )
-        ret["rhythm_v3_prompt_g_trim_ratio"] = float(
-            getattr(self.module, "prompt_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
-        )
-        ret["rhythm_v3_prompt_g_drop_edge_runs"] = int(
-            getattr(self.module, "prompt_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
-        )
-        ret["rhythm_v3_prompt_min_boundary_confidence_for_g"] = (
-            None
-            if getattr(self.module, "prompt_min_boundary_confidence_for_g", None) is None
-            else float(self.module.prompt_min_boundary_confidence_for_g)
-        )
-        ret["rhythm_v3_src_g_variant"] = str(
-            getattr(self.module, "src_g_variant", self.module.g_variant)
-        )
-        ret["rhythm_v3_src_g_trim_ratio"] = float(
-            getattr(self.module, "src_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
-        )
-        ret["rhythm_v3_src_g_drop_edge_runs"] = int(getattr(self.module, "g_drop_edge_runs", 0))
-        ret["rhythm_v3_src_min_boundary_confidence_for_g"] = (
-            None
-            if getattr(self.module, "min_boundary_confidence_for_g", None) is None
-            else float(self.module.min_boundary_confidence_for_g)
-        )
-        src_prefix_stat_mode = str(getattr(self.module, "src_prefix_stat_mode", "ema"))
+        contract_meta = self._collect_contract_meta()
+        ret.update({k: v for k, v in contract_meta.items() if k != "rhythm_v3_control_contract_values"})
+        src_prefix_stat_mode = str(contract_meta["rhythm_v3_src_prefix_stat_mode"])
         ret["rhythm_v3_src_prefix_stat_mode"] = src_prefix_stat_mode
         ret["rhythm_v3_src_prefix_requires_full_history"] = float(
             src_prefix_stat_mode_requires_full_history(src_prefix_stat_mode)
@@ -847,124 +984,8 @@ class ConanDurationAdapter(nn.Module):
             if src_prefix_stat_mode_requires_full_history(src_prefix_stat_mode)
             else "state_safe_runtime"
         )
-        ret["rhythm_v3_src_rate_init_mode"] = str(
-            getattr(self.module, "src_rate_init_mode", "first_speech")
-        )
-        ret["rhythm_v3_src_prefix_min_support"] = float(
-            getattr(self.module, "src_prefix_min_support", 3)
-        )
-        ret["rhythm_v3_prompt_domain_mode"] = str(
-            getattr(self.module, "prompt_domain_mode", "minimal_strict")
-        )
-        ret["rhythm_v3_prompt_require_clean_support"] = float(
-            bool(getattr(self.module, "prompt_require_clean_support", True))
-        )
-        ret["rhythm_v3_prompt_g_variant"] = str(
-            getattr(self.module, "prompt_g_variant", getattr(self.module, "g_variant", "raw_median"))
-        )
-        ret["rhythm_v3_src_g_variant"] = str(
-            getattr(self.module, "src_g_variant", getattr(self.module, "g_variant", "raw_median"))
-        )
-        ret["rhythm_v3_min_prompt_speech_ratio"] = float(
-            getattr(self.module, "min_prompt_speech_ratio", self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6))
-        )
-        ret["rhythm_v3_min_prompt_ref_len_sec"] = float(
-            self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0
-        )
-        ret["rhythm_v3_max_prompt_ref_len_sec"] = float(
-            self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0
-        )
-        ret["rhythm_v3_disallow_same_text_reference"] = float(
-            bool(self.hparams.get("rhythm_v3_disallow_same_text_reference", True))
-        )
-        ret["rhythm_v3_disallow_same_text_paired_target"] = float(
-            bool(self.hparams.get("rhythm_v3_disallow_same_text_paired_target", False))
-        )
-        ret["rhythm_v3_require_same_text_paired_target"] = float(
-            bool(self.hparams.get("rhythm_v3_require_same_text_paired_target", True))
-        )
-        ret["rhythm_v3_strict_eval_invalid_g"] = float(
-            bool(self.hparams.get("rhythm_v3_strict_eval_invalid_g", True))
-        )
-        ret["rhythm_v3_alignment_prefilter_bad_samples"] = float(
-            bool(self.hparams.get("rhythm_v3_alignment_prefilter_bad_samples", False))
-        )
-        ret["rhythm_v3_alignment_prefilter_max_attempts"] = float(
-            self.hparams.get("rhythm_v3_alignment_prefilter_max_attempts", 4) or 0
-        )
-        ret["rhythm_v3_alignment_unmatched_speech_ratio_max"] = float(
-            self.hparams.get("rhythm_v3_alignment_unmatched_speech_ratio_max", 1.0) or 0.0
-        )
-        ret["rhythm_v3_alignment_mean_local_confidence_speech_min"] = float(
-            self.hparams.get("rhythm_v3_alignment_mean_local_confidence_speech_min", 0.0) or 0.0
-        )
-        ret["rhythm_v3_alignment_mean_coarse_confidence_speech_min"] = float(
-            self.hparams.get("rhythm_v3_alignment_mean_coarse_confidence_speech_min", 0.0) or 0.0
-        )
-        ret["rhythm_v3_alignment_local_margin_p10_min"] = float(
-            self.hparams.get("rhythm_v3_alignment_local_margin_p10_min", 0.0) or 0.0
-        )
-        ret["rhythm_v3_use_src_gap_in_coarse_head"] = float(
-            bool(getattr(self.module, "use_src_gap_in_coarse_head", False))
-        )
-        ret["rhythm_v3_analytic_gap_clip"] = float(getattr(self.module, "analytic_gap_clip", 0.35))
-        ret["rhythm_v3_minimal_v1_profile"] = float(bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False)))
-        ret["rhythm_v3_strict_minimal_claim_profile"] = float(
-            bool(self.hparams.get("rhythm_v3_strict_minimal_claim_profile", True))
-        )
-        ret["rhythm_v3_use_continuous_alignment"] = float(
-            bool(self.hparams.get("rhythm_v3_use_continuous_alignment", False))
-        )
-        ret["rhythm_v3_alignment_mode"] = str(
-            self.hparams.get("rhythm_v3_alignment_mode", "continuous_viterbi_v1") or "continuous_viterbi_v1"
-        )
-        ret["rhythm_v3_prefix_budget_pos"] = float(getattr(self.module.projector, "prefix_budget_pos", 24))
-        ret["rhythm_v3_prefix_budget_neg"] = float(getattr(self.module.projector, "prefix_budget_neg", 24))
-        ret["rhythm_v3_dynamic_budget_ratio"] = float(getattr(self.module.projector, "dynamic_budget_ratio", 0.0))
-        ret["rhythm_v3_min_prefix_budget"] = float(getattr(self.module.projector, "min_prefix_budget", 0))
-        ret["rhythm_v3_max_prefix_budget"] = float(getattr(self.module.projector, "max_prefix_budget", 0))
-        ret["rhythm_v3_budget_mode"] = str(getattr(self.module.projector, "budget_mode", "total"))
-        ret["rhythm_v3_boundary_carry_decay"] = float(
-            getattr(self.module.projector, "boundary_carry_decay", 0.25)
-        )
-        ret["rhythm_v3_boundary_offset_decay"] = float(
-            getattr(self.module.projector, "boundary_offset_decay", 0.25)
-        )
-        ret["rhythm_v3_boundary_reset_thresh"] = float(
-            getattr(self.module.projector, "boundary_reset_thresh", 0.5)
-        )
-        ret["rhythm_v3_integer_projection_mode"] = str(
-            getattr(self.module.projector, "integer_projection_mode", "greedy")
-        )
-        ret["rhythm_v3_integer_projection_anchor_mode"] = str(
-            getattr(self.module.projector, "integer_projection_anchor_mode", "rounded")
-        )
-        ret["rhythm_v3_projection_repair_max_steps"] = float(
-            getattr(self.module.projector, "projection_repair_max_steps", 0)
-        )
-        ret["rhythm_v3_projection_repair_speech_bonus"] = float(
-            getattr(self.module.projector, "projection_repair_speech_bonus", 1.0)
-        )
-        ret["rhythm_v3_projection_repair_boundary_penalty"] = float(
-            getattr(self.module.projector, "projection_repair_boundary_penalty", 0.35)
-        )
-        ret["rhythm_v3_control_contract_id"] = (
-            f"prompt={ret['rhythm_v3_prompt_domain_mode']}"
-            f"|prompt_g={ret['rhythm_v3_prompt_g_variant']}"
-            f"|src_g={ret['rhythm_v3_src_g_variant']}"
-            f"|prefix={src_prefix_stat_mode}"
-            f"|src_init={ret['rhythm_v3_src_rate_init_mode']}"
-            f"|proj={ret['rhythm_v3_integer_projection_mode']}"
-            f"|anchor={ret['rhythm_v3_integer_projection_anchor_mode']}"
-            f"|budget={ret['rhythm_v3_budget_mode']}"
-            f"|budget_box={int(ret['rhythm_v3_prefix_budget_pos'])}/{int(ret['rhythm_v3_prefix_budget_neg'])}"
-            f"|clip={ret['rhythm_v3_analytic_gap_clip']:.2f}"
-            f"|srcgap={int(ret['rhythm_v3_use_src_gap_in_coarse_head'])}"
-            f"|prompt_speech={ret['rhythm_v3_min_prompt_speech_ratio']:.2f}"
-            f"|same_text_ref={int(ret['rhythm_v3_disallow_same_text_reference'])}"
-            f"|align_unmatched={ret['rhythm_v3_alignment_unmatched_speech_ratio_max']:.2f}"
-            f"|boundary={ret['rhythm_v3_boundary_carry_decay']:.2f}/{ret['rhythm_v3_boundary_offset_decay']:.2f}"
-        )
+        ret["rhythm_v3_src_rate_init_mode"] = str(ret["rhythm_v3_src_rate_init_mode"])
+        ret["rhythm_v3_src_prefix_min_support"] = float(ret["rhythm_v3_src_prefix_min_support"])
         ret["rhythm_v3_detach_global_term_in_local_head"] = float(
             bool(getattr(self.module, "detach_global_term_in_local_head", False))
         )
@@ -1297,11 +1318,13 @@ class ConanDurationAdapter(nn.Module):
                 "src_g_trim_ratio": float(
                     getattr(self.module, "src_g_trim_ratio", getattr(self.module, "g_trim_ratio", 0.2))
                 ),
-                "src_g_drop_edge_runs": float(getattr(self.module, "g_drop_edge_runs", 0)),
+                "src_g_drop_edge_runs": float(
+                    getattr(self.module, "src_g_drop_edge_runs", getattr(self.module, "g_drop_edge_runs", 0))
+                ),
                 "src_min_boundary_confidence_for_g": (
                     None
-                    if getattr(self.module, "min_boundary_confidence_for_g", None) is None
-                    else float(self.module.min_boundary_confidence_for_g)
+                    if getattr(self.module, "src_min_boundary_confidence_for_g", None) is None
+                    else float(self.module.src_min_boundary_confidence_for_g)
                 ),
                 "src_prefix_stat_mode": str(getattr(self.module, "src_prefix_stat_mode", "ema")),
                 "src_prefix_min_support": float(getattr(self.module, "src_prefix_min_support", 3)),
@@ -1587,11 +1610,7 @@ class ConanDurationAdapter(nn.Module):
                 "projector_preclamp_duration_exec": (
                     execution.projector_preclamp_duration_exec.detach()
                     if isinstance(getattr(execution, "projector_preclamp_duration_exec", None), torch.Tensor)
-                    else (
-                        execution.projector_preclamp_exec.detach()
-                        if isinstance(getattr(execution, "projector_preclamp_exec", None), torch.Tensor)
-                        else None
-                    )
+                    else None
                 ),
                 "projector_prefreeze_exec": (
                     execution.projector_prefreeze_exec.detach()
@@ -1650,11 +1669,7 @@ class ConanDurationAdapter(nn.Module):
                 "projector_projection_regret": (
                     execution.projector_projection_regret.detach()
                     if isinstance(getattr(execution, "projector_projection_regret", None), torch.Tensor)
-                    else (
-                        execution.projector_rounding_regret.detach()
-                        if isinstance(getattr(execution, "projector_rounding_regret", None), torch.Tensor)
-                        else None
-                    )
+                    else None
                 ),
                 "projector_preclamp_prefix_cumsum": (
                     execution.projector_preclamp_prefix_cumsum.detach()

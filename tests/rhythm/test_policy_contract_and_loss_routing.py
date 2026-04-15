@@ -17,7 +17,7 @@ from tasks.Conan.rhythm.loss_routing import (
     route_conan_optimizer_losses,
     update_public_loss_aliases,
 )
-from tasks.Conan.rhythm.targets import scale_rhythm_loss_terms
+from tasks.Conan.rhythm.common.targets_impl import scale_rhythm_loss_terms
 
 
 class PolicyContractAndLossRoutingTests(unittest.TestCase):

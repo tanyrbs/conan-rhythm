@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from tasks.Conan.rhythm.v1_task_mixin import RhythmV1TaskMixin
 
 
 class _DummyCallableModel:
@@ -25,7 +25,7 @@ class _DummyCallableModel:
         }
 
 
-class _ModuleOnlyValidationTask(RhythmConanTaskMixin):
+class _ModuleOnlyValidationTask(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.model = _DummyCallableModel()
         self.global_step = 0
@@ -42,7 +42,7 @@ class _ModuleOnlyValidationTask(RhythmConanTaskMixin):
         losses["rhythm_exec_speech"] = torch.tensor(1.0)
 
 
-class _TeacherOfflineEvalTask(RhythmConanTaskMixin):
+class _TeacherOfflineEvalTask(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.model = _DummyCallableModel()
         self.global_step = 0
@@ -61,7 +61,7 @@ class _SilentLogger:
         return None
 
 
-class _ValidationWithoutMelTask(RhythmConanTaskMixin):
+class _ValidationWithoutMelTask(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.global_step = 0
         self.mel_losses = {"l1": 1.0}
@@ -72,7 +72,7 @@ class _ValidationWithoutMelTask(RhythmConanTaskMixin):
         return {"rhythm_exec_speech": torch.tensor(1.0)}, {"rhythm_teacher_only_stage": 1.0}
 
 
-class _TrainingObservabilityTask(RhythmConanTaskMixin):
+class _TrainingObservabilityTask(RhythmV1TaskMixin):
     def __init__(self) -> None:
         self.global_step = 0
         self.mel_disc = None
@@ -115,7 +115,7 @@ class RuntimeValidationAlignmentTests(unittest.TestCase):
     def test_module_only_validation_skips_acoustic_and_pitch_objectives(self) -> None:
         task = _ModuleOnlyValidationTask()
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "random_speaker_steps": 0,
                 "rhythm_stage": "student_kd",
@@ -141,7 +141,7 @@ class RuntimeValidationAlignmentTests(unittest.TestCase):
     def test_teacher_offline_validation_uses_teacher_only_branch(self) -> None:
         task = _TeacherOfflineEvalTask()
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "random_speaker_steps": 0,
                 "rhythm_stage": "teacher_offline",
@@ -163,22 +163,22 @@ class RuntimeValidationAlignmentTests(unittest.TestCase):
     def test_validation_step_tolerates_teacher_only_output_without_mel(self) -> None:
         task = _ValidationWithoutMelTask()
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "num_valid_plots": 1,
                 "audio_sample_rate": 16000,
             },
             clear=True,
         ):
-            with mock.patch("tasks.Conan.rhythm.task_mixin.build_rhythm_metric_dict", return_value={}):
-                with mock.patch("tasks.Conan.rhythm.task_mixin.compute_reporting_total_loss", return_value=1.0):
+            with mock.patch("tasks.Conan.rhythm.v1_task_mixin.build_rhythm_metric_dict", return_value={}):
+                with mock.patch("tasks.Conan.rhythm.v1_task_mixin.compute_reporting_total_loss", return_value=1.0):
                     outputs = task.validation_step(self._sample(), batch_idx=0)
         self.assertEqual(outputs["total_loss"], 1.0)
 
     def test_training_step_exposes_runtime_observability_scalars(self) -> None:
         task = _TrainingObservabilityTask()
         with mock.patch.dict(
-            "tasks.Conan.rhythm.task_mixin.hparams",
+            "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
                 "disc_start_steps": 999999,
                 "lambda_mel_adv": 0.0,

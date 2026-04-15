@@ -443,12 +443,11 @@ def test_validate_rhythm_training_hparams_allows_unit_norm_when_strict_claim_dis
     validate_rhythm_training_hparams(hparams)
 
 
-def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_src_gap_in_coarse_head():
+def test_validate_rhythm_training_hparams_accepts_minimal_v1_profile_with_src_gap_in_coarse_head():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
     hparams["rhythm_v3_use_src_gap_in_coarse_head"] = True
-    with pytest.raises(ValueError, match="rhythm_v3_use_src_gap_in_coarse_head=false"):
-        validate_rhythm_training_hparams(hparams)
+    validate_rhythm_training_hparams(hparams)
 
 
 def test_validate_rhythm_training_hparams_allows_src_gap_in_coarse_head_when_strict_claim_disabled():
@@ -580,6 +579,27 @@ def test_validate_rhythm_training_hparams_rejects_missing_gate2_when_official_tr
     hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
     hparams["rhythm_v3_require_gate2_for_official_train"] = True
     with pytest.raises(ValueError, match="requires gate2_pass=true"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_local_candidate_gate_status_under_strict_gate(tmp_path):
+    gate_status = tmp_path / "rhythm_v3_gate_status_local_candidate_debug.json"
+    gate_status.write_text(
+        json.dumps(
+            {
+                "gate0_pass": True,
+                "gate1_pass": True,
+                "gate2_pass": True,
+                "contract_fingerprint": _build_gate_contract_fingerprint(_minimal_prompt_summary_v1_hparams()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(gate_status)
+    with pytest.raises(ValueError, match="local-candidate gate status JSON"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -717,12 +737,9 @@ def test_validate_rhythm_training_hparams_reports_schema_before_failed_gate_bits
 @pytest.mark.parametrize(
     ("config_rel", "status_rel"),
     (
-        ("egs/conan_emformer_rhythm_v3.yaml", "egs/overrides/rhythm_v3_gate_status.json"),
-        ("egs/overrides/rhythm_v3_local_weighted_exact.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260414.json"),
-        ("egs/overrides/rhythm_v3_gate2_exec_candidate_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_exec.json"),
-        ("egs/overrides/rhythm_v3_gate2_exec_candidate_dual_ema_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_dualema.json"),
-        ("egs/overrides/rhythm_v3_gate2_prefix_optimal_candidate_20260415.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_prefixopt.json"),
-        ("egs/overrides/rhythm_v3_gate3_learned.yaml", "egs/overrides/rhythm_v3_gate_status_local_candidate_20260415_gate3.json"),
+        # The checked-in official gate status JSON corresponds to the strict
+        # official-gate overlay, not the permissive base recipe.
+        ("egs/overrides/rhythm_v3_official_strict_gate.yaml", "egs/overrides/rhythm_v3_gate_status.json"),
     ),
 )
 def test_checked_in_gate_status_fingerprints_match_current_configs(config_rel, status_rel):
@@ -735,14 +752,14 @@ def test_checked_in_gate_status_fingerprints_match_current_configs(config_rel, s
 @pytest.mark.parametrize(
     "config_rel",
     (
-        "egs/overrides/rhythm_v3_gate2_coarse_only.yaml",
-        "egs/local_arctic_rhythm_v3_quick_gate2.yaml",
-        "egs/overrides/rhythm_v3_gate3_learned.yaml",
-        "egs/local_arctic_rhythm_v3_quick_gate3.yaml",
+        # Only strict official entrypoints should remain hard-blocked by the
+        # checked-in gate status JSON. Diagnostic overlays must remain runnable.
+        "egs/overrides/rhythm_v3_official_strict_gate.yaml",
     ),
 )
-def test_checked_in_local_candidate_training_entrypoints_validate(config_rel):
-    validate_rhythm_training_hparams(_load_yaml_chain(ROOT / config_rel))
+def test_checked_in_official_training_entrypoints_remain_blocked_without_gate_pass(config_rel):
+    with pytest.raises(ValueError, match="gate0_pass=true and gate1_pass=true"):
+        validate_rhythm_training_hparams(_load_yaml_chain(ROOT / config_rel))
 
 
 @pytest.mark.parametrize(
@@ -788,18 +805,17 @@ def test_validate_rhythm_training_hparams_rejects_invalid_budget_mode():
 def test_validate_rhythm_training_hparams_accepts_prefix_optimal_integer_projection():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
-    hparams["rhythm_v3_integer_projection_mode"] = "prefix_optimal"
+    hparams["rhythm_v3_projection_mode"] = "prefix_optimal"
     hparams["rhythm_v3_integer_projection_anchor_mode"] = "continuous"
-    hparams["rhythm_v3_prefix_projection_candidate_radius"] = 2
-    hparams["rhythm_v3_prefix_projection_max_states"] = 32
+    hparams["rhythm_v3_prefix_optimal_max_states"] = 32
     validate_rhythm_training_hparams(hparams)
 
 
 def test_validate_rhythm_training_hparams_rejects_invalid_integer_projection_mode():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
-    hparams["rhythm_v3_integer_projection_mode"] = "bad_mode"
-    with pytest.raises(ValueError, match="rhythm_v3_integer_projection_mode"):
+    hparams["rhythm_v3_projection_mode"] = "bad_mode"
+    with pytest.raises(ValueError, match="rhythm_v3_projection_mode"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -901,6 +917,25 @@ def test_validate_rhythm_training_hparams_rejects_invalid_prompt_ref_len_order()
     hparams["rhythm_v3_min_prompt_ref_len_sec"] = 8.0
     hparams["rhythm_v3_max_prompt_ref_len_sec"] = 3.0
     with pytest.raises(ValueError, match="prompt_ref_len_sec"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_allows_inactive_prompt_ref_len_contract_for_meaningful_reference():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_prompt_domain_mode"] = "meaningful_reference"
+    hparams["rhythm_v3_min_prompt_ref_len_sec"] = 0.0
+    hparams["rhythm_v3_max_prompt_ref_len_sec"] = 0.0
+    validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_non_ema_prefix_mode_under_strict_gate():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_gate_quality_strict"] = True
+    hparams["rhythm_v3_required_gate_status_json"] = str(ROOT / "egs/overrides/rhythm_v3_gate_status.json")
+    hparams["rhythm_v3_src_prefix_stat_mode"] = "exact_global_family"
+    with pytest.raises(ValueError, match="official strict gate currently only permits"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -1695,7 +1730,12 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_src_g_variant: weighted_median" in source
     assert "rhythm_v3_prompt_require_clean_support: false" in source
     assert "rhythm_v3_drop_edge_runs_for_g: 1" in source
-    assert "rhythm_v3_min_boundary_confidence_for_g: 0.5" in source
+    assert "rhythm_v3_min_boundary_confidence_for_g: null" in source
+    assert "rhythm_v3_boundary_confidence_soft_floor: 0.35" in source
+    assert "rhythm_v3_min_prompt_support_runs: 3" in source
+    assert "rhythm_v3_min_prompt_support_fraction: 0.20" in source
+    assert "rhythm_v3_min_prompt_support_weight: 2.0" in source
+    assert "rhythm_v3_require_prompt_ref_len_gate: false" in source
     assert "rhythm_v3_use_continuous_alignment: true" in source
     assert "rhythm_v3_alignment_mode: continuous_viterbi_v1" in source
     assert "rhythm_v3_alignment_lambda_emb: 1.0" in source
@@ -1711,9 +1751,9 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_freeze_src_rate_init: true" in source
     assert "rhythm_v3_debug_export: true" in source
     assert "rhythm_v3_strict_minimal_claim_profile: true" in source
-    assert "rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json" in source
-    assert "rhythm_v3_require_gate2_for_official_train: true" in source
-    assert "rhythm_v3_strict_eval_invalid_g: true" in source
+    # Base recipe stays permissive; strict official gating lives in overlays.
+    assert "rhythm_v3_gate_quality_strict: false" in source
+    assert "rhythm_v3_strict_eval_invalid_g: false" in source
     assert "rhythm_v3_use_src_gap_in_coarse_head: false" in source
     assert "rhythm_v3_min_prompt_speech_ratio: 0.60" in source
     assert "rhythm_v3_min_prompt_ref_len_sec: 3.0" in source
@@ -1733,6 +1773,12 @@ def test_maintained_v3_yaml_defaults_to_minimal_v1_global_stats_surface():
     assert "rhythm_v3_disallow_same_text_paired_target: false" in source
     assert "rhythm_v3_require_same_text_paired_target: true" in source
     assert "prompt_speech_mask" in source
+
+    strict_overlay = (ROOT / "egs" / "overrides" / "rhythm_v3_official_strict_gate.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "rhythm_v3_gate_quality_strict: true" in strict_overlay
+    assert "rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json" in strict_overlay
 
 
 def test_deprecated_v2_minimal_v1_yaml_now_aliases_v3_contract():

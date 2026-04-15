@@ -22,7 +22,7 @@ from tasks.Conan.rhythm.duration_v3.alignment_projection import (
     resolve_run_silence_mask as _resolve_run_silence_mask,
 )
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
-from tasks.Conan.rhythm.duration_v3.targets import build_pseudo_source_duration_context
+from tasks.Conan.rhythm.common.targets_impl import build_pseudo_source_duration_context
 from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 
 _ALIGNMENT_KIND_DISCRETE = "discrete"
@@ -771,6 +771,7 @@ class DurationV3DatasetMixin:
         prompt_closed_mask=None,
         prompt_boundary_confidence=None,
         min_boundary_confidence: float | None = None,
+        boundary_confidence_soft_floor: float | None = None,
         drop_edge_runs: int = 0,
         allow_shape_repair: bool = False,
     ) -> np.ndarray:
@@ -821,7 +822,9 @@ class DurationV3DatasetMixin:
                 resized.reshape(-1)[:limit] = closed_mask.reshape(-1)[:limit]
                 closed_mask = resized
             weight *= closed_mask.clip(0.0, 1.0)
-        if prompt_boundary_confidence is not None and min_boundary_confidence is not None:
+        if prompt_boundary_confidence is not None and (
+            min_boundary_confidence is not None or boundary_confidence_soft_floor is not None
+        ):
             boundary_conf = np.asarray(prompt_boundary_confidence, dtype=np.float32)
             if boundary_conf.shape != speech.shape:
                 if not bool(allow_shape_repair):
@@ -836,23 +839,32 @@ class DurationV3DatasetMixin:
                 boundary_conf = resized
             boundary_conf = boundary_conf.clip(0.0, 1.0)
             finite_mask = np.isfinite(boundary_conf)
-            active = (weight > 0.0) & finite_mask
-            if np.any(active):
-                active_bc = boundary_conf[active].astype(np.float32, copy=False)
-                q50 = float(np.quantile(active_bc, 0.50))
-                q75 = float(np.quantile(active_bc, 0.75))
-                center = q50
-                if min_boundary_confidence is not None:
-                    # Keep the configured hard gate for strict domain validity elsewhere, but
-                    # center weighting on the observed boundary scale so prompt weights do not
-                    # collapse when cache-side boundary scores live below a global absolute cut.
-                    center = min(center, float(min_boundary_confidence))
-                scale = max(1.0e-3, q75 - q50)
-                logits = np.clip((boundary_conf - center) / scale, -20.0, 20.0)
-                soft_bc = 1.0 / (1.0 + np.exp(-logits))
-                soft_bc = (0.10 + (0.90 * soft_bc)).astype(np.float32, copy=False)
-                soft_bc = np.where(finite_mask, soft_bc, np.zeros_like(soft_bc, dtype=np.float32))
-                weight *= soft_bc
+            if boundary_confidence_soft_floor is not None:
+                floor = float(boundary_confidence_soft_floor)
+                boundary_weight = np.clip(
+                    (boundary_conf - floor) / max(1.0e-6, 1.0 - floor),
+                    0.0,
+                    1.0,
+                ).astype(np.float32, copy=False)
+                boundary_weight = np.where(
+                    finite_mask,
+                    boundary_weight,
+                    np.zeros_like(boundary_weight, dtype=np.float32),
+                )
+                weight *= boundary_weight
+            else:
+                active = (weight > 0.0) & finite_mask
+                if np.any(active):
+                    active_bc = boundary_conf[active].astype(np.float32, copy=False)
+                    q50 = float(np.quantile(active_bc, 0.50))
+                    q75 = float(np.quantile(active_bc, 0.75))
+                    center = min(q50, float(min_boundary_confidence))
+                    scale = max(1.0e-3, q75 - q50)
+                    logits = np.clip((boundary_conf - center) / scale, -20.0, 20.0)
+                    soft_bc = 1.0 / (1.0 + np.exp(-logits))
+                    soft_bc = (0.10 + (0.90 * soft_bc)).astype(np.float32, copy=False)
+                    soft_bc = np.where(finite_mask, soft_bc, np.zeros_like(soft_bc, dtype=np.float32))
+                    weight *= soft_bc
         drop_edge_runs = max(0, int(drop_edge_runs))
         if drop_edge_runs > 0:
             active = np.flatnonzero(weight > 0.0)
@@ -907,40 +919,63 @@ class DurationV3DatasetMixin:
     def _strict_prompt_sidecars_required(self) -> bool:
         if not self._use_duration_v3_dataset_contract():
             return False
-        if not self._use_duration_v3_simple_global_stats():
-            return False
-        return bool(self.hparams.get("rhythm_v3_minimal_v1_profile", False))
+        return bool(self.hparams.get("rhythm_v3_require_prompt_sidecars_for_audit", False))
 
-    def _validate_minimal_prompt_reference_domain(
+    def _validate_prompt_information_sufficiency(
         self,
         *,
         speech_ratio_scalar: float | None,
+        support_count: float | None,
+        support_fraction: float | None,
+        support_weight: float | None,
         prompt_ref_len_sec: float | None,
+        prompt_ref_len_present: bool,
         context: str,
     ) -> None:
-        prompt_domain_mode = str(
-            self.hparams.get("rhythm_v3_prompt_domain_mode", "minimal_strict") or "minimal_strict"
-        ).strip().lower()
         min_ratio = float(self.hparams.get("rhythm_v3_min_prompt_speech_ratio", 0.6) or 0.0)
-        min_ref_sec = float(self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
-        max_ref_sec = float(self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
+        min_support_runs = int(self.hparams.get("rhythm_v3_min_prompt_support_runs", 3) or 0)
+        min_support_fraction = float(self.hparams.get("rhythm_v3_min_prompt_support_fraction", 0.20) or 0.0)
+        min_support_weight = float(self.hparams.get("rhythm_v3_min_prompt_support_weight", 2.0) or 0.0)
+        require_ref_len_gate = bool(self.hparams.get("rhythm_v3_require_prompt_ref_len_gate", False))
         if speech_ratio_scalar is None or not np.isfinite(float(speech_ratio_scalar)):
             raise RhythmDatasetPrefilterDrop(
-                f"minimal_v1 prompt conditioning rejects {context}: invalid speech_ratio"
+                f"prompt conditioning rejects {context}: invalid speech_ratio"
             )
         if speech_ratio_scalar < min_ratio:
             raise RhythmDatasetPrefilterDrop(
-                f"minimal_v1 prompt conditioning rejects {context}: speech_ratio={speech_ratio_scalar:.4f} < min={min_ratio:.4f}"
+                f"prompt conditioning rejects {context}: speech_ratio={speech_ratio_scalar:.4f} < min={min_ratio:.4f}"
             )
-        if prompt_domain_mode != "minimal_strict":
+        if support_count is None or float(support_count) < float(min_support_runs):
+            raise RhythmDatasetPrefilterDrop(
+                f"prompt conditioning rejects {context}: support_count={support_count!r} < min={min_support_runs}"
+            )
+        if support_fraction is None or not np.isfinite(float(support_fraction)):
+            raise RhythmDatasetPrefilterDrop(
+                f"prompt conditioning rejects {context}: invalid support_fraction"
+            )
+        if float(support_fraction) < min_support_fraction:
+            raise RhythmDatasetPrefilterDrop(
+                f"prompt conditioning rejects {context}: support_fraction={float(support_fraction):.4f} < min={min_support_fraction:.4f}"
+            )
+        if support_weight is None or not np.isfinite(float(support_weight)):
+            raise RhythmDatasetPrefilterDrop(
+                f"prompt conditioning rejects {context}: invalid support_weight"
+            )
+        if float(support_weight) < min_support_weight:
+            raise RhythmDatasetPrefilterDrop(
+                f"prompt conditioning rejects {context}: support_weight={float(support_weight):.4f} < min={min_support_weight:.4f}"
+            )
+        if not require_ref_len_gate or not prompt_ref_len_present:
             return
+        min_ref_sec = float(self.hparams.get("rhythm_v3_min_prompt_ref_len_sec", 3.0) or 0.0)
+        max_ref_sec = float(self.hparams.get("rhythm_v3_max_prompt_ref_len_sec", 8.0) or 0.0)
         if prompt_ref_len_sec is None or not np.isfinite(float(prompt_ref_len_sec)):
             raise RhythmDatasetPrefilterDrop(
-                f"minimal_v1 prompt conditioning rejects {context}: invalid ref_len_sec"
+                f"prompt conditioning rejects {context}: invalid ref_len_sec"
             )
         if prompt_ref_len_sec < min_ref_sec or prompt_ref_len_sec > max_ref_sec:
             raise RhythmDatasetPrefilterDrop(
-                f"minimal_v1 prompt conditioning rejects {context}: ref_len_sec={prompt_ref_len_sec:.3f} outside [{min_ref_sec:.1f}, {max_ref_sec:.1f}]"
+                f"prompt conditioning rejects {context}: ref_len_sec={prompt_ref_len_sec:.3f} outside [{min_ref_sec:.1f}, {max_ref_sec:.1f}]"
             )
 
     def _coerce_prompt_sidecar(
@@ -979,7 +1014,10 @@ class DurationV3DatasetMixin:
         closed_source = conditioning.get("prompt_closed_mask")
         if closed_source is None:
             closed_source = source_cache.get("sealed_mask")
-        if strict_sidecars and closed_source is None:
+        closed_present = bool(
+            np.asarray(conditioning.get("prompt_closed_mask_present", np.asarray([0.0], dtype=np.float32))).reshape(-1)[0] > 0.5
+        ) if "prompt_closed_mask_present" in conditioning else (closed_source is not None)
+        if strict_sidecars and not closed_present:
             raise RuntimeError(
                 "minimal_v1 prompt conditioning requires sealed_mask/prompt_closed_mask in prompt/reference cache."
             )
@@ -993,21 +1031,31 @@ class DurationV3DatasetMixin:
         boundary_source = conditioning.get("prompt_boundary_confidence")
         if boundary_source is None:
             boundary_source = source_cache.get("boundary_confidence")
-        if strict_sidecars and boundary_source is None:
+        boundary_present = bool(
+            np.asarray(conditioning.get("prompt_boundary_confidence_present", np.asarray([0.0], dtype=np.float32))).reshape(-1)[0] > 0.5
+        ) if "prompt_boundary_confidence_present" in conditioning else (boundary_source is not None)
+        if strict_sidecars and not boundary_present:
             raise RuntimeError(
                 "minimal_v1 prompt conditioning requires boundary_confidence/prompt_boundary_confidence in prompt/reference cache."
             )
         if boundary_source is None:
-            boundary_source = source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs))
+            boundary_source = source_cache.get("source_boundary_cue")
+        if boundary_source is None:
+            boundary_source = np.ones_like(prompt_duration_obs, dtype=np.float32)
         prompt_boundary_confidence = self._coerce_prompt_sidecar(
             name="prompt_boundary_confidence",
             value=boundary_source,
             reference=prompt_duration_obs,
-            default_value=0.0,
+            default_value=1.0,
             allow_shape_repair=allow_shape_repair,
         ) * prompt_valid_mask
         conditioning["prompt_closed_mask"] = prompt_closed_mask.astype(np.float32, copy=False)
+        conditioning["prompt_closed_mask_present"] = np.asarray([1.0 if closed_present else 0.0], dtype=np.float32)
         conditioning["prompt_boundary_confidence"] = prompt_boundary_confidence.astype(np.float32, copy=False)
+        conditioning["prompt_boundary_confidence_present"] = np.asarray(
+            [1.0 if boundary_present else 0.0],
+            dtype=np.float32,
+        )
         prompt_min_boundary_confidence = self.hparams.get(
             "rhythm_v3_prompt_min_boundary_confidence_for_g",
             self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None),
@@ -1041,6 +1089,7 @@ class DurationV3DatasetMixin:
             prompt_closed_mask=prompt_closed_mask,
             prompt_boundary_confidence=prompt_boundary_confidence,
             min_boundary_confidence=prompt_min_boundary_confidence,
+            boundary_confidence_soft_floor=self.hparams.get("rhythm_v3_boundary_confidence_soft_floor", None),
             drop_edge_runs=prompt_g_drop_edge_runs,
             allow_shape_repair=allow_shape_repair,
         )
@@ -1059,12 +1108,14 @@ class DurationV3DatasetMixin:
             prompt_duration_obs=prompt_duration_obs,
             prompt_item=prompt_item,
         )
-        if strict_sidecars and prompt_ref_len_sec is None:
+        prompt_ref_len_present = prompt_ref_len_sec is not None
+        if strict_sidecars and not prompt_ref_len_present:
             raise RuntimeError(
                 "minimal_v1 prompt conditioning requires prompt_ref_len_sec/ref_len_sec/dur_sec metadata "
                 "or hop_size+audio_sample_rate to resolve strict 3-8s reference gating."
             )
-        if prompt_ref_len_sec is not None:
+        conditioning["prompt_ref_len_present"] = np.asarray([1.0 if prompt_ref_len_present else 0.0], dtype=np.float32)
+        if prompt_ref_len_present:
             conditioning["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
         conditioning["g_trim_ratio"] = np.asarray([prompt_g_trim_ratio], dtype=np.float32)
         conditioning["prompt_g_trim_ratio"] = np.asarray([prompt_g_trim_ratio], dtype=np.float32)
@@ -1255,11 +1306,15 @@ class DurationV3DatasetMixin:
             )
             if prompt_ref_len_sec is not None:
                 augmented["prompt_ref_len_sec"] = np.asarray([prompt_ref_len_sec], dtype=np.float32)
+                augmented["prompt_ref_len_present"] = np.asarray([1.0], dtype=np.float32)
             elif self._strict_prompt_sidecars_required():
                 raise RuntimeError(
                     "minimal_v1 prompt augmentation requires hop_size+audio_sample_rate to recompute "
                     "prompt_ref_len_sec after truncation/dropout."
                 )
+            else:
+                augmented.pop("prompt_ref_len_sec", None)
+                augmented["prompt_ref_len_present"] = np.asarray([0.0], dtype=np.float32)
         return augmented
 
     def _build_reference_prompt_unit_conditioning(self, prompt_item, *, target_mode: str):
@@ -1367,11 +1422,15 @@ class DurationV3DatasetMixin:
         prompt_speech_mask = prompt_valid_mask * (1.0 - prompt_silence_mask.clip(0.0, 1.0))
         strict_sidecars = self._strict_prompt_sidecars_required()
         prompt_closed_source = source_cache.get("sealed_mask")
+        prompt_closed_present = prompt_closed_source is not None
         if prompt_closed_source is None and not strict_sidecars:
             prompt_closed_source = prompt_valid_mask
         prompt_boundary_source = source_cache.get("boundary_confidence")
+        prompt_boundary_present = prompt_boundary_source is not None
         if prompt_boundary_source is None and not strict_sidecars:
-            prompt_boundary_source = source_cache.get("source_boundary_cue", np.zeros_like(prompt_duration_obs))
+            prompt_boundary_source = source_cache.get("source_boundary_cue")
+            if prompt_boundary_source is None:
+                prompt_boundary_source = np.ones_like(prompt_duration_obs, dtype=np.float32)
         conditioning = {
             "prompt_content_units": prompt_content_units,
             "prompt_duration_obs": prompt_duration_obs,
@@ -1393,10 +1452,22 @@ class DurationV3DatasetMixin:
         }
         if prompt_closed_source is not None:
             conditioning["prompt_closed_mask"] = np.asarray(prompt_closed_source, dtype=np.float32) * prompt_valid_mask
+            conditioning["prompt_closed_mask_present"] = np.asarray(
+                [1.0 if prompt_closed_present else 0.0],
+                dtype=np.float32,
+            )
+        else:
+            conditioning["prompt_closed_mask_present"] = np.asarray([0.0], dtype=np.float32)
         if prompt_boundary_source is not None:
             conditioning["prompt_boundary_confidence"] = (
                 np.asarray(prompt_boundary_source, dtype=np.float32) * prompt_valid_mask
             )
+            conditioning["prompt_boundary_confidence_present"] = np.asarray(
+                [1.0 if prompt_boundary_present else 0.0],
+                dtype=np.float32,
+            )
+        else:
+            conditioning["prompt_boundary_confidence_present"] = np.asarray([0.0], dtype=np.float32)
         use_log_base_rate = not self._use_duration_v3_simple_global_stats()
         if use_log_base_rate and "unit_anchor_base" in source_cache:
             conditioning["prompt_unit_anchor_base"] = np.asarray(source_cache["unit_anchor_base"], dtype=np.float32)
@@ -1411,16 +1482,28 @@ class DurationV3DatasetMixin:
             source_cache=source_cache,
             prompt_item=prompt_item if isinstance(prompt_item, dict) else None,
         )
-        if self._strict_prompt_sidecars_required():
-            speech_ratio = float(np.asarray(conditioning["prompt_speech_ratio_scalar"], dtype=np.float32).reshape(-1)[0])
-            ref_len = None
-            if "prompt_ref_len_sec" in conditioning:
-                ref_len = float(np.asarray(conditioning["prompt_ref_len_sec"], dtype=np.float32).reshape(-1)[0])
-            self._validate_minimal_prompt_reference_domain(
-                speech_ratio_scalar=speech_ratio,
-                prompt_ref_len_sec=ref_len,
-                context=f"prompt conditioning for {item_name}",
-            )
+        prompt_global_weight = np.asarray(conditioning["prompt_global_weight"], dtype=np.float32)
+        prompt_speech = np.asarray(conditioning["prompt_speech_mask"], dtype=np.float32)
+        speech_total = float(np.sum(prompt_speech > 0.0, dtype=np.float64))
+        support_count = float(np.sum(prompt_global_weight > 0.0, dtype=np.float64))
+        support_fraction = 0.0 if speech_total <= 0.0 else support_count / speech_total
+        support_weight = float(np.sum(prompt_global_weight, dtype=np.float64))
+        speech_ratio = float(np.asarray(conditioning["prompt_speech_ratio_scalar"], dtype=np.float32).reshape(-1)[0])
+        ref_len = None
+        if "prompt_ref_len_sec" in conditioning:
+            ref_len = float(np.asarray(conditioning["prompt_ref_len_sec"], dtype=np.float32).reshape(-1)[0])
+        prompt_ref_len_present = bool(
+            np.asarray(conditioning.get("prompt_ref_len_present", np.asarray([0.0], dtype=np.float32))).reshape(-1)[0] > 0.5
+        )
+        self._validate_prompt_information_sufficiency(
+            speech_ratio_scalar=speech_ratio,
+            support_count=support_count,
+            support_fraction=support_fraction,
+            support_weight=support_weight,
+            prompt_ref_len_sec=ref_len,
+            prompt_ref_len_present=prompt_ref_len_present,
+            context=f"prompt conditioning for {item_name}",
+        )
         return conditioning
 
     @staticmethod

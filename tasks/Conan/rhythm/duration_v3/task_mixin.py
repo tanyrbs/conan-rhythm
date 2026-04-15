@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tasks.Conan.rhythm.duration_v3.targets import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
+from tasks.Conan.rhythm.common.targets_impl import DurationV3TargetBuildConfig, build_duration_v3_loss_targets
 from tasks.Conan.rhythm.duration_v3.task_config import is_duration_v3_prompt_summary_backbone
 from utils.commons.hparams import hparams
 

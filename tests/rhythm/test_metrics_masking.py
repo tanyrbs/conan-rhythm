@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.metrics import build_rhythm_metric_dict, build_rhythm_metric_sections
+from tasks.Conan.rhythm.common.metrics_impl import build_rhythm_metric_dict, build_rhythm_metric_sections
 
 
 class RhythmMetricMaskingTests(unittest.TestCase):

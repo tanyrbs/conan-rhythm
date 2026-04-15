@@ -16,14 +16,19 @@ from tasks.Conan.rhythm.config_contract import build_contract_context
 from tasks.Conan.rhythm.config_contract_cache_rules import validate_cache_field_contract
 from tasks.Conan.rhythm.dataset_contracts import RhythmDatasetCacheContract
 from tasks.Conan.rhythm.dataset_errors import RhythmDatasetPrefilterDrop
-from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+from tasks.Conan.rhythm.v1_dataset_mixin import RhythmV1DatasetMixin
 from tasks.Conan.rhythm.duration_v3.dataset_mixin import _align_target_runs_to_source_discrete
 from modules.Conan.rhythm_v3.source_cache import duration_v3_cache_meta_signature
 
 
-class _DummyDataset(RhythmConanDatasetMixin):
+class _DummyDataset(RhythmV1DatasetMixin):
     def __init__(self, hparams: dict):
-        self.hparams = hparams
+        self.hparams = {
+            "rhythm_v3_min_prompt_support_runs": 1,
+            "rhythm_v3_min_prompt_support_fraction": 0.0,
+            "rhythm_v3_min_prompt_support_weight": 0.0,
+            **hparams,
+        }
         self.prefix = "train"
 
 
@@ -49,7 +54,7 @@ class _RetryAssembler:
         return sample
 
 
-class _RetryDataset(RhythmConanDatasetMixin, _RetryDatasetBase):
+class _RetryDataset(RhythmV1DatasetMixin, _RetryDatasetBase):
     def __init__(self):
         self.hparams = {
             "rhythm_enable_v3": True,
@@ -501,7 +506,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         self.assertGreater(weights[3], 0.0)
         self.assertLess(weights[3], weights[0])
 
-    def test_minimal_v1_prompt_summary_conditioning_requires_closed_boundary_sidecars(self) -> None:
+    def test_minimal_v1_prompt_summary_conditioning_marks_missing_sidecars_without_hard_failure(self) -> None:
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
@@ -521,10 +526,12 @@ class RhythmCacheContractTests(unittest.TestCase):
             "source_silence_mask": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
             "source_run_stability": np.asarray([1.0, 0.9, 0.8], dtype=np.float32),
         }
-        with self.assertRaisesRegex(RuntimeError, "sealed_mask/prompt_closed_mask"):
-            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        self.assertEqual(float(np.asarray(conditioning["prompt_closed_mask_present"]).reshape(-1)[0]), 0.0)
+        self.assertEqual(float(np.asarray(conditioning["prompt_boundary_confidence_present"]).reshape(-1)[0]), 0.0)
+        self.assertTrue(np.allclose(conditioning["prompt_boundary_confidence"], np.ones((3,), dtype=np.float32)))
 
-    def test_minimal_v1_prompt_summary_conditioning_requires_prompt_ref_len_sidecar(self) -> None:
+    def test_minimal_v1_prompt_summary_conditioning_does_not_require_ref_len_sidecar_by_default(self) -> None:
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
@@ -547,8 +554,8 @@ class RhythmCacheContractTests(unittest.TestCase):
             "sealed_mask": np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
             "boundary_confidence": np.asarray([0.9, 0.9, 0.9], dtype=np.float32),
         }
-        with self.assertRaisesRegex(RuntimeError, "prompt_ref_len_sec/ref_len_sec/dur_sec"):
-            dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        conditioning = dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
+        self.assertEqual(float(np.asarray(conditioning["prompt_ref_len_present"]).reshape(-1)[0]), 0.0)
 
     def test_minimal_v1_prompt_summary_conditioning_prefilters_low_speech_ratio(self) -> None:
         dataset = _DummyDataset(
@@ -577,7 +584,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RhythmDatasetPrefilterDrop, "speech_ratio"):
             dataset._build_reference_prompt_unit_conditioning(prompt_item, target_mode="runtime_only")
 
-    def test_minimal_v1_prompt_summary_conditioning_prefilters_ref_len_out_of_range(self) -> None:
+    def test_minimal_v1_prompt_summary_conditioning_prefilters_ref_len_out_of_range_when_enabled(self) -> None:
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
@@ -587,6 +594,7 @@ class RhythmCacheContractTests(unittest.TestCase):
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_simple_global_stats": True,
                 "rhythm_v3_emit_silence_runs": True,
+                "rhythm_v3_require_prompt_ref_len_gate": True,
                 "hop_size": 0,
                 "audio_sample_rate": 0,
             }

@@ -2,7 +2,7 @@ from modules.Conan.Conan import Conan, ConanPostnet
 from modules.tts.iclspeech.multi_window_disc import Discriminator
 from tasks.Conan.base_gen_task import AuxDecoderMIDITask
 from tasks.Conan.dataset import ConanDataset
-from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from tasks.Conan.rhythm.v1_task_mixin import RhythmV1TaskMixin
 from modules.Conan.rhythm.stages import detect_rhythm_stage
 from utils.commons.hparams import hparams
 import torch
@@ -25,7 +25,7 @@ class ConanEmbTask(AuxDecoderMIDITask):
         return {}, {"style_embed": output}
 
 
-class ConanTask(RhythmConanTaskMixin, AuxDecoderMIDITask):
+class ConanTask(RhythmV1TaskMixin, AuxDecoderMIDITask):
     def __init__(self):
         super().__init__()
         self.dataset_cls = ConanDataset

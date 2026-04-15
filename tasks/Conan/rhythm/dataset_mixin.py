@@ -7,7 +7,56 @@ from tasks.Conan.rhythm.duration_v3.dataset_mixin import DurationV3DatasetMixin
 from tasks.Conan.rhythm.rhythm_v2.dataset_mixin import RhythmV2DatasetMixin
 
 
-class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, CommonRhythmDatasetMixin):
+class RhythmConanDatasetMixin(DurationV3DatasetMixin, CommonRhythmDatasetMixin):
+    """Maintained rhythm_v3 dataset shell."""
+
+    _RHYTHM_SOURCE_CACHE_KEYS = (
+        "content_units",
+        "dur_anchor_src",
+        "open_run_mask",
+        "sealed_mask",
+        "sep_hint",
+        "boundary_confidence",
+    )
+    _RHYTHM_SOURCE_DEBUG_CACHE_KEYS = (
+        "source_boundary_cue",
+        "phrase_group_index",
+        "phrase_group_pos",
+        "phrase_final_mask",
+    )
+    _RHYTHM_REF_CACHE_KEYS = (
+        "ref_rhythm_stats",
+        "ref_rhythm_trace",
+    )
+    _RHYTHM_REF_PROMPT_UNIT_KEYS = (
+        "prompt_content_units",
+        "prompt_duration_obs",
+        "prompt_unit_mask",
+        "prompt_valid_mask",
+        "prompt_speech_mask",
+        "prompt_closed_mask",
+        "prompt_closed_mask_present",
+        "prompt_boundary_confidence",
+        "prompt_boundary_confidence_present",
+        "prompt_ref_len_sec",
+        "prompt_ref_len_present",
+        "prompt_speech_ratio_scalar",
+        "prompt_global_weight",
+        "prompt_global_weight_present",
+        "prompt_unit_log_prior_present",
+        "prompt_unit_prior_vocab_size",
+        "prompt_unit_log_prior",
+        "prompt_unit_anchor_base",
+        "prompt_log_base",
+        "prompt_source_boundary_cue",
+        "prompt_phrase_group_pos",
+        "prompt_phrase_final_mask",
+    )
+
+
+class LegacyRhythmConanDatasetMixin(RhythmV2DatasetMixin, CommonRhythmDatasetMixin):
+    """Legacy rhythm_v2 dataset shell."""
+
     _RHYTHM_SOURCE_CACHE_KEYS = (
         "content_units",
         "dur_anchor_src",
@@ -274,4 +323,9 @@ class RhythmConanDatasetMixin(DurationV3DatasetMixin, RhythmV2DatasetMixin, Comm
     _RHYTHM_CACHE_AUDIT_KEYS = _RHYTHM_META_KEYS
 
 
-__all__ = ["RhythmConanDatasetMixin"]
+for _name, _value in list(vars(LegacyRhythmConanDatasetMixin).items()):
+    if _name.startswith("_RHYTHM_"):
+        setattr(RhythmConanDatasetMixin, _name, _value)
+
+
+__all__ = ["LegacyRhythmConanDatasetMixin", "RhythmConanDatasetMixin"]

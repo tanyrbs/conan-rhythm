@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
-from importlib import import_module
 
 import numpy as np
 import torch
@@ -114,23 +113,12 @@ class CommonRhythmDatasetMixin:
         missing: list[str] = []
         if item.get("prompt_speech_mask") is None and item.get("source_silence_mask") is None:
             missing.append("prompt_speech_mask/source_silence_mask")
-        if item.get("prompt_closed_mask") is None and item.get("sealed_mask") is None:
-            missing.append("prompt_closed_mask/sealed_mask")
-        has_ref_len = any(item.get(key) is not None for key in ("prompt_ref_len_sec", "ref_len_sec", "dur_sec"))
-        can_derive_ref_len = (
-            item.get("prompt_duration_obs") is not None or item.get("dur_anchor_src") is not None
-        ) and float(self.hparams.get("hop_size", 0.0) or 0.0) > 0.0 and float(
-            self.hparams.get("audio_sample_rate", 0.0) or 0.0
-        ) > 0.0
-        if not has_ref_len and not can_derive_ref_len:
-            missing.append("prompt_ref_len_sec/ref_len_sec/dur_sec")
-        min_bc = self.hparams.get("rhythm_v3_min_boundary_confidence_for_g", None)
-        if (
-            min_bc is not None
-            and item.get("prompt_boundary_confidence") is None
-            and item.get("boundary_confidence") is None
-        ):
-            missing.append("prompt_boundary_confidence/boundary_confidence")
+        if item.get("prompt_duration_obs") is None and item.get("dur_anchor_src") is None:
+            missing.append("prompt_duration_obs/dur_anchor_src")
+        if item.get("prompt_unit_mask") is None and item.get("prompt_valid_mask") is None:
+            can_derive_mask = item.get("prompt_duration_obs") is not None or item.get("dur_anchor_src") is not None
+            if not can_derive_mask:
+                missing.append("prompt_unit_mask/prompt_valid_mask")
         if missing:
             raise RuntimeError(f"{item_name}: missing minimal_v1 prompt sidecars {missing}")
 
@@ -310,8 +298,11 @@ class CommonRhythmDatasetMixin:
             "prompt_valid_mask": ("float", 0.0),
             "prompt_speech_mask": ("float", 0.0),
             "prompt_closed_mask": ("float", 0.0),
+            "prompt_closed_mask_present": ("float", 0.0),
             "prompt_boundary_confidence": ("float", 0.0),
+            "prompt_boundary_confidence_present": ("float", 0.0),
             "prompt_ref_len_sec": ("float", 0.0),
+            "prompt_ref_len_present": ("float", 0.0),
             "prompt_speech_ratio_scalar": ("float", 0.0),
             "prompt_global_weight": ("float", 0.0),
             "prompt_global_weight_present": ("float", 0.0),
@@ -867,16 +858,9 @@ class CommonRhythmDatasetMixin:
             prompt_source,
             target_mode=target_mode,
         )
-        if self._use_duration_v3_dataset_contract() and prompt_conditioning:
-            include_proxy = bool(self.hparams.get("rhythm_v3_include_proxy_conditioning", False))
-            if not include_proxy:
-                return prompt_conditioning
-        return self._build_legacy_reference_rhythm_conditioning(
-            ref_item,
-            sample,
-            target_mode=target_mode,
-            prompt_conditioning=prompt_conditioning,
-        )
+        if not self._use_duration_v3_dataset_contract():
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 dataset path.")
+        return prompt_conditioning
 
     def _build_paired_target_rhythm_conditioning(self, paired_target_item, sample, *, target_mode: str, item=None):
         del sample
@@ -892,9 +876,9 @@ class CommonRhythmDatasetMixin:
         )
 
     def _merge_rhythm_targets(self, item, source_cache, ref_conditioning, paired_target_conditioning, sample):
-        if self._use_duration_v3_dataset_contract():
-            return self._merge_duration_v3_rhythm_targets(item, source_cache, paired_target_conditioning, sample)
-        return self._merge_legacy_rhythm_targets(item, source_cache, ref_conditioning, sample)
+        if not self._use_duration_v3_dataset_contract():
+            raise RuntimeError("This repository is sealed to the rhythm_v3 V1 dataset path.")
+        return self._merge_duration_v3_rhythm_targets(item, source_cache, paired_target_conditioning, sample)
 
     def __getitem__(self, index):
         max_prefilter_attempts = 0
@@ -971,13 +955,4 @@ class CommonRhythmDatasetMixin:
         return batch
 
 
-__all__ = ["CommonRhythmDatasetMixin", "RhythmConanDatasetMixin"]
-
-
-def __getattr__(name: str):
-    if name != "RhythmConanDatasetMixin":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module("tasks.Conan.rhythm.dataset_mixin")
-    value = getattr(module, name)
-    globals()[name] = value
-    return value
+__all__ = ["CommonRhythmDatasetMixin"]

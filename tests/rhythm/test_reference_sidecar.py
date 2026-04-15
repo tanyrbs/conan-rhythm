@@ -17,7 +17,7 @@ from modules.Conan.rhythm.contracts import StreamingRhythmState
 from modules.Conan.rhythm.reference_encoder import sample_progress_trace
 from modules.Conan.rhythm.reference_selector import ReferenceSelector
 from modules.Conan.rhythm.supervision import build_source_phrase_cache
-from tasks.Conan.rhythm.dataset_mixin import RhythmConanDatasetMixin
+from tasks.Conan.rhythm.v1_dataset_mixin import RhythmV1DatasetMixin
 from tasks.Conan.rhythm.runtime_modes import build_rhythm_ref_conditioning
 
 
@@ -36,7 +36,7 @@ class ReferenceSidecarTests(unittest.TestCase):
         trace[:, :, 4] = 1.0
         return stats, trace
 
-    class _DummyDataset(RhythmConanDatasetMixin):
+    class _DummyDataset(RhythmV1DatasetMixin):
         def __init__(self):
             self.hparams = {
                 "rhythm_enable_v2": True,

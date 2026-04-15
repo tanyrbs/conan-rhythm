@@ -15,7 +15,7 @@ from tasks.Conan.rhythm.distill_confidence import (
     normalize_component_distill_confidence,
     normalize_distill_confidence,
 )
-from tasks.Conan.rhythm.targets import (
+from tasks.Conan.rhythm.common.targets_impl import (
     DistillConfidenceBundle,
     RhythmTargetBuildConfig,
     build_rhythm_loss_targets_from_sample,

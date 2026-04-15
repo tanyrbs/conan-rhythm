@@ -282,7 +282,7 @@ class OptionalDependencyGuardTests(unittest.TestCase):
             _restore_modules("data_gen.tts.txt_processors", removed)
 
     def test_task_mixin_import_does_not_require_g2p_en_at_import_time(self) -> None:
-        removed_task_mixin = _pop_modules("tasks.Conan.rhythm.task_mixin")
+        removed_task_mixin = _pop_modules("tasks.Conan.rhythm.v1_task_mixin")
         removed_base_task = _pop_modules("tasks.Conan.base_gen_task")
         removed_txt = _pop_modules("data_gen.tts.txt_processors")
         real_import = __import__
@@ -294,12 +294,12 @@ class OptionalDependencyGuardTests(unittest.TestCase):
 
         try:
             with mock.patch("builtins.__import__", side_effect=fake_import):
-                module = importlib.import_module("tasks.Conan.rhythm.task_mixin")
-            self.assertTrue(hasattr(module, "RhythmConanTaskMixin"))
+                module = importlib.import_module("tasks.Conan.rhythm.v1_task_mixin")
+            self.assertTrue(hasattr(module, "RhythmV1TaskMixin"))
         finally:
             _restore_modules("data_gen.tts.txt_processors", removed_txt)
             _restore_modules("tasks.Conan.base_gen_task", removed_base_task)
-            _restore_modules("tasks.Conan.rhythm.task_mixin", removed_task_mixin)
+            _restore_modules("tasks.Conan.rhythm.v1_task_mixin", removed_task_mixin)
 
     def test_get_txt_processor_cls_raises_clear_error_for_missing_optional_dependency(self) -> None:
         missing = ModuleNotFoundError("No module named 'g2p_en'")

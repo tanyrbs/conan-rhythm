@@ -10,12 +10,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tasks.Conan.rhythm.task_mixin import RhythmConanTaskMixin
+from tasks.Conan.rhythm.v1_task_mixin import RhythmV1TaskMixin
 from utils.commons.hparams import hparams
 from utils.metrics.ssim import ssim
 
 
-class _DummyTask(RhythmConanTaskMixin):
+class _DummyTask(RhythmV1TaskMixin):
     pass
 
 

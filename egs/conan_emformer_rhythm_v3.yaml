@@ -67,15 +67,22 @@ rhythm_v3_prompt_min_boundary_confidence_for_g: null
 rhythm_v3_src_g_variant: weighted_median
 rhythm_v3_src_g_trim_ratio: 0.2
 rhythm_v3_src_g_drop_edge_runs: 1
+rhythm_v3_prompt_information_gate: true
 rhythm_v3_min_prompt_speech_ratio: 0.60
+rhythm_v3_min_prompt_support_runs: 3
+rhythm_v3_min_prompt_support_fraction: 0.20
+rhythm_v3_min_prompt_support_weight: 2.0
+rhythm_v3_require_prompt_ref_len_gate: false
 rhythm_v3_min_prompt_ref_len_sec: 3.0
 rhythm_v3_max_prompt_ref_len_sec: 8.0
-rhythm_v3_min_boundary_confidence_for_g: 0.5
+rhythm_v3_min_boundary_confidence_for_g: null
+rhythm_v3_boundary_confidence_soft_floor: 0.35
 rhythm_v3_src_min_boundary_confidence_for_g: 0.5
-rhythm_v3_gate_quality_strict: true  # strict gate enforcement now baked into config validation
-rhythm_v3_required_gate_status_json: egs/overrides/rhythm_v3_gate_status.json  # checked-in online-maintained gate; exact upper-bound validation lives in rhythm_v3_gate_status_local_candidate_20260414.json and must not be treated as online unblock
-rhythm_v3_require_gate2_for_official_train: true  # official learned training stays blocked until Gate1-online + Gate2 are recorded under the same state-sufficient contract
-rhythm_v3_strict_eval_invalid_g: true
+# Base recipe keeps strict gate OFF so repair/falsification runs are not blocked
+# by the official gate JSON. Enable strict official gating only via:
+# - egs/overrides/rhythm_v3_official_strict_gate.yaml
+rhythm_v3_gate_quality_strict: false
+rhythm_v3_strict_eval_invalid_g: false
 # Only needed for g_variant=unit_norm. Build with scripts/build_unit_log_prior.py.
 rhythm_v3_unit_prior_path: null
 rhythm_v3_disable_local_residual: false
@@ -155,17 +162,21 @@ rhythm_v3_src_prefix_min_support: 3
 rhythm_v3_min_support_log_iqr_for_g: 0.08
 rhythm_v3_min_support_log_span_for_g: 0.18
 rhythm_v3_min_support_unique_for_g: 3
-rhythm_v3_enable_shared_beta1_probe: false
-rhythm_v3_beta1_min: 0.7
-rhythm_v3_beta1_max: 1.3
-rhythm_v3_beta1_min_points: 24
-rhythm_v3_beta1_min_var: 0.0025
 rhythm_v3_src_rate_init_value: 0.0
 # Minimal V1 keeps silence on a constant clip surface. Short-gap / leading-silence
 # shaping remain non-minimal-only knobs and are intentionally omitted here.
 rhythm_v3_boundary_offset_decay: 0.60
 rhythm_v3_boundary_carry_decay: 0.25
 rhythm_v3_boundary_reset_thresh: 0.55
+rhythm_v3_projection_mode: greedy  # greedy | prefix_optimal
+rhythm_v3_prefix_optimal_step_weight: 0.10
+rhythm_v3_prefix_optimal_prefix_weight: 1.00
+rhythm_v3_prefix_optimal_terminal_weight: 1.00
+rhythm_v3_prefix_optimal_boundary_weight: 0.75
+rhythm_v3_prefix_optimal_coarse_weight: 0.50
+rhythm_v3_prefix_optimal_phrase_final_boost: 1.50
+rhythm_v3_prefix_optimal_max_window: 96
+rhythm_v3_prefix_optimal_max_states: 97
 rhythm_source_phrase_threshold: 0.55
 rhythm_allow_eos_tail_flush_fallback: false
 rhythm_v3_disallow_same_text_reference: true

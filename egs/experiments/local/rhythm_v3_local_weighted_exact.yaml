@@ -1,0 +1,12 @@
+base_config: egs/conan_emformer_rhythm_v3.yaml
+
+# Probe-only upper-bound contract.
+# This file is for local/offline evidence and should not be used as a runnable
+# strict-training entrypoint while the official base still requires Gate2.
+rhythm_v3_g_variant: weighted_median
+rhythm_v3_src_prefix_stat_mode: exact_global_family
+rhythm_v3_drop_edge_runs_for_g: 1
+rhythm_v3_min_boundary_confidence_for_g: 0.5
+rhythm_v3_required_gate_status_json: egs/experiments/local/rhythm_v3_gate_status_local_candidate_20260414.json
+rhythm_v3_src_rate_init_mode: first_speech
+rhythm_v3_src_prefix_min_support: 3
