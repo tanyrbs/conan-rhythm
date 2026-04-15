@@ -1,4 +1,0 @@
-base_config: egs/conan_emformer_rhythm_v2_teacher_offline.yaml
-
-# Compatibility alias.
-# Prefer `egs/conan_emformer_rhythm_v2_teacher_offline.yaml` as the maintained stage-1 entry.

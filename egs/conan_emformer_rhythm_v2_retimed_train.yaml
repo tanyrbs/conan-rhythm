@@ -1,4 +1,0 @@
-base_config: egs/conan_emformer_rhythm_v2_student_retimed.yaml
-
-# Compatibility alias.
-# Prefer `egs/conan_emformer_rhythm_v2_student_retimed.yaml` as the maintained stage-3 entry.
