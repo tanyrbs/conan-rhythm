@@ -56,6 +56,17 @@ Use the repository surfaces like this:
 - official gate bundle: `egs/overrides/rhythm_v3_gate_status.json`
 - local experiments only: `egs/experiments/local/`
 - local example quick config: `egs/local_examples/local_arctic_rhythm_v3_quick.example.yaml`
+- local ARCTIC/L2-ARCTIC metadata builder: `scripts/build_local_arctic_l2_processed_metadata.py`
+
+## Local Quick Data Build
+
+For a machine-local ARCTIC/L2-ARCTIC quick path:
+
+1. Build processed metadata and pair manifests with `scripts/build_local_arctic_l2_processed_metadata.py`.
+2. Point an untracked local config at the generated `processed_data_dir` / `binary_data_dir`.
+3. Run `python -m data_gen.tts.runs.binarize --config <local-yaml>`.
+
+The maintained repo surface does not ship machine-specific paths. Keep local quick configs in ignored `egs/*.local.yaml` files.
 
 Local candidate configs, local gate JSON snapshots, and checkpoint-specific findings are diagnostics only. They are not part of the maintained online contract and must not be reused as official unblock evidence.
 

@@ -28,6 +28,12 @@ class CommonTaskRuntimeSupport:
     def mel_loss_names(self) -> tuple[str, ...]:
         return tuple(self.owner.mel_losses.keys())
 
+    def collect_runtime_offline_source_cache(self, sample, *, infer: bool):
+        # rhythm_v3 V1 does not maintain a secondary offline-source cache path.
+        # Keep the hook on the common runtime surface so sealed v3 callers do not
+        # depend on legacy/v2-only subclasses for a no-op implementation.
+        return None
+
     def route_conan_losses(self, losses, *, schedule_only_stage: bool) -> None:
         mel_loss_names = self.mel_loss_names()
         route_conan_optimizer_losses(

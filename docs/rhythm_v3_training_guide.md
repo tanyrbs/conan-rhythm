@@ -74,7 +74,27 @@ For machine-local quick experiments:
 
 - copy `egs/local_examples/local_arctic_rhythm_v3_quick.example.yaml`
 - write dataset-specific paths into an untracked local yaml
+- build local processed metadata + pair manifests with `scripts/build_local_arctic_l2_processed_metadata.py`
+- binarize with `python -m data_gen.tts.runs.binarize --config <local-yaml>`
 - keep local candidate configs under `egs/experiments/local/`
+
+## Local ARCTIC/L2-ARCTIC Quick Path
+
+The maintained local quick path assumes:
+
+- raw corpora only under a machine-local data root
+- explicit processed outputs:
+  `metadata.json`, `pairs.json`, `spker_set.json`, `build_summary.json`
+- binary outputs produced from the same local yaml used for later probes
+
+Use `scripts/build_local_arctic_l2_processed_metadata.py` to generate the processed layer. The script seals the local quick contract by:
+
+- assigning explicit `train/valid/test` split labels in metadata
+- emitting same-text paired targets via the native ARCTIC speaker
+- emitting different-text same-speaker prompt refs in `pairs.json`
+- writing canonical text strings so `rhythm_v3_require_same_text_paired_target=true` holds at dataset time
+
+This local quick path is diagnostic only. It does not modify the checked-in official gate bundle.
 
 ## Official Vs Diagnostic Surfaces
 

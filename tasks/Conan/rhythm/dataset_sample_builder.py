@@ -136,6 +136,10 @@ class RhythmDatasetSampleAssembler:
             "rhythm_teacher_confidence_shape",
             "rhythm_offline_teacher_confidence",
             "dur_anchor_src",
+            "source_duration_obs",
+            "unit_mask",
+            "rhythm_offline_source_duration_obs",
+            "rhythm_offline_unit_mask",
             "prompt_duration_obs",
             "prompt_unit_mask",
             "prompt_global_weight",
@@ -166,8 +170,10 @@ class RhythmDatasetSampleAssembler:
             "ref_phrase_ends",
             "rhythm_offline_content_units",
             "rhythm_offline_dur_anchor_src",
+            "sep_mask",
             "rhythm_offline_open_run_mask",
             "rhythm_offline_sep_hint",
+            "rhythm_offline_sep_mask",
             "rhythm_offline_phrase_group_index",
             "selector_meta_indices",
             "selector_meta_starts",
@@ -334,7 +340,7 @@ class RhythmDatasetSampleAssembler:
                 target_mode=target_mode,
                 item=item,
             )
-        rhythm_runtime_fields.update(source_cache)
+        rhythm_runtime_fields.update(self.owner._prefix_source_cache(source_cache, prefix=""))
         rhythm_runtime_fields.update(ref_conditioning)
         try:
             merged_targets = self.owner._merge_rhythm_targets(

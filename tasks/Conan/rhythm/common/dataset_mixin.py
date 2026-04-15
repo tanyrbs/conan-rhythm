@@ -264,11 +264,14 @@ class CommonRhythmDatasetMixin:
         return {
             "content_units": ("long", 0),
             "dur_anchor_src": ("float", 0.0),
+            "source_duration_obs": ("float", 0.0),
+            "unit_mask": ("float", 0.0),
             "unit_anchor_base": ("float", 0.0),
             "unit_rate_log_base": ("float", 0.0),
             "open_run_mask": ("long", 0),
             "sealed_mask": ("float", 0.0),
             "sep_hint": ("long", 0),
+            "sep_mask": ("long", 0),
             "boundary_confidence": ("float", 0.0),
             "source_silence_mask": ("float", 0.0),
             "source_run_stability": ("float", 0.0),
@@ -279,11 +282,14 @@ class CommonRhythmDatasetMixin:
             "rhythm_v3_cache_meta": ("object", None),
             "rhythm_offline_content_units": ("long", 0),
             "rhythm_offline_dur_anchor_src": ("long", 0),
+            "rhythm_offline_source_duration_obs": ("float", 0.0),
+            "rhythm_offline_unit_mask": ("float", 0.0),
             "rhythm_offline_source_silence_mask": ("float", 0.0),
             "rhythm_offline_source_run_stability": ("float", 0.0),
             "rhythm_offline_open_run_mask": ("long", 0),
             "rhythm_offline_sealed_mask": ("float", 0.0),
             "rhythm_offline_sep_hint": ("long", 0),
+            "rhythm_offline_sep_mask": ("long", 0),
             "rhythm_offline_boundary_confidence": ("float", 0.0),
             "rhythm_offline_source_boundary_cue": ("float", 0.0),
             "rhythm_offline_phrase_group_index": ("long", 0),
@@ -543,7 +549,16 @@ class CommonRhythmDatasetMixin:
 
     @staticmethod
     def _prefix_source_cache(cache: dict, *, prefix: str) -> dict:
-        return {f"{prefix}{key}": value for key, value in cache.items()}
+        payload = {f"{prefix}{key}": value for key, value in cache.items()}
+        duration = cache.get("dur_anchor_src")
+        if duration is not None and f"{prefix}source_duration_obs" not in payload:
+            payload[f"{prefix}source_duration_obs"] = duration
+        if duration is not None and f"{prefix}unit_mask" not in payload:
+            payload[f"{prefix}unit_mask"] = (np.asarray(duration) > 0).astype(np.float32)
+        sep_hint = cache.get("sep_hint")
+        if sep_hint is not None and f"{prefix}sep_mask" not in payload:
+            payload[f"{prefix}sep_mask"] = sep_hint
+        return payload
 
     @staticmethod
     def _coerce_content_sequence(content) -> list[int]:
