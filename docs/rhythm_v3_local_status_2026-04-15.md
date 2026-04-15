@@ -46,6 +46,28 @@ the Gate3 wiring fix, and the local quick-config dataset migration to
   `use_learned_residual_gate=true`
 - this is a local candidate wiring fix, not a Gate3 pass
 
+4. A projector/headroom falsification pass was run after the `src_gap`
+   candidate review.
+
+- boundary no-decay was falsified:
+  `rhythm_v3_boundary_carry_decay=1.0` and
+  `rhythm_v3_boundary_offset_decay=1.0` kept raw/preproj unchanged but worsened
+  execution collapse and drift
+- optional projector diagnostics were added for local experiments:
+  `rhythm_v3_integer_projection_mode=prefix_optimal` and
+  `rhythm_v3_integer_projection_anchor_mode=continuous`
+- the review CLI was fixed so `ref_bin=slow|mid|fast` is promoted to
+  `ref_condition`/`triplet_id` when loading debug-record bundles, and tempo
+  transfer uses `tempo_ref_runtime` or sign-correct source-gap instead of raw
+  `delta_g`
+- the strongest no-retrain execution-headroom probe so far is:
+  `rhythm_v3_analytic_gap_clip=0.80`,
+  `rhythm_v3_prefix_budget_pos=72`,
+  `rhythm_v3_prefix_budget_neg=72`,
+  `rhythm_v3_min_prefix_budget=24`,
+  `rhythm_v3_max_prefix_budget=96`,
+  `rhythm_v3_dynamic_budget_ratio=0.35`
+
 ## Current gate reading
 
 ### Gate0 / Gate1 upper-bound
@@ -68,6 +90,23 @@ Current reviewed result:
 - `analytic_tempo_tie_rate=0.6471`
 - `coarse_only_runtime_metrics.cumulative_drift=8.9612`
 - `coarse_only_control_regressions=["monotonicity_rate","speech_weighted_mae"]`
+
+Projector/headroom follow-up:
+
+- `boundary_carry_decay=1.0` / `boundary_offset_decay=1.0` is not the fix:
+  train exec range dropped and `budget_hit_any_rate` rose sharply
+- `prefix_optimal` projection and continuous-anchor debt tracking are now
+  available for controlled local trials, but on the current quick data they do
+  not materially change the Gate1 analytic result by themselves
+- wider budget plus `analytic_gap_clip=0.80` improves train transfer
+  (`monotone_source_count=7/12`, mean exec slope about `1.02`) but still fails
+  the gate because ties and non-monotone triplets remain
+- valid/test remain insufficient:
+  valid `1/3` exec pass, test `1/2` exec pass on the same no-retrain probe
+- the fixed review status for that best no-retrain probe still reads
+  `gate1_pass=false`, `gate2_pass=false`, `gate3_pass=false`,
+  `analytic_tempo_monotonicity_rate=0.50`,
+  `analytic_tempo_tie_rate=0.417`
 
 Interpretation:
 
@@ -120,6 +159,8 @@ So the next debugging priority is:
 
 - projector/clipping/budget/headroom
 - exec bucketization / tie formation
+- source-side state upgrades such as dual EMA before any non-streaming exact
+  family promotion
 - not simply increasing model freedom again
 
 ## Official vs local

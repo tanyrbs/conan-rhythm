@@ -13,6 +13,7 @@ from .frame_plan import build_frame_plan_from_execution
 def _project_row_recurrence_script(
     row_exec: torch.Tensor,
     row_source_rounded: torch.Tensor,
+    row_source_budget: torch.Tensor,
     row_speech: torch.Tensor,
     row_coarse: torch.Tensor,
     row_boundary: torch.Tensor,
@@ -35,6 +36,7 @@ def _project_row_recurrence_script(
         is_speech = bool(row_speech[offset] > 0.5)
         is_coarse_only = bool(row_coarse[offset] > 0.5)
         anchor = torch.clamp_min(row_source_rounded[offset], 1.0)
+        budget_anchor = torch.clamp_min(row_source_budget[offset], 1.0)
         if (not is_speech) and (not is_coarse_only):
             projected[offset] = anchor
             continue
@@ -42,13 +44,13 @@ def _project_row_recurrence_script(
         total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
         frames = torch.floor(total + 0.5)
         frames = torch.clamp_min(frames, 1.0)
-        lower = torch.ceil(anchor - (float(row_budget_neg) + prefix_offset[0]))
+        lower = torch.ceil(budget_anchor - (float(row_budget_neg) + prefix_offset[0]))
         lower = torch.clamp_min(lower, 1.0)
-        upper = torch.floor(anchor + (float(row_budget_pos) - prefix_offset[0]))
+        upper = torch.floor(budget_anchor + (float(row_budget_pos) - prefix_offset[0]))
         upper = torch.maximum(upper, lower)
         frames = torch.minimum(torch.maximum(frames, lower), upper)
         projected[offset] = frames
-        prefix_offset[0] = prefix_offset[0] + (frames - anchor)
+        prefix_offset[0] = prefix_offset[0] + (frames - budget_anchor)
         carry[0] = total - frames
 
         boundary_event = bool(row_boundary[offset] >= boundary_reset_thresh) or bool(row_phrase_final[offset] > 0.5)
@@ -72,6 +74,7 @@ def _project_row_recurrence_script(
 def _project_row_recurrence_no_boundary_script(
     row_exec: torch.Tensor,
     row_source_rounded: torch.Tensor,
+    row_source_budget: torch.Tensor,
     row_speech: torch.Tensor,
     row_coarse: torch.Tensor,
     carry_init: torch.Tensor,
@@ -87,6 +90,7 @@ def _project_row_recurrence_no_boundary_script(
         is_speech = bool(row_speech[offset] > 0.5)
         is_coarse_only = bool(row_coarse[offset] > 0.5)
         anchor = torch.clamp_min(row_source_rounded[offset], 1.0)
+        budget_anchor = torch.clamp_min(row_source_budget[offset], 1.0)
         if (not is_speech) and (not is_coarse_only):
             projected[offset] = anchor
             continue
@@ -94,15 +98,264 @@ def _project_row_recurrence_no_boundary_script(
         total = torch.clamp_min(row_exec[offset] + carry[0], 0.0)
         frames = torch.floor(total + 0.5)
         frames = torch.clamp_min(frames, 1.0)
-        lower = torch.ceil(anchor - (float(row_budget_neg) + prefix_offset[0]))
+        lower = torch.ceil(budget_anchor - (float(row_budget_neg) + prefix_offset[0]))
         lower = torch.clamp_min(lower, 1.0)
-        upper = torch.floor(anchor + (float(row_budget_pos) - prefix_offset[0]))
+        upper = torch.floor(budget_anchor + (float(row_budget_pos) - prefix_offset[0]))
         upper = torch.maximum(upper, lower)
         frames = torch.minimum(torch.maximum(frames, lower), upper)
         projected[offset] = frames
-        prefix_offset[0] = prefix_offset[0] + (frames - anchor)
+        prefix_offset[0] = prefix_offset[0] + (frames - budget_anchor)
         carry[0] = total - frames
     return projected, carry, prefix_offset
+
+
+def _normalize_integer_projection_mode(value: str | None) -> str:
+    mode = str(value or "greedy").strip().lower()
+    aliases = {
+        "": "greedy",
+        "default": "greedy",
+        "nearest": "greedy",
+        "recurrent": "greedy",
+        "dp": "prefix_optimal",
+        "prefix": "prefix_optimal",
+        "prefix_dp": "prefix_optimal",
+        "closed_prefix": "prefix_optimal",
+        "closed_prefix_optimal": "prefix_optimal",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"greedy", "prefix_optimal"}:
+        raise ValueError(
+            f"Unsupported rhythm_v3_integer_projection_mode={value!r}. "
+            "Expected one of: greedy, prefix_optimal."
+        )
+    return mode
+
+
+def _normalize_integer_projection_anchor_mode(value: str | None) -> str:
+    mode = str(value or "rounded").strip().lower()
+    aliases = {
+        "": "rounded",
+        "default": "rounded",
+        "round": "rounded",
+        "source_rounded": "rounded",
+        "raw": "continuous",
+        "float": "continuous",
+        "source": "continuous",
+        "source_continuous": "continuous",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"rounded", "continuous"}:
+        raise ValueError(
+            f"Unsupported rhythm_v3_integer_projection_anchor_mode={value!r}. "
+            "Expected one of: rounded, continuous."
+        )
+    return mode
+
+
+def _project_row_prefix_optimal_python(
+    *,
+    row_exec: torch.Tensor,
+    row_source_rounded: torch.Tensor,
+    row_source_budget: torch.Tensor,
+    row_speech: torch.Tensor,
+    row_coarse: torch.Tensor,
+    row_boundary: torch.Tensor,
+    row_phrase_final: torch.Tensor,
+    carry_init: torch.Tensor,
+    prefix_offset_init: torch.Tensor,
+    row_budget_pos: int,
+    row_budget_neg: int,
+    boundary_carry_decay: float,
+    boundary_offset_decay: float,
+    boundary_reset_thresh: float,
+    candidate_radius: int,
+    max_states: int,
+    terminal_carry_weight: float,
+    terminal_offset_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Constrained projection over the currently closed prefix only.
+
+    The dynamic program keeps the same streaming contract as the recurrent
+    projector: cached units before this row slice are immutable, and the open
+    tail is not inspected. It only replaces local greedy rounding within the
+    newly committed prefix by a bounded shortest-path search over carry and
+    prefix-offset states.
+    """
+    device = row_exec.device
+    dtype = row_exec.dtype
+    num_units = int(row_exec.numel())
+    if num_units <= 0:
+        empty = torch.zeros_like(row_exec)
+        return empty, empty, empty, carry_init.reshape(1).to(device=device), prefix_offset_init.reshape(1).to(device=device)
+
+    projected = torch.zeros_like(row_exec)
+    boundary_hit = torch.zeros_like(row_exec)
+    boundary_decay = torch.zeros_like(row_exec)
+    candidate_radius = int(max(0, candidate_radius))
+    max_states = int(max(1, max_states))
+    terminal_carry_weight = float(max(0.0, terminal_carry_weight))
+    terminal_offset_weight = float(max(0.0, terminal_offset_weight))
+    row_budget_pos = int(max(0, row_budget_pos))
+    row_budget_neg = int(max(0, row_budget_neg))
+
+    initial_carry = float(carry_init.reshape(-1)[0].detach().cpu().item())
+    initial_offset = float(prefix_offset_init.reshape(-1)[0].detach().cpu().item())
+    # key -> (cost, path, carry, prefix_offset, hit_path, decay_path)
+    states: dict[tuple[int, int], tuple[float, tuple[float, ...], float, float, tuple[float, ...], tuple[float, ...]]] = {
+        (int(round(initial_offset * 1000.0)), int(round(initial_carry * 1000.0))): (
+            0.0,
+            tuple(),
+            initial_carry,
+            initial_offset,
+            tuple(),
+            tuple(),
+        )
+    }
+
+    for offset in range(num_units):
+        exec_value = float(row_exec[offset].detach().cpu().item())
+        anchor = max(float(row_source_rounded[offset].detach().cpu().item()), 1.0)
+        budget_anchor = max(float(row_source_budget[offset].detach().cpu().item()), 1.0)
+        is_speech = bool(float(row_speech[offset].detach().cpu().item()) > 0.5)
+        is_coarse_only = bool(float(row_coarse[offset].detach().cpu().item()) > 0.5)
+        if (not is_speech) and (not is_coarse_only):
+            next_states = {}
+            for key, (cost, path, carry, prefix_offset, hit_path, decay_path) in states.items():
+                next_states[key] = (
+                    cost,
+                    path + (anchor,),
+                    carry,
+                    prefix_offset,
+                    hit_path + (0.0,),
+                    decay_path + (0.0,),
+                )
+            states = next_states
+            continue
+
+        boundary_event = (
+            bool(float(row_boundary[offset].detach().cpu().item()) >= float(boundary_reset_thresh))
+            or bool(float(row_phrase_final[offset].detach().cpu().item()) > 0.5)
+        )
+        next_states: dict[
+            tuple[int, int],
+            tuple[float, tuple[float, ...], float, float, tuple[float, ...], tuple[float, ...]],
+        ] = {}
+        for cost, path, carry, prefix_offset, hit_path, decay_path in states.values():
+            total = max(float(exec_value) + float(carry), 0.0)
+            nearest = int(math.floor(total + 0.5))
+            lower = int(math.ceil(budget_anchor - (float(row_budget_neg) + float(prefix_offset))))
+            lower = max(lower, 1)
+            upper = int(math.floor(budget_anchor + (float(row_budget_pos) - float(prefix_offset))))
+            upper = max(upper, lower)
+            centers = {
+                nearest,
+                int(math.floor(total)),
+                int(math.ceil(total)),
+                int(math.floor(exec_value)),
+                int(math.ceil(exec_value)),
+            }
+            candidates: set[int] = {lower, upper}
+            for center in centers:
+                for delta in range(-candidate_radius, candidate_radius + 1):
+                    value = int(center + delta)
+                    if lower <= value <= upper:
+                        candidates.add(value)
+            if not candidates:
+                candidates.add(lower)
+
+            for frames_int in sorted(candidates):
+                frames = float(max(1, frames_int))
+                next_offset = float(prefix_offset) + (frames - budget_anchor)
+                if next_offset > float(row_budget_pos) + 1.0e-6:
+                    continue
+                if next_offset < -float(row_budget_neg) - 1.0e-6:
+                    continue
+                next_carry = total - frames
+                step_cost = abs(frames - total)
+                hit_value = 1.0 if boundary_event else 0.0
+                decay_value = 0.0
+                if boundary_event:
+                    if (
+                        float(boundary_carry_decay) < (1.0 - 1.0e-6)
+                        or float(boundary_offset_decay) < (1.0 - 1.0e-6)
+                    ):
+                        next_carry = next_carry * float(boundary_carry_decay)
+                        next_offset = max(
+                            -float(row_budget_neg),
+                            min(float(row_budget_pos), next_offset * float(boundary_offset_decay)),
+                        )
+                        decay_value = 1.0
+                next_cost = float(cost) + float(step_cost)
+                state_key = (
+                    int(round(next_offset * 1000.0)),
+                    int(round(next_carry * 1000.0)),
+                )
+                state_value = (
+                    next_cost,
+                    path + (frames,),
+                    next_carry,
+                    next_offset,
+                    hit_path + (hit_value,),
+                    decay_path + (decay_value,),
+                )
+                current = next_states.get(state_key)
+                if current is None or next_cost < current[0]:
+                    next_states[state_key] = state_value
+        if not next_states:
+            # Keep the old recurrence as a safe fallback for pathological rows.
+            return _project_row_recurrence_script(
+                row_exec=row_exec,
+                row_source_rounded=row_source_rounded,
+                row_source_budget=row_source_budget,
+                row_speech=row_speech.float(),
+                row_coarse=row_coarse.float(),
+                row_boundary=row_boundary.float(),
+                row_phrase_final=row_phrase_final.float(),
+                carry_init=carry_init,
+                prefix_offset_init=prefix_offset_init,
+                row_budget_pos=row_budget_pos,
+                row_budget_neg=row_budget_neg,
+                boundary_carry_decay=boundary_carry_decay,
+                boundary_offset_decay=boundary_offset_decay,
+                boundary_reset_thresh=boundary_reset_thresh,
+            )
+        ranked = sorted(
+            next_states.values(),
+            key=lambda state: (
+                state[0]
+                + terminal_carry_weight * abs(float(state[2]))
+                + terminal_offset_weight * abs(float(state[3])),
+                state[1],
+            ),
+        )
+        states = {
+            (
+                int(round(state[3] * 1000.0)),
+                int(round(state[2] * 1000.0)),
+            ): state
+            for state in ranked[:max_states]
+        }
+
+    best = min(
+        states.values(),
+        key=lambda state: (
+            state[0]
+            + terminal_carry_weight * abs(float(state[2]))
+            + terminal_offset_weight * abs(float(state[3])),
+            state[1],
+        ),
+    )
+    _, best_path, best_carry, best_offset, best_hit, best_decay = best
+    projected = torch.as_tensor(best_path, dtype=dtype, device=device).reshape_as(row_exec)
+    boundary_hit = torch.as_tensor(best_hit, dtype=dtype, device=device).reshape_as(row_exec)
+    boundary_decay = torch.as_tensor(best_decay, dtype=dtype, device=device).reshape_as(row_exec)
+    return (
+        projected,
+        boundary_hit,
+        boundary_decay,
+        row_exec.new_tensor([best_carry]),
+        row_exec.new_tensor([best_offset]),
+    )
 
 
 class StreamingDurationProjector(nn.Module):
@@ -118,6 +371,12 @@ class StreamingDurationProjector(nn.Module):
         boundary_carry_decay: float = 0.25,
         boundary_offset_decay: float | None = None,
         boundary_reset_thresh: float = 0.5,
+        integer_projection_mode: str = "greedy",
+        integer_projection_anchor_mode: str = "rounded",
+        prefix_projection_candidate_radius: int = 2,
+        prefix_projection_max_states: int = 256,
+        prefix_projection_terminal_carry_weight: float = 0.25,
+        prefix_projection_terminal_offset_weight: float = 0.05,
         export_projector_telemetry: bool = True,
     ) -> None:
         super().__init__()
@@ -134,6 +393,12 @@ class StreamingDurationProjector(nn.Module):
             boundary_offset_decay = boundary_carry_decay
         self.boundary_offset_decay = float(max(0.0, min(1.0, boundary_offset_decay)))
         self.boundary_reset_thresh = float(max(0.0, min(1.0, boundary_reset_thresh)))
+        self.integer_projection_mode = _normalize_integer_projection_mode(integer_projection_mode)
+        self.integer_projection_anchor_mode = _normalize_integer_projection_anchor_mode(integer_projection_anchor_mode)
+        self.prefix_projection_candidate_radius = int(max(0, prefix_projection_candidate_radius))
+        self.prefix_projection_max_states = int(max(1, prefix_projection_max_states))
+        self.prefix_projection_terminal_carry_weight = float(max(0.0, prefix_projection_terminal_carry_weight))
+        self.prefix_projection_terminal_offset_weight = float(max(0.0, prefix_projection_terminal_offset_weight))
         self.export_projector_telemetry = bool(export_projector_telemetry)
 
     def init_state(self, *, batch_size: int, device: torch.device) -> DurationRuntimeState:
@@ -344,6 +609,12 @@ class StreamingDurationProjector(nn.Module):
         boundary_carry_decay: float = 0.25,
         boundary_offset_decay: float | None = None,
         boundary_reset_thresh: float = 0.5,
+        integer_projection_mode: str = "greedy",
+        integer_projection_anchor_mode: str = "rounded",
+        prefix_projection_candidate_radius: int = 2,
+        prefix_projection_max_states: int = 256,
+        prefix_projection_terminal_carry_weight: float = 0.25,
+        prefix_projection_terminal_offset_weight: float = 0.05,
         committed_len: torch.Tensor | None = None,
         budget_pos_tensor: torch.Tensor | None = None,
         budget_neg_tensor: torch.Tensor | None = None,
@@ -359,6 +630,12 @@ class StreamingDurationProjector(nn.Module):
         )
         source_anchor_rounded = torch.round(source_duration_obs.detach().float().clamp_min(0.0)).to(
             device=unit_duration_exec.device
+        )
+        anchor_mode = _normalize_integer_projection_anchor_mode(integer_projection_anchor_mode)
+        source_anchor_budget = (
+            source_duration_obs.detach().float().clamp_min(0.0).to(device=unit_duration_exec.device)
+            if anchor_mode == "continuous"
+            else source_anchor_rounded
         )
         residual_next = residual_prev.float().reshape(batch_size).detach().clone().to(device=unit_duration_exec.device)
         prefix_offset_next = (
@@ -426,6 +703,7 @@ class StreamingDurationProjector(nn.Module):
         budget_pos_values_rounded = torch.round(budget_pos_values.detach()).long()
         budget_neg_values_rounded = torch.round(budget_neg_values.detach()).long()
         has_boundary_inputs = isinstance(source_boundary_cue, torch.Tensor) or isinstance(phrase_final_mask, torch.Tensor)
+        projection_mode = _normalize_integer_projection_mode(integer_projection_mode)
         for row_idx in active_row_tensor:
             batch_idx = int(row_idx.item())
             row_committed_len = int(committed_len_tensor[batch_idx].item())
@@ -434,13 +712,14 @@ class StreamingDurationProjector(nn.Module):
             start_unit = int(prev_prefix[batch_idx].item())
             carry = float(residual_next[batch_idx].item())
             prefix_offset = float(prefix_offset_next[batch_idx].item())
-            row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final = (
+            row_exec, row_source_rounded, row_source_budget, row_speech, row_coarse, row_boundary, row_phrase_final = (
                 StreamingDurationProjector._extract_projection_row_torch(
                     batch_idx=batch_idx,
                     start_unit=start_unit,
                     committed_len=row_committed_len,
                     unit_duration_exec=unit_duration_exec,
                     source_anchor_rounded=source_anchor_rounded,
+                    source_anchor_budget=source_anchor_budget,
                     speech_commit_mask=speech_commit_mask,
                     coarse_only_commit_mask=coarse_only_commit_mask,
                     source_boundary_cue=source_boundary_cue,
@@ -448,10 +727,45 @@ class StreamingDurationProjector(nn.Module):
                 )
             )
             row_coarse_float = row_coarse.float() if isinstance(row_coarse, torch.Tensor) else torch.zeros_like(row_exec)
-            if not has_boundary_inputs:
+            if projection_mode == "prefix_optimal":
+                (
+                    row_projected,
+                    row_boundary_hit,
+                    row_boundary_decay,
+                    carry_tensor,
+                    prefix_offset_tensor,
+                ) = _project_row_prefix_optimal_python(
+                    row_exec=row_exec,
+                    row_source_rounded=row_source_rounded,
+                    row_source_budget=row_source_budget,
+                    row_speech=row_speech.float(),
+                    row_coarse=row_coarse_float,
+                    row_boundary=(row_boundary if isinstance(row_boundary, torch.Tensor) else torch.zeros_like(row_exec)),
+                    row_phrase_final=(
+                        row_phrase_final.float()
+                        if isinstance(row_phrase_final, torch.Tensor)
+                        else torch.zeros_like(row_exec)
+                    ),
+                    carry_init=row_exec.new_tensor([carry]),
+                    prefix_offset_init=row_exec.new_tensor([prefix_offset]),
+                    row_budget_pos=row_budget_pos,
+                    row_budget_neg=row_budget_neg,
+                    boundary_carry_decay=boundary_carry_decay,
+                    boundary_offset_decay=resolved_boundary_offset_decay,
+                    boundary_reset_thresh=boundary_reset_thresh,
+                    candidate_radius=prefix_projection_candidate_radius,
+                    max_states=prefix_projection_max_states,
+                    terminal_carry_weight=prefix_projection_terminal_carry_weight,
+                    terminal_offset_weight=prefix_projection_terminal_offset_weight,
+                )
+                if not has_boundary_inputs:
+                    row_boundary_hit = torch.zeros_like(row_exec)
+                    row_boundary_decay = torch.zeros_like(row_exec)
+            elif not has_boundary_inputs:
                 row_projected, carry_tensor, prefix_offset_tensor = _project_row_recurrence_no_boundary_script(
                     row_exec=row_exec,
                     row_source_rounded=row_source_rounded,
+                    row_source_budget=row_source_budget,
                     row_speech=row_speech.float(),
                     row_coarse=row_coarse_float,
                     carry_init=row_exec.new_tensor([carry]),
@@ -471,6 +785,7 @@ class StreamingDurationProjector(nn.Module):
                 ) = _project_row_recurrence_script(
                     row_exec=row_exec,
                     row_source_rounded=row_source_rounded,
+                    row_source_budget=row_source_budget,
                     row_speech=row_speech.float(),
                     row_coarse=row_coarse_float,
                     row_boundary=(row_boundary if isinstance(row_boundary, torch.Tensor) else torch.zeros_like(row_exec)),
@@ -523,14 +838,24 @@ class StreamingDurationProjector(nn.Module):
         committed_len: int,
         unit_duration_exec: torch.Tensor,
         source_anchor_rounded: torch.Tensor,
+        source_anchor_budget: torch.Tensor,
         speech_commit_mask: torch.Tensor,
         coarse_only_commit_mask: torch.Tensor | None,
         source_boundary_cue: torch.Tensor | None,
         phrase_final_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         row_slice = slice(int(start_unit), int(committed_len))
         row_exec = unit_duration_exec[batch_idx, row_slice].detach().float()
         row_source_rounded = source_anchor_rounded[batch_idx, row_slice]
+        row_source_budget = source_anchor_budget[batch_idx, row_slice]
         row_speech = speech_commit_mask[batch_idx, row_slice].detach().float() > 0.5
         row_coarse = (
             (coarse_only_commit_mask[batch_idx, row_slice].detach().float() > 0.5)
@@ -547,7 +872,7 @@ class StreamingDurationProjector(nn.Module):
             if isinstance(phrase_final_mask, torch.Tensor)
             else None
         )
-        return row_exec, row_source_rounded, row_speech, row_coarse, row_boundary, row_phrase_final
+        return row_exec, row_source_rounded, row_source_budget, row_speech, row_coarse, row_boundary, row_phrase_final
 
     @staticmethod
     def _materialize_projected_duration(
@@ -743,6 +1068,12 @@ class StreamingDurationProjector(nn.Module):
             boundary_carry_decay=self.boundary_carry_decay,
             boundary_offset_decay=self.boundary_offset_decay,
             boundary_reset_thresh=self.boundary_reset_thresh,
+            integer_projection_mode=self.integer_projection_mode,
+            integer_projection_anchor_mode=self.integer_projection_anchor_mode,
+            prefix_projection_candidate_radius=self.prefix_projection_candidate_radius,
+            prefix_projection_max_states=self.prefix_projection_max_states,
+            prefix_projection_terminal_carry_weight=self.prefix_projection_terminal_carry_weight,
+            prefix_projection_terminal_offset_weight=self.prefix_projection_terminal_offset_weight,
             committed_len=committed_len,
             budget_pos_tensor=budget_pos_used.reshape(batch_size),
             budget_neg_tensor=budget_neg_used.reshape(batch_size),

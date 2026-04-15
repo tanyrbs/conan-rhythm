@@ -1793,7 +1793,10 @@ def summarize_falsification_ladder(
             "r2_like": float("nan"),
         }
         prefix_signal_explain = tempo_explainability(
-            crop_mode.get("delta_g_ref_minus_src_prefix", []),
+            crop_mode.get(
+                "delta_g_ref_minus_src_prefix_final",
+                crop_mode.get("delta_g_ref_minus_src_prefix", []),
+            ),
             crop_mode.get("zbar_sp_star", []),
         ) if not crop_mode.empty else {
             "spearman": float("nan"),
@@ -1835,11 +1838,20 @@ def summarize_falsification_ladder(
                 tie_values = unique_triplets["tempo_tie_triplet"].to_numpy(dtype=np.float32)
                 tie_values = tie_values[np.isfinite(tie_values)]
                 tie_rate = float(np.nanmean(tie_values)) if tie_values.size > 0 else float("nan")
-            tempo_transfer = transfer_slope(mono_mode.get("delta_g", []), mono_mode.get("tempo_delta", []))
+            if "tempo_ref_runtime" in mono_mode.columns:
+                tempo_x_col = "tempo_ref_runtime"
+            elif "delta_g_ref_minus_src_prefix_final_neg" in mono_mode.columns:
+                tempo_x_col = "delta_g_ref_minus_src_prefix_final_neg"
+            elif "delta_g_ref_minus_src_prefix_neg" in mono_mode.columns:
+                tempo_x_col = "delta_g_ref_minus_src_prefix_neg"
+            else:
+                tempo_x_col = "delta_g_ref_minus_src_utt_neg" if "delta_g_ref_minus_src_utt_neg" in mono_mode.columns else "delta_g"
+            tempo_y_col = "tempo_delta" if "tempo_delta" in mono_mode.columns else "tempo_out"
+            tempo_transfer = transfer_slope(mono_mode.get(tempo_x_col, []), mono_mode.get(tempo_y_col, []))
             negative_control_gap, real_reference_count, negative_control_count = _compute_negative_control_gap(
                 mono_mode,
-                x_col="delta_g",
-                y_col="tempo_delta",
+                x_col=tempo_x_col,
+                y_col=tempo_y_col,
                 metric_fn=transfer_slope,
             )
             if (not np.isfinite(negative_control_gap) or real_reference_count <= 0 or negative_control_count <= 0) and not crop_mode.empty:

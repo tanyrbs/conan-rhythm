@@ -28,6 +28,8 @@ Current verdict:
 - latest local strongest-contract Gate 0: pass
 - latest local strongest-contract Gate 1: pass
 - Gate2-online local `src_gap` candidate: rerun and reviewed, no material aggregate improvement
+- later execution-headroom falsification: best no-retrain combo improves train
+  transfer but still fails valid/test and still does not clear Gate1-online
 - Gate3 local candidate: wiring-fixed and locally advanced to a checkpointed run
 - official training: blocked
 - prefix fine-tune: blocked
@@ -56,12 +58,17 @@ Official training is still blocked because:
   maintained online contract
 - the local Gate2-online `src_gap` candidate did not materially improve the
   aggregate gate picture
+- later projector/headroom falsification only improved the train split under a
+  looser local probe surface
 - local Gate3 candidate work has not been converted into an official reviewed
   Gate3 pass
 - `exact_global_family` is currently an upper-bound validation contract, not
   the maintained strict online runtime default
 - the dominant failure signature still looks execution-side:
   `preproj` can show signal while `exec` often collapses to ties/flat buckets
+- current best no-retrain local combo is still only diagnostic:
+  `analytic_gap_clip=0.80` with wider prefix budgets improves train-side Gate1
+  response, but valid/test remain only `1/3` and `1/2` exec-pass respectively
 
 So the right reading is:
 

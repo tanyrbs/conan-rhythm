@@ -231,3 +231,73 @@ So the stronger current reading is:
   bucketization
 - Gate3 local training is unblocked and advanced to a checkpointed run, but no
   Gate3 pass should be claimed from this log
+
+## 2026-04-15 projector/headroom follow-up
+
+### Scope
+
+- same maintained minimal-V1 online surface
+- same local quick ARCTIC checkpoint:
+  `checkpoints/rhythm_v3_gate2_candidate_20260415_s76_srcgap/model_ckpt_steps_75.ckpt`
+- no-retrain execution-layer falsification only
+
+### What was falsified
+
+1. Boundary no-decay is not the primary bottleneck.
+
+- probe:
+  `rhythm_v3_boundary_carry_decay=1.0`
+  `rhythm_v3_boundary_offset_decay=1.0`
+- result:
+  raw/preproj stayed unchanged, but exec range got smaller and drift got worse
+- concrete reading:
+  removing boundary decay raised local drift sharply and introduced widespread
+  budget-hit rows without recovering Gate1 ordering
+
+2. Optional closed-prefix projector rewrites are not enough by themselves.
+
+- added local projector knobs:
+  `rhythm_v3_integer_projection_mode=prefix_optimal`
+  `rhythm_v3_integer_projection_anchor_mode=continuous`
+- result on current quick data:
+  these knobs are now available and tested, but they do not materially change
+  the current checkpoint by themselves
+
+3. Execution headroom is real, but not sufficient.
+
+- best no-retrain train probe so far:
+  `analytic_gap_clip=0.80`,
+  `prefix_budget_pos=72`,
+  `prefix_budget_neg=72`,
+  `min_prefix_budget=24`,
+  `max_prefix_budget=96`,
+  `dynamic_budget_ratio=0.35`
+- train result:
+  `monotone_source_count=7/12`,
+  mean exec range about `0.191`,
+  mean exec slope about `1.02`
+- but the fixed review still reports:
+  `gate1_pass=false`,
+  `analytic_tempo_monotonicity_rate=0.50`,
+  `analytic_tempo_tie_rate=0.417`
+
+### Review-layer fix made during this pass
+
+The debug-record gate CLI had a real summary bug:
+
+- `record_summary` emitted `ref_bin` but not always `ref_condition`
+- `scripts/rhythm_v3_debug_records.py` then treated valid
+  `slow|mid|fast` triplets as `analytic_triplet_count=0`
+- the CLI now promotes `ref_bin` to `ref_condition`/`triplet_id` when needed
+  and computes tempo transfer with `tempo_ref_runtime` or sign-corrected
+  source-gap instead of raw `delta_g`
+
+This was a review/gating correction, not a model-quality improvement.
+
+### Current reading
+
+- the current quick checkpoint can be pushed into a stronger train-side Gate1
+  response with more clip/budget headroom
+- but valid/test still do not hold that response consistently
+- the maintained online contract still does not justify opening Gate3 training
+  as if Gate1/Gate2 had been cleared

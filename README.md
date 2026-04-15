@@ -36,6 +36,14 @@ Current reading on the quick-ARCTIC surface:
 - that local Gate2 candidate did **not** materially improve aggregate Gate2
   metrics; recurring evidence still points to `preproj` showing signal while
   `exec` flattens/ties
+- later execution-layer falsification on the same checkpoint found:
+  - boundary no-decay is not the main fix
+  - optional `prefix_optimal` / continuous-anchor projector modes are now
+    available for local experiments
+  - the strongest no-retrain headroom combo so far is
+    `analytic_gap_clip=0.80` plus wider prefix budgets; this improves train
+    transfer but still fails valid/test Gate1 monotonicity and still does not
+    clear Gate2/Gate3
 - local Gate3 candidate training was unblocked by fixing a
   config/runtime-wiring mismatch and then advanced to a checkpointed local run
   at `step_125`; this is **not** a Gate3 pass
@@ -104,6 +112,7 @@ The maintained explanation is:
 - **utterance-level scalar coarse correction over the analytic source/ref rate gap, broadcast over the visible prefix**
 - **strict-causal, state-sufficient source prefix-rate correction**
 - **carry+budget integer projection core with exported boundary-side smoothing telemetry**
+- **optional closed-prefix projector experiments (`prefix_optimal`, continuous-anchor debt tracking) kept behind explicit local knobs**
 - **explicit silence-run frontend that materializes speech vs. pause runs**
 - **stable-lattice suppression of short flicker runs and micro-silence islands before retiming**
 - **silence runs follow the coarse/global bias (clipped) without a local residual, keeping them tied to the overall rate**

@@ -624,6 +624,32 @@ def test_validate_rhythm_training_hparams_rejects_invalid_budget_mode():
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_accepts_prefix_optimal_integer_projection():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_integer_projection_mode"] = "prefix_optimal"
+    hparams["rhythm_v3_integer_projection_anchor_mode"] = "continuous"
+    hparams["rhythm_v3_prefix_projection_candidate_radius"] = 2
+    hparams["rhythm_v3_prefix_projection_max_states"] = 32
+    validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_invalid_integer_projection_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_integer_projection_mode"] = "bad_mode"
+    with pytest.raises(ValueError, match="rhythm_v3_integer_projection_mode"):
+        validate_rhythm_training_hparams(hparams)
+
+
+def test_validate_rhythm_training_hparams_rejects_invalid_integer_projection_anchor_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_integer_projection_anchor_mode"] = "bad_mode"
+    with pytest.raises(ValueError, match="rhythm_v3_integer_projection_anchor_mode"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_discrete_alignment_mode():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True

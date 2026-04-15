@@ -36,6 +36,12 @@ Current verdict on the local quick-ARCTIC surface:
   contract
 - aggregate Gate2 results were essentially unchanged relative to the earlier
   candidate
+- later projector/headroom falsification found:
+  boundary no-decay is not the fix,
+  optional `prefix_optimal` / continuous-anchor projector knobs are now
+  available for controlled local experiments,
+  and the best no-retrain headroom combo improves train transfer but still
+  fails valid/test Gate1-online
 - recurring failure mode remains execution-side:
   `preproj` often shows signal while `exec` still flattens or ties
 - Gate 3 local candidate training is now unblocked by a runtime/config wiring

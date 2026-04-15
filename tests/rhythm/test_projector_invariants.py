@@ -145,6 +145,110 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
         for batched_tensor, expected_tensor in zip(batched, expected):
             assert torch.allclose(batched_tensor, expected_tensor)
 
+    def test_duration_v3_prefix_optimal_projection_preserves_cached_prefix(self):
+        projected, residual, prefix_offset, boundary_hit, boundary_decay = (
+            StreamingDurationV3Projector._project_duration_prefix(
+                unit_duration_exec=torch.tensor([[9.0, 9.0, 2.49, 2.49]], dtype=torch.float32),
+                source_duration_obs=torch.tensor([[2.0, 3.0, 2.0, 2.0]], dtype=torch.float32),
+                commit_mask=torch.ones((1, 4), dtype=torch.float32),
+                speech_commit_mask=torch.ones((1, 4), dtype=torch.float32),
+                coarse_only_commit_mask=None,
+                source_boundary_cue=torch.zeros((1, 4), dtype=torch.float32),
+                phrase_final_mask=torch.zeros((1, 4), dtype=torch.float32),
+                residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+                prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+                committed_units_prev=torch.tensor([2], dtype=torch.long),
+                cached_duration_exec_prev=torch.tensor([[2.0, 3.0, 0.0, 0.0]], dtype=torch.float32),
+                budget_pos=24,
+                budget_neg=24,
+                boundary_carry_decay=0.25,
+                boundary_reset_thresh=0.5,
+                integer_projection_mode="prefix_optimal",
+            )
+        )
+
+        assert torch.allclose(projected[:, :2], torch.tensor([[2.0, 3.0]], dtype=torch.float32))
+        assert torch.all(projected[:, 2:] >= 1.0)
+        assert torch.all(prefix_offset.abs() <= 24.0)
+        assert torch.all(residual.abs() < 1.0)
+        assert torch.allclose(boundary_hit, torch.zeros((1, 4), dtype=torch.float32))
+        assert torch.allclose(boundary_decay, torch.zeros((1, 4), dtype=torch.float32))
+
+    def test_duration_v3_projection_can_track_continuous_anchor_drift(self):
+        rounded = StreamingDurationV3Projector._project_duration_prefix(
+            unit_duration_exec=torch.tensor([[2.4]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.4]], dtype=torch.float32),
+            commit_mask=torch.ones((1, 1), dtype=torch.float32),
+            speech_commit_mask=torch.ones((1, 1), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            source_boundary_cue=None,
+            phrase_final_mask=None,
+            residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+            committed_units_prev=None,
+            cached_duration_exec_prev=None,
+            budget_pos=24,
+            budget_neg=24,
+            integer_projection_anchor_mode="rounded",
+        )
+        continuous = StreamingDurationV3Projector._project_duration_prefix(
+            unit_duration_exec=torch.tensor([[2.4]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.4]], dtype=torch.float32),
+            commit_mask=torch.ones((1, 1), dtype=torch.float32),
+            speech_commit_mask=torch.ones((1, 1), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            source_boundary_cue=None,
+            phrase_final_mask=None,
+            residual_prev=torch.zeros((1, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.zeros((1, 1), dtype=torch.float32),
+            committed_units_prev=None,
+            cached_duration_exec_prev=None,
+            budget_pos=24,
+            budget_neg=24,
+            integer_projection_anchor_mode="continuous",
+        )
+
+        assert torch.allclose(rounded[0], continuous[0])
+        assert torch.allclose(rounded[2], torch.tensor([[0.0]], dtype=torch.float32))
+        assert torch.allclose(continuous[2], torch.tensor([[-0.4]], dtype=torch.float32), atol=1.0e-6)
+
+    def test_duration_v3_prefix_optimal_projection_is_batch_deterministic(self):
+        kwargs = dict(
+            unit_duration_exec=torch.tensor([[2.6, 2.4, 3.6], [2.6, 2.4, 3.6]], dtype=torch.float32),
+            source_duration_obs=torch.tensor([[2.0, 2.0, 4.0], [2.0, 2.0, 4.0]], dtype=torch.float32),
+            commit_mask=torch.ones((2, 3), dtype=torch.float32),
+            speech_commit_mask=torch.ones((2, 3), dtype=torch.float32),
+            coarse_only_commit_mask=None,
+            residual_prev=torch.zeros((2, 1), dtype=torch.float32),
+            prefix_unit_offset_prev=torch.zeros((2, 1), dtype=torch.float32),
+            committed_units_prev=torch.zeros((2,), dtype=torch.long),
+            cached_duration_exec_prev=None,
+            budget_pos=4,
+            budget_neg=4,
+            boundary_carry_decay=0.5,
+            boundary_offset_decay=0.5,
+            boundary_reset_thresh=0.5,
+            integer_projection_mode="prefix_optimal",
+            prefix_projection_candidate_radius=2,
+            prefix_projection_max_states=32,
+        )
+        batched = StreamingDurationV3Projector._project_duration_prefix(
+            **kwargs,
+            source_boundary_cue=torch.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((2, 3), dtype=torch.float32),
+        )
+        row = StreamingDurationV3Projector._project_duration_prefix(
+            **{
+                key: (value[:1] if isinstance(value, torch.Tensor) and value.size(0) == 2 else value)
+                for key, value in kwargs.items()
+            },
+            source_boundary_cue=torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32),
+            phrase_final_mask=torch.zeros((1, 3), dtype=torch.float32),
+        )
+        expected = tuple(torch.cat([tensor, tensor], dim=0) for tensor in row)
+        for batched_tensor, expected_tensor in zip(batched, expected):
+            assert torch.allclose(batched_tensor, expected_tensor)
+
     def test_duration_v3_prefix_projection_separates_boundary_offset_decay_from_carry_decay(self):
         keep_offset = StreamingDurationV3Projector._project_duration_prefix(
             unit_duration_exec=torch.tensor([[2.4, 2.4]], dtype=torch.float32),

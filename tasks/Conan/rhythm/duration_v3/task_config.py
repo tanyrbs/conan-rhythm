@@ -586,6 +586,48 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     budget_mode = str(hparams.get("rhythm_v3_budget_mode", "total") or "total").strip().lower()
     if budget_mode not in {"total", "speech_only", "hybrid"}:
         raise ValueError("rhythm_v3_budget_mode must be one of: total, speech_only, hybrid.")
+    integer_projection_mode = str(hparams.get("rhythm_v3_integer_projection_mode", "greedy") or "greedy").strip().lower()
+    integer_projection_aliases = {
+        "default": "greedy",
+        "nearest": "greedy",
+        "recurrent": "greedy",
+        "dp": "prefix_optimal",
+        "prefix": "prefix_optimal",
+        "prefix_dp": "prefix_optimal",
+        "closed_prefix": "prefix_optimal",
+        "closed_prefix_optimal": "prefix_optimal",
+    }
+    integer_projection_mode = integer_projection_aliases.get(integer_projection_mode, integer_projection_mode)
+    if integer_projection_mode not in {"greedy", "prefix_optimal"}:
+        raise ValueError("rhythm_v3_integer_projection_mode must be one of: greedy, prefix_optimal.")
+    integer_projection_anchor_mode = (
+        str(hparams.get("rhythm_v3_integer_projection_anchor_mode", "rounded") or "rounded").strip().lower()
+    )
+    integer_projection_anchor_aliases = {
+        "default": "rounded",
+        "round": "rounded",
+        "source_rounded": "rounded",
+        "raw": "continuous",
+        "float": "continuous",
+        "source": "continuous",
+        "source_continuous": "continuous",
+    }
+    integer_projection_anchor_mode = integer_projection_anchor_aliases.get(
+        integer_projection_anchor_mode,
+        integer_projection_anchor_mode,
+    )
+    if integer_projection_anchor_mode not in {"rounded", "continuous"}:
+        raise ValueError("rhythm_v3_integer_projection_anchor_mode must be one of: rounded, continuous.")
+    if int(hparams.get("rhythm_v3_prefix_projection_candidate_radius", 2) or 0) < 0:
+        raise ValueError("rhythm_v3_prefix_projection_candidate_radius must be >= 0 for rhythm_v3.")
+    if int(hparams.get("rhythm_v3_prefix_projection_max_states", 256) or 0) <= 0:
+        raise ValueError("rhythm_v3_prefix_projection_max_states must be > 0 for rhythm_v3.")
+    for key in (
+        "rhythm_v3_prefix_projection_terminal_carry_weight",
+        "rhythm_v3_prefix_projection_terminal_offset_weight",
+    ):
+        if float(hparams.get(key, 0.0) or 0.0) < 0.0:
+            raise ValueError(f"{key} must be >= 0 for rhythm_v3.")
     if float(hparams.get("rhythm_progress_support_tau", 8.0) or 0.0) < 0.0:
         raise ValueError("rhythm_progress_support_tau must be >= 0 for rhythm_v3.")
     if int(hparams.get("rhythm_progress_bins", 4) or 0) <= 0:

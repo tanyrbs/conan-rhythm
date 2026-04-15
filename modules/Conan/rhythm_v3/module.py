@@ -610,6 +610,42 @@ class MixedEffectsDurationModule(nn.Module):
             unused_kwargs.pop("rhythm_v3_boundary_offset_decay", None),
         )
         boundary_reset_thresh = float(unused_kwargs.pop("boundary_reset_thresh", 0.5))
+        integer_projection_mode = str(
+            unused_kwargs.pop(
+                "integer_projection_mode",
+                unused_kwargs.pop("rhythm_v3_integer_projection_mode", "greedy"),
+            )
+        )
+        integer_projection_anchor_mode = str(
+            unused_kwargs.pop(
+                "integer_projection_anchor_mode",
+                unused_kwargs.pop("rhythm_v3_integer_projection_anchor_mode", "rounded"),
+            )
+        )
+        prefix_projection_candidate_radius = int(
+            unused_kwargs.pop(
+                "prefix_projection_candidate_radius",
+                unused_kwargs.pop("rhythm_v3_prefix_projection_candidate_radius", 2),
+            )
+        )
+        prefix_projection_max_states = int(
+            unused_kwargs.pop(
+                "prefix_projection_max_states",
+                unused_kwargs.pop("rhythm_v3_prefix_projection_max_states", 256),
+            )
+        )
+        prefix_projection_terminal_carry_weight = float(
+            unused_kwargs.pop(
+                "prefix_projection_terminal_carry_weight",
+                unused_kwargs.pop("rhythm_v3_prefix_projection_terminal_carry_weight", 0.25),
+            )
+        )
+        prefix_projection_terminal_offset_weight = float(
+            unused_kwargs.pop(
+                "prefix_projection_terminal_offset_weight",
+                unused_kwargs.pop("rhythm_v3_prefix_projection_terminal_offset_weight", 0.05),
+            )
+        )
         emit_prompt_diagnostics = bool(
             unused_kwargs.pop("emit_prompt_diagnostics", unused_kwargs.pop("rhythm_v3_emit_prompt_diagnostics", True))
         )
@@ -937,6 +973,12 @@ class MixedEffectsDurationModule(nn.Module):
             boundary_carry_decay=boundary_carry_decay,
             boundary_offset_decay=boundary_offset_decay,
             boundary_reset_thresh=boundary_reset_thresh,
+            integer_projection_mode=integer_projection_mode,
+            integer_projection_anchor_mode=integer_projection_anchor_mode,
+            prefix_projection_candidate_radius=prefix_projection_candidate_radius,
+            prefix_projection_max_states=prefix_projection_max_states,
+            prefix_projection_terminal_carry_weight=prefix_projection_terminal_carry_weight,
+            prefix_projection_terminal_offset_weight=prefix_projection_terminal_offset_weight,
             export_projector_telemetry=self.export_projector_telemetry,
         )
         if self.use_reference_summary:

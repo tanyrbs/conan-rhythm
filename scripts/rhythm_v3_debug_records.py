@@ -1300,6 +1300,33 @@ def main() -> None:
     )
     if pd is not None:
         summary_df = pd.DataFrame(rows)
+        if "ref_bin" in summary_df.columns:
+            ref_bin_series = summary_df["ref_bin"].map(_normalize_ref_bin)
+            if "ref_condition" not in summary_df.columns:
+                summary_df["ref_condition"] = ref_bin_series
+            else:
+                ref_condition = summary_df["ref_condition"].astype(str).str.strip()
+                missing_ref_condition = ref_condition.eq("") | ref_condition.str.lower().eq("nan")
+                summary_df.loc[missing_ref_condition, "ref_condition"] = ref_bin_series.loc[missing_ref_condition]
+        if "triplet_id" not in summary_df.columns and {"src_id", "eval_mode", "ref_bin"}.issubset(summary_df.columns):
+            ref_bin_series = summary_df["ref_bin"].map(_normalize_ref_bin)
+            ref_condition = (
+                summary_df["ref_condition"].map(_normalize_ref_condition)
+                if "ref_condition" in summary_df.columns
+                else ref_bin_series.map(_normalize_ref_condition)
+            )
+            real_mask = np.asarray(
+                [
+                    _is_real_reference_condition(cond, ref_bin=bin_value)
+                    for cond, bin_value in zip(ref_condition.tolist(), ref_bin_series.tolist())
+                ],
+                dtype=bool,
+            )
+            summary_df["triplet_id"] = np.where(
+                real_mask,
+                summary_df["src_id"].astype(str) + "::" + summary_df["eval_mode"].astype(str),
+                np.nan,
+            )
         ref_crop_df = build_ref_crop_table(
             records,
             g_variant=args.g_variant,
