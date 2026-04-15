@@ -43,7 +43,7 @@ def _build_prompt_summary_hparams():
     hparams = _build_hparams()
     hparams.update(
         {
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -2295,26 +2295,27 @@ def test_rhythm_v3_projector_applies_prefix_unit_budget_clamp():
     assert float(residual[0, 0].item()) >= 0.0
 
 
-def test_rhythm_v3_adapter_forwards_projection_mode_and_repair_hparams():
+def test_rhythm_v3_adapter_forwards_prefix_optimal_projection_hparams():
     adapter = ConanDurationAdapter(
         {
             **_build_hparams(),
             "rhythm_v3_backbone": "global_only",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
-            "rhythm_v3_projection_mode": "greedy_repair",
-            "rhythm_v3_projection_repair_max_steps": 6,
-            "rhythm_v3_projection_repair_speech_bonus": 1.25,
-            "rhythm_v3_projection_repair_boundary_penalty": 0.2,
+            "rhythm_v3_projection_mode": "prefix_optimal",
+            "rhythm_v3_prefix_optimal_step_weight": 0.25,
+            "rhythm_v3_prefix_optimal_prefix_weight": 1.75,
+            "rhythm_v3_prefix_optimal_max_states": 41,
         },
         hidden_size=32,
         vocab_size=128,
     )
     projector = adapter.module.projector
-    assert projector.integer_projection_mode == "greedy_repair"
-    assert projector.projection_repair_max_steps == 6
-    assert projector.projection_repair_speech_bonus == pytest.approx(1.25)
-    assert projector.projection_repair_boundary_penalty == pytest.approx(0.2)
+    assert projector.integer_projection_mode == "prefix_optimal"
+    assert projector.projection_mode == "prefix_optimal"
+    assert projector.prefix_optimal_step_weight == pytest.approx(0.25)
+    assert projector.prefix_optimal_prefix_weight == pytest.approx(1.75)
+    assert projector.prefix_optimal_max_states == 41
 
 
 def test_rhythm_v3_projector_rejects_noncontiguous_visible_prefix_commit_mask():

@@ -74,8 +74,13 @@ _FORBIDDEN_V3_PUBLIC_LOSSES = (
     "L_stream_state",
     "rhythm_v3_break",
 )
-_LEGACY_PROMPT_SUMMARY_BACKBONES = {"role_memory", "unit_run"}
-_MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global", "v1g_minimal"}
+_REMOVED_PROMPT_SUMMARY_BACKBONES = {
+    "prompt_summary",
+    "role_memory",
+    "unit_run",
+    "v1g_minimal",
+}
+_MINIMAL_V1_GLOBAL_BACKBONES = {"minimal_v1_global"}
 _UNIT_NORM_G_VARIANTS = {"unit_norm", "unit_normalized"}
 
 
@@ -85,7 +90,7 @@ def _is_unit_norm_variant(value) -> bool:
 
 def normalize_duration_v3_backbone_mode(value) -> str:
     normalized = str(value or "global_only").strip().lower()
-    if normalized in _LEGACY_PROMPT_SUMMARY_BACKBONES | _MINIMAL_V1_GLOBAL_BACKBONES:
+    if normalized in _MINIMAL_V1_GLOBAL_BACKBONES:
         return "prompt_summary"
     return normalized
 
@@ -182,7 +187,6 @@ _GATE_STATUS_INT_KEYS = {
     "rhythm_v3_max_prefix_budget",
     "rhythm_v3_prefix_optimal_max_window",
     "rhythm_v3_prefix_optimal_max_states",
-    "rhythm_v3_projection_repair_max_steps",
 }
 _GATE_STATUS_FLOAT_KEYS = {
     "rhythm_v3_alignment_local_margin_p10_min",
@@ -209,8 +213,6 @@ _GATE_STATUS_FLOAT_KEYS = {
     "rhythm_v3_prefix_optimal_boundary_weight",
     "rhythm_v3_prefix_optimal_coarse_weight",
     "rhythm_v3_prefix_optimal_phrase_final_boost",
-    "rhythm_v3_projection_repair_speech_bonus",
-    "rhythm_v3_projection_repair_boundary_penalty",
 }
 
 
@@ -361,13 +363,20 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             "rhythm_v3_ablation has been removed. "
             "Use rhythm_v3_backbone/rhythm_v3_warp_mode/rhythm_v3_allow_hybrid instead."
         )
-    backbone_mode = normalize_duration_v3_backbone_mode(hparams.get("rhythm_v3_backbone", "global_only"))
+    backbone_value = hparams.get("rhythm_v3_backbone", "global_only")
+    backbone_text = str(backbone_value or "").strip().lower()
+    if backbone_text in _REMOVED_PROMPT_SUMMARY_BACKBONES:
+        raise ValueError(
+            "rhythm_v3_backbone compatibility aliases 'prompt_summary', 'role_memory', "
+            "'unit_run', and 'v1g_minimal' have been removed; use 'minimal_v1_global' "
+            "for the maintained V1 surface."
+        )
+    backbone_mode = normalize_duration_v3_backbone_mode(backbone_value)
     warp_mode = str(hparams.get("rhythm_v3_warp_mode", "none") or "none").strip().lower()
     allow_hybrid = bool(hparams.get("rhythm_v3_allow_hybrid", False))
     if backbone_mode not in {"global_only", "operator", "prompt_summary"}:
         raise ValueError(
-            "rhythm_v3_backbone must be one of: global_only, operator, prompt_summary "
-            "(public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)"
+            "rhythm_v3_backbone must be one of: global_only, operator, minimal_v1_global"
         )
     if warp_mode not in {"none", "progress", "detector"}:
         raise ValueError("rhythm_v3_warp_mode must be one of: none, progress, detector")
@@ -376,16 +385,15 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     if backbone_mode == "prompt_summary":
         if warp_mode != "none":
             raise ValueError(
-                "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'."
+                "rhythm_v3_backbone='minimal_v1_global' only supports rhythm_v3_warp_mode='none'."
             )
         if allow_hybrid:
             raise ValueError(
-                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run')."
+                "rhythm_v3_allow_hybrid is not used when rhythm_v3_backbone='minimal_v1_global'."
             )
         if not bool(hparams.get("rhythm_v3_emit_silence_runs", True)):
             raise ValueError(
-                "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') "
-                "requires rhythm_v3_emit_silence_runs=true."
+                "rhythm_v3_backbone='minimal_v1_global' requires rhythm_v3_emit_silence_runs=true."
             )
     if backbone_mode == "operator" and warp_mode == "progress" and not allow_hybrid:
         raise ValueError(
@@ -405,7 +413,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         raise ValueError("rhythm_v3_rate_mode must be one of: simple_global, log_base")
     if backbone_mode == "prompt_summary" and anchor_mode != "source_observed":
         raise ValueError(
-            "rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') requires rhythm_v3_anchor_mode='source_observed'."
+            "rhythm_v3_backbone='minimal_v1_global' requires rhythm_v3_anchor_mode='source_observed'."
         )
     minimal_v1_profile = _is_enabled_flag(hparams.get("rhythm_v3_minimal_v1_profile", False))
     strict_minimal_claim_profile = _is_enabled_flag(
@@ -426,15 +434,14 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             raise ValueError(
                 "rhythm_v3_minimal_v1_profile requires explicit rhythm_v3_backbone='minimal_v1_global'."
             )
-        if backbone_text in _LEGACY_PROMPT_SUMMARY_BACKBONES:
+        if backbone_text in _REMOVED_PROMPT_SUMMARY_BACKBONES:
             raise ValueError(
-                "rhythm_v3_minimal_v1_profile forbids legacy rhythm_v3_backbone aliases "
-                "'role_memory' and 'unit_run'; use 'minimal_v1_global' instead."
+                "rhythm_v3_minimal_v1_profile requires the canonical rhythm_v3_backbone="
+                "'minimal_v1_global'; compatibility aliases are not allowed."
             )
         if normalized_backbone_value != "prompt_summary":
             raise ValueError(
-                "rhythm_v3_minimal_v1_profile requires rhythm_v3_backbone='minimal_v1_global' "
-                "(or 'prompt_summary' only for compatibility)."
+                "rhythm_v3_minimal_v1_profile requires rhythm_v3_backbone='minimal_v1_global'."
             )
         for key in ("rhythm_num_summary_slots", "rhythm_num_role_slots", "num_summary_slots", "num_role_slots"):
             if key in hparams and int(hparams.get(key, 1) or 1) != 1:
@@ -751,10 +758,6 @@ def validate_duration_v3_training_hparams(hparams) -> None:
         "dual",
         "dual_scale",
         "dualtime",
-        "family_hybrid",
-        "robust",
-        "hybrid",
-        "family",
         "exact_global_family",
         "exact",
         "exact_family",
@@ -762,7 +765,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
     }:
         raise ValueError(
             "rhythm_v3_src_prefix_stat_mode must be one of: "
-            "ema, dual_timescale, family_hybrid, exact_global_family."
+            "ema, dual_timescale, exact_global_family."
         )
     if _is_enabled_flag(hparams.get("rhythm_v3_gate_quality_strict", False)) and src_prefix_stat_mode != "ema":
         raise ValueError(
@@ -906,18 +909,18 @@ def validate_duration_v3_training_hparams(hparams) -> None:
                 f"rhythm_v3_source_residual_gain must be 0 when rhythm_v3 runtime mode is '{runtime_mode}'."
             )
     if runtime_mode != "prompt_summary" and lambda_bias > 0.0:
-        raise ValueError("lambda_rhythm_bias is only valid when rhythm_v3_backbone='prompt_summary'.")
+        raise ValueError("lambda_rhythm_bias is only valid when rhythm_v3_backbone='minimal_v1_global'.")
     if runtime_mode == "prompt_summary":
         if float(hparams.get("lambda_rhythm_zero", 0.0) or 0.0) > 0.0:
-            raise ValueError("lambda_rhythm_zero must be 0 when rhythm_v3_backbone='prompt_summary'.")
+            raise ValueError("lambda_rhythm_zero must be 0 when rhythm_v3_backbone='minimal_v1_global'.")
         if float(hparams.get("lambda_rhythm_ortho", 0.0) or 0.0) > 0.0:
-            raise ValueError("lambda_rhythm_ortho must be 0 when rhythm_v3_backbone='prompt_summary'.")
+            raise ValueError("lambda_rhythm_ortho must be 0 when rhythm_v3_backbone='minimal_v1_global'.")
     elif (
         float(hparams.get("lambda_rhythm_mem", 0.0) or 0.0) > 0.0
         or float(hparams.get("lambda_rhythm_summary", 0.0) or 0.0) > 0.0
     ):
         raise ValueError(
-            "lambda_rhythm_summary (legacy alias: lambda_rhythm_mem) is only valid when rhythm_v3_backbone='prompt_summary'."
+            "lambda_rhythm_summary (legacy alias: lambda_rhythm_mem) is only valid when rhythm_v3_backbone='minimal_v1_global'."
         )
     elif runtime_mode != "operator_srcres" and source_residual_gain > 0.0:
         raise ValueError("rhythm_v3_source_residual_gain is only valid when rhythm_v3 runtime mode is 'operator_srcres'.")
@@ -966,7 +969,7 @@ def validate_duration_v3_training_hparams(hparams) -> None:
             if lambda_summary > 0.0 and not any(key in public_losses for key in ("rhythm_v3_summary", "rhythm_v3_mem", "rhythm_v3_op")):
                 raise ValueError(
                     "rhythm_public_losses must include rhythm_v3_summary "
-                    "(legacy aliases: rhythm_v3_mem / rhythm_v3_op) when rhythm_v3_backbone='prompt_summary'."
+                    "(legacy aliases: rhythm_v3_mem / rhythm_v3_op) when rhythm_v3_backbone='minimal_v1_global'."
                 )
         else:
             if "rhythm_v3_op" not in public_losses:

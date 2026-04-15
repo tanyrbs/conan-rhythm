@@ -71,7 +71,7 @@ def _closed_prefix_objective(
 
 
 class DurationV3ProjectorHotPathTests(unittest.TestCase):
-    def test_duration_v3_repair_projection_carry_tracks_clamped_integer(self):
+    def test_duration_v3_greedy_projection_carry_tracks_clamped_integer(self):
         projected, residual, _, _, _, _, _, _, _ = StreamingDurationV3Projector._project_duration_prefix(
             unit_duration_exec=torch.tensor([[2.9]], dtype=torch.float32),
             source_duration_obs=torch.tensor([[2.0]], dtype=torch.float32),
@@ -89,10 +89,7 @@ class DurationV3ProjectorHotPathTests(unittest.TestCase):
             boundary_carry_decay=1.0,
             boundary_offset_decay=1.0,
             boundary_reset_thresh=0.5,
-            integer_projection_mode="greedy_repair",
-            projection_repair_max_steps=1,
-            projection_repair_speech_bonus=1.0,
-            projection_repair_boundary_penalty=0.0,
+            integer_projection_mode="greedy",
         )
         assert torch.allclose(projected, torch.tensor([[2.0]], dtype=torch.float32))
         assert torch.allclose(residual, torch.tensor([[0.9]], dtype=torch.float32), atol=1.0e-6)

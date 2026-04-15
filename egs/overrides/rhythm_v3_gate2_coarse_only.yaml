@@ -18,9 +18,6 @@ lambda_rhythm_cons: 0.05
 # Official path keeps projector canonical.
 rhythm_v3_integer_projection_mode: greedy
 rhythm_v3_integer_projection_anchor_mode: rounded
-rhythm_v3_projection_repair_max_steps: 0
-rhythm_v3_projection_repair_speech_bonus: 1.0
-rhythm_v3_projection_repair_boundary_penalty: 0.35
 
 rhythm_v3_prefix_budget_pos: 24
 rhythm_v3_prefix_budget_neg: 24

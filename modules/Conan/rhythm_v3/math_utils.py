@@ -198,15 +198,12 @@ def normalize_src_prefix_stat_mode(value: str | None) -> str:
         "dual": "dual_timescale",
         "dual_scale": "dual_timescale",
         "dualtime": "dual_timescale",
-        "robust": "family_hybrid",
-        "hybrid": "family_hybrid",
-        "family": "family_hybrid",
         "exact": "exact_global_family",
         "exact_family": "exact_global_family",
         "global_family": "exact_global_family",
     }
     normalized = aliases.get(normalized, normalized)
-    valid = {"ema", "dual_timescale", "family_hybrid", "exact_global_family"}
+    valid = {"ema", "dual_timescale", "exact_global_family"}
     if normalized not in valid:
         raise ValueError(
             f"Unsupported src_prefix_stat_mode={value!r}. Expected one of: {sorted(valid)}"

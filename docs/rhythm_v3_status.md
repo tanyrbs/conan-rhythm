@@ -13,7 +13,12 @@ The maintained official online contract is:
 - source init: `first_speech`
 - prompt policy: `meaningful_reference`
 - source anchor: `source_observed`
-- projector: greedy integer projection on the total-budget prefix contract
+- maintained projector surface: `greedy | prefix_optimal`
+
+The checked-in official strict fingerprint currently binds:
+
+- `rhythm_v3_projection_mode=greedy`
+- `rhythm_v3_integer_projection_mode=greedy`
 
 Official entrypoints:
 
@@ -31,7 +36,7 @@ Official truth:
 - `gate1_pass=false`
 - `gate2_pass=false`
 - `gate3_pass=false`
-- contract id: `8052e96e745d5aad`
+- contract id: `795e286bac5bee76`
 
 Current technical read:
 
@@ -57,6 +62,18 @@ All local experiments now belong under:
 - `egs/experiments/local/`
 
 Those files are diagnostics only.
+
+## Gate Library
+
+Maintained gate semantics now live in:
+
+- `tasks/Conan/rhythm/duration_v3/gate_status.py`
+
+The export script:
+
+- `scripts/rhythm_v3_debug_records.py`
+
+is a CLI and bundle-export surface over that library, not the source of truth for gate criteria.
 
 ## Current Priority
 

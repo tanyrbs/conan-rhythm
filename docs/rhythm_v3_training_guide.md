@@ -19,7 +19,12 @@ The maintained online contract is:
 - source init: `first_speech`
 - prompt policy: `meaningful_reference`
 - source anchor: `source_observed`
-- integer projector: `greedy`
+- maintained projector surface: `greedy | prefix_optimal`
+
+The checked-in official strict fingerprint currently uses:
+
+- `rhythm_v3_projection_mode=greedy`
+- `rhythm_v3_integer_projection_mode=greedy`
 
 The base recipe keeps `rhythm_v3_gate_quality_strict=false`. That is intentional. Repair and diagnostic runs should use the maintained configs without mutating the checked-in official gate bits.
 
@@ -37,7 +42,7 @@ As of 2026-04-15:
 
 - official strict training is blocked
 - official status file scope is `official_maintained_online_contract`
-- the checked-in official contract id is `8052e96e745d5aad`
+- the checked-in official contract id is `795e286bac5bee76`
 - `gate0_pass=false`
 - `gate1_pass=false`
 - `gate2_pass=false`
@@ -97,6 +102,8 @@ That is the only reading this guide endorses. Legacy alias language, dated candi
 
 - runtime code: `modules/Conan/rhythm_v3/`
 - task/data contract: `tasks/Conan/rhythm/duration_v3/`
+- gate-status library: `tasks/Conan/rhythm/duration_v3/gate_status.py`
+- export CLI: `scripts/rhythm_v3_debug_records.py`
 - tests: `tests/rhythm/`
 - current project status: `docs/rhythm_v3_status.md`
 - validation and gate workflow: `docs/rhythm_v3_validation_stack.md`

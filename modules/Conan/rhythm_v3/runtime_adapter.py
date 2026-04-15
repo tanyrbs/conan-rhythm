@@ -114,7 +114,7 @@ class ConanDurationAdapter(nn.Module):
                 raise ValueError(f"{removed_key} has been removed from rhythm_v3. Use {replacement} instead.")
         if self.prompt_summary_backbone and not self.emit_silence_runs:
             raise ValueError(
-                "rhythm_v3 prompt_summary/unit_run backbone requires rhythm_v3_emit_silence_runs=true."
+                "rhythm_v3 minimal_v1_global backbone requires rhythm_v3_emit_silence_runs=true."
             )
         self.unit_frontend = DurationUnitFrontend(
             vocab_size=vocab_size,
@@ -203,13 +203,6 @@ class ConanDurationAdapter(nn.Module):
             prefix_optimal_phrase_final_boost=float(hparams.get("rhythm_v3_prefix_optimal_phrase_final_boost", 1.50) or 1.50),
             prefix_optimal_max_window=int(hparams.get("rhythm_v3_prefix_optimal_max_window", 96) or 96),
             prefix_optimal_max_states=int(hparams.get("rhythm_v3_prefix_optimal_max_states", 97) or 97),
-            projection_repair_max_steps=int(hparams.get("rhythm_v3_projection_repair_max_steps", 0) or 0),
-            projection_repair_speech_bonus=float(
-                hparams.get("rhythm_v3_projection_repair_speech_bonus", 1.0) or 0.0
-            ),
-            projection_repair_boundary_penalty=float(
-                hparams.get("rhythm_v3_projection_repair_boundary_penalty", 0.35) or 0.0
-            ),
             rate_mode=rate_mode,
             simple_global_stats=simple_global_stats,
             minimal_v1_profile=minimal_v1_profile,
@@ -395,7 +388,7 @@ class ConanDurationAdapter(nn.Module):
         if state is not None and resolved_prefix_mode != "ema":
             raise ValueError(
                 "strict online continuation currently only guarantees src_prefix_stat_mode=ema. "
-                "dual_timescale requires a 2-state carry, family_hybrid requires a richer prefix summary state, "
+                "dual_timescale requires a 2-state carry, "
                 "and exact_global_family remains local/offline only."
             )
         precomputed_cache = collect_duration_v3_source_cache(rhythm_source_cache)
@@ -431,7 +424,7 @@ class ConanDurationAdapter(nn.Module):
                 and precomputed_cache.get("source_silence_mask") is None
             ):
                 raise ValueError(
-                    "rhythm_v3 prompt_summary runtime with explicit silence runs requires "
+                    "rhythm_v3 minimal_v1_global runtime with explicit silence runs requires "
                     "source_silence_mask in rhythm_source_cache / offline source cache."
                 )
             batch = self.unit_frontend.from_precomputed(
@@ -563,7 +556,7 @@ class ConanDurationAdapter(nn.Module):
             return prompt_valid_mask.float() * (1.0 - derived_silence)
         if self.prompt_summary_backbone:
             raise ValueError(
-                "rhythm_v3 prompt_summary/unit_run backbone requires prompt_speech_mask, "
+                "rhythm_v3 minimal_v1_global backbone requires prompt_speech_mask, "
                 "prompt_silence_mask, or explicit silence-run prompt units."
             )
         return prompt_valid_mask.float()
@@ -623,7 +616,7 @@ class ConanDurationAdapter(nn.Module):
                 raise ValueError("prompt_speech_mask + prompt_silence_mask must not exceed prompt_valid_mask.")
         if self.prompt_summary_backbone and not bool((prompt_speech_mask > 0.5).any().item()):
             raise ValueError(
-                "rhythm_v3 prompt_summary/unit_run backbone requires at least one speech run in prompt conditioning."
+                "rhythm_v3 minimal_v1_global backbone requires at least one speech run in prompt conditioning."
             )
         enriched = {
             "prompt_content_units": prompt_content_units,
@@ -860,15 +853,6 @@ class ConanDurationAdapter(nn.Module):
             ),
             "rhythm_v3_prefix_optimal_max_states": int(
                 getattr(self.module.projector, "prefix_optimal_max_states", 97)
-            ),
-            "rhythm_v3_projection_repair_max_steps": int(
-                getattr(self.module.projector, "projection_repair_max_steps", 0)
-            ),
-            "rhythm_v3_projection_repair_speech_bonus": float(
-                getattr(self.module.projector, "projection_repair_speech_bonus", 1.0)
-            ),
-            "rhythm_v3_projection_repair_boundary_penalty": float(
-                getattr(self.module.projector, "projection_repair_boundary_penalty", 0.35)
             ),
             "rhythm_v3_use_continuous_alignment": bool(
                 self.hparams.get("rhythm_v3_use_continuous_alignment", False)

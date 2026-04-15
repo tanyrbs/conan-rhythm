@@ -176,7 +176,7 @@ class OptimizerParamCollectionTests(unittest.TestCase):
         with mock.patch.dict(
             "tasks.Conan.rhythm.v1_task_mixin.hparams",
             {
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_baseline_train_mode": "joint",
                 "rhythm_v3_freeze_baseline": False,
                 "rhythm_train_offline_confidence_heads": False,

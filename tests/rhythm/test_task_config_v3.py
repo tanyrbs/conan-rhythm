@@ -214,7 +214,7 @@ def test_validate_rhythm_training_hparams_rejects_invalid_boundary_reset_thresh(
 
 def test_validate_rhythm_training_hparams_rejects_prompt_summary_without_explicit_silence_runs():
     hparams = _minimal_v3_hparams()
-    hparams["rhythm_v3_backbone"] = "prompt_summary"
+    hparams["rhythm_v3_backbone"] = "minimal_v1_global"
     hparams["rhythm_v3_warp_mode"] = "none"
     hparams["rhythm_v3_allow_hybrid"] = False
     hparams["rhythm_v3_anchor_mode"] = "source_observed"
@@ -230,7 +230,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_sim
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -249,7 +249,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_when_same_t
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -269,7 +269,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_sam
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -289,7 +289,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_refere
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -309,7 +309,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_log_ba
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -329,7 +329,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_si
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -349,7 +349,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_spe
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -369,7 +369,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_without_cro
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -404,13 +404,13 @@ def test_validate_rhythm_training_hparams_accepts_minimal_v1_global_backbone_sur
     validate_rhythm_training_hparams(hparams)
 
 
-@pytest.mark.parametrize("backbone", ["role_memory", "unit_run"])
+@pytest.mark.parametrize("backbone", ["prompt_summary", "role_memory", "unit_run", "v1g_minimal"])
 def test_validate_rhythm_training_hparams_rejects_legacy_backbone_aliases_under_minimal_v1(backbone):
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_backbone"] = backbone
     hparams["rhythm_v3_use_continuous_alignment"] = True
 
-    with pytest.raises(ValueError, match="forbids legacy rhythm_v3_backbone aliases"):
+    with pytest.raises(ValueError, match="compatibility aliases"):
         validate_rhythm_training_hparams(hparams)
 
 
@@ -819,6 +819,14 @@ def test_validate_rhythm_training_hparams_rejects_invalid_integer_projection_mod
         validate_rhythm_training_hparams(hparams)
 
 
+def test_validate_rhythm_training_hparams_rejects_removed_greedy_repair_projection_mode():
+    hparams = _minimal_prompt_summary_v1_hparams()
+    hparams["rhythm_v3_use_continuous_alignment"] = True
+    hparams["rhythm_v3_projection_mode"] = "greedy_repair"
+    with pytest.raises(ValueError, match="greedy, prefix_optimal"):
+        validate_rhythm_training_hparams(hparams)
+
+
 def test_validate_rhythm_training_hparams_rejects_invalid_integer_projection_anchor_mode():
     hparams = _minimal_prompt_summary_v1_hparams()
     hparams["rhythm_v3_use_continuous_alignment"] = True
@@ -848,7 +856,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_self_t
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1012,7 +1020,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_silenc
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1058,7 +1066,7 @@ def test_validate_rhythm_training_hparams_rejects_minimal_v1_profile_with_non_st
     hparams.update(
         {
             "rhythm_v3_minimal_v1_profile": True,
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1167,7 +1175,7 @@ def test_validate_rhythm_training_hparams_accepts_prompt_summary_backbone_surfac
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1185,7 +1193,7 @@ def test_validate_rhythm_training_hparams_accepts_prompt_summary_public_surface_
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1210,7 +1218,7 @@ def test_validate_rhythm_training_hparams_rejects_prompt_summary_without_source_
         validate_rhythm_training_hparams(
             {
                 **_minimal_v3_hparams(),
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_warp_mode": "none",
                 "rhythm_v3_allow_hybrid": False,
                 "rhythm_v3_anchor_mode": "baseline",
@@ -1236,7 +1244,7 @@ def test_validate_rhythm_training_hparams_requires_prompt_unit_public_inputs_whe
 def test_validate_rhythm_training_hparams_requires_prompt_speech_mask_for_prompt_summary_public_surface():
     hparams = {
         **_minimal_v3_hparams(),
-        "rhythm_v3_backbone": "prompt_summary",
+        "rhythm_v3_backbone": "minimal_v1_global",
         "rhythm_v3_warp_mode": "none",
         "rhythm_v3_allow_hybrid": False,
         "rhythm_v3_anchor_mode": "source_observed",
@@ -1308,7 +1316,7 @@ def test_validate_rhythm_training_hparams_requires_consistency_loss_surface_when
 def test_validate_rhythm_training_hparams_requires_summary_surface_for_prompt_summary_public_losses():
     hparams = {
         **_minimal_v3_hparams(),
-        "rhythm_v3_backbone": "prompt_summary",
+        "rhythm_v3_backbone": "minimal_v1_global",
         "rhythm_v3_warp_mode": "none",
         "rhythm_v3_allow_hybrid": False,
         "rhythm_v3_anchor_mode": "source_observed",
@@ -1341,57 +1349,60 @@ def test_validate_rhythm_training_hparams_requires_baseline_loss_surface_when_en
         validate_rhythm_training_hparams(hparams)
 
 
-def test_validate_rhythm_training_hparams_accepts_role_memory_legacy_alias_surface():
-    validate_rhythm_training_hparams(
-        {
-            **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "role_memory",
-            "rhythm_v3_warp_mode": "none",
-            "rhythm_v3_allow_hybrid": False,
-            "rhythm_v3_anchor_mode": "source_observed",
-            "lambda_rhythm_bias": 0.20,
-            "lambda_rhythm_mem": 0.25,
-            "lambda_rhythm_zero": 0.0,
-            "lambda_rhythm_ortho": 0.0,
-            "rhythm_public_losses": [
-                "rhythm_total",
-                "rhythm_v3_dur",
-                "rhythm_v3_bias",
-                "rhythm_v3_mem",
-                "rhythm_v3_pref",
-            ],
-        }
-    )
+@pytest.mark.parametrize("backbone", ["prompt_summary", "role_memory", "unit_run", "v1g_minimal"])
+def test_validate_rhythm_training_hparams_rejects_removed_legacy_backbone_alias_surface(backbone):
+    with pytest.raises(ValueError, match="compatibility aliases"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": backbone,
+                "rhythm_v3_warp_mode": "none",
+                "rhythm_v3_allow_hybrid": False,
+                "rhythm_v3_anchor_mode": "source_observed",
+                "lambda_rhythm_bias": 0.20,
+                "lambda_rhythm_mem": 0.25,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+                "rhythm_public_losses": [
+                    "rhythm_total",
+                    "rhythm_v3_dur",
+                    "rhythm_v3_bias",
+                    "rhythm_v3_mem",
+                    "rhythm_v3_pref",
+                ],
+            }
+        )
 
 
-def test_validate_rhythm_training_hparams_accepts_unit_run_alias_surface():
-    validate_rhythm_training_hparams(
-        {
-            **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "unit_run",
-            "rhythm_v3_warp_mode": "none",
-            "rhythm_v3_allow_hybrid": False,
-            "rhythm_v3_anchor_mode": "source_observed",
-            "lambda_rhythm_bias": 0.20,
-            "lambda_rhythm_mem": 0.25,
-            "lambda_rhythm_zero": 0.0,
-            "lambda_rhythm_ortho": 0.0,
-            "rhythm_public_losses": [
-                "rhythm_total",
-                "rhythm_v3_dur",
-                "rhythm_v3_bias",
-                "rhythm_v3_mem",
-                "rhythm_v3_pref",
-            ],
-        }
-    )
+def test_validate_rhythm_training_hparams_rejects_removed_minimal_v1_backbone_alias():
+    with pytest.raises(ValueError, match="compatibility aliases"):
+        validate_rhythm_training_hparams(
+            {
+                **_minimal_v3_hparams(),
+                "rhythm_v3_backbone": "v1g_minimal",
+                "rhythm_v3_warp_mode": "none",
+                "rhythm_v3_allow_hybrid": False,
+                "rhythm_v3_anchor_mode": "source_observed",
+                "lambda_rhythm_bias": 0.20,
+                "lambda_rhythm_mem": 0.25,
+                "lambda_rhythm_zero": 0.0,
+                "lambda_rhythm_ortho": 0.0,
+                "rhythm_public_losses": [
+                    "rhythm_total",
+                    "rhythm_v3_dur",
+                    "rhythm_v3_bias",
+                    "rhythm_v3_mem",
+                    "rhythm_v3_pref",
+                ],
+            }
+        )
 
 
 def test_validate_rhythm_training_hparams_allows_prompt_summary_public_losses_without_summary_when_disabled():
     validate_rhythm_training_hparams(
         {
             **_minimal_v3_hparams(),
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -1413,7 +1424,7 @@ def test_validate_rhythm_training_hparams_allows_prompt_summary_public_losses_wi
 def test_validate_rhythm_training_hparams_requires_bias_surface_for_prompt_summary_public_losses():
     hparams = {
         **_minimal_v3_hparams(),
-        "rhythm_v3_backbone": "prompt_summary",
+        "rhythm_v3_backbone": "minimal_v1_global",
         "rhythm_v3_warp_mode": "none",
         "rhythm_v3_allow_hybrid": False,
         "rhythm_v3_anchor_mode": "source_observed",

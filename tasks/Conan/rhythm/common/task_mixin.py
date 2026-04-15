@@ -123,6 +123,16 @@ class CommonRhythmTaskMixin:
     def _validate_rhythm_training_hparams():
         validate_rhythm_training_hparams(hparams)
 
+    @staticmethod
+    def _should_skip_rhythm_named_param(name: str) -> bool:
+        if bool(hparams.get("rhythm_train_offline_confidence_heads", False)):
+            return False
+        normalized = str(name or "")
+        return (
+            "offline_teacher.confidence_trunk" in normalized
+            or "offline_teacher.confidence_heads" in normalized
+        )
+
     def _collect_rhythm_gen_params(self):
         if self.model is None or not getattr(self.model, "rhythm_enabled", getattr(self.model, "rhythm_enable_v2", False)):
             return []
@@ -147,6 +157,24 @@ class CommonRhythmTaskMixin:
             params.extend(list(self.model.rhythm_render_phase_mlp.parameters()))
         if optimize_render_params and getattr(self.model, "rhythm_render_phase_gain", None) is not None:
             params.append(self.model.rhythm_render_phase_gain)
+        return self._task_runtime_support().dedup_trainable_params(params)
+
+    def _collect_offline_teacher_gen_params(self):
+        if self.model is None or not getattr(self.model, "rhythm_enable_v2", False):
+            return []
+        rhythm_module = getattr(self.model, "rhythm_module", None)
+        if rhythm_module is None:
+            return []
+        params = []
+        if getattr(rhythm_module, "unit_embedding", None) is not None:
+            params.extend(list(rhythm_module.unit_embedding.parameters()))
+        if getattr(rhythm_module, "reference_descriptor", None) is not None:
+            params.extend(list(rhythm_module.reference_descriptor.parameters()))
+        if getattr(rhythm_module, "offline_teacher", None) is not None:
+            for name, param in rhythm_module.offline_teacher.named_parameters():
+                if self._should_skip_rhythm_named_param(f"offline_teacher.{name}"):
+                    continue
+                params.append(param)
         return self._task_runtime_support().dedup_trainable_params(params)
 
     @staticmethod

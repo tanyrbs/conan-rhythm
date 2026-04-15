@@ -284,7 +284,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         with mock.patch.dict(
             "tasks.Conan.rhythm.task_runtime_support.hparams",
             {
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "lambda_rhythm_dur": 1.0,
                 "lambda_rhythm_summary": 0.10,
                 "lambda_rhythm_pref": 0.0,
@@ -301,7 +301,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         with mock.patch.dict(
             "tasks.Conan.rhythm.task_runtime_support.hparams",
             {
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "lambda_rhythm_dur": 1.0,
                 "lambda_rhythm_pref": 0.0,
                 "lambda_rhythm_zero": 0.0,
@@ -317,7 +317,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         with mock.patch.dict(
             "tasks.Conan.rhythm.task_runtime_support.hparams",
             {
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_simple_global_stats": True,
                 "rhythm_v3_rate_mode": "simple_global",
@@ -360,7 +360,7 @@ class RhythmTaskRuntimeSupportTests(unittest.TestCase):
         with mock.patch.dict(
             "tasks.Conan.rhythm.task_runtime_support.hparams",
             {
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_warp_mode": "none",
                 "rhythm_v3_allow_hybrid": False,
                 "rhythm_v3_anchor_mode": "source_observed",

@@ -260,7 +260,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "pseudo_source_duration_perturbation": True,
                 "rhythm_augmentation_deterministic": True,
@@ -283,7 +283,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_prompt_truncation": 2.0,
                 "rhythm_prompt_dropout": 0.5,
@@ -376,7 +376,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_prompt_truncation": 2.0,
@@ -400,7 +400,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_g_variant": "weighted_median",
@@ -440,7 +440,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_g_variant": "weighted_median",
@@ -466,7 +466,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_g_variant": "weighted_median",
@@ -511,7 +511,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             {
                 "rhythm_enable_v3": True,
                 "rhythm_v3_minimal_v1_profile": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_simple_global_stats": True,
@@ -536,7 +536,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             {
                 "rhythm_enable_v3": True,
                 "rhythm_v3_minimal_v1_profile": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_simple_global_stats": True,
@@ -562,7 +562,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             {
                 "rhythm_enable_v3": True,
                 "rhythm_v3_minimal_v1_profile": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_simple_global_stats": True,
@@ -589,7 +589,7 @@ class RhythmCacheContractTests(unittest.TestCase):
             {
                 "rhythm_enable_v3": True,
                 "rhythm_v3_minimal_v1_profile": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_rate_mode": "simple_global",
                 "rhythm_v3_simple_global_stats": True,
@@ -616,7 +616,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
             }
@@ -635,7 +635,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_allow_prompt_weight_shape_repair": True,
@@ -656,7 +656,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_g_variant": "unit_norm",
@@ -675,7 +675,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_g_variant": "unit_norm",
@@ -707,7 +707,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_allow_source_self_target_fallback": False,
@@ -753,7 +753,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_allow_silence_aux": True,
@@ -783,7 +783,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
             }
@@ -819,7 +819,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_require_same_text_paired_target": True,
@@ -864,7 +864,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -905,7 +905,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -943,7 +943,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1021,7 +1021,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1063,7 +1063,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1110,7 +1110,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_gate_quality_strict": True,
@@ -1157,7 +1157,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_allow_discrete_fallback_from_continuous": True,
@@ -1226,7 +1226,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
             }
@@ -1284,7 +1284,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_alignment_prefilter_bad_samples": True,
@@ -1340,7 +1340,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
             }
@@ -1383,7 +1383,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_allow_discrete_fallback_from_continuous": False,
@@ -1416,7 +1416,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_continuous_projection_surface": "weighted_occupancy",
@@ -1467,7 +1467,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_continuous_projection_surface": "mystery_surface",
@@ -1512,7 +1512,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_alignment_mode": "continuous_viterbi_v1",
@@ -1702,7 +1702,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1747,7 +1747,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1794,7 +1794,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1863,7 +1863,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1893,7 +1893,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_emit_silence_runs": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -1969,7 +1969,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
             }
         )
@@ -2083,7 +2083,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_gate_quality_strict": True,
                 "rhythm_v3_alignment_unmatched_speech_ratio_max": 0.15,
@@ -2256,7 +2256,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2290,7 +2290,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2313,7 +2313,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2350,7 +2350,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2380,7 +2380,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2411,7 +2411,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2442,7 +2442,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2474,7 +2474,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2521,7 +2521,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2568,7 +2568,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2626,7 +2626,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2722,7 +2722,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_use_continuous_alignment": True,
                 "rhythm_v3_alignment_mode": "continuous_viterbi_v1",
@@ -2763,7 +2763,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_use_continuous_alignment": True,
@@ -2797,7 +2797,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_allow_source_self_target_fallback": False,
             }
@@ -2823,7 +2823,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_minimal_v1_profile": True,
                 "rhythm_v3_allow_source_self_target_fallback": True,
@@ -2844,7 +2844,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_stage": "bootstrap_pretrain",
                 "rhythm_v3_allow_source_self_target_fallback": False,
@@ -2865,7 +2865,7 @@ class RhythmCacheContractTests(unittest.TestCase):
         dataset = _DummyDataset(
             {
                 "rhythm_enable_v3": True,
-                "rhythm_v3_backbone": "prompt_summary",
+                "rhythm_v3_backbone": "minimal_v1_global",
                 "rhythm_v3_anchor_mode": "source_observed",
                 "rhythm_v3_disallow_same_text_reference": True,
             }

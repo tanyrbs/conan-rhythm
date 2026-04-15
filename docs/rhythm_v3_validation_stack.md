@@ -9,7 +9,14 @@ The maintained official online contract is:
 - prompt/reference cue: `weighted_median`
 - source prefix state: `ema`
 - source init: `first_speech`
-- projection surface: greedy integer projection on the total-budget contract
+- prompt policy: `meaningful_reference`
+- source anchor: `source_observed`
+- maintained projection surface: `greedy | prefix_optimal`
+
+The checked-in official strict fingerprint currently uses:
+
+- `rhythm_v3_projection_mode=greedy`
+- `rhythm_v3_integer_projection_mode=greedy`
 
 Official validation is anchored by:
 
@@ -72,6 +79,7 @@ Maintained code and utility surfaces:
 
 - runtime: `modules/Conan/rhythm_v3/`
 - task/runtime glue: `tasks/Conan/rhythm/duration_v3/`
+- gate-status library: `tasks/Conan/rhythm/duration_v3/gate_status.py`
 - export CLI: `scripts/rhythm_v3_debug_records.py`
 - review utilities: `utils/plot/rhythm_v3_viz/`
 - regression tests: `tests/rhythm/`
@@ -85,6 +93,16 @@ They are intentionally separated from `egs/overrides/` so the maintained config 
 ## Gate Discipline
 
 The gate bundle must describe one object only: the maintained online contract.
+
+The maintained source of truth for gate calculations is the library layer:
+
+- `tasks/Conan/rhythm/duration_v3/gate_status.py`
+
+The CLI:
+
+- `scripts/rhythm_v3_debug_records.py`
+
+must stay a thin export surface over that library.
 
 That means:
 

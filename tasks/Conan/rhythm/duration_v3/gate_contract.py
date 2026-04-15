@@ -69,9 +69,6 @@ _GATE_STATUS_FINGERPRINT_KEYS = (
     "rhythm_v3_prefix_optimal_phrase_final_boost",
     "rhythm_v3_prefix_optimal_max_window",
     "rhythm_v3_prefix_optimal_max_states",
-    "rhythm_v3_projection_repair_max_steps",
-    "rhythm_v3_projection_repair_speech_bonus",
-    "rhythm_v3_projection_repair_boundary_penalty",
     "rhythm_v3_use_continuous_alignment",
     "rhythm_v3_alignment_mode",
     "rhythm_v3_minimal_v1_profile",
@@ -104,7 +101,6 @@ _GATE_STATUS_INT_KEYS = {
     "rhythm_v3_max_prefix_budget",
     "rhythm_v3_prefix_optimal_max_window",
     "rhythm_v3_prefix_optimal_max_states",
-    "rhythm_v3_projection_repair_max_steps",
 }
 
 _GATE_STATUS_FLOAT_KEYS = {
@@ -132,8 +128,6 @@ _GATE_STATUS_FLOAT_KEYS = {
     "rhythm_v3_prefix_optimal_boundary_weight",
     "rhythm_v3_prefix_optimal_coarse_weight",
     "rhythm_v3_prefix_optimal_phrase_final_boost",
-    "rhythm_v3_projection_repair_speech_bonus",
-    "rhythm_v3_projection_repair_boundary_penalty",
 }
 
 
@@ -178,16 +172,14 @@ def normalize_projection_mode(value) -> str:
         "default": "greedy",
         "nearest": "greedy",
         "recurrent": "greedy",
-        "repair": "greedy_repair",
-        "greedyrepair": "greedy_repair",
         "optimal": "prefix_optimal",
         "dp": "prefix_optimal",
         "prefix_dp": "prefix_optimal",
     }
     mode = aliases.get(mode, mode)
-    if mode not in {"greedy", "greedy_repair", "prefix_optimal"}:
+    if mode not in {"greedy", "prefix_optimal"}:
         raise ValueError(
-            f"rhythm_v3_projection_mode must be one of: greedy, greedy_repair, prefix_optimal; got {value!r}."
+            f"rhythm_v3_projection_mode must be one of: greedy, prefix_optimal; got {value!r}."
         )
     return mode
 
@@ -332,12 +324,6 @@ def resolve_gate_contract_hparam(hparams, key: str):
         return int(hparams.get(key, 96) or 96)
     if key == "rhythm_v3_prefix_optimal_max_states":
         return int(hparams.get(key, 97) or 97)
-    if key == "rhythm_v3_projection_repair_max_steps":
-        return int(hparams.get(key, 0) or 0)
-    if key == "rhythm_v3_projection_repair_speech_bonus":
-        return float(hparams.get(key, 1.0) or 0.0)
-    if key == "rhythm_v3_projection_repair_boundary_penalty":
-        return float(hparams.get(key, 0.35) or 0.0)
     if key == "rhythm_v3_use_continuous_alignment":
         return _is_enabled_flag(hparams.get(key, False))
     if key == "rhythm_v3_alignment_mode":

@@ -7,7 +7,13 @@ The maintained V1 contract is:
 - prompt/reference global cue: `weighted_median`
 - source prefix state: `ema`
 - source rate init: `first_speech`
-- execution surface: greedy integer projection on the total-budget prefix contract
+- prompt policy: `meaningful_reference`
+- source anchor: `source_observed`
+- maintained projector surface: `greedy | prefix_optimal`
+
+The checked-in official strict fingerprint currently uses:
+
+- `rhythm_v3_projection_mode=greedy`
 
 The official maintained online path is configured by:
 
@@ -57,8 +63,10 @@ Local candidate configs, local gate JSON snapshots, and checkpoint-specific find
 
 - `modules/Conan/rhythm_v3/`: maintained runtime implementation
 - `tasks/Conan/rhythm/duration_v3/`: maintained task and dataset contract
+- `tasks/Conan/rhythm/duration_v3/gate_status.py`: maintained gate-status and review-contract library
 - `egs/`: maintained configs and local experiment overlays
 - `inference/`: runtime and evaluation helpers
+- `scripts/rhythm_v3_debug_records.py`: maintained review/export CLI over the gate-status library
 - `tests/rhythm/`: regression coverage for runtime, task config, losses, metrics, and projector invariants
 
 ## Current Blocker

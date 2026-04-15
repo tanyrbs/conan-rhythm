@@ -34,9 +34,11 @@ from utils.plot.rhythm_v3_viz import (
 )
 from scripts.rhythm_v3_debug_records import (
     _warn_sparse_review_metadata,
+    main as debug_records_main,
+)
+from tasks.Conan.rhythm.duration_v3.gate_status import (
     build_gate_status,
     collect_gate_issues,
-    main as debug_records_main,
 )
 from utils.plot.rhythm_v3_viz.review import (
     compute_g,

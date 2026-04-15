@@ -40,14 +40,16 @@ from .summary_memory import (
 )
 
 _MINIMAL_V1_PUBLIC_BACKBONE = "minimal_v1_global"
-
-
-_PROMPT_SUMMARY_BACKBONE_ALIASES = {
+_REMOVED_MINIMAL_V1_BACKBONES = {
     "prompt_summary",
     "role_memory",
     "unit_run",
-    "minimal_v1_global",
     "v1g_minimal",
+}
+
+
+_PROMPT_SUMMARY_BACKBONE_ALIASES = {
+    "minimal_v1_global",
 }
 
 
@@ -59,13 +61,11 @@ def _normalize_prompt_summary_backbone(backbone_mode: str | None) -> str:
 
 
 def _prompt_summary_public_label(*, minimal_v1_profile: bool) -> str:
-    return _MINIMAL_V1_PUBLIC_BACKBONE if minimal_v1_profile else "prompt_summary"
+    return _MINIMAL_V1_PUBLIC_BACKBONE
 
 
 def _prompt_summary_public_with_aliases(*, minimal_v1_profile: bool) -> str:
-    if minimal_v1_profile:
-        return f"{_MINIMAL_V1_PUBLIC_BACKBONE} (compat: prompt_summary; legacy: role_memory, unit_run)"
-    return "prompt_summary (public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)"
+    return _MINIMAL_V1_PUBLIC_BACKBONE
 
 
 def compute_duration_weighted_prompt_speech_ratio(
@@ -173,24 +173,40 @@ def _resolve_duration_runtime_surface(
     allow_hybrid: bool | None,
     source_residual_gain: float,
 ) -> tuple[str, str, bool, str]:
+    backbone_text = str(backbone_mode or "global_only").strip().lower()
+    if backbone_text in _REMOVED_MINIMAL_V1_BACKBONES:
+        raise ValueError(
+            "rhythm_v3_backbone compatibility aliases 'prompt_summary', 'role_memory', "
+            "'unit_run', and 'v1g_minimal' have been removed; use "
+            f"'{_MINIMAL_V1_PUBLIC_BACKBONE}'."
+        )
     resolved_backbone = _normalize_prompt_summary_backbone(backbone_mode)
     resolved_warp = str(warp_mode or "none").strip().lower()
     resolved_allow_hybrid = bool(allow_hybrid) if allow_hybrid is not None else False
     if resolved_backbone not in {"global_only", "operator", "prompt_summary"}:
         raise ValueError(
             "Unsupported rhythm_v3 backbone mode: "
-            f"{backbone_mode!r}. Supported values are global_only, operator, prompt_summary "
-            "(public minimal alias: minimal_v1_global; legacy aliases: role_memory, unit_run)."
+            f"{backbone_mode!r}. Supported values are global_only, operator, "
+            f"{_MINIMAL_V1_PUBLIC_BACKBONE}."
         )
     if resolved_warp not in {"none", "progress", "detector"}:
         raise ValueError(f"Unsupported rhythm_v3 warp mode: {warp_mode!r}")
     if resolved_backbone == "prompt_summary":
         if resolved_warp != "none":
-            raise ValueError("rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run') only supports rhythm_v3_warp_mode='none'.")
+            raise ValueError(
+                f"rhythm_v3_backbone='{_MINIMAL_V1_PUBLIC_BACKBONE}' only supports "
+                "rhythm_v3_warp_mode='none'."
+            )
         if resolved_allow_hybrid:
-            raise ValueError("rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run').")
+            raise ValueError(
+                f"rhythm_v3_allow_hybrid is not used by rhythm_v3_backbone="
+                f"'{_MINIMAL_V1_PUBLIC_BACKBONE}'."
+            )
         if float(source_residual_gain) > 0.0:
-            raise ValueError("rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone='prompt_summary' (public minimal alias: 'minimal_v1_global'; legacy aliases: 'role_memory', 'unit_run').")
+            raise ValueError(
+                f"rhythm_v3_source_residual_gain is not supported by rhythm_v3_backbone="
+                f"'{_MINIMAL_V1_PUBLIC_BACKBONE}'."
+            )
         return resolved_backbone, resolved_warp, False, "prompt_summary"
     if resolved_backbone == "global_only":
         if resolved_allow_hybrid:
@@ -636,24 +652,6 @@ class MixedEffectsDurationModule(nn.Module):
         prefix_optimal_phrase_final_boost = float(unused_kwargs.pop("prefix_optimal_phrase_final_boost", unused_kwargs.pop("rhythm_v3_prefix_optimal_phrase_final_boost", 1.50)))
         prefix_optimal_max_window = int(unused_kwargs.pop("prefix_optimal_max_window", unused_kwargs.pop("rhythm_v3_prefix_optimal_max_window", 96)))
         prefix_optimal_max_states = int(unused_kwargs.pop("prefix_optimal_max_states", unused_kwargs.pop("rhythm_v3_prefix_optimal_max_states", 97)))
-        projection_repair_max_steps = int(
-            unused_kwargs.pop(
-                "projection_repair_max_steps",
-                unused_kwargs.pop("rhythm_v3_projection_repair_max_steps", 0),
-            )
-        )
-        projection_repair_speech_bonus = float(
-            unused_kwargs.pop(
-                "projection_repair_speech_bonus",
-                unused_kwargs.pop("rhythm_v3_projection_repair_speech_bonus", 1.0),
-            )
-        )
-        projection_repair_boundary_penalty = float(
-            unused_kwargs.pop(
-                "projection_repair_boundary_penalty",
-                unused_kwargs.pop("rhythm_v3_projection_repair_boundary_penalty", 0.35),
-            )
-        )
         emit_prompt_diagnostics = bool(
             unused_kwargs.pop("emit_prompt_diagnostics", unused_kwargs.pop("rhythm_v3_emit_prompt_diagnostics", True))
         )
@@ -1017,9 +1015,6 @@ class MixedEffectsDurationModule(nn.Module):
             prefix_optimal_phrase_final_boost=prefix_optimal_phrase_final_boost,
             prefix_optimal_max_window=prefix_optimal_max_window,
             prefix_optimal_max_states=prefix_optimal_max_states,
-            projection_repair_max_steps=projection_repair_max_steps,
-            projection_repair_speech_bonus=projection_repair_speech_bonus,
-            projection_repair_boundary_penalty=projection_repair_boundary_penalty,
             export_projector_telemetry=self.export_projector_telemetry,
         )
         if self.use_reference_summary:

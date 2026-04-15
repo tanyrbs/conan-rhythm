@@ -59,7 +59,7 @@ def _build_prompt_summary_hparams():
     hparams = _build_hparams()
     hparams.update(
         {
-            "rhythm_v3_backbone": "prompt_summary",
+            "rhythm_v3_backbone": "minimal_v1_global",
             "rhythm_v3_warp_mode": "none",
             "rhythm_v3_allow_hybrid": False,
             "rhythm_v3_anchor_mode": "source_observed",
@@ -526,6 +526,7 @@ def test_minimal_prompt_global_condition_encoder_keeps_invalid_support_rows_empt
         min_speech_ratio=0.6,
         min_ref_len_sec=3.0,
         max_ref_len_sec=8.0,
+        min_support_runs=2,
         drop_edge_runs_for_g=1,
         min_boundary_confidence=0.8,
     )
